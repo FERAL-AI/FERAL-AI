@@ -118,10 +118,21 @@ _OPENAI_RULES: tuple[tuple[re.Pattern[str], ModelClass], ...] = (
     (re.compile(r"^gpt-4o(-mini)?-transcribe-diarize(-\d{4}-\d{2}-\d{2})?$"), "audio"),
     # Audio out / TTS — same dated-snapshot fix.
     (re.compile(r"^gpt-4o(-mini)?-tts(-\d{4}-\d{2}-\d{2})?$"), "audio"),
+    # The 2026-07 transcription line drops the gpt-4o prefix entirely:
+    # ``gpt-transcribe`` and ``gpt-live-transcribe``. Found on the
+    # operator's account by a catalog refresh on 2026-09-04, where both
+    # classified as "unknown" and therefore fell through to the chat
+    # class, which is how a transcription model gets handed to
+    # /chat/completions and 400s.
+    (re.compile(r"^gpt(-live)?-transcribe(-.+)?$"), "audio"),
     (re.compile(r"^tts-.+$"), "audio"),
     # Image generation.
     (re.compile(r"^dall-e-.+$"), "image"),
     (re.compile(r"^gpt-image-.+$"), "image"),
+    # ``chatgpt-image-latest`` does not start with gpt-image, so the rule
+    # above missed it and it classified as "unknown" and was offered as a
+    # chat model. Same refresh, same failure mode.
+    (re.compile(r"^chatgpt-image(-.+)?$"), "image"),
     # Realtime speech-to-speech. Same dated-snapshot tail so the
     # 2025-12-17 / etc. dated variants don't leak into chat either.
     (re.compile(r"^gpt-(4o-)?realtime.*$"), "realtime"),

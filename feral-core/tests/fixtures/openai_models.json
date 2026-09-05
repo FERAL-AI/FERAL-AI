@@ -6,15 +6,11 @@
       "object": "model"
     },
     {
+      "id": "chat-latest",
+      "object": "model"
+    },
+    {
       "id": "chatgpt-image-latest",
-      "object": "model"
-    },
-    {
-      "id": "dall-e-2",
-      "object": "model"
-    },
-    {
-      "id": "dall-e-3",
       "object": "model"
     },
     {
@@ -102,39 +98,11 @@
       "object": "model"
     },
     {
-      "id": "gpt-4o-audio-preview",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-audio-preview-2024-12-17",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-audio-preview-2025-06-03",
-      "object": "model"
-    },
-    {
       "id": "gpt-4o-mini",
       "object": "model"
     },
     {
       "id": "gpt-4o-mini-2024-07-18",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-mini-audio-preview",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-mini-audio-preview-2024-12-17",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-mini-realtime-preview",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-mini-realtime-preview-2024-12-17",
       "object": "model"
     },
     {
@@ -167,18 +135,6 @@
     },
     {
       "id": "gpt-4o-mini-tts-2025-12-15",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-realtime-preview",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-realtime-preview-2024-12-17",
-      "object": "model"
-    },
-    {
-      "id": "gpt-4o-realtime-preview-2025-06-03",
       "object": "model"
     },
     {
@@ -350,6 +306,22 @@
       "object": "model"
     },
     {
+      "id": "gpt-5.6-luna",
+      "object": "model"
+    },
+    {
+      "id": "gpt-5.6-sol",
+      "object": "model"
+    },
+    {
+      "id": "gpt-5.6-terra",
+      "object": "model"
+    },
+    {
+      "id": "gpt-6-astra",
+      "object": "model"
+    },
+    {
       "id": "gpt-audio",
       "object": "model"
     },
@@ -394,11 +366,27 @@
       "object": "model"
     },
     {
+      "id": "gpt-live-transcribe",
+      "object": "model"
+    },
+    {
       "id": "gpt-realtime",
       "object": "model"
     },
     {
       "id": "gpt-realtime-1.5",
+      "object": "model"
+    },
+    {
+      "id": "gpt-realtime-2",
+      "object": "model"
+    },
+    {
+      "id": "gpt-realtime-2.1",
+      "object": "model"
+    },
+    {
+      "id": "gpt-realtime-2.1-mini",
       "object": "model"
     },
     {
@@ -410,11 +398,19 @@
       "object": "model"
     },
     {
-      "id": "gpt-realtime-mini-2025-10-06",
+      "id": "gpt-realtime-mini-2025-12-15",
       "object": "model"
     },
     {
-      "id": "gpt-realtime-mini-2025-12-15",
+      "id": "gpt-realtime-translate",
+      "object": "model"
+    },
+    {
+      "id": "gpt-realtime-whisper",
+      "object": "model"
+    },
+    {
+      "id": "gpt-transcribe",
       "object": "model"
     },
     {
@@ -442,27 +438,11 @@
       "object": "model"
     },
     {
-      "id": "o3-deep-research",
-      "object": "model"
-    },
-    {
-      "id": "o3-deep-research-2025-06-26",
-      "object": "model"
-    },
-    {
       "id": "o3-mini",
       "object": "model"
     },
     {
       "id": "o3-mini-2025-01-31",
-      "object": "model"
-    },
-    {
-      "id": "o3-pro",
-      "object": "model"
-    },
-    {
-      "id": "o3-pro-2025-06-10",
       "object": "model"
     },
     {

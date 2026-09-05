@@ -1,61 +1,25 @@
 {
   "data": [
     {
-      "id": "ai21/jamba-large-1.7",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "aion-labs/aion-1.0",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "aion-labs/aion-1.0-mini",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "aion-labs/aion-2.0",
       "architecture": {
         "modality": "text"
       }
     },
     {
+      "id": "aion-labs/aion-3.0",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "aion-labs/aion-3.0-mini",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "aion-labs/aion-rp-llama-3.1-8b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "alfredpros/codellama-7b-instruct-solidity",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "alibaba/tongyi-deepresearch-30b-a3b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "allenai/olmo-3-32b-think",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "allenai/olmo-3.1-32b-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "alpindale/goliath-120b",
       "architecture": {
         "modality": "text"
       }
@@ -103,25 +67,37 @@
       }
     },
     {
-      "id": "anthropic/claude-3.5-haiku",
+      "id": "anthropic/claude-fable-5",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "anthropic/claude-3.7-sonnet",
+      "id": "anthropic/claude-fable-5.1",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "anthropic/claude-3.7-sonnet:thinking",
+      "id": "anthropic/claude-fable-5.1:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-fable-5:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
       "id": "anthropic/claude-haiku-4.5",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-haiku-4.5:batch",
       "architecture": {
         "modality": "text"
       }
@@ -139,7 +115,19 @@
       }
     },
     {
+      "id": "anthropic/claude-opus-4.1:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "anthropic/claude-opus-4.5",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-4.5:batch",
       "architecture": {
         "modality": "text"
       }
@@ -151,13 +139,43 @@
       }
     },
     {
-      "id": "anthropic/claude-opus-4.6-fast",
+      "id": "anthropic/claude-opus-4.6:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
       "id": "anthropic/claude-opus-4.7",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-4.7:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-4.8",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-4.8:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-5",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "anthropic/claude-opus-5:batch",
       "architecture": {
         "modality": "text"
       }
@@ -175,31 +193,31 @@
       }
     },
     {
+      "id": "anthropic/claude-sonnet-4.5:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "anthropic/claude-sonnet-4.6",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "arcee-ai/coder-large",
+      "id": "anthropic/claude-sonnet-4.6:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "arcee-ai/maestro-reasoning",
+      "id": "anthropic/claude-sonnet-5",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "arcee-ai/spotlight",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "arcee-ai/trinity-large-preview",
+      "id": "anthropic/claude-sonnet-5:batch",
       "architecture": {
         "modality": "text"
       }
@@ -211,49 +229,7 @@
       }
     },
     {
-      "id": "arcee-ai/trinity-mini",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "arcee-ai/virtuoso-large",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "baidu/ernie-4.5-21b-a3b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "baidu/ernie-4.5-21b-a3b-thinking",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "baidu/ernie-4.5-300b-a47b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "baidu/ernie-4.5-vl-28b-a3b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "baidu/ernie-4.5-vl-424b-a47b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "baidu/qianfan-ocr-fast:free",
       "architecture": {
         "modality": "text"
       }
@@ -266,6 +242,18 @@
     },
     {
       "id": "bytedance-seed/seed-1.6-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "bytedance-seed/seed-2-1-turbo",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "bytedance-seed/seed-2.0-code",
       "architecture": {
         "modality": "text"
       }
@@ -289,7 +277,7 @@
       }
     },
     {
-      "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition:free",
+      "id": "cognitivecomputations/dolphin-mistral-24b-venice-edition",
       "architecture": {
         "modality": "text"
       }
@@ -319,7 +307,7 @@
       }
     },
     {
-      "id": "deepcogito/cogito-v2.1-671b",
+      "id": "cohere/north-mini-code:free",
       "architecture": {
         "modality": "text"
       }
@@ -361,12 +349,6 @@
       }
     },
     {
-      "id": "deepseek/deepseek-r1-distill-qwen-32b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "deepseek/deepseek-v3.1-terminus",
       "architecture": {
         "modality": "text"
@@ -385,13 +367,25 @@
       }
     },
     {
-      "id": "deepseek/deepseek-v3.2-speciale",
+      "id": "deepseek/deepseek-v4-flash",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "deepseek/deepseek-v4-flash",
+      "id": "deepseek/deepseek-v4-flash-0731",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-0731:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "deepseek/deepseek-v4-flash-vision-exp",
       "architecture": {
         "modality": "text"
       }
@@ -403,19 +397,19 @@
       }
     },
     {
-      "id": "essentialai/rnj-1-instruct",
+      "id": "deepseek/deepseek-v4-pro-0813",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "google/gemini-2.0-flash-001",
+      "id": "deepseek/deepseek-v4-pro-0813:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "google/gemini-2.0-flash-lite-001",
+      "id": "dots-studio/dots-3-note-preview:free",
       "architecture": {
         "modality": "text"
       }
@@ -439,7 +433,13 @@
       }
     },
     {
-      "id": "google/gemini-2.5-flash-lite-preview-09-2025",
+      "id": "google/gemini-2.5-flash-lite:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-2.5-flash:batch",
       "architecture": {
         "modality": "text"
       }
@@ -463,7 +463,25 @@
       }
     },
     {
+      "id": "google/gemini-2.5-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "google/gemini-3-flash-preview",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3-flash-preview:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3-pro-image",
       "architecture": {
         "modality": "text"
       }
@@ -475,13 +493,37 @@
       }
     },
     {
+      "id": "google/gemini-3.1-flash-image",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "google/gemini-3.1-flash-image-preview",
       "architecture": {
         "modality": "text"
       }
     },
     {
+      "id": "google/gemini-3.1-flash-lite",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite-image",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "google/gemini-3.1-flash-lite-preview",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.1-flash-lite:batch",
       "architecture": {
         "modality": "text"
       }
@@ -499,6 +541,72 @@
       }
     },
     {
+      "id": "google/gemini-3.1-pro-preview:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.5-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.5-flash-lite",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.5-flash-lite:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.5-flash:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.6-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.6-flash:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.7-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.7-flash:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.8-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemini-3.8-flash:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "google/gemma-2-27b-it",
       "architecture": {
         "modality": "text"
@@ -511,49 +619,13 @@
       }
     },
     {
-      "id": "google/gemma-3-12b-it:free",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "google/gemma-3-27b-it",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "google/gemma-3-27b-it:free",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "google/gemma-3-4b-it",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "google/gemma-3-4b-it:free",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "google/gemma-3n-e2b-it:free",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "google/gemma-3n-e4b-it",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "google/gemma-3n-e4b-it:free",
       "architecture": {
         "modality": "text"
       }
@@ -572,6 +644,12 @@
     },
     {
       "id": "google/gemma-4-31b-it",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "google/gemma-4-31b-it:batch",
       "architecture": {
         "modality": "text"
       }
@@ -607,31 +685,43 @@
       }
     },
     {
+      "id": "ibm-granite/granite-4.2-8b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "inception/mercury-2",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "inclusionai/ling-2.6-1t:free",
+      "id": "inception/mercury-2.5-preview",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "inclusionai/ling-2.6-flash:free",
+      "id": "inclusionai/ling-3.0-flash",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "inflection/inflection-3-pi",
+      "id": "inclusionai/ling-3.0-flash-fin",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "inflection/inflection-3-productivity",
+      "id": "inclusionai/ling-3.0-flash-fin:free",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "inclusionai/ling-3.0-flash-sante:free",
       "architecture": {
         "modality": "text"
       }
@@ -643,19 +733,13 @@
       }
     },
     {
-      "id": "liquid/lfm-2-24b-a2b",
+      "id": "kwaipilot/kat-coder-pro-v2.5",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "liquid/lfm-2.5-1.2b-instruct:free",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "liquid/lfm-2.5-1.2b-thinking:free",
+      "id": "liquid/lfm-2.5-2.6b:free",
       "architecture": {
         "modality": "text"
       }
@@ -667,13 +751,7 @@
       }
     },
     {
-      "id": "meta-llama/llama-3-70b-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "meta-llama/llama-3-8b-instruct",
+      "id": "meituan/longcat-2.0",
       "architecture": {
         "modality": "text"
       }
@@ -691,12 +769,6 @@
       }
     },
     {
-      "id": "meta-llama/llama-3.2-11b-vision-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "meta-llama/llama-3.2-1b-instruct",
       "architecture": {
         "modality": "text"
@@ -709,19 +781,7 @@
       }
     },
     {
-      "id": "meta-llama/llama-3.2-3b-instruct:free",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "meta-llama/llama-3.3-70b-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "meta-llama/llama-3.3-70b-instruct:free",
       "architecture": {
         "modality": "text"
       }
@@ -739,13 +799,49 @@
       }
     },
     {
-      "id": "meta-llama/llama-guard-3-8b",
+      "id": "meta-llama/llama-guard-4-12b",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "meta-llama/llama-guard-4-12b",
+      "id": "meta/muse-glimmer-30b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "meta/muse-glimmer-30b:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "meta/muse-spark-1.1",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "meta/muse-spark-1.2",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "meta/muse-spark-1.2-contributor",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "meta/muse-spark-1.3",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "meta/muse-spark-1.3-contributor",
       "architecture": {
         "modality": "text"
       }
@@ -799,13 +895,31 @@
       }
     },
     {
-      "id": "minimax/minimax-m2.5:free",
+      "id": "minimax/minimax-m2.7",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "minimax/minimax-m2.7",
+      "id": "minimax/minimax-m2.7:free",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "minimax/minimax-m3",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "minimax/minimax-m3:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "minimax/minimax-m3:free",
       "architecture": {
         "modality": "text"
       }
@@ -818,18 +932,6 @@
     },
     {
       "id": "mistralai/devstral-2512",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "mistralai/devstral-medium",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "mistralai/devstral-small",
       "architecture": {
         "modality": "text"
       }
@@ -853,12 +955,6 @@
       }
     },
     {
-      "id": "mistralai/mistral-7b-instruct-v0.1",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "mistralai/mistral-large",
       "architecture": {
         "modality": "text"
@@ -871,12 +967,6 @@
       }
     },
     {
-      "id": "mistralai/mistral-large-2411",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "mistralai/mistral-large-2512",
       "architecture": {
         "modality": "text"
@@ -884,6 +974,18 @@
     },
     {
       "id": "mistralai/mistral-medium-3",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "mistralai/mistral-medium-3-5",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "mistralai/mistral-medium-3-5:batch",
       "architecture": {
         "modality": "text"
       }
@@ -931,25 +1033,7 @@
       }
     },
     {
-      "id": "mistralai/mistral-small-creative",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "mistralai/mixtral-8x22b-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "mistralai/mixtral-8x7b-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "mistralai/pixtral-large-2411",
       "architecture": {
         "modality": "text"
       }
@@ -991,6 +1075,24 @@
       }
     },
     {
+      "id": "moonshotai/kimi-k2.7-code",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "moonshotai/kimi-k3",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "moonshotai/kimi-k3:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "morph/morph-v3-fast",
       "architecture": {
         "modality": "text"
@@ -1003,25 +1105,19 @@
       }
     },
     {
-      "id": "nex-agi/deepseek-v3.1-nex-n1",
+      "id": "nex-agi/nex-n2-mini",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "nousresearch/hermes-2-pro-llama-3-8b",
+      "id": "nex-agi/nex-n2-pro",
       "architecture": {
         "modality": "text"
       }
     },
     {
       "id": "nousresearch/hermes-3-llama-3.1-405b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "nousresearch/hermes-3-llama-3.1-405b:free",
       "architecture": {
         "modality": "text"
       }
@@ -1045,25 +1141,13 @@
       }
     },
     {
-      "id": "nvidia/llama-3.1-nemotron-70b-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "nvidia/llama-3.3-nemotron-super-49b-v1.5",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "nvidia/nemotron-3-nano-30b-a3b",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "nvidia/nemotron-3-nano-30b-a3b:free",
+      "id": "nvidia/nemotron-3-nano-omni-30b-a3b-reasoning:free",
       "architecture": {
         "modality": "text"
       }
@@ -1081,25 +1165,37 @@
       }
     },
     {
-      "id": "nvidia/nemotron-nano-12b-v2-vl",
+      "id": "nvidia/nemotron-3-ultra-550b-a55b",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "nvidia/nemotron-nano-12b-v2-vl:free",
+      "id": "nvidia/nemotron-3-ultra-550b-a55b:free",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "nvidia/nemotron-nano-9b-v2",
+      "id": "nvidia/nemotron-3.5-content-safety",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "nvidia/nemotron-nano-9b-v2:free",
+      "id": "nvidia/nemotron-3.5-content-safety:free",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "nvidia/nemotron-3.5-lightning",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "nvidia/nemotron-3.5-lightning:free",
       "architecture": {
         "modality": "text"
       }
@@ -1129,19 +1225,13 @@
       }
     },
     {
+      "id": "openai/gpt-3.5-turbo:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-4",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "openai/gpt-4-0314",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "openai/gpt-4-1106-preview",
       "architecture": {
         "modality": "text"
       }
@@ -1159,6 +1249,12 @@
       }
     },
     {
+      "id": "openai/gpt-4-turbo:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-4.1",
       "architecture": {
         "modality": "text"
@@ -1171,7 +1267,25 @@
       }
     },
     {
+      "id": "openai/gpt-4.1-mini:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-4.1-nano",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-4.1-nano:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-4.1:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1201,12 +1315,6 @@
       }
     },
     {
-      "id": "openai/gpt-4o-audio-preview",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "openai/gpt-4o-mini",
       "architecture": {
         "modality": "text"
@@ -1219,31 +1327,19 @@
       }
     },
     {
-      "id": "openai/gpt-4o-mini-search-preview",
+      "id": "openai/gpt-4o-mini:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "openai/gpt-4o-search-preview",
+      "id": "openai/gpt-4o:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
       "id": "openai/gpt-5",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "openai/gpt-5-chat",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "openai/gpt-5-codex",
       "architecture": {
         "modality": "text"
       }
@@ -1267,7 +1363,19 @@
       }
     },
     {
+      "id": "openai/gpt-5-mini:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-5-nano",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5-nano:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1279,13 +1387,13 @@
       }
     },
     {
-      "id": "openai/gpt-5.1",
+      "id": "openai/gpt-5-pro:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "openai/gpt-5.1-chat",
+      "id": "openai/gpt-5.1",
       "architecture": {
         "modality": "text"
       }
@@ -1304,6 +1412,12 @@
     },
     {
       "id": "openai/gpt-5.1-codex-mini",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.1:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1333,7 +1447,13 @@
       }
     },
     {
-      "id": "openai/gpt-5.3-chat",
+      "id": "openai/gpt-5.2-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.2:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1363,13 +1483,37 @@
       }
     },
     {
+      "id": "openai/gpt-5.4-mini:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-5.4-nano",
       "architecture": {
         "modality": "text"
       }
     },
     {
+      "id": "openai/gpt-5.4-nano:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-5.4-pro",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.4-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.4:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1387,6 +1531,120 @@
       }
     },
     {
+      "id": "openai/gpt-5.5-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.5:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-luna",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-luna-pro",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-luna-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-luna:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-sol",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-sol-pro",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-sol-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-sol:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-terra",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-terra-pro",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-terra-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5.6-terra:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-5:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-6-astra",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-6-astra-pro",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-6-astra-pro:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/gpt-6-astra:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-audio",
       "architecture": {
         "modality": "text"
@@ -1399,13 +1657,19 @@
       }
     },
     {
+      "id": "openai/gpt-chat-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/gpt-oss-120b",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "openai/gpt-oss-120b:free",
+      "id": "openai/gpt-oss-120b:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1417,7 +1681,7 @@
       }
     },
     {
-      "id": "openai/gpt-oss-20b:free",
+      "id": "openai/gpt-oss-20b:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1447,12 +1711,6 @@
       }
     },
     {
-      "id": "openai/o3-deep-research",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "openai/o3-mini",
       "architecture": {
         "modality": "text"
@@ -1465,7 +1723,19 @@
       }
     },
     {
+      "id": "openai/o3-mini:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openai/o3-pro",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openai/o3:batch",
       "architecture": {
         "modality": "text"
       }
@@ -1477,19 +1747,25 @@
       }
     },
     {
-      "id": "openai/o4-mini-deep-research",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "openai/o4-mini-high",
       "architecture": {
         "modality": "text"
       }
     },
     {
+      "id": "openai/o4-mini:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openrouter/auto",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "openrouter/auto-beta",
       "architecture": {
         "modality": "text"
       }
@@ -1507,7 +1783,19 @@
       }
     },
     {
+      "id": "openrouter/fusion",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "openrouter/pareto-code",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "perceptron/perceptron-mk1",
       "architecture": {
         "modality": "text"
       }
@@ -1543,7 +1831,25 @@
       }
     },
     {
-      "id": "prime-intellect/intellect-3",
+      "id": "poolside/laguna-s-2.1",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "poolside/laguna-s-2.1:free",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "poolside/laguna-xs-2.1",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "poolside/laguna-xs-2.1:free",
       "architecture": {
         "modality": "text"
       }
@@ -1567,12 +1873,6 @@
       }
     },
     {
-      "id": "qwen/qwen-max",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "qwen/qwen-plus",
       "architecture": {
         "modality": "text"
@@ -1580,30 +1880,6 @@
     },
     {
       "id": "qwen/qwen-plus-2025-07-28",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "qwen/qwen-plus-2025-07-28:thinking",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "qwen/qwen-turbo",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "qwen/qwen-vl-max",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "qwen/qwen-vl-plus",
       "architecture": {
         "modality": "text"
       }
@@ -1699,12 +1975,6 @@
       }
     },
     {
-      "id": "qwen/qwen3-coder:free",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "qwen/qwen3-max",
       "architecture": {
         "modality": "text"
@@ -1718,12 +1988,6 @@
     },
     {
       "id": "qwen/qwen3-next-80b-a3b-instruct",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "qwen/qwen3-next-80b-a3b-instruct:free",
       "architecture": {
         "modality": "text"
       }
@@ -1807,6 +2071,12 @@
       }
     },
     {
+      "id": "qwen/qwen3.5-9b:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "qwen/qwen3.5-flash-02-23",
       "architecture": {
         "modality": "text"
@@ -1819,13 +2089,85 @@
       }
     },
     {
+      "id": "qwen/qwen3.5-plus-20260420",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.6-27b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.6-35b-a3b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.6-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.6-max-preview",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "qwen/qwen3.6-plus",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "qwen/qwq-32b",
+      "id": "qwen/qwen3.7-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.7-max",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.7-plus",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.8-2.4t-a95b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.8-2.4t-a95b:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.8-27b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.8-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "qwen/qwen3.8-max",
       "architecture": {
         "modality": "text"
       }
@@ -1855,19 +2197,19 @@
       }
     },
     {
-      "id": "sao10k/l3-euryale-70b",
+      "id": "sakana/fugu-ultra",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "sakana/sakana-namazu",
       "architecture": {
         "modality": "text"
       }
     },
     {
       "id": "sao10k/l3-lunaris-8b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "sao10k/l3.1-70b-hanami-x1",
       "architecture": {
         "modality": "text"
       }
@@ -1891,7 +2233,7 @@
       }
     },
     {
-      "id": "switchpoint/router",
+      "id": "stepfun/step-3.7-flash",
       "architecture": {
         "modality": "text"
       }
@@ -1903,19 +2245,43 @@
       }
     },
     {
-      "id": "tencent/hy3-preview:free",
+      "id": "tencent/hy-mt2-1.8b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "tencent/hy-mt2-30b-a3b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "tencent/hy-mt2-7b",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "tencent/hy3",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "tencent/hy3-preview",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "tencent/hy4-preview",
       "architecture": {
         "modality": "text"
       }
     },
     {
       "id": "thedrummer/cydonia-24b-v4.1",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "thedrummer/rocinante-12b",
       "architecture": {
         "modality": "text"
       }
@@ -1933,7 +2299,37 @@
       }
     },
     {
-      "id": "tngtech/deepseek-r1t2-chimera",
+      "id": "thinkingmachines/inkling",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "thinkingmachines/inkling-small",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "thinkingmachines/inkling-small:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "thinkingmachines/inkling-small:free",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "thinkingmachines/inkling:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "thinkingmachines/inkling:free",
       "architecture": {
         "modality": "text"
       }
@@ -1951,49 +2347,13 @@
       }
     },
     {
+      "id": "upstage/solar-pro4",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "writer/palmyra-x5",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "x-ai/grok-3",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "x-ai/grok-3-beta",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "x-ai/grok-3-mini",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "x-ai/grok-3-mini-beta",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "x-ai/grok-4",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "x-ai/grok-4-fast",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "x-ai/grok-4.1-fast",
       "architecture": {
         "modality": "text"
       }
@@ -2011,25 +2371,31 @@
       }
     },
     {
-      "id": "x-ai/grok-code-fast-1",
+      "id": "x-ai/grok-4.3",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "xiaomi/mimo-v2-flash",
+      "id": "x-ai/grok-4.3:batch",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "xiaomi/mimo-v2-omni",
+      "id": "x-ai/grok-4.5",
       "architecture": {
         "modality": "text"
       }
     },
     {
-      "id": "xiaomi/mimo-v2-pro",
+      "id": "x-ai/grok-4.6",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "x-ai/grok-build-0.1",
       "architecture": {
         "modality": "text"
       }
@@ -2047,12 +2413,6 @@
       }
     },
     {
-      "id": "z-ai/glm-4-32b",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
       "id": "z-ai/glm-4.5",
       "architecture": {
         "modality": "text"
@@ -2060,12 +2420,6 @@
     },
     {
       "id": "z-ai/glm-4.5-air",
-      "architecture": {
-        "modality": "text"
-      }
-    },
-    {
-      "id": "z-ai/glm-4.5-air:free",
       "architecture": {
         "modality": "text"
       }
@@ -2119,13 +2473,115 @@
       }
     },
     {
+      "id": "z-ai/glm-5.2",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "z-ai/glm-5.2:free",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "z-ai/glm-5.3",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "z-ai/glm-5.3-flash",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "z-ai/glm-5.3-flash:batch",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "z-ai/glm-5v-turbo",
       "architecture": {
         "modality": "text"
       }
     },
     {
+      "id": "~anthropic/claude-fable-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~anthropic/claude-haiku-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
       "id": "~anthropic/claude-opus-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~anthropic/claude-sonnet-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~deepseek/deepseek-v4-flash-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~google/gemini-flash-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~google/gemini-pro-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~moonshotai/kimi-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~openai/gpt-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~openai/gpt-mini-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~x-ai/grok-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~z-ai/glm-flash-latest",
+      "architecture": {
+        "modality": "text"
+      }
+    },
+    {
+      "id": "~z-ai/glm-latest",
       "architecture": {
         "modality": "text"
       }
