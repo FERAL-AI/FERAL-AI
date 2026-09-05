@@ -476,8 +476,14 @@ class GeminiRealtimeProxy:
     def _get_tools(self) -> list[dict]:
         if self._skill_registry:
             from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
+            from skills.availability import filter_unavailable_tools
+
+            # Withhold what cannot run before spending the 128 slots on
+            # it. Voice needs the gate more than chat does, not less: it
+            # is the surface already fighting a hard tool ceiling, so
+            # every schema spent on a dead tool evicts a live one.
             return cap_tools_with_pins(
-                self._skill_registry.get_all_tools(),
+                filter_unavailable_tools(self._skill_registry.get_all_tools()),
                 max_tools=OPENAI_TOOL_HARD_LIMIT,
             )
         return []

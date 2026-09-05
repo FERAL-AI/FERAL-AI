@@ -40,6 +40,7 @@ from models.skill_manifest import SkillManifest
 from memory.execution_audit import claimed_by_caller, status_of as audit_status_of
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
+from skills.availability import filter_unavailable_tools
 from skills.result_budget import (
     serialize_tool_result,
     serialize_tool_result_with_images,
@@ -3282,6 +3283,12 @@ class Orchestrator:
             logger.info("[%s] routed to specialist %s", session_id[:8], specialist.agent_id)
 
         tools = self.skills.get_tools_for_skills(relevant_skills)
+        # Withhold the skills whose prerequisite is provably absent: no
+        # key, no OAuth, no Docker, no robot. 79 of the 266 schemas on
+        # the operator's brain, every one a call the model could only
+        # lose. skills/availability.py also writes the prompt line that
+        # tells the model what is off and why.
+        tools = filter_unavailable_tools(tools)
 
         if self._mcp_client:
             mcp_tools = self._mcp_client.to_llm_tool_definitions()
@@ -3948,6 +3955,12 @@ class Orchestrator:
             logger.info("[%s] stream routed to specialist %s", session_id[:8], specialist.agent_id)
 
         tools = self.skills.get_tools_for_skills(relevant_skills)
+        # Withhold the skills whose prerequisite is provably absent: no
+        # key, no OAuth, no Docker, no robot. 79 of the 266 schemas on
+        # the operator's brain, every one a call the model could only
+        # lose. skills/availability.py also writes the prompt line that
+        # tells the model what is off and why.
+        tools = filter_unavailable_tools(tools)
 
         if self._mcp_client:
             mcp_tools = self._mcp_client.to_llm_tool_definitions()

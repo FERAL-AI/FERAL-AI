@@ -1174,13 +1174,23 @@ class RealtimeProxy:
         return "\n".join(parts)
 
     def _get_raw_tools(self) -> list[dict]:
-        """Everything the registry has, uncapped.
+        """Everything the registry has that could actually run, uncapped.
 
         Only ``start_session`` wants this, and only so the session can
         measure how much the cap dropped. See the comment there.
+
+        ``offerable_only`` withholds the skills with no key, no OAuth, no
+        Docker and no robot behind them (``skills/availability.py``).
+        Voice needs that more than chat does, not less: it is the surface
+        already fighting a 128-tool ceiling, so every schema spent on a
+        tool that cannot run evicts one that can.
         """
         if self._skill_registry:
-            return list(self._skill_registry.get_all_tools() or [])
+            from skills.availability import filter_unavailable_tools
+
+            return filter_unavailable_tools(
+                list(self._skill_registry.get_all_tools() or []),
+            )
         return []
 
     def _get_tools(self) -> list[dict]:

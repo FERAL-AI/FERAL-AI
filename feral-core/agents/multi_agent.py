@@ -199,17 +199,26 @@ class AgentWorker:
         return None
 
     def get_tools(self) -> list[dict]:
+        """Tools this worker may call this turn.
+
+        The availability gate matters most here. The "general" worker is
+        configured with ``skill_ids=[]`` and therefore falls through to
+        the whole registry, so it is the worker that was being handed all
+        266 schemas including the 79 with no key, no OAuth, no Docker and
+        no robot behind them. See ``skills/availability.py``.
+        """
         if not self._skills:
             return []
+        from skills.availability import filter_unavailable_tools
+
         tools = []
         for sid in self.skill_ids:
             skill = self._skills.skills.get(sid)
             if skill:
-                from skills.registry import SkillRegistry
                 tools.extend(self._skills._manifest_to_tools(skill))
         if not tools:
-            return self._skills.get_all_tools()
-        return tools
+            tools = self._skills.get_all_tools()
+        return filter_unavailable_tools(tools)
 
     async def run(self, session_id: str, user_text: str, context: str = "") -> WorkerResult:
         if not self._llm or not self._llm.available:

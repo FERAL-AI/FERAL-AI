@@ -128,7 +128,11 @@ class _ToolsOnlyRegistry:
     def __init__(self, tools: list[dict]):
         self._tools = tools
 
-    def get_all_tools(self) -> list[dict]:
+    def get_all_tools(self, *, offerable_only: bool = False) -> list[dict]:
+        # ``offerable_only`` is accepted and ignored: the availability
+        # gate (skills/availability.py) is exercised in
+        # tests/test_tool_availability_gate.py, and this file is about
+        # what reaches the wire, so it wants the whole list either way.
         return list(self._tools)
 
 

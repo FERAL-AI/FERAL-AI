@@ -2088,7 +2088,19 @@ class LLMProvider:
         }
         if instructions:
             body["instructions"] = instructions
-        clean_tools = self._chat_tools_to_responses_tools(tools)
+        # The 128-tool cap lived only on the chat/completions paths, and
+        # this builder is the one gpt-5.6-sol actually uses
+        # (``providers/model_classes.classify_endpoint`` routes it to
+        # /v1/responses). So the model measured on the operator's brain
+        # was receiving all 266 schemas: 32,391 tokens, 97% of every
+        # request, before a single word of the conversation. Cap here,
+        # BEFORE converting to the flat Responses shape, because
+        # ``cap_tools_with_pins`` reads pin names off either shape but
+        # the pin list and the coverage floor were written against the
+        # chat-shape list and stay honest applied to the same input.
+        clean_tools = self._chat_tools_to_responses_tools(
+            _cap_openai_chat_tools(tools) if tools else tools
+        )
         if clean_tools:
             body["tools"] = clean_tools
             # Responses-API tool_choice uses the flat ``{"type":"function","name":<n>}``

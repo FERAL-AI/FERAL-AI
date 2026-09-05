@@ -411,7 +411,20 @@ class SkillRegistry:
         return None
 
     def get_all_tools(self) -> list[dict]:
-        """Get all tools from all skills in LLM-compatible format."""
+        """Every tool from every registered skill, in LLM tool format.
+
+        This is the INVENTORY, and it stays the inventory: a skill the
+        operator has not connected yet is still installed, and
+        ``GET /api/tools``, the Skills page and the MCP projection all
+        have to keep saying so.
+
+        Callers assembling the list a model will be offered pass the
+        result through ``skills.availability.filter_unavailable_tools``,
+        which withholds the skills whose prerequisite is absent (no key,
+        no OAuth, no Docker, no robot: 79 of these 266 schemas on the
+        operator's brain). Applied by the caller rather than here because
+        the two questions are genuinely different.
+        """
         tools = []
         for skill_id, skill_tools in self._tool_cache.items():
             tools.extend(skill_tools)
@@ -478,7 +491,11 @@ class SkillRegistry:
         return [skill for _, skill in scored[:top_k]]
 
     def get_tools_for_skills(self, skills: list[SkillManifest]) -> list[dict]:
-        """Get LLM tool definitions for a subset of skills."""
+        """Get LLM tool definitions for a subset of skills.
+
+        Inventory, like :meth:`get_all_tools`. See its docstring for
+        where the availability gate is applied instead.
+        """
         tools = []
         for skill in skills:
             tools.extend(self._tool_cache.get(skill.skill_id, []))

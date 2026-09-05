@@ -217,6 +217,15 @@ def _make_worker(llm, executor=None):
     skill = MagicMock()
     skill.endpoints = [endpoint]
     skills.skills = {"cutebot": skill}
+    # A real list, not a MagicMock. ``AgentWorker.get_tools`` passes the
+    # registry's output through the availability gate
+    # (skills/availability.py), which returns a list; a MagicMock double
+    # would come back as [] and the worker would look like it had lost
+    # its tools when it had not.
+    skills._manifest_to_tools = MagicMock(return_value=[{
+        "type": "function",
+        "function": {"name": "cutebot__explore", "parameters": {}},
+    }])
     return AgentWorker(
         "hw", "Hardware", "SYS", ["cutebot"],
         llm=llm, skill_registry=skills, skill_executor=executor,
