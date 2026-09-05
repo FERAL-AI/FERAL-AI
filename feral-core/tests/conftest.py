@@ -1,5 +1,6 @@
 import pytest
 import os
+import sys
 import types
 import warnings
 from pathlib import Path
@@ -207,26 +208,36 @@ def websockets_connect_is_left_alone():
     Comparing two attributes per test is cheap. Finding this by hand
     cost an afternoon.
     """
-    import websockets
+    # Observed through sys.modules, never imported. Importing websockets
+    # here would change what a test sees: test_external_agent_skill
+    # asserts that a skill call pulls in no heavy modules, and this
+    # fixture running first made that assertion fail. A guard that
+    # perturbs the thing it guards is not a guard. If websockets was
+    # never imported, nothing can have patched it, so there is nothing
+    # to check.
+    websockets = sys.modules.get("websockets")
+    asyncio_client = sys.modules.get("websockets.asyncio.client")
 
-    try:
-        from websockets.asyncio import client as asyncio_client
-    except ImportError:  # pragma: no cover - websockets always ships it
-        asyncio_client = None
+    def _snapshot():
+        return (
+            getattr(websockets, "connect", None) if websockets else None,
+            getattr(asyncio_client, "connect", None) if asyncio_client else None,
+        )
 
-    before = (
-        websockets.connect,
-        asyncio_client.connect if asyncio_client else None,
-    )
+    before = _snapshot()
     yield
-    after = (
-        websockets.connect,
-        asyncio_client.connect if asyncio_client else None,
-    )
+    # Re-read: a test may have imported websockets for the first time,
+    # in which case there was nothing to compare against anyway.
+    websockets = sys.modules.get("websockets")
+    asyncio_client = sys.modules.get("websockets.asyncio.client")
+    if before == (None, None):
+        return
+    after = _snapshot()
     if before != after:
         # Put it back so one offender does not fail every later test.
-        websockets.connect = before[0]
-        if asyncio_client is not None:
+        if websockets is not None and before[0] is not None:
+            websockets.connect = before[0]
+        if asyncio_client is not None and before[1] is not None:
             asyncio_client.connect = before[1]
         raise AssertionError(
             "this test left websockets.connect patched. Capture every "
