@@ -23,14 +23,61 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Callable, Awaitable, Optional
 
 from agents.token_estimate import estimate_tokens
+
+
+def _briefing_state_path() -> Path:
+    """Where the delivered-briefing date lives.
+
+    A small JSON file in FERAL_HOME, matching how the rest of the brain
+    keeps this kind of flag (llm_provider_cooldowns.json,
+    update-check.json). It is one date; it does not want a table.
+    """
+    home = os.getenv("FERAL_HOME") or os.path.join(os.path.expanduser("~"), ".feral")
+    return Path(home) / "proactive_state.json"
+
+
+def _read_briefing_date(path: "Path") -> str:
+    """The last date a briefing went out, or "" when unknown.
+
+    Every failure reads as "unknown", which costs at most one extra
+    briefing. Refusing to start the proactive engine because a cache
+    file is unreadable would be the worse trade.
+    """
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            value = json.load(fh).get("briefing_delivered_on")
+        return value if isinstance(value, str) else ""
+    except Exception:
+        return ""
+
+
+def _write_briefing_date(path: "Path", day: str) -> None:
+    """Record the delivered date. Never raises into the caller.
+
+    Written through a temporary file and replaced, so a crash mid-write
+    cannot leave a truncated file that reads back as "unknown" and
+    re-delivers the briefing, which is the failure this whole change
+    exists to stop.
+    """
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        with open(tmp, "w", encoding="utf-8") as fh:
+            json.dump({"briefing_delivered_on": day}, fh)
+        os.replace(tmp, path)
+    except Exception:
+        logger.debug("could not persist the briefing date to %s", path, exc_info=True)
+
 
 logger = logging.getLogger("feral.proactive")
 
@@ -143,7 +190,15 @@ class ProactiveEngine:
         self._callbacks: list[Callable[[ProactiveMessage], Awaitable[None]]] = []
         self._trigger_states: dict[str, TriggerState] = {}
         self._trigger_counts: dict[str, int] = defaultdict(int)
-        self._first_interaction_today = True
+        # The date, in the operator's local calendar, whose morning
+        # briefing has already been delivered. Read from disk rather than
+        # started at "not yet today", because this used to be a bare
+        # in-memory flag: every restart reset it and the briefing fired
+        # again. On 2026-09-05 the operator got the same "Good morning,
+        # Omar!" card twice within twenty minutes, once per restart,
+        # while we were verifying other work. A restart is not a new day.
+        self._briefing_state_path = _briefing_state_path()
+        self._briefing_delivered_on = _read_briefing_date(self._briefing_state_path)
         self._last_hr_alert = 0.0
         self._last_break_suggestion = 0.0
         self._last_llm_eval = 0.0
@@ -246,13 +301,17 @@ class ProactiveEngine:
                     frame_sids.append(sid)
 
         # --- Morning Briefing ---
-        if self._first_interaction_today:
+        # Once per local calendar day, and the day is remembered across
+        # restarts (see __init__).
+        today = time.strftime("%Y-%m-%d", time.localtime())
+        if self._briefing_delivered_on != today:
             hour = time.localtime().tm_hour
             if 5 <= hour <= 11:
                 msg = await self._build_morning_briefing()
                 if msg:
                     messages.append(msg)
-                    self._first_interaction_today = False
+                    self._briefing_delivered_on = today
+                    _write_briefing_date(self._briefing_state_path, today)
 
         # --- Health Triggers ---
         # Freshness gate (operator report 2026-05-09: web-UI showed

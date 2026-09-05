@@ -980,30 +980,149 @@ class CronService:
             logger.info(f"Deleted automation job_id={job_id}")
         return deleted
 
-    def _catchup_missed_jobs(self) -> None:
-        """On boot, fire jobs whose next_run passed while the brain was down.
+    # How late a wall-clock routine may be and still be worth running.
+    # Overridable for operators who would rather have a late briefing
+    # than none.
+    _CATCHUP_GRACE_SECONDS = float(
+        os.getenv("FERAL_CATCHUP_GRACE_SECONDS", "") or 3600.0
+    )
 
-        Only catches up jobs missed within the last 24 hours to avoid
-        avalanche-firing very old jobs after a long outage.
+    @staticmethod
+    def _is_wall_clock_schedule(cron_expr: str) -> bool:
+        """Does this schedule name a time of day, rather than an interval?
+
+        ``daily 21:00`` means "at nine in the evening". ``every 10m``
+        means "every ten minutes" and has no opinion about when. The
+        distinction decides whether running late is acceptable or absurd.
+        """
+        raw = (cron_expr or "").strip().lower()
+        if not raw:
+            return False
+        if re.match(r"^every\s+\d+\s*[mh]", raw):
+            return False
+        if raw.startswith("@"):
+            return True
+        if re.match(r"^daily\s+\d{1,2}:\d{2}$", raw):
+            return True
+        parts = raw.split()
+        if len(parts) == 5:
+            minute, hour = parts[0], parts[1]
+            # ``*/5 * * * *`` is an interval wearing cron syntax; a
+            # specific hour or minute is a time of day.
+            if hour == "*" and (minute == "*" or minute.startswith("*/")):
+                return False
+            return True
+        return False
+
+    def _catchup_missed_jobs(self) -> None:
+        """On boot, run what was genuinely missed. Nothing else.
+
+        A restart is not something the user asked for. Upgrading, a
+        crash, or closing a laptop lid must not produce output the user
+        would not otherwise have seen, so catch-up is deliberately
+        narrow.
+
+        Two rules, beyond the existing one-day ceiling:
+
+        A wall-clock routine is only caught up inside a grace window.
+        "Spin the CuteBot at 9 PM" fired at 08:41 the next morning on
+        the operator's own machine, because the brain had been off
+        overnight and the whole of the previous evening still counted as
+        "missed within a day". The time IS the instruction for these, so
+        running one hours late is not a late delivery, it is the wrong
+        action. Past the grace they are re-armed for their next real
+        occurrence and reported, not run.
+
+        Interval routines are caught up as before. "Every ten minutes"
+        makes no claim about when, so running one immediately after a
+        gap is exactly its semantics.
+
+        And a job whose ``last_run`` is at or after its due time already
+        ran for that slot, so it is never re-run. That is what stops a
+        second restart inside the same window from firing it twice.
         """
         now = time.time()
         cutoff = now - _ONE_DAY_SECONDS
         with self._lock:
             rows = self._conn.execute(
-                "SELECT id, description, next_run, cron_expr FROM scheduled_jobs "
+                "SELECT id, description, next_run, last_run, cron_expr "
+                "FROM scheduled_jobs "
                 "WHERE enabled = 1 AND next_run < ? AND next_run >= ?",
                 (now, cutoff),
             ).fetchall()
         caught_up = 0
+        skipped = 0
         for row in rows:
-            job_id, name, next_run, _cron = row["id"], row["description"], row["next_run"], row["cron_expr"]
-            logger.info("Missed job '%s' (id=%d, was due %.0fs ago), catching up", name, job_id, now - next_run)
+            job_id, name = row["id"], row["description"]
+            next_run, cron = row["next_run"], row["cron_expr"]
+            try:
+                last_run = row["last_run"] or 0.0
+            except (IndexError, KeyError):
+                last_run = 0.0
+            late_by = now - next_run
+
+            if last_run and last_run >= next_run:
+                logger.info(
+                    "Missed job '%s' (id=%d) already ran for this slot; not re-running",
+                    name, job_id,
+                )
+                skipped += 1
+                self._rearm_without_running(job_id, cron)
+                continue
+
+            if self._is_wall_clock_schedule(cron) and late_by > self._CATCHUP_GRACE_SECONDS:
+                logger.info(
+                    "Missed job '%s' (id=%d, %r) was due %.0f minutes ago, past the "
+                    "%.0f minute grace for a time-of-day routine. Re-arming for its "
+                    "next occurrence rather than running it now.",
+                    name, job_id, cron, late_by / 60.0,
+                    self._CATCHUP_GRACE_SECONDS / 60.0,
+                )
+                skipped += 1
+                self._rearm_without_running(job_id, cron)
+                continue
+
+            logger.info(
+                "Missed job '%s' (id=%d), was due %.0fs ago, catching up",
+                name, job_id, late_by,
+            )
             job = self.get_job(job_id)
             if job and self._callback:
                 if self._fire(job):
                     caught_up += 1
-        if caught_up:
-            logger.info("Caught up %d missed jobs", caught_up)
+        if caught_up or skipped:
+            logger.info(
+                "Boot catch-up: ran %d missed job(s), re-armed %d without running",
+                caught_up, skipped,
+            )
+
+    def _rearm_without_running(self, job_id: int, cron: str) -> None:
+        """Move a job to its next occurrence without firing or counting a run.
+
+        Distinct from ``mark_completed``, which exists to record that a
+        run happened: it bumps ``run_count`` and ``last_run``, and using
+        it here would log a run that never occurred, which is the same
+        class of lie as a routine reporting success while capped.
+        """
+        with self._lock:
+            try:
+                row = self._conn.execute(
+                    "SELECT tz_name FROM scheduled_jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+                tz = ZoneInfo(row["tz_name"]) if row and row["tz_name"] else self._timezone
+            except Exception:
+                tz = self._timezone
+            try:
+                nxt = CronService._compute_next_run(cron, time.time(), tz=tz)
+            except UnparseableCronExpression:
+                # mark_completed owns disabling these, and it has the
+                # operator-facing reason text. Leave it alone rather
+                # than half-handling it here.
+                return
+            self._conn.execute(
+                "UPDATE scheduled_jobs SET next_run = ? WHERE id = ?", (nxt, job_id)
+            )
+            self._conn.commit()
 
     def _fire(self, job: ScheduledJob) -> bool:
         """Run one job's callback and re-arm it. NEVER raises.
