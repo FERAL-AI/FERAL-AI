@@ -465,6 +465,52 @@ def _cooldown_state_path() -> str:
         return ""
 
 
+def _responses_endpoint_for(provider_name: str, model: str) -> bool:
+    """True when ``(provider, model)`` must be served by ``/v1/responses``.
+
+    Thin wrapper over ``providers.model_classes.classify_endpoint`` that
+    never raises: ``_call_provider`` runs inside the failover loop, and
+    a classifier exception there would be recorded as a provider
+    failure and cool the candidate down for nothing.
+    """
+    if not provider_name or not model:
+        return False
+    try:
+        from providers.model_classes import classify_endpoint
+        return classify_endpoint(provider_name, model) == "responses"
+    except Exception:
+        return False
+
+
+def llm_response_error(data: Any) -> Optional[str]:
+    """Return the provider failure carried by a ``chat()`` result, or ``None``.
+
+    Every ``LLMProvider.chat`` path reports failure in-band as
+    ``{"error": <detail>, "choices": []}``. ``extract_response`` used to
+    hand that detail back in the TEXT slot, so the orchestrator rendered
+    an HTTP 400 as an assistant bubble, stored it in
+    ``conversation_history`` and fed it back to the model as its own
+    prior turn. Consumers that need the failure now ask this helper and
+    route it as an error frame; ``extract_response`` returns no text.
+
+    A pure function over the dict (not a method) so the orchestrator,
+    multi-agent workers and subagent loop can call it regardless of how
+    the ``llm`` object is stubbed in tests.
+
+    Only an explicit, non-empty ``error`` counts. A payload with no
+    ``choices`` is an EMPTY answer, not a provider failure: the
+    orchestrator has a never-stall retry for that case, and a failure
+    frame for it would be wrong. Non-dict input is left alone for the
+    same reason (test doubles hand back MagicMocks).
+    """
+    if not isinstance(data, dict):
+        return None
+    err = data.get("error")
+    if err:
+        return err if isinstance(err, str) else str(err)
+    return None
+
+
 def parse_tool_arguments(raw: Any, tool_name: str = "") -> tuple[dict, str]:
     """Parse a model's tool-call ``arguments`` string.
 
@@ -1037,34 +1083,55 @@ class LLMProvider:
                 logger.error("Codex app-server call failed: %s", detail)
                 return {"error": detail, "choices": []}
 
+        fallbacks = self._config.get("fallback_providers") if isinstance(self._config, dict) else None
+        use_failover = bool(fallbacks) and not (
+            self._local_engine and self.provider in ("local", "hybrid")
+        )
+
         # v2026.5.23 — Responses-API route for OpenAI Pro / o-Pro /
-        # deep-research / Codex / computer-use models. Must run BEFORE
-        # the fallback-providers short-circuit so the primary actually
-        # gets a chance to answer through the right endpoint instead
-        # of immediately deferring to OpenRouter for every turn.
+        # deep-research / Codex / computer-use / gpt-5.6 models.
+        #
+        # Only taken here when NO failover chain is configured. With a
+        # chain, ``chat_with_failover`` -> ``_call_provider`` routes the
+        # primary candidate through /v1/responses itself, so calling
+        # ``_responses_chat`` first would just try the primary twice on
+        # every failure. Before this rewrite the failover loop did not
+        # know about the Responses endpoint, which is why the direct
+        # attempt had to run first.
+        #
+        # On failure this RETURNS the error. It used to fall through to
+        # the /chat/completions body below, where ``apply_reasoning_fork``
+        # adds ``reasoning_effort`` and OpenAI answers 400 "Function tools
+        # with reasoning_effort are not supported for gpt-5.6-sol in
+        # /v1/chat/completions" (brain.err, 2026-08-01 through 2026-09-02).
+        # A responses-only model has no working chat-completions fallback
+        # by definition, so the second request could only ever add a
+        # second, misleading error.
         try:
             from providers.model_classes import classify_endpoint
-            if classify_endpoint(self.provider, self.model) == "responses":
-                result = await self._responses_chat(
-                    messages, tools, temperature, max_tokens,
-                    force_tool=force_tool,
-                )
-                if result and not result.get("error"):
-                    await self._budget_record(call_site, self.model, result)
-                    return result
-                # Responses path failed — fall through to the normal
-                # failover ladder so fallback providers (OpenRouter)
-                # still have a shot. Log truthfully.
-                if result and result.get("error"):
-                    logger.warning(
-                        "Responses-API primary failed: %s — falling through to failover",
-                        result["error"],
-                    )
+            primary_is_responses = (
+                classify_endpoint(self.provider, self.model) == "responses"
+            )
         except Exception as resp_exc:
-            logger.warning("Responses-API route raised: %s", resp_exc)
+            logger.warning("Responses-API route classification raised: %s", resp_exc)
+            primary_is_responses = False
+        if primary_is_responses and not use_failover:
+            result = await self._responses_chat(
+                messages, tools, temperature, max_tokens,
+                force_tool=force_tool,
+            )
+            if result and not result.get("error"):
+                await self._budget_record(call_site, self.model, result)
+                return result
+            if result and result.get("error"):
+                logger.warning(
+                    "Responses-API primary failed with no fallback chain: %s",
+                    result["error"],
+                )
+                return result
+            return {"error": "responses: empty payload", "choices": []}
 
-        fallbacks = self._config.get("fallback_providers") if isinstance(self._config, dict) else None
-        if fallbacks and not (self._local_engine and self.provider in ("local", "hybrid")):
+        if use_failover:
             try:
                 # Forward the same ``call_site`` so the failover path
                 # bills against the right cap. ``chat_with_failover``
@@ -1221,9 +1288,21 @@ class LLMProvider:
         """
         Extract the text response and tool calls from an LLM response.
         Returns: (text_content, tool_calls)
+
+        A provider failure (``{"error": ..., "choices": []}``) yields
+        ``(None, [])``. The failure detail is NOT returned as text: it
+        used to be, and the orchestrator then delivered "HTTP 400 ..."
+        as an assistant bubble and stored it in the transcript. Callers
+        that need the detail read it with ``llm_response_error(data)``.
+        An empty payload (no ``choices``) also yields ``(None, [])``; it
+        used to yield the literal text "No response from LLM".
         """
-        if "error" in data or not data.get("choices"):
-            return data.get("error", "No response from LLM"), []
+        if (
+            not isinstance(data, dict)
+            or llm_response_error(data) is not None
+            or not data.get("choices")
+        ):
+            return None, []
 
         choice = data["choices"][0]
         message = choice.get("message", {})
@@ -1986,12 +2065,22 @@ class LLMProvider:
         *,
         stream: bool,
         force_tool: Optional[str] = None,
+        model: Optional[str] = None,
     ) -> dict:
+        """Canonical ``/v1/responses`` request body.
+
+        ``model`` defaults to the live primary model. The failover loop
+        passes the CANDIDATE's model instead, because a fallback hop to
+        ``openai/gpt-5.6-sol`` must build a body for that model, not for
+        whatever ``self.model`` happens to be on the misconfigured
+        primary.
+        """
         from agents.llm_reasoning import apply_responses_param_fork
 
+        model = model or self.model
         instructions, input_items = self._messages_to_responses_input(messages)
         body: dict = {
-            "model": self.model,
+            "model": model,
             "input": input_items,
             "max_tokens": max_tokens,           # apply_responses_param_fork renames
             "temperature": temperature,         # apply_responses_param_fork drops if !=1
@@ -2012,8 +2101,49 @@ class LLMProvider:
                 body["tool_choice"] = {"type": "function", "name": force_tool}
             else:
                 body["tool_choice"] = "auto"
-        apply_responses_param_fork(self.model, body)
+        apply_responses_param_fork(model, body)
         return body
+
+    async def _post_responses(
+        self,
+        client: Any,
+        model: str,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        temperature: float,
+        max_tokens: int,
+        *,
+        force_tool: Optional[str] = None,
+        retry_max: Optional[int] = None,
+        retry_delays: Optional[list[float]] = None,
+    ) -> dict:
+        """Non-streaming POST to ``/v1/responses`` on an explicit client
+        and model. Raises on HTTP / transport failure (so the failover
+        loop can classify it) and returns the payload normalised to the
+        chat-completions shape.
+
+        Shared by ``_responses_chat`` (primary, swallows errors into the
+        ``{"error": ...}`` dict) and ``_call_provider`` (primary AND
+        fallback candidates, propagates the exception). The fallback
+        branch is why ``client`` and ``model`` are parameters: a
+        fallback hop runs on a temporary ``httpx.AsyncClient`` built
+        for the candidate's ``base_url`` + ``api_key``, never on
+        ``self.client``.
+        """
+        body = self._build_responses_body(
+            messages, tools, temperature, max_tokens, stream=False,
+            force_tool=force_tool, model=model,
+        )
+
+        async def _do_responses():
+            resp = await client.post("/responses", json=body)
+            resp.raise_for_status()
+            return resp.json()
+
+        payload = await _retry_llm_call(
+            _do_responses, max_retries=retry_max, delays=retry_delays,
+        )
+        return self._responses_payload_to_chat_dict(payload)
 
     async def _responses_chat(
         self,
@@ -2030,23 +2160,17 @@ class LLMProvider:
         On error returns ``{"error": str, "choices": []}``.
         """
         from observability.metrics import increment, measure
-        body = self._build_responses_body(
-            messages, tools, temperature, max_tokens, stream=False,
-            force_tool=force_tool,
-        )
         increment("feral.llm.calls_total", attributes={
             "provider": self.provider, "model": self.model, "endpoint": "responses",
         })
         try:
-            async def _do_responses():
-                resp = await self.client.post("/responses", json=body)
-                resp.raise_for_status()
-                return resp.json()
-
             with measure("feral.llm.latency", {
                 "provider": self.provider, "model": self.model, "endpoint": "responses",
             }):
-                payload = await _retry_llm_call(_do_responses)
+                return await self._post_responses(
+                    self.client, self.model, messages, tools, temperature,
+                    max_tokens, force_tool=force_tool,
+                )
         except httpx.HTTPStatusError as e:
             increment("feral.llm.errors_total", attributes={
                 "provider": self.provider, "model": self.model, "endpoint": "responses",
@@ -2062,7 +2186,37 @@ class LLMProvider:
             logger.error("Responses API failed: %s", detail)
             return {"error": detail, "choices": []}
 
-        return self._responses_payload_to_chat_dict(payload)
+    async def _call_provider_responses(
+        self,
+        client: Any,
+        provider_name: str,
+        model: str,
+        messages: list[dict],
+        tools: Optional[list[dict]],
+        temperature: float,
+        max_tokens: int,
+        *,
+        force_tool: Optional[str] = None,
+        retry_max: Optional[int] = None,
+        retry_delays: Optional[list[float]] = None,
+    ) -> dict:
+        """``_call_provider`` leg for responses-only candidates.
+
+        Keeps ``_call_provider``'s contract ("raises on error"): a
+        payload that carries an ``error`` object is raised too, so the
+        failover loop classifies it, cools the candidate down and moves
+        on instead of handing the orchestrator an error dict that looks
+        like a successful hop.
+        """
+        result = await self._post_responses(
+            client, model, messages, tools, temperature, max_tokens,
+            force_tool=force_tool, retry_max=retry_max, retry_delays=retry_delays,
+        )
+        if isinstance(result, dict) and result.get("error"):
+            raise RuntimeError(
+                f"{provider_name}/{model} responses: {result['error']}"
+            )
+        return result
 
     @staticmethod
     def _responses_payload_to_chat_dict(payload: dict) -> dict:
@@ -2601,7 +2755,14 @@ class LLMProvider:
         # so orchestrator.handle_command_stream stays unchanged.
         try:
             from providers.model_classes import classify_endpoint
-            if classify_endpoint(self.provider, self.model) == "responses":
+            stream_is_responses = (
+                classify_endpoint(self.provider, self.model) == "responses"
+            )
+        except Exception as resp_exc:
+            logger.warning("Responses-API stream classification raised: %s", resp_exc)
+            stream_is_responses = False
+        if stream_is_responses:
+            try:
                 streamed_anything = False
                 async for event in self._responses_stream(
                     messages, tools, temperature, max_tokens,
@@ -2610,9 +2771,31 @@ class LLMProvider:
                     if event.get("type") in ("text_delta", "tool_call_delta"):
                         streamed_anything = True
                     if event.get("type") == "error" and not streamed_anything:
-                        # Yield error to caller; chat_stream's existing
-                        # failover-on-error logic in the outer handler
-                        # picks up after the generator finishes.
+                        # Pre-token failure. Same treatment as the SSE
+                        # and Anthropic stream branches: try the
+                        # non-stream failover chain (which now routes
+                        # responses-only candidates correctly) before
+                        # surfacing the error. Guarded because
+                        # ``_stream_via_nonstream_failover`` reads
+                        # ``self._config``, which test doubles built via
+                        # ``__new__`` may not have.
+                        failover_events = None
+                        try:
+                            failover_events = await self._stream_via_nonstream_failover(
+                                messages, tools, temperature, max_tokens,
+                                primary_error=RuntimeError(
+                                    str(event.get("content") or "responses stream failed")
+                                ),
+                                force_tool=force_tool,
+                            )
+                        except Exception as fo_exc:
+                            logger.debug(
+                                "Responses stream failover skipped: %s", fo_exc,
+                            )
+                        if failover_events:
+                            for fo_event in failover_events:
+                                yield fo_event
+                            return
                         yield event
                         return
                     if event.get("type") == "done" and event.get("usage"):
@@ -2650,13 +2833,21 @@ class LLMProvider:
                             event,
                         )
                     yield event
-                if streamed_anything:
-                    return
-                # Responses route returned no usable content — fall
-                # through to chat-completions so failover / OR still
-                # gets a chance.
-        except Exception as resp_exc:
-            logger.warning("Responses-API stream route raised: %s", resp_exc)
+                # Done, whether or not anything streamed. This used to
+                # fall through to the chat-completions SSE body below
+                # when the Responses stream ended without content,
+                # "so failover / OR still gets a chance". For a
+                # responses-only model that second request can only
+                # 400 (tools + reasoning_effort on /chat/completions,
+                # the brain.err signature from 2026-08-01 to 2026-09-02)
+                # and the orchestrator's empty-response retry already
+                # covers the no-content case.
+                return
+            except Exception as resp_exc:
+                detail = _describe_error(resp_exc)
+                logger.warning("Responses-API stream route raised: %s", detail)
+                yield {"type": "error", "content": detail}
+                return
 
         model_guard_error = _chat_completions_model_guard(self.provider, self.model)
         if model_guard_error:
@@ -4834,6 +5025,23 @@ class LLMProvider:
                 )
                 return self._normalize_anthropic_response(data)
 
+            # Responses-only models (gpt-5.6-sol, gpt-5.5-pro, o3-pro, ...)
+            # never go to /chat/completions from here. Before this check
+            # the branch below built a chat-completions body, and
+            # ``apply_reasoning_fork`` added ``reasoning_effort`` to it;
+            # with tools attached OpenAI answers 400 "Function tools with
+            # reasoning_effort are not supported for gpt-5.6-sol in
+            # /v1/chat/completions. To use function tools, use
+            # /v1/responses or set reasoning_effort to 'none'". Every
+            # candidate in the failover chain passes through here, so
+            # this is the one place the route has to be right.
+            if _responses_endpoint_for(provider_name, selected_model):
+                return await self._call_provider_responses(
+                    self.client, provider_name, selected_model, messages,
+                    tools, temperature, max_tokens, force_tool=force_tool,
+                    retry_max=retry_max, retry_delays=retry_delays,
+                )
+
             body = {
                 "model": selected_model,
                 "messages": messages,
@@ -4894,6 +5102,19 @@ class LLMProvider:
                     delays=retry_delays,
                 )
                 return self._normalize_anthropic_response(data)
+
+            # Same routing rule as the primary branch, on the candidate's
+            # temporary client. This is the exact path the 2026-09-02
+            # brain.err hits took: primary misconfigured as
+            # deepseek | anthropic/claude-sonnet-5, so openai/gpt-5.6-sol
+            # was a FALLBACK candidate and was posted to /chat/completions
+            # with tools + reasoning_effort, four times in a row.
+            if _responses_endpoint_for(provider_name, model):
+                return await self._call_provider_responses(
+                    tmp, provider_name, model, messages, tools, temperature,
+                    max_tokens, force_tool=force_tool,
+                    retry_max=retry_max, retry_delays=retry_delays,
+                )
 
             body = {
                 "model": model,

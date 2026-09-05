@@ -185,7 +185,7 @@ class ToolGenesisEngine:
                 {"role": "user", "content": prompt},
             ])
             text, _ = self._llm.extract_response(response)
-            code = text.strip()
+            code = (text or "").strip()
 
             safe, reason = _ast_safety_check(code)
             if not safe:
