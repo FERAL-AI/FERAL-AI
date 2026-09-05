@@ -108,21 +108,38 @@ def test_realtime_proxy_connect_attempts_actually_dispatch() -> None:
 
     # Patch BOTH possible entry points so the test works regardless of
     # which one is installed.
-    patched = []
+    #
+    # Every original is captured BEFORE anything is patched, and that
+    # order is the whole point. ``websockets`` resolves ``connect``
+    # lazily through a module __getattr__ that forwards to
+    # ``websockets.asyncio.client.connect`` and does not cache the result
+    # in its __dict__. Capturing interleaved with patching, which is what
+    # this did, meant the second capture read ``websockets.connect``
+    # while the asyncio client was already faked, so it recorded the FAKE
+    # as the original and the restore wrote the fake back permanently.
+    #
+    # The damage was not local. ``memory/sync.py`` dials peers through
+    # ``websockets.connect``, so every sync test that happened to run
+    # after this one in a randomised order failed with "dial halted
+    # (test)", the sentinel raised below. That was 11 of the 28 failures
+    # in a full-suite run, all of them passing in isolation, which is the
+    # signature that sends people looking for a product bug that is not
+    # there.
+    targets = []
     try:
         from websockets.asyncio import client as _asyncio_client_mod
-        original = _asyncio_client_mod.connect
-        _asyncio_client_mod.connect = fake_connect  # type: ignore[assignment]
-        patched.append(("websockets.asyncio.client", _asyncio_client_mod, original))
+        targets.append(("websockets.asyncio.client", _asyncio_client_mod))
     except ImportError:
         pass
     try:
         import websockets as _ws_mod
-        ws_original = _ws_mod.connect
-        _ws_mod.connect = fake_connect  # type: ignore[assignment]
-        patched.append(("websockets", _ws_mod, ws_original))
+        targets.append(("websockets", _ws_mod))
     except ImportError:
         pass
+
+    patched = [(name, mod, mod.connect) for name, mod in targets]
+    for _, mod, _original in patched:
+        mod.connect = fake_connect  # type: ignore[assignment]
 
     try:
         from voice.realtime_proxy import RealtimeSession

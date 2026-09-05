@@ -187,6 +187,56 @@ def reset_settings_cache():
 
 
 @pytest.fixture(autouse=True)
+def websockets_connect_is_left_alone():
+    """Fail the test that leaves a patched ``websockets.connect`` behind.
+
+    ``websockets`` resolves ``connect`` lazily through a module
+    __getattr__ that forwards to ``websockets.asyncio.client.connect``
+    and never caches it. A test that patches the asyncio client and then
+    reads ``websockets.connect`` to remember "the original" records the
+    FAKE, and its restore writes that fake back for good.
+
+    That happened. test_voice_realtime_headers captured interleaved with
+    patching, and every sync test that ran after it in a randomised
+    order failed with "dial halted (test)", its sentinel, because
+    memory/sync.py dials peers through ``websockets.connect``. It was 11
+    of 28 failures in a full run, every one of them passing in isolation,
+    which is the signature that sends somebody hunting a product bug
+    that does not exist.
+
+    Comparing two attributes per test is cheap. Finding this by hand
+    cost an afternoon.
+    """
+    import websockets
+
+    try:
+        from websockets.asyncio import client as asyncio_client
+    except ImportError:  # pragma: no cover - websockets always ships it
+        asyncio_client = None
+
+    before = (
+        websockets.connect,
+        asyncio_client.connect if asyncio_client else None,
+    )
+    yield
+    after = (
+        websockets.connect,
+        asyncio_client.connect if asyncio_client else None,
+    )
+    if before != after:
+        # Put it back so one offender does not fail every later test.
+        websockets.connect = before[0]
+        if asyncio_client is not None:
+            asyncio_client.connect = before[1]
+        raise AssertionError(
+            "this test left websockets.connect patched. Capture every "
+            "original BEFORE patching anything: reading websockets.connect "
+            "after patching websockets.asyncio.client.connect returns the "
+            "patch, not the original."
+        )
+
+
+@pytest.fixture(autouse=True)
 def isolate_feral_home(request, tmp_path, monkeypatch):
     """Isolate tests from real ~/.feral directory.
     Skips for tests that manage FERAL_HOME themselves.
