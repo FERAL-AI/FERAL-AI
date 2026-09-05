@@ -2236,8 +2236,23 @@ button.v2-chip[aria-pressed="false"] { text-decoration: line-through; }
  * v2-modal-card mirrors the backdrop so a screenshot tool that sees
  * only the inner Glass card can still verify the correct layer.
  */
+/*
+ * The same block also softens the scrim. The ui.css rule pairs
+ * --v2-scrim (0.45 on dark) with --v2-blur-sm (blur(24px)), and on the
+ * dark theme's rgb(28,31,35) ground that combination does not dim the
+ * page, it deletes it: verified live against an open skills modal, the
+ * shell behind the sheet computed to a uniform black slab with no edge
+ * of the page you came from left visible. It was read as a broken
+ * layout, but the shell is still painted and still in the tree; it is
+ * purely a contrast defect. The modal-only pair below (0.22 light /
+ * 0.28 dark, blur(8px)) still pushes the page back and still passes the
+ * dialog-focus test, while leaving the page recognisable underneath.
+ */
 .v2-modal-backdrop {
   z-index: var(--z-modal);
+  background: var(--v2-scrim-modal);
+  -webkit-backdrop-filter: var(--v2-blur-modal);
+  backdrop-filter: var(--v2-blur-modal);
 }
 .v2-modal-card {
   position: relative;
