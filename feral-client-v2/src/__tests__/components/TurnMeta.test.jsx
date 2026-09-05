@@ -59,3 +59,48 @@ describe('TurnMeta', () => {
     expect(screen.getByText(/125\s*tokens/)).toBeInTheDocument();
   });
 });
+
+/**
+ * The count is a SUM, and had to stop pretending otherwise.
+ *
+ * Observed live: "241,240 tokens" under one assistant message, with the
+ * header's context indicator reading 12.5k at the same moment. Both
+ * numbers were correct. `agents/turn_attribution.py accumulate_turn_usage`
+ * folds every LLM round of the turn into one running total, and a turn
+ * that ran eight tool rounds re-sends the whole conversation on each one,
+ * so the footer was roughly eight contexts added together while looking
+ * exactly like a measurement of one. The fix is the label, not the
+ * number: the total stays exact, and now says what it is a total OF.
+ */
+describe('TurnMeta says what the number counts', () => {
+  it('names the round count when the brain reports one', () => {
+    render(<TurnMeta model="gpt-5.6-sol" usage={{ ...USAGE, rounds: 8 }} />);
+    expect(screen.getByText(/10,616 tokens across 8 rounds/)).toBeInTheDocument();
+  });
+
+  it('does not say "rounds" for a single round', () => {
+    render(<TurnMeta model="" usage={{ ...USAGE, rounds: 1 }} />);
+    expect(screen.getByText(/10,616 tokens across 1 round$/)).toBeInTheDocument();
+  });
+
+  it('still says the number spans the whole turn when no count is on the wire', () => {
+    // `rounds` is not a field the brain sends today. Silence about the
+    // scope is what made the number look like one context, so the
+    // fallback states the scope without inventing a count.
+    render(<TurnMeta model="gpt-5.6-sol" usage={USAGE} />);
+    expect(screen.getByText(/10,616 tokens \(all rounds\)/)).toBeInTheDocument();
+  });
+
+  it('keeps the exact in/out split in the tooltip', () => {
+    render(<TurnMeta model="gpt-5.6-sol" usage={{ ...USAGE, rounds: 8 }} />);
+    expect(screen.getByTestId('chat-turn-meta')).toHaveAttribute(
+      'title',
+      '10,341 in + 275 out = 10,616 tokens',
+    );
+  });
+
+  it('still renders nothing when the provider reported no usage at all', () => {
+    const { container } = render(<TurnMeta model="" usage={{ rounds: 3 }} />);
+    expect(container).toBeEmptyDOMElement();
+  });
+});
