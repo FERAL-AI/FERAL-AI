@@ -471,6 +471,19 @@ class GeminiRealtimeProxy:
             ctx = await self._memory.build_context_for_llm(session_id, max_tokens_budget=400)
             if ctx:
                 parts.append(f"\n[Memory]\n{ctx}")
+        # ``_get_tools`` withholds the skills whose prerequisite is
+        # absent, so name them and say why. Same reasoning as the OpenAI
+        # proxy: a capability that vanishes from the tool list with no
+        # explanation is one the model will report as missing from the
+        # brain rather than from the setup.
+        try:
+            from skills.availability import availability_note
+
+            note = availability_note()
+            if note:
+                parts.append(f"\n{note}")
+        except Exception:
+            logger.debug("voice availability note unavailable", exc_info=True)
         return "\n".join(parts)
 
     def _get_tools(self) -> list[dict]:
