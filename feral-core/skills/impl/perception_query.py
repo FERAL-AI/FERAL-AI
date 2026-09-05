@@ -208,7 +208,13 @@ class PerceptionQuerySkill(BaseSkill):
         scene_description: Optional[str] = None
         scene_raw: Optional[dict] = None
         scene = getattr(state, "scene", None)
-        if scene is not None and getattr(scene, "available", False) and data_b64:
+        # ``configured``, not ``available``: this is an explicit request
+        # and it forces, so it probes a provider that the periodic loop
+        # has backed off from. See SceneAnalyzer.analyze_frame.
+        scene_ready = getattr(
+            scene, "configured", getattr(scene, "available", False),
+        )
+        if scene is not None and scene_ready and data_b64:
             try:
                 scene_raw = await scene.analyze_frame(
                     data_b64=data_b64,

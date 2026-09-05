@@ -228,6 +228,11 @@ async def system_info():
         "vision": {
             "change_detector": state.change_detector.stats() if state.change_detector else {},
             "scene_available": state.scene.available if state.scene else False,
+            # ``scene_available`` alone read as a flat False whether the
+            # operator had configured no VLM at all or had one configured
+            # and not running. Those need different actions from them, so
+            # report the reachability the SceneAnalyzer already tracks.
+            "scene_provider": state.scene.provider_health if state.scene else {},
         },
         "integrations": {
             "oauth": state.oauth.status() if state.oauth else {},

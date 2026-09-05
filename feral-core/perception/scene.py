@@ -75,6 +75,67 @@ The frames are ordered chronologically. Describe what happened across these fram
 Return ONLY valid JSON."""
 
 
+# How many consecutive connection failures mark the provider unreachable.
+# Three, not one: a VLM that is up can still refuse a single call (a model
+# still loading, a socket lost mid-request), and one unlucky tick must not
+# take vision away from a working install.
+UNREACHABLE_AFTER_FAILURES = 3
+
+# Backoff between probes once the provider IS marked unreachable. Doubles
+# from the first value, capped at the last.
+#
+# The numbers come from one morning on the operator's brain: ScreenLoop
+# ticks every 8s, the scene cooldown is 10s, so a dead Ollama produced a
+# call every ~16s, and ``feral.scene`` logged 78 ERROR plus 78 WARNING
+# lines in a single morning, still climbing after a restart that night.
+# None of them said anything the first one had not. A provider that has
+# refused three connections in a row is not going to answer the fourth
+# eight seconds later; it will answer when the operator starts it, and
+# ten minutes is a fine granularity for noticing that.
+UNREACHABLE_BACKOFF_START_S = 30.0
+UNREACHABLE_BACKOFF_MAX_S = 600.0
+
+# Exception types that mean "nothing is listening", as opposed to "the
+# model rejected the request". Matched by name so this module does not
+# have to import httpx, and widened by the message test below because
+# httpx wraps the whole retry set in ``ConnectError: All connection
+# attempts failed``, which is the exact text in the operator's log.
+_CONNECTION_ERROR_NAMES = (
+    "ConnectError",
+    "ConnectTimeout",
+    "ReadTimeout",
+    "PoolTimeout",
+    "ConnectionError",
+    "ConnectionRefusedError",
+    "TimeoutError",
+    "OSError",
+)
+_CONNECTION_ERROR_PHRASES = (
+    "all connection attempts failed",
+    "connection refused",
+    "connect call failed",
+    "nodename nor servname",
+    "name or service not known",
+    "cannot connect to host",
+    "timed out",
+)
+
+
+def is_connection_error(exc: BaseException) -> bool:
+    """Is this "nothing is listening" rather than "the model said no"?
+
+    A 401 or a 400 from a live provider is a configuration problem the
+    operator must see every time. A refused TCP connection is a fact that
+    stays true until something changes, and repeating it every 16 seconds
+    is noise that buries everything else in the log.
+    """
+    name = type(exc).__name__
+    if name in _CONNECTION_ERROR_NAMES:
+        return True
+    text = str(exc).lower()
+    return any(phrase in text for phrase in _CONNECTION_ERROR_PHRASES)
+
+
 class SceneAnalyzer:
     """
     Analyzes vision frames through a VLM with support for multiple
@@ -100,6 +161,13 @@ class SceneAnalyzer:
         # reply, so the "this VLM ignores the JSON contract" warning is
         # logged loudly once instead of every ``_cooldown`` seconds.
         self._prose_fallback_warned: set[str] = set()
+
+        # Reachability state. See UNREACHABLE_AFTER_FAILURES.
+        self._connect_failures = 0
+        self._unreachable_since = 0.0
+        self._unreachable_detail = ""
+        self._next_probe_at = 0.0
+        self._backoff_s = UNREACHABLE_BACKOFF_START_S
 
     def _init_vlm_client(self):
         """Initialize a dedicated VLM client if a separate provider is configured."""
@@ -135,10 +203,100 @@ class SceneAnalyzer:
             logger.info(f"VLM: Ollama ({self._vlm_client['model']})")
 
     @property
-    def available(self) -> bool:
+    def configured(self) -> bool:
+        """Is a VLM wired at all? True whenever a client object exists."""
         if self._vlm_client:
             return True
         return self._llm is not None and self._llm.available
+
+    @property
+    def unreachable(self) -> bool:
+        """Has the provider refused enough connections to be written off,
+        and is it still inside its backoff window?"""
+        if not self._unreachable_since:
+            return False
+        return time.time() < self._next_probe_at
+
+    @property
+    def available(self) -> bool:
+        """Can a call plausibly succeed right now?
+
+        This used to be ``configured`` alone: true whenever a client
+        object existed, which is true of a client pointed at an Ollama
+        that is not running. ScreenLoop reads this before every tick, so
+        "a client exists" meant "keep calling forever". A provider inside
+        its backoff window now answers False, which is what stops the
+        loop rather than merely slowing it down.
+        """
+        return self.configured and not self.unreachable
+
+    @property
+    def provider_health(self) -> dict:
+        """Reachability, for anywhere provider health is reported."""
+        health = {
+            "provider": self._describe_vlm(),
+            "configured": self.configured,
+            "available": self.available,
+            "unreachable": self.unreachable,
+            "consecutive_connection_failures": self._connect_failures,
+        }
+        if self._unreachable_since:
+            health["unreachable_since"] = self._unreachable_since
+            health["detail"] = self._unreachable_detail
+            health["next_probe_in_s"] = max(
+                0.0, round(self._next_probe_at - time.time(), 1),
+            )
+        return health
+
+    def _note_vlm_reachable(self) -> None:
+        """A call got through. Clear the backoff."""
+        if self._unreachable_since:
+            logger.info(
+                "Vision provider %s is reachable again after %.0fs",
+                self._describe_vlm(), time.time() - self._unreachable_since,
+            )
+        self._connect_failures = 0
+        self._unreachable_since = 0.0
+        self._unreachable_detail = ""
+        self._next_probe_at = 0.0
+        self._backoff_s = UNREACHABLE_BACKOFF_START_S
+
+    def _note_vlm_connection_failure(self, exc: BaseException) -> None:
+        """A call could not reach the provider.
+
+        Under the threshold this stays at debug; the caller has already
+        logged the individual failure. At and over it, the provider is
+        marked unreachable and the next probe is pushed out by an
+        exponential backoff capped at :data:`UNREACHABLE_BACKOFF_MAX_S`,
+        with ONE warning per transition instead of an ERROR per tick.
+        """
+        self._connect_failures += 1
+        self._unreachable_detail = str(exc)[:200]
+        if self._connect_failures < UNREACHABLE_AFTER_FAILURES:
+            logger.debug(
+                "Vision provider %s connection failure %d/%d: %s",
+                self._describe_vlm(), self._connect_failures,
+                UNREACHABLE_AFTER_FAILURES, self._unreachable_detail,
+            )
+            return
+
+        first_time = not self._unreachable_since
+        now = time.time()
+        if first_time:
+            self._unreachable_since = now
+            self._backoff_s = UNREACHABLE_BACKOFF_START_S
+        else:
+            self._backoff_s = min(
+                self._backoff_s * 2.0, UNREACHABLE_BACKOFF_MAX_S,
+            )
+        self._next_probe_at = now + self._backoff_s
+        logger.warning(
+            "Vision provider %s is unreachable (%d consecutive connection "
+            "failures: %s). Scene analysis is paused; the next probe is in "
+            "%.0fs. This is logged once per backoff step, not once per tick.",
+            self._describe_vlm(), self._connect_failures,
+            self._unreachable_detail, self._backoff_s,
+        )
 
     async def analyze_frame(
         self,
@@ -157,8 +315,17 @@ class SceneAnalyzer:
           tracking — what changed since last frame
           ocr      — extract all text
           query    — answer a specific question about the frame
+
+        ``force`` bypasses the unreachable backoff as well as the
+        cooldown, and deliberately so: ``force=True`` is only ever set by
+        an explicit request (``screen_capture``, ``perception_query``,
+        a test), and an explicit request is exactly the probe the backoff
+        is waiting for. The periodic ScreenLoop tick does not force, so it
+        keeps backing off.
         """
-        if not self.available:
+        if not self.configured:
+            return None
+        if self.unreachable and not force:
             return None
 
         now = time.time()
@@ -174,6 +341,14 @@ class SceneAnalyzer:
         try:
             result_text = await self._call_vlm(messages)
             if not result_text:
+                if self._connect_failures:
+                    # The call never reached the provider, so "returned an
+                    # empty reply" is the wrong thing to say about it, and
+                    # saying it every tick is the other half of the 78
+                    # WARNING lines that came with the 78 ERRORs.
+                    # _note_vlm_connection_failure has already reported
+                    # this at the right volume.
+                    return None
                 # Was a bare ``return None``. An empty reply is how a
                 # dead/misconfigured VLM presents (the shared LLM's
                 # failover chain exhausting on 401s returns "" rather
@@ -216,7 +391,7 @@ class SceneAnalyzer:
         Multi-frame reasoning — analyze a sequence of frames together.
         Each frame dict should have 'data_b64' and optionally 'encoding'.
         """
-        if not self.available or not frames:
+        if not self.configured or self.unreachable or not frames:
             return None
 
         content_parts = [
@@ -275,10 +450,26 @@ class SceneAnalyzer:
         }]
 
     async def _call_vlm(self, messages: list[dict]) -> Optional[str]:
-        """Route the VLM call to the appropriate provider."""
-        if self._vlm_client:
-            return await self._call_dedicated_vlm(messages)
-        return await self._call_default_llm(messages)
+        """Route the VLM call to the appropriate provider.
+
+        Also the single place reachability is decided, so every provider
+        adapter shares one definition of "nothing is listening" and the
+        backoff cannot be bypassed by adding a third one.
+        """
+        try:
+            if self._vlm_client:
+                text = await self._call_dedicated_vlm(messages)
+            else:
+                text = await self._call_default_llm(messages)
+        except Exception as exc:
+            if is_connection_error(exc):
+                self._note_vlm_connection_failure(exc)
+                return None
+            raise
+        # The call reached the provider. Whatever it answered, the socket
+        # worked, so any backoff in progress is over.
+        self._note_vlm_reachable()
+        return text
 
     async def _call_default_llm(self, messages: list[dict]) -> Optional[str]:
         """Use the shared LLMProvider (OpenAI-compatible) for vision."""
@@ -344,6 +535,8 @@ class SceneAnalyzer:
             if candidates:
                 return candidates[0].get("content", {}).get("parts", [{}])[0].get("text", "")
         except Exception as e:
+            if is_connection_error(e):
+                raise  # ``_call_vlm`` owns the backoff; see _call_ollama_vlm.
             logger.error(f"Gemini VLM call failed: {e}")
         return None
 
@@ -367,6 +560,12 @@ class SceneAnalyzer:
             data = resp.json()
             return data.get("choices", [{}])[0].get("message", {}).get("content", "")
         except Exception as e:
+            if is_connection_error(e):
+                # Re-raised so ``_call_vlm`` owns the backoff. Logging it
+                # here is what produced 78 ERROR lines in one morning,
+                # each one saying "All connection attempts failed" about
+                # the same Ollama that was not running.
+                raise
             logger.error(f"Ollama VLM call failed: {e}")
         return None
 
