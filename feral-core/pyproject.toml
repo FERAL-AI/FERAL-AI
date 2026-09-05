@@ -539,12 +539,26 @@ include = [
     # (skipping)" and the 10 curated packs were silently absent from
     # `/api/workflow-packs`.
     "workflows*",
+    # 2026-09-04: four more top-level packages were being imported at
+    # runtime and were absent from the published wheel. The installed
+    # 2026.9.2 logged "migration pass failed; continuing boot" with
+    # ModuleNotFoundError: No module named 'migrations' on every boot, so
+    # ~/.feral shape migrations never ran on a pip install; `system` is
+    # imported by cli/main.py and coding_tools, `process` by the memory
+    # store, `bridges` by the external-agent skill. Each was added to the
+    # tree after this list was written, and nothing checked. The guard is
+    # tests/test_wheel_includes_every_package.py: every top-level package
+    # in feral-core must match an include glob here or be excluded on
+    # purpose below, so the next new package cannot ship missing.
+    "bridges*", "migrations*", "process*", "system*",
 ]
 # `tests*` was previously included here, which shipped the entire
 # pytest suite inside the wheel. That bloated the install and risked
 # top-level name collisions on `tests` (a common module name). Drop
 # them from the published artifact in 2026.5.13.
-exclude = ["tests*"]
+# `scripts_audit` is audit tooling driven from the test suite, not runtime
+# code; it stays out of the wheel on purpose and the guard test knows so.
+exclude = ["tests*", "scripts_audit*"]
 
 [tool.setuptools.package-data]
 "skills.manifests" = ["*.json"]
