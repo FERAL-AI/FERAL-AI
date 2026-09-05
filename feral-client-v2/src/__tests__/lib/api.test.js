@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ApiError, apiFetch, apiJson } from '../../lib/api';
+import { ApiError, apiFetch, apiJson, _resetToastDedupeForTesting } from '../../lib/api';
 import { _resetGlobalErrorsForTesting, pushGlobalError } from '../../hooks/useGlobalErrors';
 
 describe('ApiError', () => {
@@ -26,6 +26,7 @@ describe('ApiError', () => {
 describe('apiFetch', () => {
   beforeEach(() => {
     _resetGlobalErrorsForTesting();
+    _resetToastDedupeForTesting();
     vi.stubGlobal('localStorage', {
       getItem: () => null,
       setItem: () => {},
@@ -35,6 +36,7 @@ describe('apiFetch', () => {
 
   afterEach(() => {
     vi.unstubAllGlobals();
+    _resetToastDedupeForTesting();
   });
 
   it('throws ApiError on non-2xx and pushes to global store', async () => {
@@ -128,5 +130,103 @@ describe('apiJson', () => {
     await expect(apiJson('/api/automations')).rejects.toMatchObject({
       detail: 'text is required',
     });
+  });
+});
+
+/**
+ * Toast dedupe.
+ *
+ * Observed after `feral stop` / `feral start`: three toasts stacked on
+ * Home, "Failed to fetch /api/conversations/save", "Failed to fetch
+ * /api/conversations/new" and "Request failed (503)
+ * /api/conversations/active/thread", for a boot that then worked. Those
+ * are three renderings of one fact. While the brain is not answering,
+ * every poller on every mounted surface fails on the same tick, so the
+ * count is bounded only by how many endpoints the page reads.
+ *
+ * Status 0 (the fetch never completed) and 503 (up, not ready) share one
+ * key because to a reader they are the same event. Everything else keeps
+ * its own key, so two genuinely different failures both still surface.
+ */
+describe('global toast dedupe', () => {
+  beforeEach(() => {
+    _resetGlobalErrorsForTesting();
+    _resetToastDedupeForTesting();
+    vi.stubGlobal('localStorage', { getItem: () => null });
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    _resetToastDedupeForTesting();
+  });
+
+  async function errorsAfter(run) {
+    const { renderHook } = await import('@testing-library/react');
+    const { useGlobalErrors } = await import('../../hooks/useGlobalErrors');
+    const { result } = renderHook(() => useGlobalErrors());
+    await run();
+    return result.current.errors;
+  }
+
+  it('shows one toast for a burst of unreachable-brain failures', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new TypeError('Failed to fetch')));
+    const errors = await errorsAfter(async () => {
+      await apiFetch('/api/conversations/save', { method: 'POST' }).catch(() => {});
+      await apiFetch('/api/conversations/new', { method: 'POST' }).catch(() => {});
+      await apiFetch('/api/jobs').catch(() => {});
+    });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('collapses a 503 into the same unreachable-brain toast', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls += 1;
+      if (calls === 1) throw new TypeError('Failed to fetch');
+      return {
+        ok: false,
+        status: 503,
+        statusText: 'Service Unavailable',
+        text: async () => '',
+      };
+    }));
+    const errors = await errorsAfter(async () => {
+      await apiFetch('/api/conversations/new', { method: 'POST' }).catch(() => {});
+      await apiFetch('/api/conversations/active/thread').catch(() => {});
+    });
+    expect(errors).toHaveLength(1);
+  });
+
+  it('keeps two different real failures apart', async () => {
+    let calls = 0;
+    vi.stubGlobal('fetch', vi.fn(async () => {
+      calls += 1;
+      return {
+        ok: false,
+        status: 400,
+        statusText: 'Bad Request',
+        text: async () => JSON.stringify({ error: calls === 1 ? 'first' : 'second' }),
+      };
+    }));
+    const errors = await errorsAfter(async () => {
+      await apiFetch('/api/a').catch(() => {});
+      await apiFetch('/api/b').catch(() => {});
+    });
+    expect(errors).toHaveLength(2);
+  });
+
+  it('suppresses only the repeat, not the first report', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      statusText: 'Error',
+      text: async () => JSON.stringify({ error: 'boom' }),
+    }));
+    const errors = await errorsAfter(async () => {
+      await apiFetch('/api/x').catch(() => {});
+      await apiFetch('/api/x').catch(() => {});
+    });
+    expect(errors).toHaveLength(1);
+    expect(errors[0].message).toContain('boom');
   });
 });

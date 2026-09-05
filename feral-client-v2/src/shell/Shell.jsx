@@ -298,8 +298,16 @@ function ShellFrame() {
     const fallbackId = `thread-${Date.now().toString(36)}`;
     let nextId = fallbackId;
     try {
+      // `silent: true` because the catch below already handles this:
+      // the local fallback id is a complete answer, so a failure here
+      // costs the user nothing and does not deserve a toast. Observed
+      // after `feral stop` / `feral start`: this call toasted "Failed to
+      // fetch /api/conversations/new" on a boot that then worked fine,
+      // because surfaceError pushes the toast before it throws and a
+      // caller cannot opt out of it by catching.
       const response = await apiFetch('/api/conversations/new', {
         method: 'POST',
+        silent: true,
         body: JSON.stringify({ id: fallbackId, title: 'New conversation' }),
       });
       const body = await response.json().catch(() => ({}));
@@ -339,7 +347,12 @@ function ShellFrame() {
       let hydratedFromConversations = false;
       try {
         const query = stored ? `?conversation_id=${encodeURIComponent(stored)}` : '';
-        const active = await apiJson(`/api/conversations/active/thread${query}`);
+        // Silent for the same reason as the two calls around it: the
+        // catch falls through to an explicit create, so the user is not
+        // blocked. On a brain that is still booting this returned 503
+        // and put "Request failed (503)" on screen next to a chat that
+        // then worked.
+        const active = await apiJson(`/api/conversations/active/thread${query}`, { silent: true });
         if (!active?.error && active?.id) {
           setConversation(active.id, active.messages || []);
           // The conversation resolved by the boot hydration is the
@@ -360,7 +373,10 @@ function ShellFrame() {
       // separate store. If anything goes wrong we just keep the
       // conversation-store thread we already loaded.
       try {
-        const transcript = await apiJson('/api/sessions/primary/transcript');
+        // Silent for the same reason as the rest of the boot chain: the
+        // catch below states outright that this endpoint is optional and
+        // must never block hydration, so its failure is not news.
+        const transcript = await apiJson('/api/sessions/primary/transcript', { silent: true });
         const wsMessages = Array.isArray(transcript?.messages) ? transcript.messages : [];
         if (wsMessages.length) {
           // Use the functional updater so we see the current messages
@@ -412,6 +428,11 @@ function ShellFrame() {
       };
       apiFetch('/api/conversations/save', {
         method: 'POST',
+        // The autosave is best-effort by design and fires every 450 ms
+        // of typing, so a brain that is down turned it into a toast
+        // machine. `.catch(() => {})` did not stop that: the toast is
+        // pushed before the throw. It retries on the next keystroke.
+        silent: true,
         body: JSON.stringify(payload),
       }).catch(() => {
         // best-effort autosave

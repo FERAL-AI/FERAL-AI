@@ -44,10 +44,19 @@ const listeners = new Set();
 let timer = null;
 
 async function poll() {
+  // `silent: true` on all three: this poller already handles failure as
+  // a first-class outcome (allSettled, per-source fulfilled checks, and
+  // `reachable: false` once every source has failed), and the dock says
+  // so on screen. Without the flag a brain that is down turned a
+  // background poll on a 4 s timer into a toast every tick, because
+  // lib/api.js pushes the toast before it throws and allSettled cannot
+  // opt out of that by absorbing the rejection. Observed after
+  // `feral stop` / `feral start`: "Failed to fetch" stacked on Home for
+  // a brain that was simply still starting.
   const [j, a, d] = await Promise.allSettled([
-    apiJson('/api/jobs?limit=60'),
-    apiJson('/api/approvals'),
-    apiJson('/api/dashboard'),
+    apiJson('/api/jobs?limit=60', { silent: true }),
+    apiJson('/api/approvals', { silent: true }),
+    apiJson('/api/dashboard', { silent: true }),
   ]);
   const next = { ...snapshot };
 

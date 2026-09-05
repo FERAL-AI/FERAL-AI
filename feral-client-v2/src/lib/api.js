@@ -102,8 +102,58 @@ async function readJsonBody(response) {
   }
 }
 
+/**
+ * Toast dedupe window.
+ *
+ * Observed after `feral stop` / `feral start`: the Home page stacked
+ * "Failed to fetch /api/conversations/save", "Failed to fetch
+ * /api/conversations/new" and "Request failed (503)
+ * /api/conversations/active/thread" while the brain was still coming up.
+ * Those are three renderings of one fact, and callers that already
+ * `.catch(() => {})` still produced them because `surfaceError` pushes
+ * the toast BEFORE it throws, so swallowing the rejection swallows
+ * nothing that the user sees.
+ *
+ * The individual boot calls now pass `{ silent: true }` (they all have
+ * local fallbacks), and this window covers the rest: while the brain is
+ * unreachable every page's poller fails at once, so a burst says the
+ * same thing many times over. Status 0 (fetch never completed) and 503
+ * (the server is up but not ready) are collapsed onto ONE key, because
+ * to a reader they are the same event: the brain is not answering. Every
+ * other status keeps its own key, so two genuinely different failures
+ * still both surface.
+ */
+const TOAST_DEDUPE_MS = 5000;
+const lastToastAt = new Map();
+
+function dedupeKey(err) {
+  const status = Number(err?.status || 0);
+  if (status === 0 || status === 503) return 'brain-unreachable';
+  return `${status}|${err?.detail || err?.message || ''}`;
+}
+
+function shouldSuppressToast(err, now) {
+  const key = dedupeKey(err);
+  const previous = lastToastAt.get(key);
+  if (previous !== undefined && now - previous < TOAST_DEDUPE_MS) return true;
+  lastToastAt.set(key, now);
+  // Bounded: a long session must not accrete one entry per distinct
+  // error message forever.
+  if (lastToastAt.size > 64) {
+    for (const [k, at] of lastToastAt) {
+      if (now - at >= TOAST_DEDUPE_MS) lastToastAt.delete(k);
+    }
+  }
+  return false;
+}
+
+/** Test seam — clears the dedupe window between vitest cases. */
+export function _resetToastDedupeForTesting() {
+  lastToastAt.clear();
+}
+
 function surfaceError(err, silent) {
-  if (!silent) pushGlobalError(err);
+  if (!silent && !shouldSuppressToast(err, Date.now())) pushGlobalError(err);
   throw err;
 }
 
