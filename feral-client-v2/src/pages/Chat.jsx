@@ -1,4 +1,4 @@
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import {
   History, Save, GitBranch, Plus, Trash2, X, Mic, MicOff, Paperclip, FileText,
   Search, Pin, PinOff, Pencil, ChevronDown,
@@ -202,6 +202,9 @@ export default function Chat() {
   const bottomRef = useRef(null);
   const logRef = useRef(null);
   const stickToBottomRef = useRef(true);
+  // Which conversation the log has already been jumped to the end of.
+  // Null until the first jump, so opening the page counts as a switch.
+  const settledConversationRef = useRef(null);
   const streamBufferRef = useRef('');
   const streamReasoningRef = useRef('');
   const pendingTraceRef = useRef([]);
@@ -818,6 +821,38 @@ export default function Chat() {
     const distance = el.scrollHeight - el.scrollTop - el.clientHeight;
     stickToBottomRef.current = distance < 80;
   }, []);
+
+  // Opening a thread must land on the newest message, not the oldest.
+  //
+  // The follow-the-tail effect below is the wrong tool for that. It runs
+  // after paint and asks for a SMOOTH scroll, and on a thread of any
+  // length the two lose a race: the effect fires when hydration first
+  // sets `messages`, the animation starts from the top, and then the
+  // markdown, tool cards and code blocks below finish laying out and
+  // grow scrollHeight underneath it. Measured on the operator's own
+  // 49-message thread on 2026-09-05, a fresh load left the log at
+  // scrollTop 0 of scrollHeight 6480, so the page opened on a
+  // conversation from days earlier and the reply the user had just sent
+  // was six screens down. It reads as "my message did not send".
+  //
+  // Setting scrollTop directly is deliberate: it cannot be interrupted
+  // the way an animation can, and it does not care whether the rows
+  // below have measured yet, because it is re-applied while the height
+  // keeps changing. `useLayoutEffect` puts it before paint so the first
+  // frame the user sees is already at the bottom rather than a visible
+  // jump. It runs once per conversation; after that the follow-the-tail
+  // effect owns scrolling, including the user's own right to scroll up.
+  useLayoutEffect(() => {
+    const conversationId = thread?.conversationId || '';
+    if (!conversationId || settledConversationRef.current === conversationId) return;
+    const el = logRef.current;
+    if (!el) return;
+    // Nothing rendered yet: wait for the hydration pass that fills it.
+    if (el.scrollHeight <= el.clientHeight) return;
+    el.scrollTop = el.scrollHeight;
+    stickToBottomRef.current = true;
+    settledConversationRef.current = conversationId;
+  }, [thread?.conversationId, messages]);
 
   useEffect(() => {
     if (!stickToBottomRef.current) return;
