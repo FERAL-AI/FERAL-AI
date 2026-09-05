@@ -1,4 +1,4 @@
-"""Tests for Hardware Use Protocol (HUP)."""
+"""Tests for Hardware Unification Protocol (HUP)."""
 import pytest
 from hardware.protocol import (
     DeviceCapability,

@@ -1,5 +1,5 @@
 """
-FERAL Hardware Use Protocol (HUP)
+FERAL Hardware Unification Protocol (HUP)
 ====================================
 Like "computer use" made screens controllable by AI agents,
 HUP makes ANY hardware controllable through a universal abstraction.

@@ -9,7 +9,7 @@ slug: /guides/devices
 
 > Looking to pair a phone from the dashboard? Use the Pairing & Access guide in the Mintlify docs. This page is for building custom HUP adapters.
 
-The **Hardware Use Protocol (HUP)** is how physical devices — wristbands, smart glasses, robots, sensors — join the FERAL mesh. Each device runs a small adapter that connects to the Brain over WebSocket, registers its capabilities, streams telemetry, and responds to commands.
+The **Hardware Unification Protocol (HUP)** is how physical devices — wristbands, smart glasses, robots, sensors — join the FERAL mesh. Each device runs a small adapter that connects to the Brain over WebSocket, registers its capabilities, streams telemetry, and responds to commands.
 
 ## Concepts
 

@@ -89,7 +89,7 @@ async def get_audit_log():
 
 
 # ─────────────────────────────────────────────
-# Hardware Use Protocol (HUP) API
+# Hardware Unification Protocol (HUP) API
 # ─────────────────────────────────────────────
 
 
