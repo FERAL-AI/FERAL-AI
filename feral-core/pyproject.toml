@@ -526,10 +526,10 @@ py-modules = ["version"]
 [tool.setuptools.packages.find]
 where = ["."]
 include = [
-    "agents*", "api*", "channels*", "cli*", "config*", "cost*", "gateway*",
+    "agents*", "api*", "bridges*", "channels*", "cli*", "config*", "cost*", "gateway*",
     "genui*", "hardware*", "identity*", "infra*", "integrations*",
-    "mcp*", "memory*", "models*", "observability*", "perception*",
-    "providers*", "security*", "services*", "skills*", "voice*",
+    "mcp*", "memory*", "migrations*", "models*", "observability*", "perception*",
+    "process*", "providers*", "scripts_audit*", "security*", "services*", "skills*", "system*", "voice*",
     "webui*", "webui_v2*",
     # audit-r9 brief #08: `workflows` is a sibling top-level package
     # (data-only, holds first-party workflow-pack JSONs). Was omitted

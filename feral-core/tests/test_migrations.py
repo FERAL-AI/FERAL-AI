@@ -339,3 +339,27 @@ class TestARecurringSweepIsNeverMarkedApplied:
                 assert getattr(_load(name, path), "RECURRING", False) is True
                 return
         raise AssertionError("the credential sweep is no longer in migrations/")
+
+
+def test_all_top_level_packages_are_included_in_distributions():
+    """Installed CLIs and runtimes must see every first-party package."""
+    from fnmatch import fnmatchcase
+    import tomllib
+    from pathlib import Path
+
+    pyproject = Path(__file__).parents[1] / "pyproject.toml"
+    config = tomllib.loads(pyproject.read_text(encoding="utf-8"))
+    includes = config["tool"]["setuptools"]["packages"]["find"]["include"]
+    package_roots = {
+        path.name
+        for path in pyproject.parent.iterdir()
+        if path.is_dir()
+        and path.name != "tests"
+        and (path / "__init__.py").is_file()
+    }
+    omitted = sorted(
+        name
+        for name in package_roots
+        if not any(fnmatchcase(name, pattern) for pattern in includes)
+    )
+    assert omitted == []
