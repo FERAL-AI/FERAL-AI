@@ -38,8 +38,28 @@ def registry():
     return reg
 
 
+@pytest.fixture(autouse=True)
+def isolated_feral_home(tmp_path, monkeypatch):
+    """This module opts out of the suite-wide FERAL_HOME isolation with
+    ``no_auto_feral_home``, so it has to do that job itself.
+
+    ``granted_cwd`` calls ``SandboxPolicy.grant_folder``, which appends a
+    row to ``$FERAL_HOME/workspace_grants.json``. With the autouse
+    isolation opted out, ``$FERAL_HOME`` was the operator's real
+    ``~/.feral``, so every run of this file added six permanent grants
+    for ``tmp_path`` directories pytest deletes minutes later. That is
+    the entire source of the 870 dead pytest grants found in a live
+    ``workspace_grants.json`` (876 rows, 174 KB, 2 of them real): the six
+    test names in the file account for all 870.
+    """
+    home = tmp_path / ".feral-jobs-home"
+    home.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setenv("FERAL_HOME", str(home))
+    return home
+
+
 @pytest.fixture
-def granted_cwd(tmp_path):
+def granted_cwd(tmp_path, isolated_feral_home):
     d = tmp_path / "work"
     d.mkdir()
     SandboxPolicy.load_default().grant_folder(str(d), mode="readwrite")

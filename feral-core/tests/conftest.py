@@ -2,6 +2,7 @@ import pytest
 import os
 import types
 import warnings
+from pathlib import Path
 
 
 # Raise the rate-limit ceiling well before the server module imports so
@@ -109,6 +110,61 @@ def mock_vault():
         def inject_headers(self, skill_id, headers):
             return headers
     return MockVault()
+
+
+def real_workspace_grants_path() -> Path:
+    """The operator's own ``~/.feral/workspace_grants.json``.
+
+    Resolved from ``Path.home()`` and not through ``config.loader``,
+    because the whole point is to name the file no test may touch even
+    when a test has repointed ``FERAL_HOME`` at itself.
+    """
+    return Path.home() / ".feral" / "workspace_grants.json"
+
+
+def grants_fingerprint(path: Path) -> tuple:
+    """Enough of a file to notice a write. Absence is a value too."""
+    try:
+        st = path.stat()
+    except OSError:
+        return ("absent", 0, 0)
+    return ("present", st.st_size, st.st_mtime_ns)
+
+
+@pytest.fixture(scope="session", autouse=True)
+def real_workspace_grants_untouched():
+    """Fail the run if the suite wrote to the real grants file.
+
+    ``workspace_grants.json`` is the list of every folder the brain may
+    read and write, and the autouse ``isolate_feral_home`` fixture below
+    can be opted out of with ``no_auto_feral_home``. One module that did
+    so (``test_api_jobs_background_bash.py``) also called
+    ``SandboxPolicy.grant_folder`` on a ``tmp_path`` directory, so every
+    run appended six permanent grants to the operator's real file for
+    directories pytest deleted minutes later. It reached 876 grants and
+    174 KB, 870 of them dead pytest sandboxes, before anyone noticed,
+    and the page that lists them rendered 2,665 lines.
+
+    Nothing in this fixture prevents that write. It makes it loud: the
+    file is fingerprinted once at session start and once at the end, and
+    a difference ends the run in an error naming the file. A test that
+    genuinely needs to exercise the real home is welcome to exist, but
+    it has to say so by changing this fixture, in a diff a reviewer sees.
+    """
+    path = real_workspace_grants_path()
+    before = grants_fingerprint(path)
+    yield
+    after = grants_fingerprint(path)
+    if after != before:
+        pytest.fail(
+            f"the test suite modified {path}, the operator's real list of "
+            f"folders FERAL may read and write "
+            f"(before={before}, after={after}). Some test is running "
+            f"against the real ~/.feral instead of an isolated FERAL_HOME; "
+            f"look for `no_auto_feral_home` on a module that grants "
+            f"workspace access.",
+            pytrace=False,
+        )
 
 
 @pytest.fixture(autouse=True)

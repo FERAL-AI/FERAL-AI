@@ -8,6 +8,25 @@ All notable changes to FERAL are documented here.
 
 ### Fixed
 
+- **The list of folders FERAL may touch is reviewable again.**
+  `~/.feral/workspace_grants.json` never lost a row. On a live install it
+  held 876 grants in 174,897 bytes: 870 were pytest sandboxes under
+  `/private/var/.../T/pytest-of-<user>/`, 4 were other temp directories,
+  and exactly 2 were folders the operator had granted. The "Folders FERAL
+  can use" page rendered 2,665 lines, so the one surface that says where
+  the brain may read and write could not be read. The leak was
+  `tests/test_api_jobs_background_bash.py`, which opts out of the autouse
+  `FERAL_HOME` isolation with `no_auto_feral_home` and then granted a
+  `tmp_path` directory, writing six permanent rows into the real home on
+  every run. That module now isolates `FERAL_HOME` itself, a session-wide
+  guard fails any run that modifies the real grants file,
+  `SandboxPolicy._save_grants` prunes on every grant and revoke, and a
+  migration cleans an existing file at boot. The pruning rule is narrow
+  by design: a grant is removed only when it is both missing from disk
+  and under a directory the OS reclaims, so an unplugged drive or an
+  unmounted share keeps its grant. Past 25 rows the page now offers a
+  filter box and a count, with the folders a person chose listed above
+  scratch directories.
 - **Voice replies no longer fragment into several assistant rows.** When
   the assistant's own audio tripped OpenAI's server VAD on the phone
   mic, OpenAI cancelled the response (`response.done status=cancelled

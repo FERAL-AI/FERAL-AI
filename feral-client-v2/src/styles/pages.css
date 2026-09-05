@@ -3149,6 +3149,17 @@ button.v2-chip[aria-pressed="false"] { text-decoration: line-through; }
 .v2-grants-add .v2-input { flex: 1; min-width: 180px; }
 .v2-grants-mode { flex: none; width: auto; }
 
+/* Only rendered past FILTER_THRESHOLD grants: a folder list only grows,
+   and a live install reached 876 rows. */
+.v2-grants-find { display: flex; align-items: center; gap: 8px; margin: 10px 0 0; }
+.v2-grants-find .v2-input { flex: 1; min-width: 160px; }
+.v2-grants-count {
+  flex: none;
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-secondary);
+  white-space: nowrap;
+}
+
 .v2-grants-list { list-style: none; padding: 0; margin: 12px 0 0; display: flex; flex-direction: column; gap: 4px; }
 .v2-grant {
   display: flex;
