@@ -63,6 +63,16 @@ from security.session_auth import (
     warn_if_unsafe_bypass,
 )
 from security.device_pairing import DevicePairingStore  # used in type hint
+from security.proxy_auth import (
+    ProxyAuthConfig,
+    ProxyAuthError,
+    ProxyIdentity,
+    authenticate_proxy,
+    authorize_browser_origin,
+    config_from_env,
+    raw_socket_peer_ip,
+    uvicorn_proxy_headers_app,
+)
 
 from api.routes.dashboard import health as _dashboard_health_json
 from api.routes.dashboard import router as dashboard_router
@@ -583,6 +593,58 @@ def _is_webhook_receive(path: str) -> bool:
     return bool(tail) and "/" not in tail
 
 
+def _proxy_identity(
+    config: ProxyAuthConfig,
+    *,
+    peer: str | None,
+    headers,
+    method: str,
+    transport_trusted: bool = True,
+    websocket: bool = False,
+) -> tuple[ProxyIdentity | None, bool, bool]:
+    """Return proxy identity, whether proxy headers were attempted, and config error.
+
+    The proxy path is deliberately additive.  With the feature disabled, this
+    is a no-op; with it enabled, a malformed configuration is fail-closed and
+    any supplied proxy envelope must authenticate.  ``peer`` is always the
+    preserved ASGI socket peer, never a forwarded header.  A listener marked
+    as untrusted may still accept explicit FERAL tokens, but never a proxy
+    assertion.
+    """
+    if not config.enabled:
+        return None, False, False
+
+    names = (config.secret_header, config.identity_header, config.groups_header)
+    attempted = any(
+        any(str(key).lower() == name.lower() for key in headers.keys())
+        for name in names
+    )
+    if attempted and not transport_trusted:
+        return None, True, True
+    try:
+        config.validated()
+    except ProxyAuthError:
+        return None, attempted, True
+
+    if not attempted:
+        return None, False, False
+    try:
+        identity = authenticate_proxy(
+            config,
+            socket_client_ip=peer or "",
+            headers=headers,
+        )
+        authorize_browser_origin(
+            config,
+            headers=headers,
+            method=method,
+            websocket=websocket,
+        )
+    except ProxyAuthError:
+        return None, attempted, True
+    return identity, True, False
+
+
 class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path
@@ -604,11 +666,11 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
             return await call_next(request)
 
         # audit-r12 A1 (v2026.5.38) — secure-by-default.
-        # Loopback (127.0.0.1 / ::1 / localhost) ALWAYS bypasses HTTP auth so
-        # the local dashboard works out of the box. Off-loopback (LAN /
-        # Tailscale / 0.0.0.0) requires the API key or phone bearer; the
-        # dev escape hatch is ``FERAL_LOCAL_BYPASS=1``, which emits a loud
-        # boot warning via ``warn_if_unsafe_bypass``.
+        # With proxy auth disabled, loopback (127.0.0.1 / ::1 / localhost)
+        # bypasses HTTP auth so the local dashboard works out of the box.
+        # Off-loopback (LAN / Tailscale / 0.0.0.0) requires the API key or
+        # phone bearer; the dev escape hatch is ``FERAL_LOCAL_BYPASS=1``,
+        # which emits a loud boot warning via ``warn_if_unsafe_bypass``.
         #
         # Both bypasses are conditioned on the transport being trusted.
         # A remote tunnel terminates on this machine, so its requests
@@ -616,13 +678,45 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
         # dashboard's complete exemption from auth.
         client_host = request.client.host if request.client else None
         trusted = _session_auth_module.transport_is_trusted(request.scope)
-        if trusted and _session_auth_module.is_localhost(client_host):
+
+        proxy_config = config_from_env()
+        proxy_identity, proxy_attempted, proxy_error = _proxy_identity(
+            proxy_config,
+            peer=raw_socket_peer_ip(request.scope),
+            headers=request.headers,
+            method=request.method,
+            transport_trusted=trusted,
+        )
+        if proxy_identity is not None:
+            try:
+                request.state.proxy_identity = proxy_identity
+            except Exception:
+                pass
             return await call_next(request)
-        if trusted and _session_auth_module.local_bypass_enabled():
-            return await call_next(request)
+        if proxy_attempted and proxy_error:
+            return JSONResponse(
+                {"error": "Unauthorized — invalid trusted proxy authentication"},
+                status_code=401,
+            )
 
         auth = request.headers.get("authorization", "")
         if auth == f"Bearer {FERAL_API_KEY}":
+            return await call_next(request)
+
+        # Enabling proxy auth makes the assertion mandatory for implicit
+        # local access.  Explicit API-key and phone-bearer credentials remain
+        # independent paths below, including when proxy config is malformed.
+        if (
+            not proxy_config.enabled
+            and trusted
+            and _session_auth_module.is_localhost(client_host)
+        ):
+            return await call_next(request)
+        if (
+            not proxy_config.enabled
+            and trusted
+            and _session_auth_module.local_bypass_enabled()
+        ):
             return await call_next(request)
 
         # v2026.5.26 — phone-bearer HTTP auth. Pre-fix the middleware
@@ -1520,6 +1614,34 @@ def check_local_bypass_safety() -> None:
     warn_if_unsafe_bypass(bind)
 
 
+def check_proxy_auth_safety() -> None:
+    """Validate optional trusted-proxy auth without logging credentials.
+
+    A broken proxy-auth configuration never becomes an authentication bypass:
+    proxy assertions fail closed while the existing API-key, session-token,
+    and phone-bearer paths remain independently available.
+    """
+    config = config_from_env()
+    if not config.enabled:
+        return
+    try:
+        config.validated()
+    except ProxyAuthError as exc:
+        logger.error(
+            "FERAL_PROXY_AUTH_ENABLED is set, but trusted-proxy auth is "
+            "unavailable: %s. Proxy assertions will be rejected; existing "
+            "token authentication remains available.",
+            exc,
+        )
+        return
+    logger.info(
+        "Trusted-proxy auth enabled for %d peer rule(s) and %d browser "
+        "origin(s).",
+        len(config.trusted_proxies),
+        len(config.allowed_origins),
+    )
+
+
 # What an operator loses when the integration probe sweeper is not running.
 # One string so the three call sites below cannot describe it three ways.
 _PROBE_SWEEPER_LOSS = (
@@ -1615,6 +1737,7 @@ async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> i
 @app.on_event("startup")
 async def startup():
     check_local_bypass_safety()
+    check_proxy_auth_safety()
 
     # uvicorn.run installs its own non-propagating handlers on the
     # ``uvicorn.*`` loggers after this module was imported, so the filter
@@ -2087,41 +2210,83 @@ def _build_chat_turn_runner(
 # Main Client WebSocket
 # ─────────────────────────────────────────────
 
-@app.websocket("/v1/session")
-async def client_session(ws: WebSocket, token: str = Query(default=None)):
+async def _authenticate_client_session(ws: WebSocket, token: str | None) -> bool:
+    """Authenticate the session socket and perform its single ASGI accept.
+
+    Proxy mode disables only the two implicit local bypasses.  Explicit query
+    and first-frame tokens remain available, while a malformed proxy envelope
+    is rejected before the upgrade and an untrusted listener can never assert
+    proxy identity.
+    """
+    client_host = ws.client.host if ws.client else None
+    trusted = _session_auth_module.transport_is_trusted(ws.scope)
+    proxy_config = config_from_env()
+
+    proxy_identity, proxy_attempted, proxy_error = _proxy_identity(
+        proxy_config,
+        peer=raw_socket_peer_ip(ws.scope),
+        headers=ws.headers,
+        method="GET",
+        transport_trusted=trusted,
+        websocket=True,
+    )
+    if proxy_identity is not None:
+        try:
+            ws.state.proxy_identity = proxy_identity
+        except Exception:
+            pass
+
+    # A supplied proxy envelope must authenticate in its own right. Reject a
+    # spoofed or partial envelope before upgrading the connection. With no
+    # envelope, the existing query-token and first-message-token protocols are
+    # unchanged; the latter necessarily authenticates after the HTTP upgrade.
+    if proxy_identity is None and proxy_attempted and proxy_error:
+        await ws.close(code=4001, reason="Unauthorized")
+        return False
     await ws.accept()
 
-    client_host = ws.client.host if ws.client else None
-    _ws_authed = False
-
-    # audit-r12 A1 (v2026.5.38) — loopback always bypasses; off-loopback
-    # requires a token, with ``FERAL_LOCAL_BYPASS=1`` as the dev opt-in.
+    # audit-r12 A1 (v2026.5.38) — with proxy auth disabled, loopback
+    # bypasses; off-loopback requires a token, with
+    # ``FERAL_LOCAL_BYPASS=1`` as the dev opt-in.
     #
     # Both bypasses are gated on the transport. This socket carries the
     # unrestricted chat session, and a tunnel terminating on this machine
     # presents as loopback: without the gate, exposing the brain remotely
     # would publish an unauthenticated chat socket to the internet. That
     # is the single most dangerous line in the remote-access design.
-    _trusted = _session_auth_module.transport_is_trusted(ws.scope)
-    if _trusted and is_localhost(client_host):
-        _ws_authed = True
-    elif _trusted and local_bypass_enabled():
-        _ws_authed = True
-    elif token and (verify_session(token) or token == FERAL_API_KEY):
-        _ws_authed = True
+    if proxy_identity is not None:
+        return True
+    if token and (verify_session(token) or token == FERAL_API_KEY):
+        return True
+    if (
+        not proxy_config.enabled
+        and trusted
+        and is_localhost(client_host)
+    ):
+        return True
+    if (
+        not proxy_config.enabled
+        and trusted
+        and local_bypass_enabled()
+    ):
+        return True
 
-    if not _ws_authed:
-        try:
-            first_msg = await asyncio.wait_for(ws.receive_json(), timeout=5)
-            if first_msg.get("type") == "auth":
-                t = first_msg.get("token", "")
-                if verify_session(t) or t == FERAL_API_KEY:
-                    _ws_authed = True
-        except Exception:
-            pass
+    try:
+        first_msg = await asyncio.wait_for(ws.receive_json(), timeout=5)
+        if first_msg.get("type") == "auth":
+            first_token = first_msg.get("token", "")
+            if verify_session(first_token) or first_token == FERAL_API_KEY:
+                return True
+    except Exception:
+        pass
 
-    if not _ws_authed:
-        await ws.close(code=4001, reason="Unauthorized")
+    await ws.close(code=4001, reason="Unauthorized")
+    return False
+
+
+@app.websocket("/v1/session")
+async def client_session(ws: WebSocket, token: str = Query(default=None)):
+    if not await _authenticate_client_session(ws, token):
         return
 
     # Audit-r9 fix — operator: "the chat and memory should be the same
@@ -6821,6 +6986,13 @@ class UntrustedTransport:
 
 untrusted_app = UntrustedTransport(app)
 
+# These are the supported Uvicorn entrypoints.  The outer wrapper captures the
+# actual TCP peer before Uvicorn's inner ProxyHeadersMiddleware normalizes
+# ``scope["client"]`` from X-Forwarded-For.  Uvicorn itself must therefore be
+# started with ``proxy_headers=False``; the shipped launchers do that.
+uvicorn_app = uvicorn_proxy_headers_app(app)
+untrusted_uvicorn_app = uvicorn_proxy_headers_app(untrusted_app)
+
 # Expose the brain state on the ASGI app so routes that take it by
 # request rather than by import can reach it.
 #
@@ -6846,4 +7018,10 @@ if __name__ == "__main__":
     ║   Voice · GenUI · Hardware          ║
     ╚══════════════════════════════════════╝
     """)
-    uvicorn.run(app, host=brain_bind_host(), port=brain_port(), log_level="info")
+    uvicorn.run(
+        uvicorn_app,
+        host=brain_bind_host(),
+        port=brain_port(),
+        log_level="info",
+        proxy_headers=False,
+    )
