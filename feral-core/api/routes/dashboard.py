@@ -551,13 +551,95 @@ def _update_availability() -> dict:
         return {"enabled": False, "status": "unknown", "detail": "unavailable"}
 
 
+def _require_number(value, *, allow_none: bool = False):
+    """``value`` as a float, or raise so the caller can fall back.
+
+    Written as a rejection rather than a coercion because of the exact
+    trap `_uptime_seconds` above documents: a `MagicMock` implements
+    `__float__` and answers 1.0, so `float(state.cost_budget.
+    current_spend(...))` would invent a spend of $1.00 on any stubbed
+    state instead of degrading. A number here has to actually be a
+    number.
+    """
+    if value is None and allow_none:
+        return None
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise TypeError(f"not a number: {type(value).__name__}")
+    return float(value)
+
+
+def _budget_from_ledger(budget) -> dict:
+    """Live spend and caps read from the thing that enforces them.
+
+    ``CostBudget`` is the only object in the process that knows what has
+    actually been spent: ``record_usage`` writes ``cost_events`` and
+    ``cost_rollup`` and keeps a per (call_site, window) tally that
+    ``check_and_reserve`` then bills against. Reporting anything else
+    means the header and the enforcer can disagree, which is exactly
+    what the operator saw.
+
+    ``chat`` is the call site the header is about. The hourly cap on it
+    is what stops a conversation, and the global hourly cap stands in
+    when no per-site cap is configured.
+    """
+    hour_spend = _require_number(budget.current_spend("chat", "hour"))
+    hour_cap = _require_number(budget._cap_for("chat", "hour"), allow_none=True)
+    if hour_cap is None:
+        hour_cap = _require_number(
+            budget._cap_for("__global__", "hour"), allow_none=True,
+        )
+    # Global, not per-site: the label on this number is "spent today
+    # across every provider", so it must include the screen loop, the
+    # learner and the proactive engine, not just chat.
+    day_spend = _require_number(budget.current_spend(None, "day"))
+    day_cap = _require_number(budget._cap_for("__global__", "day"), allow_none=True)
+
+    caps_set = hour_cap is not None or day_cap is not None
+    daily_budget = float(day_cap or 0.0)
+    remaining = daily_budget - day_spend
+    return {
+        # True when the operator has configured ANY cap. The old snapshot
+        # keyed this off ``llm.daily_budget_usd``, a setting nothing
+        # writes, so an install with a $10/hour chat cap reported
+        # "no budget configured".
+        "enabled": bool(caps_set),
+        "source": "cost_budget",
+        "hour_spend_usd": hour_spend,
+        "hour_cap_usd": float(hour_cap or 0.0),
+        "daily_spend_usd": day_spend,
+        "daily_budget_usd": daily_budget,
+        "remaining_usd": remaining,
+        "headroom_ratio": (remaining / daily_budget) if daily_budget > 0 else 1.0,
+    }
+
+
 def _budget_status() -> dict:
     """Today's spend against the cap, or an empty dict if unknowable.
 
     Empty rather than zeros on failure: a bar that reports $0.00 when it
     simply could not read the number is worse than one that shows
     nothing, because $0.00 is a claim.
+
+    It used to be a claim. This read ``LLMProvider._budget_snapshot()``,
+    which resolves ``FERAL_LLM_DAILY_SPEND_USD`` or the config key
+    ``llm.daily_spend_usd``, and the only producer of that key is the
+    static ``0.0`` default in ``config/loader.py``. Nothing ever writes
+    it, and it is not connected to the ledger, so the header read
+    "$0.00" on an install that had just spent $9.99 of a $10 hourly cap
+    and was refusing turns because of it.
+
+    ``state.cost_budget`` is now the preferred source. The provider
+    snapshot stays as the fallback for a process that has no CostBudget
+    (its construction is wrapped in a try at boot), because an operator
+    who did set ``FERAL_LLM_DAILY_BUDGET_USD`` should still see it.
     """
+    budget = getattr(state, "cost_budget", None)
+    if budget is not None:
+        try:
+            return _budget_from_ledger(budget)
+        except Exception:
+            logger.debug("dashboard: cost_budget unreadable", exc_info=True)
+
     try:
         provider = getattr(getattr(state, "orchestrator", None), "llm", None)
         snapshot = getattr(provider, "_budget_snapshot", None)

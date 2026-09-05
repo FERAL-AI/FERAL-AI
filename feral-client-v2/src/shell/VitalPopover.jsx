@@ -182,11 +182,27 @@ export function rowsFor(kind, data, vitals) {
       return [{ id: 'x', title: 'Not available', sub: 'the brain did not report a budget', value: '' }];
     }
     return [
+      // Hour first: a chat cap is enforced per UTC clock hour, so this is
+      // the row that explains a refused turn. Only rendered when the
+      // brain reports the ledger figures.
+      vitals.hourKnown && (vitals.hourCap > 0
+        ? {
+          id: 'hr',
+          title: 'This hour',
+          sub: 'chat, against the hourly cap',
+          value: `${money(vitals.hourCost)} / ${money(vitals.hourCap)}`,
+        }
+        : {
+          id: 'hr',
+          title: 'This hour',
+          sub: 'chat, no hourly cap set',
+          value: money(vitals.hourCost),
+        }),
       { id: 'sp', title: 'Spent today', sub: 'across every provider', value: money(vitals.cost) },
-      vitals.budgetOn
-        ? { id: 'cap', title: 'Daily cap', sub: 'set in Settings, LLM', value: money(vitals.budget) }
-        : { id: 'cap', title: 'No daily cap', sub: 'nothing throttles spend', value: 'off' },
-    ];
+      vitals.budget > 0
+        ? { id: 'cap', title: 'Daily cap', sub: 'set in Settings, Cost', value: money(vitals.budget) }
+        : { id: 'cap', title: 'No daily cap', sub: 'nothing throttles daily spend', value: 'off' },
+    ].filter(Boolean);
   }
 
   return [];

@@ -65,10 +65,19 @@ export function visibleVitals(v) {
     // Shown whenever the brain reported a budget at all, including
     // $0.00. A cost of zero is information; a missing reading is not,
     // and the two used to look identical.
-    v.costKnown && {
-      k: 'cost', title: 'Today', Icon: CircleDollarSign, label: money(v.cost),
-      aria: `${money(v.cost)} spent today`,
-    },
+    // The hour, when the brain reports it and a cap exists, because that
+    // is the window that refuses a turn. "$0.00 today" next to a chat
+    // that has stopped answering is the reading this replaces.
+    v.costKnown && (v.hourKnown && v.hourCap > 0
+      ? {
+        k: 'cost', title: 'This hour', Icon: CircleDollarSign,
+        label: `${money(v.hourCost)} / ${money(v.hourCap)}`,
+        aria: `${money(v.hourCost)} of ${money(v.hourCap)} spent this hour`,
+      }
+      : {
+        k: 'cost', title: 'Today', Icon: CircleDollarSign, label: money(v.cost),
+        aria: `${money(v.cost)} spent today`,
+      }),
     v.autonomy && {
       k: 'autonomy', title: 'Autonomy', label: v.autonomy, word: 'autonomy',
       aria: `Autonomy is ${v.autonomy}`,

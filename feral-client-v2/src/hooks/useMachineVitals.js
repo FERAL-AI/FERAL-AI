@@ -28,9 +28,16 @@ const EMPTY = {
   episodes: 0,     // what the memory vital counts
   skills: 0,
   cost: 0,
-  budgetOn: false, // is a daily cap configured at all
+  budgetOn: false, // is any cap configured at all
   budget: 0,
   costKnown: false,
+  // The hour is the window that actually stops a conversation: chat caps
+  // are per UTC clock hour. The brain reports it now, so the header can
+  // show the number the enforcer is reading instead of a daily total
+  // that says nothing about why a turn was refused.
+  hourCost: 0,
+  hourCap: 0,
+  hourKnown: false,
   autonomy: '',
   uptime: 0,        // seconds this brain process has been up
   llmAvailable: false,
@@ -77,13 +84,21 @@ async function poll() {
     next.episodes = Number(v.memory?.episodes ?? 0);
     next.skills = Number(v.skills_count ?? 0);
     // `cost_today` / `spend_today` never existed either. The real
-    // number is the LLM provider's budget snapshot, which had no HTTP
-    // surface at all until it was added to this payload.
+    // number comes from the brain's CostBudget ledger, which had no HTTP
+    // surface at all until it was added to this payload. Before that the
+    // brain answered from `llm.daily_spend_usd`, a settings key with no
+    // producer, so this read $0.00 while $9.99 of a $10 hourly cap was
+    // spent and turns were being refused.
     const b = v.budget || {};
     next.costKnown = Object.keys(b).length > 0;
     next.cost = Number(b.daily_spend_usd ?? 0);
     next.budget = Number(b.daily_budget_usd ?? 0);
     next.budgetOn = Boolean(b.enabled);
+    // Present only on the ledger-backed payload. `?? undefined` rather
+    // than `?? 0` so an older brain reports "unknown" instead of "$0".
+    next.hourKnown = b.hour_spend_usd !== undefined && b.hour_spend_usd !== null;
+    next.hourCost = Number(b.hour_spend_usd ?? 0);
+    next.hourCap = Number(b.hour_cap_usd ?? 0);
     next.autonomy = String(v.autonomy || '');
     next.uptime = Number(v.uptime_s ?? 0);
     next.llmAvailable = Boolean(v.llm_available);
