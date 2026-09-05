@@ -146,6 +146,14 @@ _OPENAI_RULES: tuple[tuple[re.Pattern[str], ModelClass], ...] = (
         r"^gpt-5(\.[0-9]+)?(-(pro|nano|mini|sol|terra|luna))?"
         r"(-(pro|nano|mini))?(-\d{4}-\d{2}-\d{2})?$"
     ), "reasoning"),
+    # gpt-6-astra (released 2026-09-03) is a reasoning model per OpenAI's
+    # model page (reasoning.effort low through max). Only the published
+    # id and its usual tier/date suffixes are matched; every other gpt-6-*
+    # string stays "unknown" on purpose, because the tests use invented
+    # gpt-6 ids as the fixture for "a model nobody has classified yet"
+    # and that behaviour (default to chat, never guess reasoning) is
+    # what protects an operator who types an id we have not seen.
+    (re.compile(r"^gpt-6-astra(-(pro|mini|nano))?(-\d{4}-\d{2}-\d{2})?$"), "reasoning"),
     (re.compile(r"^o[134](-.*)?$"), "reasoning"),
     # Chat (gpt-4o / gpt-4.1 / gpt-4-turbo / gpt-4 / gpt-3.5-turbo).
     (re.compile(r"^gpt-4o(-.+)?$"), "chat"),
@@ -490,6 +498,16 @@ _RESPONSES_ONLY_OPENAI: tuple[_re_endpoint.Pattern[str], ...] = (
     _re_endpoint.compile(
         r"^gpt-5\.6(-(sol|terra|luna))?(-\d{4}-\d{2}-\d{2})?$"
     ),
+    # gpt-6-astra. OpenAI's model page lists both Chat Completions and
+    # Responses as supported, so strictly this is a choice rather than a
+    # requirement. It is routed to /v1/responses for the same reason the
+    # 5.6 line is: FERAL sends function tools on nearly every turn, and
+    # on the sibling reasoning family /chat/completions rejects tools
+    # together with reasoning_effort. Responses is the endpoint OpenAI's
+    # own error text prescribes for that combination and it keeps
+    # reasoning on. Unverified against a live account on 2026-09-04
+    # because the model had not reached this operator's organisation yet.
+    _re_endpoint.compile(r"^gpt-6-astra(-(pro|mini|nano))?(-\d{4}-\d{2}-\d{2})?$"),
     # o-series reasoning Pro variants (o3-pro etc).
     _re_endpoint.compile(r"^o[134]-pro(-.*)?$"),
     # Deep research models (responses-only per OpenAI docs).

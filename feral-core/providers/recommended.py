@@ -41,6 +41,10 @@ from typing import FrozenSet
 #      provider has one.
 
 _RECOMMENDED_OPENAI: FrozenSet[str] = frozenset({
+    # GPT-6 Astra (2026-09-03). Recommended, and ranked one below the
+    # 5.6 flagship in ``_TIER_RANK`` so it never becomes the silent
+    # default (it costs twice as much per token).
+    "gpt-6-astra",
     # Flagship (2026-07 generation). The 5.6 line names its tiers
     # sol / terra / luna; ``gpt-5.6`` is an alias of ``gpt-5.6-sol``.
     "gpt-5.6-sol",
@@ -215,19 +219,26 @@ def is_recommended(provider_id: str, model_id: str) -> bool:
 # a priority entry keep caller order.
 _TIER_RANK: dict[str, list[tuple[str, int]]] = {
     "openai": [
+        # gpt-5.6-sol stays rank 0 on purpose. ``default_model_for`` takes
+        # rank 0, and gpt-6-astra costs twice as much per token ($10/$50
+        # against $5/$30). Making it the silent default the day it lands
+        # on an account would double every operator's bill without a
+        # decision. It is one row below so the picker shows it first
+        # after the current default and an operator can choose it.
         ("gpt-5.6-sol", 0),
-        ("gpt-5.6-terra", 1),
-        ("gpt-5.6-luna", 2),
-        ("gpt-5.6", 3),
-        ("gpt-5.5-pro", 4),
-        ("gpt-5.5", 5),
-        ("gpt-5.4", 6),
-        ("gpt-5-mini", 7),
-        ("gpt-5-nano", 7),
-        ("gpt-5", 7),  # tied with mini/nano; stable order preserved
-        ("o4-", 8),
-        ("o3", 9),
-        ("gpt-4.1", 10),  # previous-gen; still recommended but below current
+        ("gpt-6-astra", 1),
+        ("gpt-5.6-terra", 2),
+        ("gpt-5.6-luna", 3),
+        ("gpt-5.6", 4),
+        ("gpt-5.5-pro", 5),
+        ("gpt-5.5", 6),
+        ("gpt-5.4", 7),
+        ("gpt-5-mini", 8),
+        ("gpt-5-nano", 8),
+        ("gpt-5", 8),  # tied with mini/nano; stable order preserved
+        ("o4-", 9),
+        ("o3", 10),
+        ("gpt-4.1", 11),  # previous-gen; still recommended but below current
     ],
     # ``default_model_for`` takes rank 0, so this ladder also chooses
     # the provider's DEFAULT model — not merely the display order.
