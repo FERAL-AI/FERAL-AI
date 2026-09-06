@@ -287,7 +287,7 @@ A wristband or smart glasses that streams health and motion data.
 - Type: `glasses` / `wristband`
 - Capabilities: `heart_rate`, `spo2`, `temperature`, `steps`, `uv`, `accelerometer`
 - Category: `sensor` (passive)
-- Example: Theora W300 glasses, health wristband
+- Example: Theora glasses, health wristband
 
 ### Home Automation Bridge
 A bridge to smart home devices (lights, HVAC, locks, appliances).

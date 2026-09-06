@@ -85,6 +85,13 @@ SCAN_FILES = sorted(
 # Forbidden substrings (case-insensitive). Adding a new internal artifact?
 # Add its identifier here so it can never leak into shipped docs again.
 FORBIDDEN_SUBSTRINGS = [
+    # The glasses model number. Docs say "Theora glasses"; the model is
+    # an internal detail and was reported by a reader of the public repo.
+    # Source code still uses it as an identifier (w300_daemon, the fusion
+    # priority order, the iOS bridge) and that is deliberate: renaming a
+    # shipped package to satisfy a docs rule would be a functional change
+    # dressed as an editorial one. This linter scans documentation only.
+    "W300",
     "AUDIT-r14",
     "AUDIT-r13",
     "SCOREBOARD",
@@ -111,7 +118,11 @@ FORBIDDEN_PATHS = [
 # real product / spec references rather than internal workstream IDs.
 WORKSTREAM_REGEX = re.compile(r"\bW\d{1,2}(?:\.\d+)?\b")
 WORKSTREAM_ALLOWLIST = {
-    "W300",   # smart-glasses product reference (hardware docs)
+    # "W300" was allowed here as a real product reference. It is now
+    # forbidden instead, below: the model number is not something this
+    # project publishes, and allowing it here is what let it back into
+    # docs/mintlify/hardware/glasses.mdx while a public reader was
+    # asking why it appeared in the repo at all.
     "W3C",    # standards body
 }
 # Additional per-file exceptions (path glob → allowed tokens). Use sparingly.

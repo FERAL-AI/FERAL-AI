@@ -284,8 +284,8 @@ FROM node_subdevices ORDER BY last_seen DESC LIMIT 4;"
 
 **Verified output:**
 ```
-feral-iphone-6053b3cdc4ed  jw_health_glasses  disconnected  {"device_name": "W300"}  ble  2026-08-06 15:52:06
-feral-iphone-2a210fa1      jw_health_glasses  ready         {"device_name": "W300"}  ble  2026-07-07 14:25:02
+feral-iphone-6053b3cdc4ed  jw_health_glasses  disconnected  {"device_name": "theora-glasses"}  ble  2026-08-06 15:52:06
+feral-iphone-2a210fa1      jw_health_glasses  ready         {"device_name": "theora-glasses"}  ble  2026-07-07 14:25:02
 feral-iphone-79447a4cd1ed  jw_health_glasses  ready         {"battery_pct": 86}      ble  2026-07-05 20:41:19
 feral-iphone-c29f7fd3      jw_health_glasses  audio_ready   {"headset_paired":"true"} ble 2026-06-30 20:13:16
 ```
