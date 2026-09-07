@@ -14,7 +14,46 @@
 }
 .v2-md > :first-child { margin-top: 0; }
 .v2-md > :last-child { margin-bottom: 0; }
+
+/* ── Whitespace, scoped ───────────────────────────────────────────
+ * `.v2-chat-body` sets `white-space: pre-wrap` and it inherits into
+ * rendered markdown, where the HTML structure ALREADY encodes the
+ * layout. Every newline the renderer emits between block elements was
+ * therefore drawn as a real blank line: the "\n" text nodes between
+ * sibling <li> elements each became an empty line, so a six-item list
+ * rendered with a full line-height of dead space after every item and
+ * the answer sprawled down the page.
+ *
+ * It cannot simply be turned off. There is no remark-breaks plugin
+ * (see lib/markdown.jsx REMARK_PLUGINS), so a single newline inside a
+ * paragraph produces no <br>, and `pre-wrap` is the only thing
+ * preserving intentional line breaks in assistant text.
+ *
+ * So scope it: containers collapse whitespace BETWEEN blocks, text
+ * blocks preserve newlines WITHIN themselves. Both behaviours are kept
+ * and they stop fighting. */
+.v2-md { white-space: normal; }
+/* Containers reset at EVERY depth. A nested list lives inside an <li>,
+   so it inherits that li's pre-wrap and the newlines between its own
+   items start rendering as blank lines again one level down. */
+.v2-md ul, .v2-md ol, .v2-md table, .v2-md thead, .v2-md tbody, .v2-md tr { white-space: normal; }
+.v2-md p,
+.v2-md li,
+.v2-md h1, .v2-md h2, .v2-md h3, .v2-md h4,
+.v2-md blockquote,
+.v2-md td, .v2-md th { white-space: pre-wrap; }
+
 .v2-md p { margin: 0 0 10px; }
+
+/* Prose gets a readable measure. Chat answers ran the full width of the
+   pane, about 100 characters, which is well past the point where the
+   eye loses the start of the next line. Applied to text blocks only:
+   tables, code and images keep the full width, because truncating those
+   costs information rather than comfort. */
+.v2-md p,
+.v2-md li,
+.v2-md blockquote { max-width: 76ch; }
+
 .v2-md h1, .v2-md h2, .v2-md h3, .v2-md h4 {
   margin: 18px 0 8px;
   line-height: 1.25;
@@ -25,6 +64,10 @@
 .v2-md h3 { font-size: 15px; }
 .v2-md h4 { font-size: 14px; }
 .v2-md ul, .v2-md ol { margin: 0 0 10px; padding-left: 22px; }
+.v2-md ul { list-style: disc outside; }
+.v2-md ol { list-style: decimal outside; }
+.v2-md ul ul { list-style: circle outside; }
+.v2-md li::marker { color: var(--v2-text-tertiary); }
 .v2-md li { margin: 2px 0; }
 .v2-md li > p { margin: 0; }
 .v2-md a {

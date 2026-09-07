@@ -93,6 +93,8 @@ export const FAMILY_ICONS = Object.freeze({
 });
 
 /** Group headers are not one skill, so they get a neutral agent glyph. */
+const GROUP_AUTO_COLLAPSE_ABOVE = 3;
+
 const GROUP_ICON = Bot;
 
 /**
@@ -327,9 +329,18 @@ export default function ToolCallCard({ trace, defaultOpen, grouped = false }) {
  */
 export function ToolCallList({ traces, label = 'Tool calls' }) {
   const list = Array.isArray(traces) ? traces.filter(Boolean) : [];
-  const [open, setOpen] = useState(true);
   const groupId = useId();
   const summary = useMemo(() => summariseGroup(list), [list]);
+  // A finished turn's trace is evidence, not the answer. Fourteen calls
+  // rendered as fourteen expanded rows pushed the reply itself off the
+  // bottom of the pane, and four of those rows read "Search web" with
+  // nothing to tell them apart until you opened one. So: a live group
+  // stays open, because watching it work is the point, and a short one
+  // stays open, because two rows cost nothing. A long, finished group
+  // collapses to its summary line and opens on click.
+  const [open, setOpen] = useState(
+    () => list.length <= GROUP_AUTO_COLLAPSE_ABOVE || summary.status === 'running',
+  );
 
   if (list.length === 0) return null;
 
