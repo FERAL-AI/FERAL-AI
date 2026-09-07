@@ -6,6 +6,132 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- **A turn produces one answer again, not two that disagree.** A parallel
+  multi-agent strategy hands every worker the WHOLE user question, so
+  workers do not produce complementary halves of an answer, they produce
+  competing whole answers. `ResponseMerger.merge` joined them with a
+  blank line, which put two complete replies on screen under one message
+  and gave the last word to whichever worker happened to be second.
+  Measured on a live brain: a `['general', 'research']` turn was asked
+  which apps were open and whether the running brain was on the latest
+  PyPI version. `general` ran six tools, listed the real windows, and
+  caught a stale search snippet by opening the PyPI page itself.
+  `research` has no device tools, so it said it could not inspect the Mac
+  and reported the stale version. The user was shown both, in that order,
+  ending on the one that had checked nothing. The merge now returns the
+  single best-grounded answer, ranked by tool results that actually
+  succeeded, and the orchestrator calls a new `synthesize()` that
+  reconciles the workers through the model and falls back to that merge
+  on any failure. Synthesis tokens are billed to the turn, the same
+  reasoning the router already uses for its own.
+
+- **A nightly routine no longer fires the next morning, however it got
+  late.** The boot guard added in 2026.9.5 only saw jobs missed within
+  the last day, because catch-up bounded its query at `next_run >= now -
+  one day`. A job staler than that was excluded from the pass that would
+  have re-armed it, and the ordinary tick then fired it with no lateness
+  check at all: the window meant to stop stale runs was the thing that
+  let one through. Observed at 11:40 on a live brain, where catch-up
+  correctly re-armed three jobs and logged "ran 0 missed job(s)", and one
+  second later a `daily 21:00` routine about 38 hours stale ran anyway.
+  Restarting was never the only way to reach this. A laptop closed at
+  21:00 and opened at 09:00 never restarts the brain, so catch-up never
+  runs and the scheduler simply wakes to a job whose time passed twelve
+  hours ago. `_too_late_to_run` is now the single rule both the boot pass
+  and every tick consult.
+
+- **An important alert with no browser open is delivered instead of
+  destroyed.** `ChannelManager.active_channels` is a property returning
+  `list[str]`, and the escalation path called it as `active_channels()`,
+  raising `'list' object is not callable` inside the proactive delivery
+  callback. That callback's handler logs the message and swallows the
+  traceback, so every IMPORTANT alert reaching a brain with nobody
+  watching was lost, and the only report of it was one unattributed line.
+  The test double is why this stayed green: it defined `active_channels`
+  as a plain method, so it accepted exactly the call that raised. It is a
+  property now, matching the real object, and reintroducing the bug fails
+  ten tests instead of none. The delivery handler also logs `exc_info`,
+  because it stands between a failing callback and the only report of it.
+
+- **Chat answers stopped sprawling down the page.** `.v2-chat-body` sets
+  `white-space: pre-wrap`, correctly, because a plain text message has to
+  keep the line breaks the sender typed. It inherited into rendered
+  markdown, where the HTML structure already encodes the layout, so every
+  newline the renderer emitted BETWEEN block elements was drawn as a real
+  blank line and a six item list gained a full line-height of dead space
+  after every item. It could not simply be turned off: there is no
+  remark-breaks plugin, so `pre-wrap` was the only thing preserving
+  intentional breaks in assistant text. It is scoped instead, at every
+  nesting depth, because a nested list lives inside an `<li>` and
+  re-inherits it. Tailwind's preflight had also stripped `list-style`
+  from every list, so lists rendered as unmarked lines that read as
+  disconnected paragraphs. A finished tool group holding more than three
+  calls now collapses to its summary line; fourteen expanded rows used to
+  push the reply itself off the bottom of the pane.
+
+- **A sensor dropout no longer teaches the brain a false baseline.**
+  `BaselineEngine.record` accepted any float, so a dropout entered the
+  rolling window as data and moved the mean and standard deviation that
+  every anomaly alert is measured against. On a live install a resting
+  heart-rate baseline had been learned from readings including several
+  an order of magnitude too low, wide enough that a perfectly ordinary
+  reading was reported as a multi-sigma critical anomaly, and it had
+  fired 102 times. An alerting tier that calls a healthy number an
+  emergency is how an operator learns to ignore the alert that matters.
+  The gate rejects what a body cannot do, not what a body should not do,
+  so an elite resting pulse and a hard effort both still land, and a
+  metric the engine has never seen is not range-checked at all. Windows
+  learned before the gate heal on their next sample rather than needing a
+  migration.
+
+- **`feral` addresses the brain living in the FERAL_HOME it was given.**
+  `brain_public_port` read environment variables and nothing else, so
+  every command resolved to `localhost:9090` no matter which home it was
+  pointed at. A second brain could be started but not administered: the
+  commands succeeded, against the wrong brain, and reported success. A
+  serving brain now records its port in its own home, and resolution
+  consults that record between the environment and the 9090 default.
+
+- **A failed sync says why.** The scheduler printed `result.get("reason")`
+  while the retry-exhausted branch returns `error` and no `reason` key,
+  so every failure logged `reason=unknown` with the cause sitting one
+  field away. Two brains failed to federate for an hour against a log
+  that said only "unknown"; one restart after the fix the same failure
+  read `detail=Invalid passphrase`.
+
+### Added
+
+- **Scoped replication has a producer.** Scoped federation shipped in
+  2026.9.2 with only its enforcement half: the vocabulary, the fail-closed
+  default, the reserved ungrantable `private` scope, per-peer grants, the
+  send filter and the receive re-check were all built and all correct.
+  Nothing wrote a scoped operation. `save_note` had accepted a `scope`
+  the whole time and `SyncEngine` had judged grants against it, but every
+  note in the product is written through `MemoryStore.save`, and that
+  wrapper did not forward the argument. On a live install all 8,898 rows
+  in `sync_wal` carried scope `private`, so granting a peer a scope
+  replicated nothing and the one capability with no equivalent elsewhere
+  had never moved a byte. The failure was silent, which is why it
+  survived: nothing raised, no test went red, and the CLI reported
+  success. Scope now travels end to end, the manifest declares it so a
+  model can choose to share, and omitting it still means private.
+  Verified between two brains on one LAN: a note written in a granted
+  scope replicated, and a note written without one did not.
+
+### Changed
+
+- **The client wears the project's own colours.** The accent was a
+  corporate blue in a grey shell; the palette is now sampled from the
+  project's banner, moving only the palette layer so every component,
+  the orb and every focus ring follow. The accessibility suite refused
+  the first attempt, correctly, measuring a tertiary text colour at
+  3.61:1 against a 4.5:1 floor. The colours were changed rather than the
+  thresholds. The home hero leads with what the brain is doing instead of
+  a greeting and a clock, and counts, ratios and money are set in mono
+  with tabular figures so they stop shifting width as they tick.
+
 ## [2026.9.5] - 2026-09-05 - the release that checked its own claims
 
 ### Coverage
