@@ -156,12 +156,12 @@ test.describe('token themes, measured in Chromium', () => {
     const m = await measure(page, null, SEMANTIC_NAMES, COLOR_NAMES);
     expectAllDeclared(m);
     expect(m.colorScheme).toBe('light dark');
-    expect(m.painted['--v2-bg-base']).toBe('rgb(246, 245, 242)');
-    expect(m.painted['--v2-text-primary']).toBe('rgb(34, 38, 43)');
-    expect(m.painted['--v2-surface-0']).toBe('rgba(255, 255, 255, 0.48)');
-    expect(m.painted['--v2-hairline']).toBe('rgba(34, 38, 43, 0.08)');
-    expect(m.painted['--v2-accent']).toBe('rgb(47, 109, 168)');
-    expect(m.painted['--v2-state-live']).toBe('rgb(60, 123, 80)');
+    expect(m.painted['--v2-bg-base']).toBe('rgb(247, 243, 238)');
+    expect(m.painted['--v2-text-primary']).toBe('rgb(36, 28, 24)');
+    expect(m.painted['--v2-surface-0']).toBe('rgba(255, 253, 250, 0.48)');
+    expect(m.painted['--v2-hairline']).toBe('rgba(40, 30, 26, 0.08)');
+    expect(m.painted['--v2-accent']).toBe('rgb(154, 58, 32)');
+    expect(m.painted['--v2-state-live']).toBe('rgb(61, 112, 66)');
   });
 
   test.describe('system dark', () => {
@@ -172,12 +172,12 @@ test.describe('token themes, measured in Chromium', () => {
       const m = await measure(page, null, SEMANTIC_NAMES, COLOR_NAMES);
       expectAllDeclared(m);
       expect(m.colorScheme).toBe('dark');
-      expect(m.painted['--v2-bg-base']).toBe('rgb(28, 31, 35)');
-      expect(m.painted['--v2-text-primary']).toBe('rgb(229, 232, 235)');
-      expect(m.painted['--v2-surface-0']).toBe('rgba(34, 38, 42, 0.38)');
-      expect(m.painted['--v2-hairline']).toBe('rgba(229, 232, 235, 0.1)');
-      expect(m.painted['--v2-accent']).toBe('rgb(127, 176, 222)');
-      expect(m.painted['--v2-state-live']).toBe('rgb(127, 181, 138)');
+      expect(m.painted['--v2-bg-base']).toBe('rgb(16, 13, 12)');
+      expect(m.painted['--v2-text-primary']).toBe('rgb(240, 231, 220)');
+      expect(m.painted['--v2-surface-0']).toBe('rgba(26, 21, 19, 0.38)');
+      expect(m.painted['--v2-hairline']).toBe('rgba(236, 224, 210, 0.1)');
+      expect(m.painted['--v2-accent']).toBe('rgb(209, 90, 48)');
+      expect(m.painted['--v2-state-live']).toBe('rgb(126, 168, 106)');
     });
 
     test('an explicit light choice beats a dark system preference', async ({ page }) => {
@@ -187,9 +187,9 @@ test.describe('token themes, measured in Chromium', () => {
       for (const m of [attr, cls]) {
         expectAllDeclared(m);
         expect(m.colorScheme).toBe('light');
-        expect(m.painted['--v2-bg-base']).toBe('rgb(246, 245, 242)');
-        expect(m.painted['--v2-text-primary']).toBe('rgb(34, 38, 43)');
-        expect(m.painted['--v2-hairline']).toBe('rgba(34, 38, 43, 0.08)');
+        expect(m.painted['--v2-bg-base']).toBe('rgb(247, 243, 238)');
+        expect(m.painted['--v2-text-primary']).toBe('rgb(36, 28, 24)');
+        expect(m.painted['--v2-hairline']).toBe('rgba(40, 30, 26, 0.08)');
       }
       expect(cls.painted).toEqual(attr.painted);
     });
@@ -202,11 +202,11 @@ test.describe('token themes, measured in Chromium', () => {
     for (const m of [attr, cls]) {
       expectAllDeclared(m);
       expect(m.colorScheme).toBe('dark');
-      expect(m.painted['--v2-bg-base']).toBe('rgb(28, 31, 35)');
-      expect(m.painted['--v2-text-primary']).toBe('rgb(229, 232, 235)');
-      expect(m.painted['--v2-surface-0']).toBe('rgba(34, 38, 42, 0.38)');
-      expect(m.painted['--v2-hairline']).toBe('rgba(229, 232, 235, 0.1)');
-      expect(m.painted['--v2-accent']).toBe('rgb(127, 176, 222)');
+      expect(m.painted['--v2-bg-base']).toBe('rgb(16, 13, 12)');
+      expect(m.painted['--v2-text-primary']).toBe('rgb(240, 231, 220)');
+      expect(m.painted['--v2-surface-0']).toBe('rgba(26, 21, 19, 0.38)');
+      expect(m.painted['--v2-hairline']).toBe('rgba(236, 224, 210, 0.1)');
+      expect(m.painted['--v2-accent']).toBe('rgb(209, 90, 48)');
     }
     expect(cls.painted).toEqual(attr.painted);
   });
