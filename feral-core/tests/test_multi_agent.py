@@ -360,14 +360,144 @@ def test_response_merger_single_valid():
     assert merged == "only"
 
 
-def test_response_merger_multiple_joined():
+def test_response_merger_does_not_concatenate_competing_answers():
+    """Two workers answer the WHOLE question, so joining them shows two.
+
+    This asserted ``"first\n\nsecond"`` until 2026-09-07. That is the
+    shape of the defect, not the contract: a parallel turn put two
+    complete answers on screen and let the second one have the last
+    word, whether or not it was the one that had checked anything.
+    """
     merged = ResponseMerger.merge(
         [
             WorkerResult("a", text="first"),
             WorkerResult("b", text="second"),
         ]
     )
-    assert merged == "first\n\nsecond"
+    assert merged in ("first", "second")
+    assert "first\n\nsecond" != merged
+
+
+def test_the_worker_that_actually_checked_wins():
+    """The reported case, reduced.
+
+    ``general`` ran six tools and answered from them. ``research`` had
+    no device tools and said the machine could not be inspected. The
+    operator was shown both, ending on the one that had checked nothing.
+    """
+    grounded = WorkerResult(
+        "general",
+        text="Finder, Terminal and Chrome are open. This brain runs 2026.9.5.",
+        tool_calls_made=[{"n": i} for i in range(6)],
+        tool_results=[{"success": True} for _ in range(6)],
+    )
+    ungrounded = WorkerResult(
+        "research",
+        text="I can't inspect your Mac's live apps from this session.",
+        tool_calls_made=[{"n": 1}],
+        tool_results=[{"success": True}],
+    )
+    assert ResponseMerger.merge([grounded, ungrounded]) == grounded.text
+    assert ResponseMerger.merge([ungrounded, grounded]) == grounded.text, (
+        "order must not decide which answer the user sees"
+    )
+
+
+def test_failed_tool_calls_do_not_count_as_grounding():
+    """Calling six tools and having them all fail checked nothing."""
+    all_failed = WorkerResult(
+        "a", text="short",
+        tool_calls_made=[{"n": i} for i in range(6)],
+        tool_results=[{"success": False, "error": "nope"} for _ in range(6)],
+    )
+    one_worked = WorkerResult(
+        "b", text="longer answer here",
+        tool_calls_made=[{"n": 1}],
+        tool_results=[{"success": True}],
+    )
+    assert ResponseMerger.merge([all_failed, one_worked]) == one_worked.text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_returns_one_answer_from_the_model():
+    class FakeLLM:
+        def __init__(self):
+            self.prompts = []
+
+        async def chat(self, messages, **kw):
+            self.prompts.append(messages[0]["content"])
+            return {"ok": True}
+
+        def extract_response(self, response):
+            return "One coherent answer.", None
+
+    llm = FakeLLM()
+    out = await ResponseMerger.synthesize(
+        [WorkerResult("a", text="first"), WorkerResult("b", text="second")],
+        llm, user_text="what is open?",
+    )
+    assert out == "One coherent answer."
+    prompt = llm.prompts[0]
+    assert "first" in prompt and "second" in prompt
+    assert "what is open?" in prompt
+    assert "Never mention" in prompt, "the reply must not narrate its own machinery"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_falls_back_to_the_grounded_answer_when_the_model_fails():
+    """A synthesis outage must degrade to one good answer, not to none."""
+    class BrokenLLM:
+        async def chat(self, messages, **kw):
+            raise RuntimeError("provider down")
+
+        def extract_response(self, response):
+            raise AssertionError("not reached")
+
+    grounded = WorkerResult(
+        "general", text="checked, here is the answer",
+        tool_calls_made=[{"n": 1}], tool_results=[{"success": True}],
+    )
+    ungrounded = WorkerResult("research", text="could not check")
+    out = await ResponseMerger.synthesize(
+        [grounded, ungrounded], BrokenLLM(), user_text="q",
+    )
+    assert out == grounded.text
+
+
+@pytest.mark.asyncio
+async def test_synthesize_does_not_call_the_model_for_a_single_answer():
+    """One worker answered. There is nothing to reconcile."""
+    class Boom:
+        async def chat(self, *a, **k):
+            raise AssertionError("must not be called")
+
+        def extract_response(self, r):
+            raise AssertionError("must not be called")
+
+    out = await ResponseMerger.synthesize(
+        [WorkerResult("a", text="only"), WorkerResult("b", error="failed")],
+        Boom(), user_text="q",
+    )
+    assert out == "only"
+
+
+@pytest.mark.asyncio
+async def test_synthesize_bills_the_turn_for_its_own_tokens():
+    """Every worker is billed; the pass that reconciles them is too."""
+    class FakeLLM:
+        async def chat(self, messages, **kw):
+            return {"usage": {"prompt_tokens": 10, "completion_tokens": 5}}
+
+        def extract_response(self, response):
+            return "merged", None
+
+    sink: dict = {}
+    out = await ResponseMerger.synthesize(
+        [WorkerResult("a", text="x"), WorkerResult("b", text="y")],
+        FakeLLM(), user_text="q", usage_sink=sink,
+    )
+    assert out == "merged"
+    assert sink, "synthesis tokens were not accumulated into the turn"
 
 
 def test_response_merger_all_errors_returns_first_error():
@@ -531,10 +661,14 @@ async def test_multi_agent_orchestrator_run_parallel_merge():
     llm = MagicMock()
     llm.available = True
     llm.chat = AsyncMock(return_value={})
+    # Two workers, then the synthesis pass that reconciles them. This
+    # test asserted the two lines joined by a blank line until
+    # 2026-09-07; that shipped a reply holding two competing answers.
     responses = iter(
         [
             ("Health line", []),
             ("Home line", []),
+            ("One reconciled line", []),
         ]
     )
 
@@ -550,9 +684,15 @@ async def test_multi_agent_orchestrator_run_parallel_merge():
 
     orch._router.route = _mock_route
     out = await orch.run("sess", "parallel domains")
-    assert "Health line" in out
-    assert "Home line" in out
-    assert "\n\n" in out
+    assert out == "One reconciled line"
+    assert "Health line" not in out and "Home line" not in out, (
+        "the raw worker answers must not reach the user side by side"
+    )
+
+    # The synthesis prompt has to carry both answers and the question.
+    synth_prompt = llm.chat.await_args_list[-1].args[0][0]["content"]
+    assert "Health line" in synth_prompt and "Home line" in synth_prompt
+    assert "parallel domains" in synth_prompt
 
 
 @pytest.mark.asyncio
