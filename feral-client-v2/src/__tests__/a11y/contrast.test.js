@@ -158,12 +158,15 @@ describe('token coherence', () => {
   });
 
   it('the dark tertiary measurement quoted in tokens.css is the real one', () => {
-    // tokens.css cites #9AA2AA. Recompute rather than trusting the
-    // prose. The value moved when the instrument-panel palette was
-    // ported: that design specifies #767E86, which is 2.83:1 on the
-    // elevated dark surface, so the hue was kept and the lightness
-    // raised to the nearest shade that clears AA.
-    expect(hexOf('darkMedia', '--v2-text-tertiary')).toBe('#9AA2AA');
-    expect(contrast(parseHex('#9AA2AA'), DARK_SHELL)).toBeCloseTo(6.33, 1);
+    // tokens.css cites this value. Recompute rather than trusting the
+    // prose. It has moved twice: once when the instrument-panel palette
+    // was ported (that design specifies #767E86, only 2.83:1 on the
+    // elevated dark surface), and again on 2026-09-07 when the palette
+    // was rethemed to the brand's own colours, sampled from
+    // feral-banner.png. The first warm tan tried there, #8B7D72,
+    // measured 3.61:1 on surface-elev and this suite caught it. The hue
+    // is the brand's; the lightness is whatever clears AA.
+    expect(hexOf('darkMedia', '--v2-text-tertiary')).toBe('#A5968A');
+    expect(contrast(parseHex('#A5968A'), DARK_SHELL)).toBeCloseTo(5.71, 1);
   });
 });
