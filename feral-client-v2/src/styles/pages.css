@@ -237,8 +237,24 @@ button.v2-chip[aria-pressed="false"] { text-decoration: line-through; }
   gap: 16px;
 }
 .v2-grid--devices { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-.v2-stat-label { font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); text-transform: uppercase; letter-spacing: 0.06em; }
-.v2-stat-value { margin-top: 6px; font-size: var(--v2-size-xl); font-weight: 600; letter-spacing: -0.02em; }
+.v2-stat-label {
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  color: var(--v2-text-tertiary);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+}
+/* Counts, ratios and money are data. Mono with tabular figures stops
+   them shifting width as they tick, and reads as instrumentation
+   rather than as prose. */
+.v2-stat-value {
+  margin-top: 6px;
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xl);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  font-variant-numeric: tabular-nums;
+}
 
 /* ── Chat ────────────────────────────────────────────────────── */
 /*
@@ -1879,9 +1895,35 @@ button.v2-chip[aria-pressed="false"] { text-decoration: line-through; }
 @media (max-width: 900px) {
   .v2-home-hero-body { grid-template-columns: 1fr; }
 }
-.v2-home-hero-left { display: flex; align-items: center; gap: 20px; min-width: 0; }
-.v2-home-greeting { font-size: var(--v2-size-xl); font-weight: 500; letter-spacing: -0.02em; }
-.v2-home-time { font-size: var(--v2-size-sm); color: var(--v2-text-secondary); margin-top: 2px; font-variant-numeric: tabular-nums; }
+.v2-home-hero-left { display: flex; align-items: center; gap: 24px; min-width: 0; }
+.v2-home-hero-copy { min-width: 0; }
+/* The greeting is an eyebrow now, not the headline. It is still real
+   data from the briefing endpoint, it is just not the most important
+   thing on the screen, which is what its old 22px/500 said it was. */
+.v2-home-greeting {
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-xs);
+  font-weight: 500;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--v2-text-tertiary);
+}
+.v2-home-state {
+  font-size: var(--v2-size-2xl);
+  font-weight: 600;
+  letter-spacing: -0.03em;
+  line-height: 1.1;
+  margin-top: 4px;
+  color: var(--v2-text-primary);
+}
+.v2-home-time {
+  font-family: var(--v2-font-mono);
+  font-size: var(--v2-size-sm);
+  color: var(--v2-text-tertiary);
+  margin-top: 6px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.01em;
+}
 .v2-home-next { margin-top: 6px; font-size: var(--v2-size-xs); color: var(--v2-text-tertiary); display: inline-flex; align-items: center; gap: 6px; }
 .v2-home-mode-tabs { display: inline-flex; align-items: center; gap: 6px; }
 .v2-home-stats {
@@ -1895,9 +1937,9 @@ button.v2-chip[aria-pressed="false"] { text-decoration: line-through; }
 .v2-home-stats .v2-glass { min-width: 0; }
 .v2-home-stats .v2-stat-label { font-size: 10px; }
 .v2-home-stats .v2-stat-value {
-  font-size: var(--v2-size-md);
+  font-size: var(--v2-size-lg);
   font-weight: 600;
-  margin-top: 2px;
+  margin-top: 3px;
   display: flex;
   align-items: center;
   gap: 6px;
