@@ -54,7 +54,7 @@ const SKILL_GLYPH = {
   spotify_music: '♪',
   coding_tools: '</>',
   code_interpreter: '>_',
-  web_search: '?',
+  web_search: '⌕',
   web_actions: '@',
   pdf_reader: 'pdf',
   smart_home_hue: '•',
@@ -71,7 +71,7 @@ const SKILL_GLYPH = {
   digital_twin: '⁂',
   system_settings: '⚙',
   subagent: '↻',
-  self_introspection: '?',
+  self_introspection: '⊙',
   workspace_scripts: 'sh',
 };
 
@@ -150,6 +150,15 @@ export function channelState(info) {
   }
   return { tone: 'off', label: 'off', reason: '' };
 }
+
+// What the orb's state machine means in words. Same vocabulary the orb
+// animation uses, so the headline and the animation can never disagree.
+const ORB_STATE_TEXT = {
+  idle: 'Idle',
+  listening: 'Listening',
+  thinking: 'Thinking',
+  speaking: 'Speaking',
+};
 
 export default function Home() {
   const somatic = useSomatic();
@@ -624,10 +633,17 @@ export default function Home() {
 
   const weather = briefing?.weather;
   const Weather = weather && (WEATHER_ICON[weather.condition] || Sun);
+  // An agenda entry with neither a title nor a summary has nothing to
+  // say. Rendered anyway it drew a list item containing only the
+  // separator, so a calendar that is not connected produced a "Next on
+  // calendar" card whose entire content was punctuation.
+  const namedAgenda = (briefing?.agenda || []).filter(
+    (evt) => (evt?.title || evt?.summary || '').trim(),
+  );
   const hasBriefingContent = Boolean(
     briefing?.sleep
     || weather
-    || briefing?.agenda?.length > 0
+    || namedAgenda.length > 0
     || briefing?.goals?.length > 0,
   );
   // Only the sections this page actually renders. The brain also reports
@@ -671,8 +687,15 @@ export default function Home() {
         <div className="v2-home-hero-body">
           <div className="v2-home-hero-left">
             <Orb size={120} mode={somatic.orbMode || 'idle'} />
-            <div>
+            <div className="v2-home-hero-copy">
               <div className="v2-home-greeting">{briefing?.greeting || 'Welcome back'}</div>
+              {/* The headline used to be the greeting, so the largest
+                  element on the operator's home screen was a clock and a
+                  time of day they already knew. What belongs there is
+                  what the brain is doing right now. */}
+              <div className="v2-home-state" data-testid="v2-home-state">
+                {ORB_STATE_TEXT[somatic.orbMode] || ORB_STATE_TEXT.idle}
+              </div>
               <div className="v2-home-time">
                 {time.toLocaleTimeString('en-US', { hour: 'numeric', minute: '2-digit', hour12: true })}
                 {' · '}
@@ -1094,11 +1117,11 @@ export default function Home() {
               Cognitive load {(somatic?.cognitiveLoad ?? 0).toFixed(2)} · orb {somatic?.orbMode}
             </div>
           </Glass>
-          {briefing?.agenda?.length > 0 && (
+          {namedAgenda.length > 0 && (
             <Glass level={1} radius="md" padding="md">
               <div className="v2-stat-label">Next on calendar</div>
               <ul className="v2-ambient-list">
-                {briefing.agenda.slice(0, 3).map((evt, i) => (
+                {namedAgenda.slice(0, 3).map((evt, i) => (
                   <li key={evt.id || i}>{evt.title || evt.summary}{evt.start ? ` · ${evt.start}` : ''}</li>
                 ))}
               </ul>
