@@ -105,6 +105,9 @@ class NotesMemorySkill(BaseSkill):
             content=content,
             tags=args.get("tags") or [],
             importance=args.get("importance", "normal"),
+            # Absent means private, which is what every note written
+            # before this argument existed already was.
+            scope=args.get("scope") or None,
         )
         return {"success": True, "status_code": 200, "data": result, "error": None}
 
