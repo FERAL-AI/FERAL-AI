@@ -3443,7 +3443,14 @@ class BrainState:
             if channel is not None:
                 return channel, str(chat_id)
 
-        for channel_type in (mgr.active_channels() or []):
+        # ``ChannelManager.active_channels`` is a @property returning
+        # list[str]. Calling it raised "'list' object is not callable"
+        # inside the proactive delivery callback, whose handler logs
+        # the message and swallows the traceback, so every IMPORTANT
+        # alert with no browser open was lost and the reason was one
+        # unattributed line. Observed on the operator's brain
+        # 2026-09-07 on the morning briefing.
+        for channel_type in (mgr.active_channels or []):
             channel = mgr.get_channel(channel_type)
             if channel is None:
                 continue
