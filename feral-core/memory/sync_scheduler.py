@@ -483,9 +483,18 @@ class SyncScheduler:
             evicted = self._maybe_evict(status)
         except Exception as exc:
             logger.warning("scheduler: eviction of %s failed: %s", status.peer_id, exc)
+        # ``detail`` carries the actual error and was collected here but
+        # never printed, so a peer that failed for a nameable reason
+        # logged "reason=unknown" and the operator had nothing to act
+        # on. The retry-exhausted branch of ``sync_with_peer`` returns
+        # ``error`` and no ``reason`` key at all, which is exactly the
+        # case that produced "unknown" while the cause sat in the dict
+        # one field away.
         logger.warning(
-            "sync failed (%s): peer=%s reason=%s failures=%d backoff=%.1fs%s",
-            trigger, status.peer_id, reason, status.consecutive_failures, backoff,
+            "sync failed (%s): peer=%s reason=%s%s failures=%d backoff=%.1fs%s",
+            trigger, status.peer_id, reason,
+            f" detail={str(detail)[:300]}" if detail else "",
+            status.consecutive_failures, backoff,
             " evicted" if evicted else "",
         )
         return {
