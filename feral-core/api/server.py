@@ -47,7 +47,12 @@ from security.capability_grants import (
     frame_tier_enabled,
     live_grants,
 )
-from config.runtime import brain_bind_host, brain_port, brain_public_base_url
+from config.runtime import (
+    brain_bind_host,
+    brain_port,
+    brain_public_base_url,
+    record_runtime_endpoint,
+)
 from gateway.protocol import GatewaySession
 
 from api.state import state, _log_activity, VISION_MAX_FRAME_KB
@@ -6846,4 +6851,8 @@ if __name__ == "__main__":
     ║   Voice · GenUI · Hardware          ║
     ╚══════════════════════════════════════╝
     """)
-    uvicorn.run(app, host=brain_bind_host(), port=brain_port(), log_level="info")
+    _port = brain_port()
+    # So a CLI pointed at this FERAL_HOME reaches THIS brain and not
+    # whatever is on 9090. See config.runtime.record_runtime_endpoint.
+    record_runtime_endpoint(_port)
+    uvicorn.run(app, host=brain_bind_host(), port=_port, log_level="info")
