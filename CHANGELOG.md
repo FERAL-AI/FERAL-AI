@@ -6,6 +6,15 @@ All notable changes to FERAL are documented here.
 
 ## [Unreleased]
 
+## [2026.9.7] - 2026-09-07 - the half that was never wired
+
+### Coverage
+- pytest (feral-core): 11,470 passed, 37 skipped. Run with
+  `-p no:randomly`; see issue #292 for order-dependent failures in
+  one file, all of which pass in isolation.
+- vitest (feral-client-v2): 166 files, 1,335 passed.
+- playwright (feral-client-v2): 106 passed.
+
 ### Fixed
 
 - **A turn produces one answer again, not two that disagree.** A parallel
