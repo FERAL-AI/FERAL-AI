@@ -50,6 +50,12 @@ class FakeManager:
     def __init__(self, channel=None):
         self._channel = channel
 
+    # A @property on ChannelManager, so a @property here too. As a plain
+    # method this double accepted ``mgr.active_channels()``, which is
+    # exactly the call that raised in production while this suite stayed
+    # green. A double that is easier to satisfy than the real object
+    # tests the double.
+    @property
     def active_channels(self):
         return ["telegram"] if self._channel else []
 

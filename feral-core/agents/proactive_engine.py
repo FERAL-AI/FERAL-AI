@@ -1226,7 +1226,14 @@ class ProactiveEngine:
             try:
                 await cb(msg)
             except Exception as e:
-                logger.warning("Proactive delivery error: %s", e)
+                # exc_info, because this handler stands between a
+                # failing callback and the only report of it. Without
+                # the traceback "'list' object is not callable" names
+                # no file, no line and no callback.
+                logger.warning(
+                    "Proactive delivery error in %s: %s",
+                    getattr(cb, "__qualname__", cb), e, exc_info=True,
+                )
 
     async def _execute_automation(self, msg: ProactiveMessage):
         """Execute smart home / automation actions attached to proactive alerts.
