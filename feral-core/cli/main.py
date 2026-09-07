@@ -780,6 +780,13 @@ def _spawn_brain_server(
                 **ssl_kwargs,
             )
             server = _uvicorn.Server(config)
+            # Record where this brain serves, into its own FERAL_HOME, so
+            # `feral <cmd>` pointed at that home addresses THIS brain.
+            try:
+                from config.runtime import record_runtime_endpoint
+                record_runtime_endpoint(port)
+            except Exception:
+                pass
             server_holder["server"] = server
             server_ready.set()
             server.run()

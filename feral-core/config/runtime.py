@@ -150,6 +150,72 @@ def brain_port() -> int:
     return 9090
 
 
+# ── The endpoint of the brain living in this FERAL_HOME ───────────
+#
+# ``brain_public_port`` consulted environment variables and nothing
+# else, so every ``feral`` command addressed localhost:9090 no matter
+# which FERAL_HOME it was pointed at. Running a second brain and
+# administering it was therefore impossible without also exporting
+# FERAL_PORT: the commands succeeded, against the WRONG brain, and said
+# so cheerfully. Measured on 2026-09-07, ``FERAL_HOME=<B> feral sync
+# peer scope grant <A> work`` granted the scope on A, to A itself, and
+# left B with an empty roster. B then correctly refused every operation
+# A sent it, and the feature looked broken while it was working.
+#
+# So a serving brain records where it is, in its own home, and the
+# resolver below reads it. Env still wins, because an operator behind a
+# proxy is describing something this file cannot observe.
+
+_RUNTIME_STATE_FILE = "runtime.json"
+
+
+def _runtime_state_path() -> "Path":
+    from config.loader import feral_home  # local import: avoids a cycle
+    return feral_home() / _RUNTIME_STATE_FILE
+
+
+def record_runtime_endpoint(port: int) -> None:
+    """Record the port this process is about to serve on. Never raises.
+
+    Written at serve time into this brain's own FERAL_HOME, so a CLI
+    pointed at that home can find it. Best effort: a brain that cannot
+    write its own home has larger problems than CLI addressing, and
+    failing to boot over it would be the wrong trade.
+    """
+    import json as _json
+    import os as _os
+
+    try:
+        path = _runtime_state_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".json.tmp")
+        tmp.write_text(_json.dumps({"port": int(port), "pid": _os.getpid()}))
+        _os.replace(tmp, path)
+    except Exception:
+        pass
+
+
+def running_brain_port() -> int | None:
+    """The port the brain in this FERAL_HOME last served on, if known.
+
+    ``None`` when nothing has served here, or when the record is
+    unreadable or nonsensical. A stale record is not dangerous: the
+    caller gets a connection refused, which is the same outcome as
+    guessing 9090 at a home with no brain, and a far better one than
+    silently reaching a different brain.
+    """
+    import json as _json
+
+    try:
+        raw = _json.loads(_runtime_state_path().read_text())
+    except Exception:
+        return None
+    port = raw.get("port") if isinstance(raw, dict) else None
+    if isinstance(port, int) and 1 <= port <= 65535:
+        return port
+    return None
+
+
 def brain_public_scheme() -> str:
     return os.getenv("FERAL_PUBLIC_SCHEME", "http")
 
@@ -163,7 +229,20 @@ def brain_public_host() -> str:
 
 
 def brain_public_port() -> int:
-    return _int_env("FERAL_PUBLIC_PORT", "FERAL_BRAIN_PORT", "FERAL_PORT", default=9090)
+    """Env first, then the brain actually serving in this FERAL_HOME.
+
+    The recorded endpoint sits between the env vars and the 9090
+    default so that pointing a command at a home addresses the brain
+    that lives there, while an operator behind a proxy can still
+    override with FERAL_PUBLIC_PORT.
+    """
+    env = _int_env("FERAL_PUBLIC_PORT", "FERAL_BRAIN_PORT", "FERAL_PORT", default=-1)
+    if env != -1:
+        return env
+    recorded = running_brain_port()
+    if recorded is not None:
+        return recorded
+    return 9090
 
 
 def brain_public_base_url() -> str:
