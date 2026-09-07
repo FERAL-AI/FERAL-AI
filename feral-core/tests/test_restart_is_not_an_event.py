@@ -195,3 +195,120 @@ class TestBriefingSurvivesRestart:
         path = tmp_path / "proactive_state.json"
         pe._write_briefing_date(path, "2026-09-05")
         assert json.loads(path.read_text()) == {"briefing_delivered_on": "2026-09-05"}
+
+
+# ─────────────── the hole the first fix left open ────────────────────
+
+class TestStaleJobsBeyondTheOneDayWindow:
+    """Measured on the operator's brain, 2026-09-07, boot at 11:40.
+
+    The boot pass re-armed jobs 4, 9 and 7 correctly and logged "ran 0
+    missed job(s), re-armed 3 without running". One second later job 10,
+    'Spin the cutebot for a few seconds with red lights then halt', ran
+    anyway, and the operator watched the agent answer that it could not,
+    because no CuteBot is connected.
+
+    Job 10 carries the same ``daily 21:00`` as job 9. What differed was
+    staleness: its ``next_run`` was about 38 hours old, and the catch-up
+    query bounded itself with ``next_run >= now - one day``. Being too
+    late excluded it from the pass that would have re-armed it, and the
+    ordinary tick then fired it with no lateness check of any kind.
+
+    The window meant to stop stale runs was the thing that let one
+    through.
+    """
+
+    def test_a_wall_clock_job_missed_by_two_days_is_not_run(self, svc):
+        fired = []
+        svc._callback = lambda job: fired.append(job.id)
+        job = svc.create_job(JobType.SCHEDULED, "daily 21:00", "spin the cutebot", {}, "s1")
+        _make_due(svc, job.id, seconds_ago=38 * 3600)
+
+        svc._catchup_missed_jobs()
+
+        assert fired == [], "a routine 38 hours stale must not fire on boot"
+        assert svc.get_job(job.id).next_run > time.time()
+        assert svc.get_job(job.id).run_count == 0
+
+    def test_an_interval_job_missed_by_a_week_is_not_run_either(self, svc):
+        """'Every 10 minutes' fired once, a week late, is noise."""
+        fired = []
+        svc._callback = lambda job: fired.append(job.id)
+        job = svc.create_job(JobType.SCHEDULED, "every 10m", "poll something", {}, "s1")
+        _make_due(svc, job.id, seconds_ago=7 * 24 * 3600)
+
+        svc._catchup_missed_jobs()
+
+        assert fired == []
+        assert svc.get_job(job.id).next_run > time.time()
+
+    def test_an_interval_job_missed_by_hours_is_still_caught_up(self, svc):
+        """The existing contract has to survive the wider query."""
+        fired = []
+        svc._callback = lambda job: fired.append(job.id)
+        job = svc.create_job(JobType.SCHEDULED, "every 10m", "poll something", {}, "s1")
+        _make_due(svc, job.id, seconds_ago=6 * 3600)
+
+        svc._catchup_missed_jobs()
+
+        assert fired == [job.id]
+
+
+class TestTheOrdinaryTickIsGuardedToo:
+    """Sleeping is not restarting, and it reaches the same wrong action.
+
+    A laptop closed at 21:00 and opened at 09:00 never restarts the
+    brain, so boot catch-up never runs. The scheduler simply wakes to a
+    job whose time passed twelve hours ago. Before this, ``_tick`` fired
+    every due job with no lateness check, so the nightly routine ran
+    over breakfast with no restart anywhere in the story.
+    """
+
+    def test_tick_rearms_a_wall_clock_job_that_slept_past_its_time(self, svc):
+        fired = []
+        svc._callback = lambda job: fired.append(job.id)
+        job = svc.create_job(JobType.SCHEDULED, "daily 21:00", "spin the cutebot", {}, "s1")
+        _make_due(svc, job.id, seconds_ago=12 * 3600)
+
+        svc._tick()
+
+        assert fired == [], "a nightly routine must not fire the next morning"
+        assert svc.get_job(job.id).next_run > time.time()
+        assert svc.get_job(job.id).run_count == 0
+
+    def test_tick_still_fires_a_job_that_is_due_now(self, svc):
+        """The guard must not stop ordinary on-time scheduling."""
+        fired = []
+        svc._callback = lambda job: fired.append(job.id)
+        job = svc.create_job(JobType.SCHEDULED, "daily 21:00", "spin", {}, "s1")
+        _make_due(svc, job.id, seconds_ago=20)
+
+        svc._tick()
+
+        assert fired == [job.id]
+
+    def test_tick_still_fires_an_interval_job_slightly_late(self, svc):
+        fired = []
+        svc._callback = lambda job: fired.append(job.id)
+        job = svc.create_job(JobType.SCHEDULED, "every 10m", "poll", {}, "s1")
+        _make_due(svc, job.id, seconds_ago=90 * 60)
+
+        svc._tick()
+
+        assert fired == [job.id]
+
+
+@pytest.mark.parametrize("cron,late_s,rearm", [
+    ("daily 21:00", 20, False),
+    ("daily 21:00", 10 * 60, False),
+    ("daily 21:00", 12 * 3600, True),
+    ("daily 21:00", 38 * 3600, True),
+    ("0 7 * * *", 3 * 3600, True),
+    ("every 10m", 60, False),
+    ("every 10m", 6 * 3600, False),
+    ("every 10m", 8 * 24 * 3600, True),
+])
+def test_the_shared_lateness_rule(svc, cron, late_s, rearm):
+    """One rule, so boot and tick can never disagree again."""
+    reason = svc._too_late_to_run(cron, time.time() - late_s, time.time())
+    assert bool(reason) is rearm, f"{cron} late {late_s}s -> {reason!r}"

@@ -1014,6 +1014,35 @@ class CronService:
             return True
         return False
 
+    def _too_late_to_run(self, cron: str, next_run: float, now: float) -> str:
+        """Why this overdue job must be re-armed instead of run. "" to run it.
+
+        Lives outside ``_catchup_missed_jobs`` because boot is not the
+        only way a job goes stale. A laptop that sleeps from 21:00 to
+        09:00 never restarts the brain, so the scheduler simply wakes to
+        a job whose time passed twelve hours ago and, before this, fired
+        it on the spot. That is the same wrong action the boot guard was
+        written to stop, reached by a path the boot guard never sees.
+
+        A wall-clock routine names a time, and the time IS the
+        instruction, so running one hours late is wrong rather than
+        merely late. An interval routine has no opinion about when, so
+        it is caught up freely, but not from arbitrarily far in the
+        past: firing "every 10 minutes" once, a week late, is noise.
+        """
+        late_by = now - next_run
+        if self._is_wall_clock_schedule(cron):
+            if late_by > self._CATCHUP_GRACE_SECONDS:
+                return (
+                    f"due {late_by / 60.0:.0f} minutes ago, past the "
+                    f"{self._CATCHUP_GRACE_SECONDS / 60.0:.0f} minute grace "
+                    f"for a time-of-day routine"
+                )
+            return ""
+        if late_by > _ONE_DAY_SECONDS:
+            return f"an interval routine due {late_by / 3600.0:.0f} hours ago"
+        return ""
+
     def _catchup_missed_jobs(self) -> None:
         """On boot, run what was genuinely missed. Nothing else.
 
@@ -1042,13 +1071,12 @@ class CronService:
         second restart inside the same window from firing it twice.
         """
         now = time.time()
-        cutoff = now - _ONE_DAY_SECONDS
         with self._lock:
             rows = self._conn.execute(
                 "SELECT id, description, next_run, last_run, cron_expr "
                 "FROM scheduled_jobs "
-                "WHERE enabled = 1 AND next_run < ? AND next_run >= ?",
-                (now, cutoff),
+                "WHERE enabled = 1 AND next_run < ?",
+                (now,),
             ).fetchall()
         caught_up = 0
         skipped = 0
@@ -1070,13 +1098,12 @@ class CronService:
                 self._rearm_without_running(job_id, cron)
                 continue
 
-            if self._is_wall_clock_schedule(cron) and late_by > self._CATCHUP_GRACE_SECONDS:
+            reason = self._too_late_to_run(cron, next_run, now)
+            if reason:
                 logger.info(
-                    "Missed job '%s' (id=%d, %r) was due %.0f minutes ago, past the "
-                    "%.0f minute grace for a time-of-day routine. Re-arming for its "
-                    "next occurrence rather than running it now.",
-                    name, job_id, cron, late_by / 60.0,
-                    self._CATCHUP_GRACE_SECONDS / 60.0,
+                    "Missed job '%s' (id=%d, %r) is %s. Re-arming for its next "
+                    "occurrence rather than running it now.",
+                    name, job_id, cron, reason,
                 )
                 skipped += 1
                 self._rearm_without_running(job_id, cron)
@@ -1197,6 +1224,15 @@ class CronService:
                     job.id,
                 )
                 break
+            reason = self._too_late_to_run(job.cron_expr, job.next_run, time.time())
+            if reason:
+                logger.info(
+                    "Routine '%s' (id=%d, %r) is %s. Re-arming rather than "
+                    "running it now.",
+                    job.description, job.id, job.cron_expr, reason,
+                )
+                self._rearm_without_running(job.id, job.cron_expr)
+                continue
             self._running_jobs.add(job.id)
             try:
                 self._fire(job)
