@@ -46,6 +46,22 @@ SKIP_DIRS = {
     "_site", ".next",
 }
 
+# Build artifacts that are gitignored, so CI never sees them and a
+# developer who has run a desktop build should not be told their tree
+# is dirty. ``desktop/src-tauri/resources`` is the staged payload: a
+# COPY of feral-core made by stage_bundle.sh, which reproduces whatever
+# the source said at the time it was staged. Linting it reports the
+# same line twice and points at the copy rather than the original.
+# Matched as a path prefix, not a directory name, so an ordinary
+# ``resources`` folder elsewhere is still checked.
+SKIP_PREFIXES = (
+    "desktop/src-tauri/resources/",
+    # Agent worktrees are checkouts of OTHER branches living inside this
+    # one. Linting them reports another branch's text as this tree's
+    # problem, and the operator cannot fix it from here.
+    ".claude/worktrees/",
+)
+
 # Historical records, and this file, which must name what it blocks.
 EXEMPT_FILES = {
     "CHANGELOG.md",
@@ -68,6 +84,8 @@ def violations() -> list[str]:
             continue
         rel = path.relative_to(REPO_ROOT).as_posix()
         if rel in EXEMPT_FILES:
+            continue
+        if rel.startswith(SKIP_PREFIXES):
             continue
         try:
             lines = path.read_text(encoding="utf-8").splitlines()
