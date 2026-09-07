@@ -1,255 +1,261 @@
 {
-    "skill_id": "notes_memory",
-    "version": "1.0.0",
-    "author": "feral-core",
-    "brand": {
-        "name": "Notes & Memory",
-        "primary_color": "#FDCB6E",
-        "secondary_color": "#2D3436",
-        "logo_url": "",
-        "icon_set": "sf_symbols"
-    },
-    "description": "Save notes, reminders, and things to remember. FERAL's personal knowledge base. Recall saved information on demand.",
-    "trigger_phrases": [
-        "remember this",
-        "remember that",
-        "remember",
-        "save a note",
-        "save note",
-        "take a note",
-        "write this down",
-        "don't forget",
-        "what did I save",
-        "my notes",
-        "recall",
-        "what was that thing",
-        "store this",
-        "note that",
-        "note this"
-    ],
-    "categories": [
-        "productivity",
-        "memory",
-        "notes"
-    ],
-    "auth": {
-        "type": "none"
-    },
-    "endpoints": [
+  "skill_id": "notes_memory",
+  "version": "1.0.0",
+  "author": "feral-core",
+  "brand": {
+    "name": "Notes & Memory",
+    "primary_color": "#FDCB6E",
+    "secondary_color": "#2D3436",
+    "logo_url": "",
+    "icon_set": "sf_symbols"
+  },
+  "description": "Save notes, reminders, and things to remember. FERAL's personal knowledge base. Recall saved information on demand.",
+  "trigger_phrases": [
+    "remember this",
+    "remember that",
+    "remember",
+    "save a note",
+    "save note",
+    "take a note",
+    "write this down",
+    "don't forget",
+    "what did I save",
+    "my notes",
+    "recall",
+    "what was that thing",
+    "store this",
+    "note that",
+    "note this"
+  ],
+  "categories": [
+    "productivity",
+    "memory",
+    "notes"
+  ],
+  "auth": {
+    "type": "none"
+  },
+  "endpoints": [
+    {
+      "id": "save_note",
+      "method": "POST",
+      "url": "python://notes_memory/save_note",
+      "description": "Save a note or piece of information to FERAL's memory. User says 'remember X' and X gets stored.",
+      "params": [
         {
-            "id": "save_note",
-            "method": "POST",
-            "url": "python://notes_memory/save_note",
-            "description": "Save a note or piece of information to FERAL's memory. User says 'remember X' and X gets stored.",
-            "params": [
-                {
-                    "name": "content",
-                    "type": "string",
-                    "required": true,
-                    "description": "The content to remember"
-                },
-                {
-                    "name": "tags",
-                    "type": "array",
-                    "items": {
-                        "type": "string"
-                    },
-                    "required": false,
-                    "description": "Tags for categorization"
-                },
-                {
-                    "name": "importance",
-                    "type": "string",
-                    "required": false,
-                    "default": "normal",
-                    "description": "Priority",
-                    "enum": [
-                        "low",
-                        "normal",
-                        "high",
-                        "critical"
-                    ]
-                }
-            ],
-            "returns_description": "{id, content, tags, created_at, importance}",
-            "ui_hint": "detail_card"
+          "name": "content",
+          "type": "string",
+          "required": true,
+          "description": "The content to remember"
         },
         {
-            "id": "search_notes",
-            "read_only_hint": true,
-            "method": "GET",
-            "url": "python://notes_memory/search_notes",
-            "description": "Search saved NOTES ONLY (user-written snippets tagged in memory). Does NOT query episodic robot/device activity, chat turns, or calendar events — those live in the fused timeline. For temporal recall ('what did my cutebot do yesterday', 'what was I doing this morning') call `fused_timeline`, NOT this endpoint.",
-            "params": [
-                {
-                    "name": "query",
-                    "type": "string",
-                    "required": true,
-                    "description": "Search query"
-                },
-                {
-                    "name": "limit",
-                    "type": "integer",
-                    "required": false,
-                    "default": "10",
-                    "description": "Max results"
-                }
-            ],
-            "returns_description": "Array of {id, content, tags, created_at, relevance_score}",
-            "ui_hint": "list",
-            "result_budget": "feed"
+          "name": "tags",
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "required": false,
+          "description": "Tags for categorization"
         },
         {
-            "id": "list_recent",
-            "read_only_hint": true,
-            "method": "GET",
-            "url": "python://notes_memory/list_recent",
-            "description": "List the most recently saved notes.",
-            "params": [
-                {
-                    "name": "limit",
-                    "type": "integer",
-                    "required": false,
-                    "default": "10",
-                    "description": "Number of recent notes"
-                }
-            ],
-            "returns_description": "Array of {id, content, tags, created_at}",
-            "ui_hint": "list",
-            "result_budget": "feed"
+          "name": "importance",
+          "type": "string",
+          "required": false,
+          "default": "normal",
+          "description": "Priority",
+          "enum": [
+            "low",
+            "normal",
+            "high",
+            "critical"
+          ]
         },
         {
-            "id": "list_conversations",
-            "read_only_hint": true,
-            "method": "GET",
-            "url": "python://notes_memory/list_conversations",
-            "description": "List the ambient conversations the operator's glasses have recorded, newest first. CALL THIS whenever you are asked whether any conversation was recorded, what was discussed, who was present, or what was said in a meeting. Do NOT answer such a question from your own idea of what you can do: ambient capture is a real, shipped feature and the recordings live in a store only this tool can see. Returns {total, returned, pending, conversations:[{transcript_id, status, recorded_at, summary, people, topics, commitments}]}. total=0 is the only evidence that nothing was recorded. status='pending' means the transcript arrived but is still being summarized, which is NOT the same as no conversation.",
-            "params": [
-                {
-                    "name": "limit",
-                    "type": "integer",
-                    "required": false,
-                    "default": "20",
-                    "description": "How many conversations to return, newest first (max 100)"
-                },
-                {
-                    "name": "with_commitments_only",
-                    "type": "boolean",
-                    "required": false,
-                    "default": "false",
-                    "description": "Return only conversations that produced at least one commitment"
-                },
-                {
-                    "name": "include_detail",
-                    "type": "boolean",
-                    "required": false,
-                    "default": "false",
-                    "description": "Include the full transcript text. Off by default: transcripts run to 20k+ characters and would bury the answer."
-                }
-            ],
-            "returns_description": "{total, returned, pending, conversations:[{transcript_id, status, recorded_at, summary, people, topics, commitments, physiological_note}]}",
-            "ui_hint": "list",
-            "result_budget": "feed"
-        },
-        {
-            "id": "search_conversations",
-            "read_only_hint": true,
-            "method": "GET",
-            "url": "python://notes_memory/search_conversations",
-            "description": "Search recorded ambient conversations by a word or name, across each conversation's summary, the people in it, its topics, its commitments and the transcript itself. Use for 'what did I discuss with Noah', 'did we talk about the investor round', 'when did the deadline come up'. Prefer this over fused_timeline for questions about what was SAID: fused_timeline is time-windowed and cannot answer 'do I have any'.",
-            "params": [
-                {
-                    "name": "query",
-                    "type": "string",
-                    "required": true,
-                    "description": "Word, name or phrase to look for"
-                },
-                {
-                    "name": "limit",
-                    "type": "integer",
-                    "required": false,
-                    "default": "20",
-                    "description": "Maximum conversations to return (max 100)"
-                },
-                {
-                    "name": "include_detail",
-                    "type": "boolean",
-                    "required": false,
-                    "default": "false",
-                    "description": "Include the full transcript text of each match"
-                }
-            ],
-            "returns_description": "{query, total_searched, matched, conversations:[...]}",
-            "ui_hint": "list",
-            "result_budget": "feed"
-        },
-        {
-            "id": "conversation_commitments",
-            "read_only_hint": true,
-            "method": "GET",
-            "url": "python://notes_memory/conversation_commitments",
-            "description": "Every commitment the operator made out loud in a recorded conversation, with the conversation it came from. This is the direct answer to 'what did I say I'd do' and 'what did I promise', which is the question ambient capture exists to answer. Each entry carries the words spoken, a due date when one was actually said, and the summary and people of the conversation it came from, so the answer can be grounded rather than asserted.",
-            "params": [
-                {
-                    "name": "limit",
-                    "type": "integer",
-                    "required": false,
-                    "default": "50",
-                    "description": "Maximum commitments to return (max 200)"
-                }
-            ],
-            "returns_description": "{total_conversations, count, commitments:[{text, due_iso, transcript_id, recorded_at, from_conversation, people}]}",
-            "ui_hint": "list",
-            "result_budget": "feed"
-        },
-        {
-            "id": "fused_timeline",
-            "method": "POST",
-            "url": "python://notes_memory/fused_timeline",
-            "description": "Answer temporal-recall questions ('what did I do yesterday', 'summarize my morning', 'last Tuesday afternoon') by fusing episodes + notes + knowledge graph + calendar + health into a single chronological timeline. Returns {entries, summary, window, sources_queried, degraded_sources}. Sources that aren't configured (no calendar token, no health provider) are gracefully skipped and listed in degraded_sources so the UI can render an honest chip instead of a silently missing section. Call this for any natural-language temporal-recall query; the orchestrator emits a TimelineCard frame to the chat client in parallel.",
-            "params": [
-                {
-                    "name": "query",
-                    "type": "string",
-                    "required": true,
-                    "description": "The original user question, e.g. 'what did I do yesterday?'"
-                },
-                {
-                    "name": "window_label",
-                    "type": "string",
-                    "required": false,
-                    "default": "yesterday",
-                    "description": "Natural-language window: yesterday | today | morning | afternoon | evening | last_week | last_tuesday | etc. Used when from_ts/to_ts are not provided."
-                },
-                {
-                    "name": "from_ts",
-                    "type": "number",
-                    "required": false,
-                    "description": "Explicit UNIX epoch start of the window (overrides window_label)."
-                },
-                {
-                    "name": "to_ts",
-                    "type": "number",
-                    "required": false,
-                    "description": "Explicit UNIX epoch end of the window (overrides window_label)."
-                },
-                {
-                    "name": "per_source_limit",
-                    "type": "integer",
-                    "required": false,
-                    "default": "50",
-                    "description": "Cap entries returned per source. Default 50."
-                }
-            ],
-            "returns_description": "{entries: [{type, timestamp, title, content, source, metadata}], summary, window: {from, to, label}, sources_queried: [...], degraded_sources: [{source, reason}]}",
-            "ui_hint": "timeline_card",
-            "result_budget": "feed"
+          "name": "scope",
+          "type": "string",
+          "required": false,
+          "description": "Sharing boundary for this note. Omit to keep it private to this brain, which is the default and what happens if you are unsure. Naming a scope makes the note eligible to replicate to peer brains that have been granted that exact scope, and only those. Never set this unless the user asked for the note to be shared. 'private' is reserved and never replicates."
         }
-    ],
-    "flows": [],
-    "crons": [],
-    "triggers": [],
-    "permissions": [],
-    "requires_daemon": false,
-    "max_calls_per_hour": 10000
+      ],
+      "returns_description": "{id, content, tags, created_at, importance}",
+      "ui_hint": "detail_card"
+    },
+    {
+      "id": "search_notes",
+      "read_only_hint": true,
+      "method": "GET",
+      "url": "python://notes_memory/search_notes",
+      "description": "Search saved NOTES ONLY (user-written snippets tagged in memory). Does NOT query episodic robot/device activity, chat turns, or calendar events \u2014 those live in the fused timeline. For temporal recall ('what did my cutebot do yesterday', 'what was I doing this morning') call `fused_timeline`, NOT this endpoint.",
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "Search query"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "10",
+          "description": "Max results"
+        }
+      ],
+      "returns_description": "Array of {id, content, tags, created_at, relevance_score}",
+      "ui_hint": "list",
+      "result_budget": "feed"
+    },
+    {
+      "id": "list_recent",
+      "read_only_hint": true,
+      "method": "GET",
+      "url": "python://notes_memory/list_recent",
+      "description": "List the most recently saved notes.",
+      "params": [
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "10",
+          "description": "Number of recent notes"
+        }
+      ],
+      "returns_description": "Array of {id, content, tags, created_at}",
+      "ui_hint": "list",
+      "result_budget": "feed"
+    },
+    {
+      "id": "list_conversations",
+      "read_only_hint": true,
+      "method": "GET",
+      "url": "python://notes_memory/list_conversations",
+      "description": "List the ambient conversations the operator's glasses have recorded, newest first. CALL THIS whenever you are asked whether any conversation was recorded, what was discussed, who was present, or what was said in a meeting. Do NOT answer such a question from your own idea of what you can do: ambient capture is a real, shipped feature and the recordings live in a store only this tool can see. Returns {total, returned, pending, conversations:[{transcript_id, status, recorded_at, summary, people, topics, commitments}]}. total=0 is the only evidence that nothing was recorded. status='pending' means the transcript arrived but is still being summarized, which is NOT the same as no conversation.",
+      "params": [
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "20",
+          "description": "How many conversations to return, newest first (max 100)"
+        },
+        {
+          "name": "with_commitments_only",
+          "type": "boolean",
+          "required": false,
+          "default": "false",
+          "description": "Return only conversations that produced at least one commitment"
+        },
+        {
+          "name": "include_detail",
+          "type": "boolean",
+          "required": false,
+          "default": "false",
+          "description": "Include the full transcript text. Off by default: transcripts run to 20k+ characters and would bury the answer."
+        }
+      ],
+      "returns_description": "{total, returned, pending, conversations:[{transcript_id, status, recorded_at, summary, people, topics, commitments, physiological_note}]}",
+      "ui_hint": "list",
+      "result_budget": "feed"
+    },
+    {
+      "id": "search_conversations",
+      "read_only_hint": true,
+      "method": "GET",
+      "url": "python://notes_memory/search_conversations",
+      "description": "Search recorded ambient conversations by a word or name, across each conversation's summary, the people in it, its topics, its commitments and the transcript itself. Use for 'what did I discuss with Noah', 'did we talk about the investor round', 'when did the deadline come up'. Prefer this over fused_timeline for questions about what was SAID: fused_timeline is time-windowed and cannot answer 'do I have any'.",
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "Word, name or phrase to look for"
+        },
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "20",
+          "description": "Maximum conversations to return (max 100)"
+        },
+        {
+          "name": "include_detail",
+          "type": "boolean",
+          "required": false,
+          "default": "false",
+          "description": "Include the full transcript text of each match"
+        }
+      ],
+      "returns_description": "{query, total_searched, matched, conversations:[...]}",
+      "ui_hint": "list",
+      "result_budget": "feed"
+    },
+    {
+      "id": "conversation_commitments",
+      "read_only_hint": true,
+      "method": "GET",
+      "url": "python://notes_memory/conversation_commitments",
+      "description": "Every commitment the operator made out loud in a recorded conversation, with the conversation it came from. This is the direct answer to 'what did I say I'd do' and 'what did I promise', which is the question ambient capture exists to answer. Each entry carries the words spoken, a due date when one was actually said, and the summary and people of the conversation it came from, so the answer can be grounded rather than asserted.",
+      "params": [
+        {
+          "name": "limit",
+          "type": "integer",
+          "required": false,
+          "default": "50",
+          "description": "Maximum commitments to return (max 200)"
+        }
+      ],
+      "returns_description": "{total_conversations, count, commitments:[{text, due_iso, transcript_id, recorded_at, from_conversation, people}]}",
+      "ui_hint": "list",
+      "result_budget": "feed"
+    },
+    {
+      "id": "fused_timeline",
+      "method": "POST",
+      "url": "python://notes_memory/fused_timeline",
+      "description": "Answer temporal-recall questions ('what did I do yesterday', 'summarize my morning', 'last Tuesday afternoon') by fusing episodes + notes + knowledge graph + calendar + health into a single chronological timeline. Returns {entries, summary, window, sources_queried, degraded_sources}. Sources that aren't configured (no calendar token, no health provider) are gracefully skipped and listed in degraded_sources so the UI can render an honest chip instead of a silently missing section. Call this for any natural-language temporal-recall query; the orchestrator emits a TimelineCard frame to the chat client in parallel.",
+      "params": [
+        {
+          "name": "query",
+          "type": "string",
+          "required": true,
+          "description": "The original user question, e.g. 'what did I do yesterday?'"
+        },
+        {
+          "name": "window_label",
+          "type": "string",
+          "required": false,
+          "default": "yesterday",
+          "description": "Natural-language window: yesterday | today | morning | afternoon | evening | last_week | last_tuesday | etc. Used when from_ts/to_ts are not provided."
+        },
+        {
+          "name": "from_ts",
+          "type": "number",
+          "required": false,
+          "description": "Explicit UNIX epoch start of the window (overrides window_label)."
+        },
+        {
+          "name": "to_ts",
+          "type": "number",
+          "required": false,
+          "description": "Explicit UNIX epoch end of the window (overrides window_label)."
+        },
+        {
+          "name": "per_source_limit",
+          "type": "integer",
+          "required": false,
+          "default": "50",
+          "description": "Cap entries returned per source. Default 50."
+        }
+      ],
+      "returns_description": "{entries: [{type, timestamp, title, content, source, metadata}], summary, window: {from, to, label}, sources_queried: [...], degraded_sources: [{source, reason}]}",
+      "ui_hint": "timeline_card",
+      "result_budget": "feed"
+    }
+  ],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "permissions": [],
+  "requires_daemon": false,
+  "max_calls_per_hour": 10000
 }

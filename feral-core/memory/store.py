@@ -4135,8 +4135,25 @@ class MemoryStore:
     # Legacy Notes API (backward compat)
     # ─────────────────────────────────────────────
 
-    async def save(self, content: str, tags: list[str] = None, importance: str = "normal", source: str = "user") -> dict:
-        return await save_note(self, content=content, tags=tags, importance=importance, source=source)
+    async def save(
+        self, content: str, tags: list[str] = None, importance: str = "normal",
+        source: str = "user", scope: str | None = None,
+    ) -> dict:
+        """``scope`` names the sharing boundary and defaults to None.
+
+        ``save_note`` has accepted a scope since scoped sync landed, and
+        this wrapper was the one place it was dropped. Every note in the
+        product is written through here, so every note in the WAL was
+        private and a granted scope replicated nothing: the enforcement
+        half of federation shipped without a producer.
+
+        None still means private. Sharing stays something the caller
+        asks for by name.
+        """
+        return await save_note(
+            self, content=content, tags=tags, importance=importance,
+            source=source, scope=scope,
+        )
 
     async def search(self, query: str, limit: int = 10) -> list[dict]:
         return await search_notes(self, query=query, limit=limit)

@@ -669,9 +669,15 @@ async def memory_save(body: dict):
     content = body.get("content", "")
     tags = body.get("tags", [])
     importance = body.get("importance", "normal")
+    # Omitted means private, which is what every note was before this
+    # field existed. A note only leaves this machine if the caller names
+    # a scope AND a peer holds a grant for it.
+    scope = body.get("scope") or None
     if not content:
         return {"error": "content is required"}
-    return await state.memory.save(content=content, tags=tags, importance=importance)
+    return await state.memory.save(
+        content=content, tags=tags, importance=importance, scope=scope,
+    )
 
 
 @router.get("/internal/memory/search")
