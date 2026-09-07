@@ -140,6 +140,8 @@ class BaselineEngine:
         self._conn.executescript(self._DDL)
         self._alert_listeners: list = []
         self._sample_writes = 0
+        # Readings refused by the plausibility gate this run.
+        self._rejected_samples = 0
 
     def on_alert(self, callback) -> None:
         """Register a listener that fires every time an alert is persisted.
@@ -150,6 +152,65 @@ class BaselineEngine:
         """
         self._alert_listeners.append(callback)
 
+    # ── Plausibility gate ────────────────────────────────────────
+    #
+    # ``record`` accepted any float, so a sensor dropout entered the
+    # rolling window as if it were a reading and moved the mean and the
+    # standard deviation the alerting is measured against.
+    #
+    # Measured on the operator's brain on 2026-09-07. 2,395 heart-rate
+    # samples from paired glasses, twelve of them below 10 bpm and one
+    # at 8.0, which is not a heart rate a living wearer produces. The
+    # learned ``hr_resting`` baseline was mean 100.71 with sd 23.74, and
+    # 102 alerts had fired, most of them a normal reading measured as a
+    # multi-sigma "critical" anomaly against a distribution the
+    # dropouts had widened.
+    #
+    # The ranges below are deliberately wide: the job here is to reject
+    # what a body cannot do, not to judge what a body should do. An
+    # elite resting pulse near 30 and a hard effort at 200 both belong
+    # in the window. Anything outside is instrument error, and averaging
+    # instrument error into a personal baseline is how a diagnostic
+    # starts lying about the person.
+    #
+    # Unknown metrics are not range-checked. Inventing a range for a
+    # metric this file has never seen would reject real data, and the
+    # failure this gate exists to prevent is the opposite one.
+    _PLAUSIBLE_RANGES: dict[str, tuple[float, float]] = {
+        "hr": (25.0, 220.0),
+        "hr_resting": (25.0, 220.0),
+        "heart_rate": (25.0, 220.0),
+        "spo2": (50.0, 100.0),
+        "spo2_pct": (50.0, 100.0),
+        "hrv_ms": (1.0, 500.0),
+        "skin_temp": (20.0, 45.0),
+        "respiration": (4.0, 60.0),
+    }
+
+    @staticmethod
+    def _base_metric(metric_id: str) -> str:
+        """``hr_resting:jw_health_glasses`` and ``hr_resting`` are one metric.
+
+        Per-source baselines carry the source after a colon so they can
+        be compared separately; the plausible range is a property of the
+        body, not of which device measured it.
+        """
+        return (metric_id or "").split(":", 1)[0].strip().lower()
+
+    @classmethod
+    def is_plausible(cls, metric_id: str, value: float) -> bool:
+        """False for a reading no body produces, so it never lands."""
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            return False
+        if v != v or v in (float("inf"), float("-inf")):  # NaN / inf
+            return False
+        bounds = cls._PLAUSIBLE_RANGES.get(cls._base_metric(metric_id))
+        if bounds is None:
+            return True
+        return bounds[0] <= v <= bounds[1]
+
     def record(
         self,
         metric_id: str,
@@ -157,7 +218,21 @@ class BaselineEngine:
         category: str = "general",
         window_size: int = 14,
     ) -> None:
-        """Add a data point and recompute rolling statistics."""
+        """Add a data point and recompute rolling statistics.
+
+        A reading outside the plausible range for its metric is dropped
+        rather than recorded. See ``_PLAUSIBLE_RANGES``.
+        """
+        if not self.is_plausible(metric_id, value):
+            self._rejected_samples += 1
+            logger.warning(
+                "baseline: rejected implausible %s sample %r; it would have "
+                "moved the mean and sd that anomaly alerts are measured "
+                "against. Total rejected this run: %d",
+                metric_id, value, self._rejected_samples,
+            )
+            return
+
         row = self._conn.execute(
             "SELECT values_json, window_size FROM baselines WHERE metric_id = ?",
             (metric_id,),
@@ -170,7 +245,12 @@ class BaselineEngine:
             values = []
             ws = window_size
 
-        values.append(value)
+        # Windows written before the gate existed still hold dropouts.
+        # Drop them here rather than requiring a migration: the next
+        # sample for the metric repairs its own baseline.
+        values = [v for v in values if self.is_plausible(metric_id, v)]
+
+        values.append(float(value))
         if len(values) > ws:
             values = values[-ws:]
 
