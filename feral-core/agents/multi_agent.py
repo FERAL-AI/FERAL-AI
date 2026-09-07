@@ -882,10 +882,47 @@ class AgentRouter:
 
 
 class ResponseMerger:
-    """Merges results from multiple workers into a coherent response."""
+    """Reduces several workers' answers to the one answer the user sees.
+
+    A parallel strategy hands every worker the WHOLE user question, not
+    a slice of it, so workers do not produce complementary halves of an
+    answer. They produce competing whole answers. Joining them with a
+    blank line, which is what this did until 2026-09-07, puts two
+    answers on screen that can and do contradict each other, and gives
+    the last word to whichever worker happened to be second.
+
+    Measured on the operator's brain. A ``['general', 'research']``
+    parallel turn was asked which apps were open and whether the running
+    brain was on the latest PyPI version. ``general`` ran six tools,
+    listed the real windows, and caught a stale search snippet by
+    opening the PyPI page itself. ``research`` has no device tools, so
+    it said it could not inspect the Mac and reported the stale
+    2026.6.29. The user was shown both, in that order, under one reply.
+
+    So: synthesise into one answer when a model is available, and
+    otherwise fall back to the single best-grounded answer. Never
+    concatenate.
+    """
+
+    @staticmethod
+    def _grounding(result: WorkerResult) -> tuple:
+        """How much of this answer rests on tool evidence.
+
+        A worker that called tools and got results back is preferred
+        over one that reasoned from the prompt alone, because the
+        failure this ordering exists to prevent is a worker without the
+        relevant tools declaring the task impossible.
+        """
+        results = result.tool_results or []
+        failed = sum(
+            1 for x in results
+            if isinstance(x, dict) and (x.get("error") or x.get("success") is False)
+        )
+        return (len(results) - failed, len(result.tool_calls_made or []), len(result.text or ""))
 
     @staticmethod
     def merge(results: list[WorkerResult]) -> str:
+        """Deterministic reduction. Calls no model and touches no network."""
         valid = [r for r in results if r.text and not r.error]
         if not valid:
             errors = [r.error for r in results if r.error]
@@ -894,11 +931,63 @@ class ResponseMerger:
         if len(valid) == 1:
             return valid[0].text
 
-        parts = []
-        for r in valid:
-            parts.append(r.text)
+        return max(valid, key=ResponseMerger._grounding).text
 
-        return "\n\n".join(parts)
+    @staticmethod
+    async def synthesize(
+        results: list[WorkerResult],
+        llm,
+        user_text: str = "",
+        usage_sink: dict | None = None,
+    ) -> str:
+        """One answer from several, using the model when there is one.
+
+        Falls back to ``merge`` on any failure, so a synthesis outage
+        degrades to the best-grounded worker rather than to no reply.
+        """
+        valid = [r for r in results if r.text and not r.error]
+        if len(valid) <= 1 or llm is None:
+            return ResponseMerger.merge(results)
+
+        blocks = []
+        for i, r in enumerate(valid, start=1):
+            ran = len(r.tool_calls_made or [])
+            blocks.append(
+                f"--- Answer {i} (worker={r.worker_id}, tool calls={ran}) ---\n{r.text}"
+            )
+        prompt = (
+            "Several assistants independently answered the SAME user question. "
+            "They had different tools available, so one may wrongly claim "
+            "something could not be checked when another actually checked it.\n\n"
+            "Write the single answer the user should see.\n"
+            "- Prefer a statement backed by tool results over a statement that "
+            "the thing could not be determined.\n"
+            "- Where the answers conflict, keep the better-grounded one and "
+            "drop the other. Do not present both.\n"
+            "- Do not add any fact that is not in the answers below.\n"
+            "- Write in the first person as a single assistant. Never mention "
+            "workers, answers, or that more than one attempt was made.\n\n"
+            f"User asked: {user_text}\n\n" + "\n\n".join(blocks) + "\n\nAnswer:"
+        )
+        try:
+            response = await llm.chat(
+                [{"role": "user", "content": prompt}],
+                tools=None, temperature=0.2, max_tokens=1200,
+            )
+            # Synthesis runs on every parallel turn, so its tokens belong
+            # in the turn total, the same reasoning the router uses.
+            if usage_sink is not None:
+                accumulate_turn_usage(usage_sink, response)
+            text_content, _ = llm.extract_response(response)
+            cleaned = (text_content or "").strip()
+            if cleaned:
+                return cleaned
+            logger.warning("multi-agent synthesis returned no text; using best-grounded answer")
+        except Exception:
+            logger.warning(
+                "multi-agent synthesis failed; using best-grounded answer", exc_info=True
+            )
+        return ResponseMerger.merge(results)
 
 
 class MultiAgentOrchestrator:
@@ -1061,7 +1150,9 @@ class MultiAgentOrchestrator:
                 ]
                 if provider_failures:
                     raise MultiAgentProviderError(provider_failures[0])
-            return ResponseMerger.merge(valid_results)
+            return await ResponseMerger.synthesize(
+                valid_results, self._llm, text, usage_sink=turn_usage,
+            )
         else:
             result = await workers[0].run(session_id, text)
             merge_turn_usage(turn_usage, result.usage)
