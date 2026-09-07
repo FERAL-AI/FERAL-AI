@@ -36,14 +36,14 @@ CORE_DIR="$(cd "$(dirname "$0")/../feral-core" && pwd)"
 echo -e "\n[1/5] Starting Brain A on port $PORT_A..."
 FERAL_HOME=/tmp/feral-sync-test-a \
 FERAL_SYNC_PASSPHRASE="$PASSPHRASE" \
-    python -m uvicorn api.server:app --host 127.0.0.1 --port "$PORT_A" \
+    python -m uvicorn api.server:uvicorn_app --no-proxy-headers --host 127.0.0.1 --port "$PORT_A" \
     --log-level warning &
 PID_A=$!
 
 echo "[2/5] Starting Brain B on port $PORT_B..."
 FERAL_HOME=/tmp/feral-sync-test-b \
 FERAL_SYNC_PASSPHRASE="$PASSPHRASE" \
-    python -m uvicorn api.server:app --host 127.0.0.1 --port "$PORT_B" \
+    python -m uvicorn api.server:uvicorn_app --no-proxy-headers --host 127.0.0.1 --port "$PORT_B" \
     --log-level warning &
 PID_B=$!
 

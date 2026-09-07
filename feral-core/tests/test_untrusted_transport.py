@@ -128,7 +128,7 @@ def test_session_socket_is_open_on_the_trusted_app(apps):
 
 
 def test_uvicorn_proxy_header_kwargs_are_explicit():
-    """Pin the values rather than inheriting whatever uvicorn defaults to.
+    """Pin the composed entrypoint rather than inheriting Uvicorn defaults.
 
     ``_spawn_brain_server`` used to build ``uvicorn.Config`` without
     naming these, silently inheriting ``proxy_headers=True`` with
@@ -136,15 +136,17 @@ def test_uvicorn_proxy_header_kwargs_are_explicit():
     it is the only reason Tailscale Funnel traffic does not present as
     loopback and take the auth bypass. A uvicorn release flipping it
     would open the entire API with no code change here and no test
-    failing, so the values are asserted at the source level.
+    failing. The supported entrypoint now preserves the raw socket peer
+    outside that same loopback-only rewrite, so Uvicorn must not add a
+    second outer proxy-header middleware.
     """
     import inspect
 
     from cli import main as cli_main
 
     src = inspect.getsource(cli_main._spawn_brain_server)
-    assert "proxy_headers=True" in src, src
-    assert 'forwarded_allow_ips="127.0.0.1"' in src, src
+    assert '"api.server:uvicorn_app"' in src, src
+    assert "proxy_headers=False" in src, src
 
 
 def test_session_socket_requires_a_token_over_an_untrusted_transport(apps):

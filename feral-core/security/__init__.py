@@ -66,6 +66,13 @@ _LAZY: dict[str, tuple[str, str]] = {
     "recent_events": ("security.audit_log", "recent_events"),
     "audit_log_path": ("security.audit_log", "audit_log_path"),
     "AuditFailure": ("security.audit_log", "AuditFailure"),
+    # proxy_auth
+    "ProxyAuthConfig": ("security.proxy_auth", "ProxyAuthConfig"),
+    "ProxyAuthError": ("security.proxy_auth", "ProxyAuthError"),
+    "ProxyIdentity": ("security.proxy_auth", "ProxyIdentity"),
+    "authenticate_proxy": ("security.proxy_auth", "authenticate_proxy"),
+    "authorize_browser_origin": ("security.proxy_auth", "authorize_browser_origin"),
+    "config_from_env": ("security.proxy_auth", "config_from_env"),
 }
 
 __all__ = sorted(_LAZY.keys())

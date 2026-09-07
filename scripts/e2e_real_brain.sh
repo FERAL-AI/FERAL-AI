@@ -53,7 +53,8 @@ if [ -z "${FERAL_E2E_URL:-}" ]; then
     echo "Starting a brain on 127.0.0.1:$PORT with FERAL_HOME=$HOME_DIR ..."
     (
         cd "$ROOT/feral-core"
-        FERAL_HOME="$HOME_DIR" exec python -m uvicorn api.server:app \
+        FERAL_HOME="$HOME_DIR" exec python -m uvicorn api.server:uvicorn_app \
+            --no-proxy-headers \
             --host 127.0.0.1 --port "$PORT"
     ) > /tmp/feral-e2e-brain.log 2>&1 &
     BRAIN_PID=$!

@@ -180,6 +180,83 @@ feral.example.com {
 
 Caddy handles TLS automatically via Let's Encrypt and upgrades WebSocket connections without extra configuration.
 
+### Trusted proxy browser authentication
+
+FERAL's trusted reverse-proxy browser authentication is disabled by default.
+When enabled, the backend accepts the proxy assertion only when the exact
+socket peer is in `FERAL_PROXY_AUTH_TRUSTED_PROXIES`; forwarded client-IP
+headers never create trust. Configure a shared assertion secret and canonical
+allowed origins. Optional user and group allowlists can further restrict
+access. A group assertion may contain multiple groups separated by `|` (or by
+the configured separator).
+
+The reverse proxy must authenticate the browser first, remove any client-
+supplied copies of the assertion and identity headers, and then inject fresh
+identity headers. Never expose `FERAL_API_KEY` or
+`FERAL_PROXY_AUTH_SECRET` to browser code. Keep WebSocket upgrade forwarding
+enabled for `/v1/session`.
+
+Set these variables in the backend environment:
+
+| Variable | Default | Description |
+|:---------|:--------|:------------|
+| `FERAL_PROXY_AUTH_ENABLED` | `false` | Enable trusted-proxy browser authentication. |
+| `FERAL_PROXY_AUTH_TRUSTED_PROXIES` | — | Comma-separated trusted socket-peer IPs or CIDR ranges. |
+| `FERAL_PROXY_AUTH_SECRET` | — | Server-side shared assertion secret. |
+| `FERAL_PROXY_AUTH_SECRET_HEADER` | `X-FERAL-Proxy-Secret` | Assertion header name. |
+| `FERAL_PROXY_AUTH_IDENTITY_HEADER` | `X-FERAL-Proxy-User` | Authenticated user header name. |
+| `FERAL_PROXY_AUTH_GROUPS_HEADER` | `X-FERAL-Proxy-Groups` | Group header name. |
+| `FERAL_PROXY_AUTH_GROUPS_SEPARATOR` | `\|` | Single-character group separator; defaults to `|`. |
+| `FERAL_PROXY_AUTH_ALLOWED_USERS` | — | Optional comma-separated user allowlist. |
+| `FERAL_PROXY_AUTH_ALLOWED_GROUPS` | — | Optional comma-separated group allowlist; any intersection is accepted. |
+| `FERAL_PROXY_AUTH_ALLOWED_ORIGINS` | — | Required comma-separated canonical browser origins. |
+
+For Nginx on the same host as FERAL, trust the connection peer, not the
+forwarded browser address:
+
+```bash
+FERAL_PROXY_AUTH_TRUSTED_PROXIES=127.0.0.1
+```
+
+Put the injected headers in a reusable Nginx snippet and include it in every
+location that proxies to FERAL, including the `/v1/session` WebSocket
+location. The identity variables below are placeholders populated by the
+authentication module in front of FERAL:
+
+```nginx
+# /etc/nginx/snippets/feral-proxy-auth.conf
+proxy_set_header X-FERAL-Proxy-User   $authenticated_user;
+proxy_set_header X-FERAL-Proxy-Groups $authenticated_groups;
+include /etc/nginx/snippets/feral-proxy-auth-secret.conf;
+```
+
+Keep `feral-proxy-auth-secret.conf` root-readable only; it should contain the
+matching `proxy_set_header X-FERAL-Proxy-Secret ...` directive. These
+directives replace client-supplied values rather than forwarding them. Nginx
+may still send `X-Forwarded-For`: the supported server entrypoint preserves
+the `127.0.0.1` socket peer before Uvicorn rewrites the request client.
+
+`feral serve` uses that entrypoint automatically. If Uvicorn is launched
+directly, use `python -m uvicorn api.server:uvicorn_app --no-proxy-headers`;
+letting Uvicorn add a second outer proxy-header middleware would erase the
+socket-peer trust boundary before FERAL can record it.
+
+Use placeholders in proxy configuration and keep the backend listener off the
+public Internet. A private direct route may remain for API-key, session-token,
+or phone-bearer clients, but it must not accept proxy identity from any peer
+outside `FERAL_PROXY_AUTH_TRUSTED_PROXIES`. A generic proxy needs to pass the
+configured assertion headers only after its own auth check and retain the
+WebSocket `Upgrade`/`Connection` headers.
+
+This feature adds an authentication method to protected FERAL routes; it does
+not redefine intentionally open pairing, health, or signed-webhook endpoints.
+Apply the proxy's own access policy to the whole operator hostname unless a
+specific bootstrap or webhook endpoint is deliberately public. When proxy
+authentication is enabled, protected requests without a valid proxy envelope
+cannot use the implicit loopback or `FERAL_LOCAL_BYPASS` paths; explicit
+FERAL API-key, session-token, and phone-bearer authentication remains
+available on its existing routes.
+
 ## Monitoring
 
 FERAL exposes a health endpoint and optional Prometheus metrics:

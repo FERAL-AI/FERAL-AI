@@ -270,17 +270,20 @@ class UntrustedTunnelListener:
         # in the entire API surface. The dependency is one-directional
         # by design: the API layer may read this module's status, this
         # module only ever reaches for the app object.
-        from api.server import untrusted_app
+        from api.server import untrusted_app, untrusted_uvicorn_app
         import uvicorn
 
         self._app = untrusted_app
         config = uvicorn.Config(
-            untrusted_app,
+            untrusted_uvicorn_app,
             host=self.host,
             port=0,
             lifespan="off",
             log_level="warning",
             access_log=False,
+            # The ASGI entrypoint already composes raw-peer capture outside
+            # the loopback-only forwarded-header rewrite.
+            proxy_headers=False,
         )
         self._server = uvicorn.Server(config)
         self._task = asyncio.create_task(
