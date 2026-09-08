@@ -74,7 +74,7 @@
           "name": "scope",
           "type": "string",
           "required": false,
-          "description": "Sharing boundary for this note. Omit to keep it private to this brain, which is the default and what happens if you are unsure. Naming a scope makes the note eligible to replicate to peer brains that have been granted that exact scope, and only those. Never set this unless the user asked for the note to be shared. 'private' is reserved and never replicates."
+          "description": "Sharing boundary for this note. Two cases, and only two. If the user asked for this note to be shared, or named a scope, or said to send it to a teammate's or another brain, set this to that scope name (a short lowercase label such as 'work'). Otherwise omit it entirely, which keeps the note private to this brain. Do not guess a scope the user did not ask for, and do not claim a note was shared unless you set this field. 'private' is reserved, is never grantable, and never replicates."
         }
       ],
       "returns_description": "{id, content, tags, created_at, importance}",
