@@ -8,10 +8,14 @@ created from chat behaves identically to one created over REST.
 """
 from __future__ import annotations
 
+import logging
+
 from typing import Any, Dict, Optional
 
 from skills.base import BaseSkill
 from skills.impl import register_skill
+
+logger = logging.getLogger("feral.skill.routines")
 
 
 # Optional test/embedding override. When set, this scheduler instance is used
@@ -190,6 +194,47 @@ class FeralRoutinesSkill(BaseSkill):
 
         if not description:
             description = str(prompt or workflow_id or (f"{skill_id}.{endpoint}" if skill_id else cron_expr))
+
+        # Idempotency. Creating a routine had no duplicate check at all,
+        # and no guard upstream stops a tool that keeps SUCCEEDING:
+        # ``IterationBudget.observe`` resets every streak on success, so
+        # the no-progress and precondition guards never see a run of
+        # successful calls. Measured on 2026-09-07, a single turn called
+        # this endpoint 30 times and wrote 29 near-identical routines
+        # into the operator's brain, every one of them reported as a
+        # success and none of them stopped.
+        #
+        # An identical routine is a repeat, not a second intention: same
+        # schedule, same description, same action. Two routines that
+        # differ in any of those are two real routines and are still
+        # created. Returning the existing one makes a retry safe, which
+        # is what a side-effecting endpoint owes its caller.
+        try:
+            for existing in scheduler.list_jobs():
+                if (
+                    getattr(existing, "enabled", False)
+                    and (existing.cron_expr or "") == cron_expr
+                    and (existing.description or "") == description
+                    and (existing.payload or {}) == (payload or {})
+                ):
+                    return {
+                        "success": True,
+                        "status_code": 200,
+                        "data": {
+                            "id": existing.id,
+                            "cron_expr": existing.cron_expr,
+                            "description": existing.description,
+                            "duplicate_of_existing": True,
+                            "note": (
+                                "An identical routine already existed, so nothing "
+                                "was created. This is the same routine, not a new one."
+                            ),
+                        },
+                        "error": None,
+                    }
+        except Exception:
+            # A duplicate check that fails must not stop a real creation.
+            logger.debug("routine duplicate check failed; creating", exc_info=True)
 
         try:
             job = scheduler.create_job(
