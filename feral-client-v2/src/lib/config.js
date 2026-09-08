@@ -7,30 +7,51 @@
  * it to match a sibling.
  */
 
-const rawBase = (import.meta.env.VITE_BRAIN_BASE_URL || '').trim();
+export function resolveBrainEndpoints({
+  baseUrl = '',
+  host = '',
+  port = '',
+  location,
+} = {}) {
+  let apiBase = String(baseUrl || '').trim().replace(/\/$/, '');
 
-let apiBase = rawBase.replace(/\/$/, '');
-if (!apiBase) {
-  const host =
-    import.meta.env.VITE_BRAIN_HOST ||
-    (typeof window !== 'undefined' && window.location.hostname) ||
-    'localhost';
-  const port =
-    import.meta.env.VITE_BRAIN_PORT ||
-    (typeof window !== 'undefined' && window.location.port) ||
-    '9090';
-  const scheme =
-    typeof window !== 'undefined' && window.location.protocol === 'https:'
-      ? 'https'
-      : 'http';
-  const origin = `${host}${port ? `:${port}` : ''}`;
-  apiBase = `${scheme}://${origin}`;
+  const hasHttpLocation =
+    (location?.protocol === 'http:' || location?.protocol === 'https:') &&
+    location?.hostname;
+
+  if (!apiBase && !host && !port && hasHttpLocation) {
+    const scheme = location.protocol === 'https:' ? 'https' : 'http';
+    const origin =
+      location.origin && location.origin !== 'null'
+        ? location.origin
+        : `${scheme}://${location.hostname}${location.port ? `:${location.port}` : ''}`;
+    apiBase = origin.replace(/\/$/, '');
+  }
+
+  if (!apiBase) {
+    const resolvedHost = host || location?.hostname || 'localhost';
+    const resolvedPort = port || location?.port || '9090';
+    const scheme = location?.protocol === 'https:' ? 'https' : 'http';
+    const origin = `${resolvedHost}${resolvedPort ? `:${resolvedPort}` : ''}`;
+    apiBase = `${scheme}://${origin}`;
+  }
+
+  const wsBase = apiBase.startsWith('https://')
+    ? apiBase.replace(/^https:\/\//, 'wss://')
+    : apiBase.replace(/^http:\/\//, 'ws://');
+
+  return {
+    API_BASE: apiBase,
+    WS_BASE: wsBase,
+    WS_URL: `${wsBase}/v1/session`,
+  };
 }
 
-const wsBase = apiBase.startsWith('https://')
-  ? apiBase.replace(/^https:\/\//, 'wss://')
-  : apiBase.replace(/^http:\/\//, 'ws://');
+const endpoints = resolveBrainEndpoints({
+  baseUrl: import.meta.env.VITE_BRAIN_BASE_URL,
+  host: import.meta.env.VITE_BRAIN_HOST,
+  port: import.meta.env.VITE_BRAIN_PORT,
+  location: typeof window !== 'undefined' ? window.location : undefined,
+});
 
-export const API_BASE = apiBase;
-export const WS_BASE = wsBase;
-export const WS_URL = `${wsBase}/v1/session`;
+export const { API_BASE, WS_BASE, WS_URL } = endpoints;
