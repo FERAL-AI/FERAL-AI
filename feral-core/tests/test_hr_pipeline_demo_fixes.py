@@ -700,7 +700,11 @@ async def test_latest_health_matches_health_summary_current_hr(monkeypatch):
     aggregator = HealthAggregator(live_wearable_provider=lambda: snapshot)
     summary = await aggregator.execute("health_summary", {}, vault={})
     assert summary["data"]["current_hr"] == latest_health["heart_rate"]
+    # Same sensor, two vocabularies: internal state keeps the id, the
+    # model-facing summary carries the product name.
+    from integrations.health_canonical import source_display_name
+
     assert (
         summary["data"]["current_hr_source"]
-        == latest_health["heart_rate_source"]
+        == source_display_name(latest_health["heart_rate_source"])
     )

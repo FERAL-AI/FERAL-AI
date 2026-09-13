@@ -323,7 +323,7 @@ async def test_glasses_vitals_trend_is_unaffected_by_a_whoop_sync(engine):
 
     assert before["resting_hr_estimate"] == after["resting_hr_estimate"]
     assert before["hr_sample_count"] == after["hr_sample_count"]
-    assert after["sources"] == ["jw_health_glasses"]
+    assert after["sources"] == ["Theora glasses"]
 
 
 async def test_cloud_source_cannot_write_an_instantaneous_metric():
@@ -530,6 +530,9 @@ def test_reading_shape_is_the_durable_row_plus_render_metadata():
         "precision": 0,
         "category": "vitals",
         "source": "whoop",
+        # The id is what the row is keyed on; the name is what a person
+        # is told. Unmapped ids pass through unchanged, as here.
+        "source_name": "whoop",
         "ts": 1754006400.0,
     }
     spec = hc.metric_spec("resting_hr")

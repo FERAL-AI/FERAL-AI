@@ -68,7 +68,8 @@ async def test_history_endpoint_reaches_the_durable_store(engine):
 
     assert "hr" in history["metrics"]
     assert len(history["series"]["hr"]) == 20
-    assert history["sources"] == ["jw_health_glasses"]
+    # Model-facing shape: the product name, not the BLE vendor's id.
+    assert history["sources"] == ["Theora glasses"]
 
 
 @pytest.mark.asyncio

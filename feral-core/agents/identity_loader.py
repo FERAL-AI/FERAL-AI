@@ -803,7 +803,10 @@ class IdentityLoader:
         lines.append(
             "Peripherals are indented under the node they reach the brain "
             "through. The glasses and wristband speak BLE to the phone, not "
-            "to this brain. Report these verbatim when asked what is "
+            "to this brain. Call each peripheral by the name printed "
+            "before its internal id, never by the id itself: the ids are "
+            "BLE vendor SDK strings and board part numbers, not product "
+            "names. Report these verbatim when asked what is "
             "connected. Anything marked \"not reporting\" or \"disconnected\" "
             "is paired but silent. Say that, do not call it connected and do "
             "not omit it. The brain cannot reconnect a node itself; only the "
@@ -847,11 +850,15 @@ class IdentityLoader:
 
     @classmethod
     def _hardware_peripheral_line(cls, sub: dict) -> str:
+        # Name first, id second. Led by the capability id the model
+        # quotes the id: asked on 2026-09-12 what streams into it, the
+        # agent answered "JW Health Glasses", which is the BLE vendor's
+        # SDK and not the product. The id stays on the line because
+        # tools take it as an argument, but it is now marked as the
+        # internal handle rather than being the first thing read.
         capability = str(sub.get("capability") or "unknown")
-        detail = capability
         label = str(sub.get("name") or "").strip()
-        if label:
-            detail += f" ({label})"
+        detail = f"{label} (internal id: {capability})" if label else capability
         if sub.get("live"):
             state_text = "connected, reporting now"
         else:

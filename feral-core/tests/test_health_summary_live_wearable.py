@@ -60,12 +60,12 @@ async def test_health_summary_surfaces_w300_when_whoop_oura_offline():
     data = result["data"]
 
     assert data["current_hr"] == 72
-    assert data["current_hr_source"] == "jw_health_glasses"
+    assert data["current_hr_source"] == "Theora glasses"
     # When no cloud platform contributed a resting_hr, the live
     # wearable bpm is the best answer for the manifest-declared
     # ``resting_hr`` slot.
     assert data["resting_hr"] == 72
-    assert "jw_health_glasses" in data["sources"]
+    assert "Theora glasses" in data["sources"]
 
 
 @pytest.mark.asyncio
@@ -86,10 +86,10 @@ async def test_health_summary_surfaces_veepoo_wristband():
     data = result["data"]
 
     assert data["current_hr"] == 64
-    assert data["current_hr_source"] == "veepoo_wristband"
+    assert data["current_hr_source"] == "VITRO wristband"
     assert data["current_spo2"] == 97
-    assert data["current_spo2_source"] == "veepoo_wristband"
-    assert "veepoo_wristband" in data["sources"]
+    assert data["current_spo2_source"] == "VITRO wristband"
+    assert "VITRO wristband" in data["sources"]
 
 
 @pytest.mark.asyncio
@@ -120,9 +120,9 @@ async def test_health_summary_keeps_whoop_resting_hr_when_both_present():
 
     assert data["resting_hr"] == 55  # whoop recovery wins resting slot
     assert data["current_hr"] == 105  # wearable wins LIVE slot
-    assert data["current_hr_source"] == "jw_health_glasses"
+    assert data["current_hr_source"] == "Theora glasses"
     assert "whoop" in data["sources"]
-    assert "jw_health_glasses" in data["sources"]
+    assert "Theora glasses" in data["sources"]
 
 
 @pytest.mark.asyncio

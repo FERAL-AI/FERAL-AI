@@ -715,7 +715,7 @@ class BrainState:
         ``api/routes/dashboard.py:_get_dashboard_data`` — walk every
         active session's perception frame, keep the freshest sample
         per metric within the 120 s context window, and only consider
-        sources tagged as live wearables (Theora W300 glasses, Veepoo
+        sources tagged as live wearables (Theora glasses, Veepoo
         wristband, etc.). HealthKit / cloud-mirror sources are
         intentionally NOT surfaced as ``current_*`` because they're
         already reflected in the resting/recovery slots from the
@@ -1240,8 +1240,8 @@ class BrainState:
             # load and the integration read as unconfigured forever.
             oura = OuraClient(oauth_manager=self.oauth)
             # Operator report 2026-06-07: chat ran the health_summary
-            # tool and answered "no current data" while the W300
-            # glasses were streaming HR into the perception frame.
+            # tool and answered "no current data" while the glasses
+            # were streaming HR into the perception frame.
             # Whoop and Oura were both disconnected, so the previous
             # aggregator returned an empty snapshot. Inject a closure
             # over ``state.perception`` so the aggregator can surface

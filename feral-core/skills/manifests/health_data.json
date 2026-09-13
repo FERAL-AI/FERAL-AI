@@ -9,7 +9,7 @@
     "logo_url": "",
     "icon_set": "sf_symbols"
   },
-  "description": "Unified personal-health view across the platforms the user has connected: Whoop (recovery, strain, sleep, HRV, resting heart rate), Oura (readiness, sleep, activity), Apple HealthKit (heart rate, sleep, workouts (paired iPhone, ingested via the FERAL companion app), AND live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands: heart rate, SpO2, skin temperature). Use this skill any time the user asks about sleep, recovery, readiness, heart rate, HRV, strain, activity, or week-over-week vitals trends. It merges whatever sources are connected, tags each data point with its source, and falls back to the glasses-derived vitals trend when no third-party wearable is connected.",
+  "description": "Unified personal-health view across the platforms the user has connected: Whoop (recovery, strain, sleep, HRV, resting heart rate), Oura (readiness, sleep, activity), Apple HealthKit (heart rate, sleep, workouts (paired iPhone, ingested via the FERAL companion app), AND live wearable sensors that stream directly into the brain (Theora smart glasses, BLE wristbands: heart rate, SpO2, skin temperature). Use this skill any time the user asks about sleep, recovery, readiness, heart rate, HRV, strain, activity, or week-over-week vitals trends. It merges whatever sources are connected, tags each data point with its source, and falls back to the glasses-derived vitals trend when no third-party wearable is connected.",
   "trigger_phrases": [
     "how did i sleep",
     "how was my sleep last night",
@@ -52,7 +52,7 @@
       "id": "health_summary",
       "method": "PYTHON",
       "url": "python://health_data/health_summary",
-      "description": "Single-call snapshot of the user's current biometrics: sleep_hours, sleep_quality, recovery_score, resting_hr, hrv (ms), readiness, activity_score, strain. Each field is null when no connected source provided it; the response also lists which platforms contributed via the 'sources' array. Read-only.",
+      "description": "Single-call snapshot of the user's current biometrics: sleep_hours, sleep_quality, recovery_score, resting_hr, hrv (ms), readiness, activity_score, strain. Each field is null when no connected source provided it; the response lists contributing platforms in 'sources'. Read-only.",
       "params": [],
       "returns_description": "{sleep_hours, sleep_quality, recovery_score, resting_hr, hrv, readiness, activity_score, strain, sources}",
       "ui_hint": "metric",
@@ -63,7 +63,7 @@
       "id": "sleep_trend",
       "method": "PYTHON",
       "url": "python://health_data/sleep_trend",
-      "description": "Per-day sleep entries from every connected platform over the past N days. Each entry is tagged with its 'source' (whoop, oura, healthkit) so the LLM can describe convergence or divergence between platforms. Read-only.",
+      "description": "Per-day sleep entries from every connected platform over the past N days. Each entry is tagged with its 'source_name' (the product name to use when speaking) so the LLM can describe convergence or divergence between platforms. Read-only.",
       "params": [
         {
           "name": "days",
@@ -101,7 +101,7 @@
       "id": "vitals_trend",
       "method": "PYTHON",
       "url": "python://health_data/vitals_trend",
-      "description": "Week-over-week vitals trend derived from live wearable sensors that stream directly into the brain (W300 smart glasses, BLE wristbands), NOT third-party cloud platforms. Use this for 'how were my vitals this week / over the last week', resting heart-rate trend, HR range, or SpO2 trend when the user has no Whoop/Oura/HealthKit connected. Returns per-day resting-HR (daily min), avg/max HR, SpO2 avg/min, sample counts, and the contributing source(s). Honest about provenance ('derived from glasses sensor, N samples over Nd'). Read-only.",
+      "description": "Week-over-week vitals trend derived from live wearable sensors that stream directly into the brain (Theora smart glasses, BLE wristbands), NOT third-party cloud platforms. Use this for 'how were my vitals this week / over the last week', resting heart-rate trend, HR range, or SpO2 trend when the user has no Whoop/Oura/HealthKit connected. Returns per-day resting-HR (daily min), avg/max HR, SpO2 avg/min, sample counts, and the contributing source(s). Honest about provenance ('derived from glasses sensor, N samples over Nd'). Read-only.",
       "params": [
         {
           "name": "days",
@@ -120,7 +120,7 @@
       "id": "health_history",
       "method": "PYTHON",
       "url": "python://health_data/health_history",
-      "description": "Long-window health history read straight out of the brain's durable biometric store, NOT from a vendor API. This is the endpoint for questions that span months: 'my recovery over the last six months', 'how has my resting heart rate changed since spring', 'my sleep this year'. Whoop's daily records (recovery, resting HR, HRV, sleep hours/score/efficiency/REM/deep, respiratory rate, strain, avg and max HR, energy) are mirrored into that store on a schedule, so this works even while Whoop is unreachable and it reaches far further back than sleep_trend or recovery_trend, which only query the vendor's last N days. Live wearable samples (W300 glasses, BLE wristbands) are in the same store. Every entry is tagged with the source that produced it. Read-only.",
+      "description": "Long-window health history read straight out of the brain's durable biometric store, NOT from a vendor API. This is the endpoint for questions that span months: 'my recovery over the last six months', 'how has my resting heart rate changed since spring', 'my sleep this year'. Whoop's daily records (recovery, resting HR, HRV, sleep hours/score/efficiency/REM/deep, respiratory rate, strain, avg and max HR, energy) are mirrored into that store on a schedule, so this works even while Whoop is unreachable and it reaches far further back than sleep_trend or recovery_trend, which only query the vendor's last N days. Live wearable samples (Theora glasses, BLE wristbands) are in the same store. Every entry is tagged with a 'source_name'. Read-only.",
       "params": [
         {
           "name": "days",
