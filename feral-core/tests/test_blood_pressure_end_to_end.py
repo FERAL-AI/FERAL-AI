@@ -263,3 +263,46 @@ class TestReachesTheDurableStoreForReal:
         reading = history["series"]["bp_systolic"][0]
         assert reading["value"] == 118.0
         assert reading["unit"] == "mmHg"
+
+
+class TestBaselineTraining:
+    """A BP taken minutes ago must still train the personal baseline.
+
+    The 120 s freshness gate exists to stop a cloud mirror re-stamping an
+    hours-old reading as "current". A blood pressure is not that: it is
+    an on-demand measurement carrying the device's timestamp for when the
+    read completed. The phone pushes the instant one finishes, but a
+    reading taken while the app was backgrounded arrives on the next poll
+    minutes later -- and under the shared window it would land in history
+    and silently never train a baseline.
+    """
+
+    def _record(self, monkeypatch, age_s):
+        recorded = []
+        engine = type("E", (), {
+            "record": lambda self, mid, val, category="": recorded.append((mid, val)),
+        })()
+        monkeypatch.setattr(srv.state, "baseline_engine", engine, raising=False)
+        srv._record_biometrics_to_baseline({
+            "bp_systolic": 118,
+            "bp_diastolic": 78,
+            "blood_pressure_source": "jw_health_glasses",
+            "blood_pressure_sample_ts": time.time() - age_s,
+        })
+        return recorded
+
+    def test_a_reading_pushed_immediately_trains_the_baseline(self, monkeypatch):
+        rec = self._record(monkeypatch, age_s=2)
+        assert ("bp_systolic", 118) in rec
+        assert ("bp_diastolic", 78) in rec
+
+    def test_a_reading_relayed_on_the_next_poll_still_trains_it(self, monkeypatch):
+        """Five minutes old: past the 120 s gate, well inside BP's window."""
+        rec = self._record(monkeypatch, age_s=300)
+        assert ("bp_systolic", 118) in rec, (
+            "a backgrounded measurement never reached the baseline"
+        )
+
+    def test_a_day_old_reading_does_not_train_it(self, monkeypatch):
+        rec = self._record(monkeypatch, age_s=26 * 3600)
+        assert not rec, "a day-old reading is history, not a current measurement"

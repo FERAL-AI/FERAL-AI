@@ -6207,6 +6207,20 @@ _GATED_BASELINE_VITALS = {
 # see proactive_engine._FRESH_WINDOW_S for the canonical rationale.
 _BASELINE_FRESH_WINDOW_S = 120.0
 
+# Per-metric override. The 120 s window exists to stop a cloud mirror
+# re-stamping an hours-old reading as "current" and training the
+# baseline with it. A blood pressure is not that: it is an on-demand
+# measurement carrying the device's own timestamp for the moment the
+# cuffless read completed. The phone pushes it the instant a
+# measurement finishes, but one taken while the app was backgrounded
+# reaches the brain on the next poll instead, minutes later, and under
+# the shared window it would land in history and silently never train a
+# baseline -- so "is this normal for me" could never be answered.
+_BASELINE_FRESH_WINDOW_OVERRIDES_S = {
+    "bp_systolic": 6 * 3600.0,
+    "bp_diastolic": 6 * 3600.0,
+}
+
 
 def _record_biometrics_to_baseline(data: dict) -> None:
     """Extract known biometric keys from a sensor payload and record them.
@@ -6257,7 +6271,10 @@ def _record_biometrics_to_baseline(data: dict) -> None:
                 src = str(data.get(src_key, "") or "")
                 ts_raw = data.get(ts_key, 0.0)
                 ts = float(ts_raw) if isinstance(ts_raw, (int, float)) else 0.0
-                fresh = ts > 0 and (now - ts) <= _BASELINE_FRESH_WINDOW_S
+                window = _BASELINE_FRESH_WINDOW_OVERRIDES_S.get(
+                    raw_key, _BASELINE_FRESH_WINDOW_S,
+                )
+                fresh = ts > 0 and (now - ts) <= window
                 if _is_lagging_source(src) or not fresh:
                     logger.debug(
                         "Skipping baseline record for %s=%.1f — source=%r fresh=%s "
