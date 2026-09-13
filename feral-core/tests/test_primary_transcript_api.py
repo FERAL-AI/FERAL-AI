@@ -181,3 +181,77 @@ def test_generic_session_transcript_unknown_session_is_empty():
     assert body["session_id"] == "does-not-exist"
     assert body["messages"] == []
     assert body["count"] == 0
+
+
+# ── Rows restored from the boot snapshot are not replayed ──────────────
+#
+# The primary session receives no turns once every web thread binds to its
+# own session, so its snapshot was re-saved unchanged on each shutdown and
+# restored on each boot. Both clients merge this endpoint's output into the
+# open thread, so a July 30 exchange ("What date should I schedule it
+# for...", "10 am PST") appeared as a new message after every restart, in
+# 21 threads.
+
+
+def _restored_state():
+    restored_q = {"role": "assistant", "content": "What date should I schedule it for?"}
+    restored_a = {"role": "user", "content": "10 am PST"}
+    live = {"role": "user", "content": "check if my cutebot is connected"}
+    state = _make_state({"primary-test": [restored_q, restored_a, live]})
+    state.restored_history_rows = {"primary-test": [restored_q, restored_a]}
+    return state, restored_q, restored_a, live
+
+
+def test_rows_restored_from_snapshot_are_not_replayed():
+    state, *_ = _restored_state()
+    with patch("api.routes.sessions.state", state):
+        body = _mount_router(state).get("/api/sessions/primary/transcript").json()
+    assert [m["text"] for m in body["messages"]] == ["check if my cutebot is connected"]
+    # Position is unchanged, so since_ms polling is unaffected.
+    assert body["messages"][0]["ts_ms"] == 3
+
+
+def test_restored_rows_stay_hidden_after_trim_and_compaction():
+    state, restored_q, restored_a, live = _restored_state()
+    summary = {"role": "system", "content": "[Session Summary]\n..."}
+    # Same objects, reshaped the way the orchestrator trims and compacts.
+    state.orchestrator.conversation_history["primary-test"] = [summary, restored_a, live]
+    with patch("api.routes.sessions.state", state):
+        body = _mount_router(state).get("/api/sessions/primary/transcript").json()
+    assert [m["text"] for m in body["messages"]] == ["check if my cutebot is connected"]
+
+
+def test_a_live_turn_repeating_old_text_is_still_delivered():
+    """Identity, not content: saying the same words again is a real turn."""
+    state, restored_q, restored_a, live = _restored_state()
+    again = {"role": "user", "content": "10 am PST"}
+    state.orchestrator.conversation_history["primary-test"].append(again)
+    with patch("api.routes.sessions.state", state):
+        body = _mount_router(state).get("/api/sessions/primary/transcript").json()
+    assert [m["text"] for m in body["messages"]] == [
+        "check if my cutebot is connected", "10 am PST",
+    ]
+
+
+def test_boot_hydration_records_what_it_restored():
+    from api.state import BrainState
+
+    rows = [
+        {"role": "assistant", "content": "What date should I schedule it for?"},
+        {"role": "user", "content": "10 am PST"},
+    ]
+    fake = SimpleNamespace(
+        session_snapshot=SimpleNamespace(load=lambda: {
+            "session_id": "primary-test", "conversation_history": rows,
+        }),
+        orchestrator=SimpleNamespace(conversation_history={}),
+        memory=None,
+        primary_session_id="primary-test",
+        restored_history_rows={},
+    )
+    BrainState._hydrate_primary_thread_from_snapshot(fake)
+    restored = fake.orchestrator.conversation_history["primary-test"]
+    assert len(restored) == 2
+    assert {id(r) for r in fake.restored_history_rows["primary-test"]} == {
+        id(r) for r in restored
+    }

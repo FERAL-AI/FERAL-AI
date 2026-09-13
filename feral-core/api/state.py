@@ -349,6 +349,13 @@ class BrainState:
         # automatically. Loaded later in `init()` after `orchestrator`
         # + `memory` exist.
         self.session_snapshot: Optional[SessionSnapshotStore] = None
+        # History rows restored from the snapshot at boot, per session.
+        # Held by reference: the list keeps the dicts alive, so their id()
+        # values cannot be recycled, and trimming (`history[-N:]`) and
+        # compaction (`[*carried, summary, *preserved]`) both keep the same
+        # objects. The transcript API uses this to tell a row replayed
+        # from disk apart from a turn that happened in this process.
+        self.restored_history_rows: dict[str, list[dict]] = {}
         self.devices: dict[str, dict] = {}
         self.skill_registry = SkillRegistry()
         # Phase 5 (audit-r10 overhaul) — runtime catalog of which
@@ -2388,6 +2395,7 @@ class BrainState:
                 # into the next LLM request and triggers
                 # ``400 No tool call found for function call output``.
                 ch_attr[sid] = _sanitize_orphan_tool_rows(rehydrated)
+                self.restored_history_rows[sid] = list(ch_attr[sid])
         # Working-memory deque (LLM-context format).
         wm_rows = snapshot.get("working_memory") or []
         if isinstance(wm_rows, list) and wm_rows and self.memory is not None:
