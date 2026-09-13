@@ -4499,6 +4499,8 @@ _BIOMETRIC_KEY_MAP = {
     "skin_temp_c": ("skin_temp", "health"),
     "skin_temperature_c": ("skin_temp", "health"),
     "hrv_ms": ("hrv_ms", "health"),
+    "bp_systolic": ("bp_systolic", "health"),
+    "bp_diastolic": ("bp_diastolic", "health"),
     "sleep_hours": ("sleep_hours", "health"),
     "sleep_score": ("sleep_score", "health"),
     "steps": ("steps_daily", "activity"),
@@ -5875,7 +5877,7 @@ def _somatic_publish(session_id: str, node_id: str, *, reason: str) -> None:
 _EXTRACTABLE_EVENT_TYPES = (
     "heart_rate", "hrv", "spo2", "skin_temperature", "temperature", "steps",
     "uv", "accelerometer", "gyroscope", "ambient_light", "battery",
-    "gps", "gesture", "button_press", "activity",
+    "gps", "gesture", "button_press", "activity", "blood_pressure",
 )
 
 
@@ -6004,6 +6006,39 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
                 source=str(_src or ""),
                 ts_keys=(
                     "spo2_sample_ts",
+                    "sample_ts",
+                    "ts",
+                    "timestamp",
+                ),
+            )
+    elif event_type == "blood_pressure":
+        # The glasses' SDK names these `high` / `low`
+        # (JWBleTestBPCallBack -> int high, int low); the wristband and
+        # HealthKit both say systolic / diastolic. Accept either, and
+        # only when BOTH arrive: one half of a blood pressure is not a
+        # reading, and storing it alone would let a later query pair it
+        # with the wrong partner.
+        _sys = frame_payload.get("systolic")
+        if _sys is None:
+            _sys = frame_payload.get("high")
+        _dia = frame_payload.get("diastolic")
+        if _dia is None:
+            _dia = frame_payload.get("low")
+        if isinstance(_sys, (int, float)) and isinstance(_dia, (int, float)):
+            sensors["bp_systolic"] = _sys
+            sensors["bp_diastolic"] = _dia
+            _src = (
+                frame_payload.get("blood_pressure_source")
+                or frame_payload.get("source")
+                or _infer_wearable_source_from_node(effective_node)
+            )
+            if _src:
+                sensors["blood_pressure_source"] = _src
+            sensors["blood_pressure_sample_ts"] = _resolve_sample_ts(
+                frame_payload,
+                source=str(_src or ""),
+                ts_keys=(
+                    "blood_pressure_sample_ts",
                     "sample_ts",
                     "ts",
                     "timestamp",
@@ -6155,6 +6190,8 @@ _GATED_BASELINE_VITALS = {
     "ppg_heart_rate": ("heart_rate_source", "heart_rate_sample_ts"),
     "spo2": ("spo2_source", "spo2_sample_ts"),
     "spo2_pct": ("spo2_source", "spo2_sample_ts"),
+    "bp_systolic": ("blood_pressure_source", "blood_pressure_sample_ts"),
+    "bp_diastolic": ("blood_pressure_source", "blood_pressure_sample_ts"),
 }
 
 # Same 120 s window perception.fusion / the dashboard "current" slot use.
@@ -6274,6 +6311,12 @@ _HISTORY_METRIC_MAP = {
     # writes alongside the value, so the lagging-source exclusion above
     # applies to HRV exactly as it does to heart rate.
     "hrv_ms": ("hrv", "hrv_source", "hrv_sample_ts"),
+    "bp_systolic": (
+        "bp_systolic", "blood_pressure_source", "blood_pressure_sample_ts",
+    ),
+    "bp_diastolic": (
+        "bp_diastolic", "blood_pressure_source", "blood_pressure_sample_ts",
+    ),
 }
 
 

@@ -171,6 +171,14 @@ class PerceptionFrame:
     heart_rate_source: str = ""  # e.g. "apple_healthkit", "theora_w300"
     spo2_sample_ts: float = 0.0
     spo2_source: str = ""
+    # Blood pressure is episodic: the wearer starts a measurement and
+    # one pair of numbers lands ~30 s later. There is no stream to
+    # arbitrate between, so unlike HR/SpO2 above the newest reading
+    # simply wins. Both halves move together or neither does.
+    bp_systolic: int = 0
+    bp_diastolic: int = 0
+    bp_sample_ts: float = 0.0
+    bp_source: str = ""
     head_pose: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     ambient_light_lux: int = 0
     battery_pct: int = 100
@@ -200,6 +208,16 @@ class PerceptionFrame:
     robot_sonar_cm: float = 0.0
     robot_battery: bool = False
     robot_ts: float = 0.0
+
+    @staticmethod
+    def _age_phrase(age_s: float) -> str:
+        if age_s < 90:
+            return f"{int(age_s)}s ago"
+        if age_s < 5400:
+            return f"{int(age_s / 60)} min ago"
+        if age_s < 172800:
+            return f"{int(age_s / 3600)} h ago"
+        return f"{int(age_s / 86400)} days ago"
 
     def to_system_context(self) -> str:
         """
@@ -250,6 +268,25 @@ class PerceptionFrame:
                 else:
                     sensor_parts.append(
                         f"SpO2={self.spo2_pct}% (stale, {int(spo2_age)}s ago — do NOT report as current)"
+                    )
+        if self.bp_systolic and self.bp_diastolic:
+            bp_ts = float(getattr(self, "bp_sample_ts", 0.0) or 0.0)
+            # A blood pressure is a measurement taken at a moment, not a
+            # level that persists. The freshness window that suits a
+            # continuous HR stream would mark a reading from an hour ago
+            # stale and suppress it, which is wrong: an hour-old BP is
+            # still the wearer's most recent BP. Report it with its age
+            # and let the reader judge.
+            if bp_ts > 0:
+                bp_age = now - bp_ts
+                if bp_age <= _CONTEXT_FRESH_S:
+                    sensor_parts.append(
+                        f"BP={self.bp_systolic}/{self.bp_diastolic}mmHg"
+                    )
+                else:
+                    sensor_parts.append(
+                        f"BP={self.bp_systolic}/{self.bp_diastolic}mmHg "
+                        f"(measured {self._age_phrase(bp_age)}, not a current reading)"
                     )
         if self.skin_temperature_c:
             sensor_parts.append(f"Temp={self.skin_temperature_c}°C")
@@ -513,6 +550,30 @@ class PerceptionEngine:
                 frame.spo2_sample_ts = new_spo2_ts
                 if new_spo2_source:
                     frame.spo2_source = new_spo2_source
+
+        _bp_sys = _fv(vitals.get("bp_systolic"), sensors.get("bp_systolic"))
+        _bp_dia = _fv(vitals.get("bp_diastolic"), sensors.get("bp_diastolic"))
+        if _bp_sys is not None and _bp_dia is not None:
+            _bp_ts_raw = _fv(
+                vitals.get("blood_pressure_sample_ts"),
+                sensors.get("blood_pressure_sample_ts"),
+            )
+            new_bp_ts = float(_bp_ts_raw) if _bp_ts_raw is not None else 0.0
+            _bp_src = _fv(
+                vitals.get("blood_pressure_source"),
+                sensors.get("blood_pressure_source"),
+                sensors.get("source"),
+            )
+            # Keep the older reading only when the incoming one is
+            # genuinely older; an unstamped arrival still replaces a
+            # stamped one, because a measurement the wearer just took is
+            # the point of the feature.
+            if not (frame.bp_sample_ts and new_bp_ts and new_bp_ts < frame.bp_sample_ts):
+                frame.bp_systolic = int(_bp_sys)
+                frame.bp_diastolic = int(_bp_dia)
+                frame.bp_sample_ts = new_bp_ts
+                if _bp_src is not None and str(_bp_src):
+                    frame.bp_source = str(_bp_src)
         # Flat form included: the HUP `skin_temperature` device_event
         # extractor emits `sensors["skin_temperature_c"]` at the top
         # level, and only the nested `vitals.*` form was read here, so

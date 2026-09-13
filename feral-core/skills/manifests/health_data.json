@@ -101,7 +101,7 @@
       "id": "vitals_trend",
       "method": "PYTHON",
       "url": "python://health_data/vitals_trend",
-      "description": "Week-over-week vitals trend derived from live wearable sensors that stream directly into the brain (Theora smart glasses, BLE wristbands), NOT third-party cloud platforms. Use this for 'how were my vitals this week / over the last week', resting heart-rate trend, HR range, or SpO2 trend when the user has no Whoop/Oura/HealthKit connected. Returns per-day resting-HR (daily min), avg/max HR, SpO2 avg/min, sample counts, and the contributing source(s). Honest about provenance ('derived from glasses sensor, N samples over Nd'). Read-only.",
+      "description": "Week-over-week vitals trend derived from live wearable sensors that stream directly into the brain (Theora smart glasses, BLE wristbands), NOT third-party cloud platforms. Use this for 'how were my vitals this week / over the last week', resting heart-rate trend, HR range, or SpO2 trend when the user has no Whoop/Oura/HealthKit connected. Returns per-day resting-HR (daily min), avg/max HR, SpO2 avg/min, sample counts, and the contributing source(s). Also the most recent BLOOD PRESSURE reading under 'blood_pressure' (systolic, diastolic, mmHg, measured_at, age_seconds) when one has been taken: the glasses measure BP on demand rather than streaming it, so use this for 'what was my blood pressure' and always report the pair together with when it was measured. Honest about provenance ('derived from glasses sensor, N samples over Nd'). Read-only.",
       "params": [
         {
           "name": "days",
@@ -120,7 +120,7 @@
       "id": "health_history",
       "method": "PYTHON",
       "url": "python://health_data/health_history",
-      "description": "Long-window health history read straight out of the brain's durable biometric store, NOT from a vendor API. This is the endpoint for questions that span months: 'my recovery over the last six months', 'how has my resting heart rate changed since spring', 'my sleep this year'. Whoop's daily records (recovery, resting HR, HRV, sleep hours/score/efficiency/REM/deep, respiratory rate, strain, avg and max HR, energy) are mirrored into that store on a schedule, so this works even while Whoop is unreachable and it reaches far further back than sleep_trend or recovery_trend, which only query the vendor's last N days. Live wearable samples (Theora glasses, BLE wristbands) are in the same store. Every entry is tagged with a 'source_name'. Read-only.",
+      "description": "Long-window health history read straight out of the brain's durable biometric store, NOT from a vendor API. This is the endpoint for questions that span months: 'my recovery over the last six months', 'how has my resting heart rate changed since spring', 'my sleep this year'. Whoop's daily records (recovery, resting HR, HRV, sleep hours/score/efficiency/REM/deep, respiratory rate, strain, avg and max HR, energy) are mirrored into that store on a schedule, so this works even while Whoop is unreachable and it reaches far further back than sleep_trend or recovery_trend, which only query the vendor's last N days. Live wearable samples (Theora glasses, BLE wristbands) are in the same store. Every entry is tagged with a 'source_name'. Read-only. Blood pressure is stored here as two paired metrics, 'bp_systolic' and 'bp_diastolic', sharing one timestamp; quote them together, never one alone.",
       "params": [
         {
           "name": "days",

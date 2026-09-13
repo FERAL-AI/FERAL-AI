@@ -123,6 +123,16 @@ CANONICAL_METRICS: dict[str, MetricSpec] = {
     "body_temp": _spec(
         "body_temp", "Body Temperature", "°C", 1, "vitals", "instant",
     ),
+    # Blood pressure is TWO numbers that are only meaningful together,
+    # and the store is one value per row, so it is two metrics with a
+    # shared timestamp and source. Readers pair them by ts; never quote
+    # one without the other.
+    "bp_systolic": _spec(
+        "bp_systolic", "Blood Pressure (systolic)", "mmHg", 0, "vitals", "instant",
+    ),
+    "bp_diastolic": _spec(
+        "bp_diastolic", "Blood Pressure (diastolic)", "mmHg", 0, "vitals", "instant",
+    ),
     # ---- daily derived scores (cloud wearables) ---------------------
     "resting_hr": _spec(
         "resting_hr", "Resting Heart Rate", "bpm", 0, "vitals", "daily",

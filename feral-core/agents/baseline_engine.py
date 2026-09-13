@@ -185,6 +185,16 @@ class BaselineEngine:
         "hrv_ms": (1.0, 500.0),
         "skin_temp": (20.0, 45.0),
         "respiration": (4.0, 60.0),
+        # Wide on purpose. These bound what a cuff or a PPG estimator
+        # can physically report, not what is clinically normal: a
+        # hypertensive crisis (180/120) and severe hypotension are real
+        # readings that must survive the gate and reach the user.
+        # What they catch is a zeroed or negative decode. Note that a
+        # saturated 255 byte is INSIDE this range and is accepted, since
+        # systolic readings near 300 are documented and rejecting a real
+        # crisis reading is the worse failure of the two.
+        "bp_systolic": (50.0, 300.0),
+        "bp_diastolic": (20.0, 200.0),
     }
 
     @staticmethod

@@ -534,6 +534,51 @@ class HealthAggregator:
         ) or ("whoop" in summary.get("sources", [])
               or "oura" in summary.get("sources", []))
 
+    @staticmethod
+    def _latest_blood_pressure(store, days: int = 7) -> Optional[dict[str, Any]]:
+        """The most recent systolic/diastolic pair, or None.
+
+        Stored as two metrics sharing one timestamp (the sample table is
+        one value per row). They are re-paired on the exact ts the writer
+        stamped; a systolic with no matching diastolic is dropped rather
+        than paired with the nearest one, because "nearest" across a week
+        of on-demand readings can be hours away.
+        """
+        since = time.time() - (float(max(int(days or 0), 1)) * 86400.0)
+        try:
+            sys_rows = store.get_samples("bp_systolic", since=since) or []
+            dia_rows = store.get_samples("bp_diastolic", since=since) or []
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("blood pressure get_samples failed: %s", exc)
+            return None
+        if not sys_rows or not dia_rows:
+            return None
+
+        by_ts = {float(r.get("ts") or 0.0): r for r in dia_rows}
+        paired = [
+            (float(r.get("ts") or 0.0), r, by_ts[float(r.get("ts") or 0.0)])
+            for r in sys_rows
+            if float(r.get("ts") or 0.0) in by_ts
+        ]
+        if not paired:
+            return None
+
+        ts, sys_row, dia_row = max(paired, key=lambda t: t[0])
+        return {
+            "systolic": int(sys_row.get("value") or 0),
+            "diastolic": int(dia_row.get("value") or 0),
+            "unit": "mmHg",
+            "measured_at": ts,
+            "age_seconds": max(0.0, time.time() - ts),
+            "reading_count": len(paired),
+            "source_name": source_display_name(str(sys_row.get("source") or "")),
+            "note": (
+                "Taken on demand with the glasses, not streamed. This is a "
+                "single measurement at a moment in time, and an optical "
+                "estimate rather than a cuff."
+            ),
+        }
+
     def _build_glasses_vitals_trend(
         self, days: int = 7,
     ) -> Optional[dict[str, Any]]:
@@ -550,7 +595,19 @@ class HealthAggregator:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("biometric history get_trend failed: %s", exc)
             return None
-        if not hr["sample_count"] and not spo2["sample_count"] and not skin["sample_count"]:
+        # Blood pressure is not a trend line like the others: it is taken
+        # on demand, so a window holds a handful of discrete readings and
+        # the question is almost always "what was my last one". Paired by
+        # timestamp, because a systolic quoted next to someone else's
+        # diastolic is worse than no answer.
+        latest_bp = self._latest_blood_pressure(store, days=days)
+
+        if (
+            not hr["sample_count"]
+            and not spo2["sample_count"]
+            and not skin["sample_count"]
+            and latest_bp is None
+        ):
             return None
 
         # Daily resting-HR estimate = the day's minimum sample (lowest
@@ -604,6 +661,9 @@ class HealthAggregator:
         trend["resting_hr_estimate"] = (
             round(min(resting_candidates), 1) if resting_candidates else None
         )
+
+        if latest_bp is not None:
+            trend["blood_pressure"] = latest_bp
 
         total = hr["sample_count"] + spo2["sample_count"]
         # The note is prose, and prose is what the model repeats back to
