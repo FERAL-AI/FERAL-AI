@@ -197,6 +197,42 @@ class BaselineEngine:
         "bp_diastolic": (20.0, 200.0),
     }
 
+    # A baseline window holds the last ``window_size`` values with no
+    # per-sample timestamps, so a continuously-sampled vital can fill the
+    # whole window from ONE minute of streaming. When it does, the spread
+    # collapses: the operator's install held
+    # ``[105,105,105,104,104,102,...]``, giving mean 103.5 and std_dev
+    # 1.12 -- and a perfectly normal 64 bpm then scored 35 sigma and
+    # persisted a CRITICAL alert.
+    #
+    # A deviation measured against a spread narrower than the sensor's
+    # own noise is not a signal. These floors are the smallest spread
+    # each metric can meaningfully have; a tighter window is treated as
+    # this wide instead.
+    _SIGMA_FLOORS: dict[str, float] = {
+        "hr": 6.0,
+        "hr_resting": 6.0,
+        "heart_rate": 6.0,
+        "spo2": 1.5,
+        "spo2_pct": 1.5,
+        "hrv_ms": 8.0,
+        "skin_temp": 0.4,
+        "respiration": 2.0,
+        "bp_systolic": 8.0,
+        "bp_diastolic": 6.0,
+    }
+
+    @classmethod
+    def _effective_sigma(cls, metric_id: str, std_dev: float) -> float:
+        """The spread to measure a deviation against.
+
+        Never smaller than the metric's noise floor, so a window that
+        happened to catch one steady minute cannot manufacture an
+        impossible sigma.
+        """
+        floor = cls._SIGMA_FLOORS.get(cls._base_metric(metric_id), 0.0)
+        return max(float(std_dev or 0.0), floor)
+
     @staticmethod
     def _base_metric(metric_id: str) -> str:
         """``hr_resting:jw_health_glasses`` and ``hr_resting`` are one metric.
@@ -304,7 +340,10 @@ class BaselineEngine:
         if metric is None or len(metric.values) < 3 or metric.std_dev == 0:
             return None
 
-        deviation = abs(current_value - metric.mean) / metric.std_dev
+        sigma = self._effective_sigma(metric_id, metric.std_dev)
+        if sigma <= 0:
+            return None
+        deviation = abs(current_value - metric.mean) / sigma
         if deviation < threshold_sigma:
             return None
 

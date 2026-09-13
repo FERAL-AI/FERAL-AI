@@ -583,9 +583,9 @@ class ProactiveEngine:
                             break
                     if fresh_hr_frame is not None:
                         # Fix #5: query the active source's namespaced
-                        # baseline first (`hr_resting:jw_health_glasses`)
+                        # baseline first (`hr:jw_health_glasses`)
                         # so the W300 vs Veepoo means stay independent.
-                        # Fall back to bare `hr_resting` for legacy /
+                        # Fall back to bare `hr` for legacy /
                         # unknown sources where the per-source row
                         # doesn't exist.
                         hr_src_norm = (
@@ -599,9 +599,9 @@ class ProactiveEngine:
                         candidate_metric_ids = []
                         if hr_src_norm:
                             candidate_metric_ids.append(
-                                f"hr_resting:{hr_src_norm}"
+                                f"hr:{hr_src_norm}"
                             )
-                        candidate_metric_ids.append("hr_resting")
+                        candidate_metric_ids.append("hr")
                         alert = None
                         chosen_metric_id = None
                         for metric_id in candidate_metric_ids:

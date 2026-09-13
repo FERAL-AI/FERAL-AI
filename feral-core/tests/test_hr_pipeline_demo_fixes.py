@@ -24,8 +24,8 @@ This module covers the seven scoped fixes:
             Veepoo > polar/wahoo > garmin > w610 within the fresh
             window; freshness is the secondary tiebreak.
 #5        — Baselines namespace per source
-            (``hr_resting:jw_health_glasses``) AND keep writing
-            the bare ``hr_resting`` row for back-compat.
+            (``hr:jw_health_glasses``) AND keep writing
+            the bare ``hr`` row for back-compat.
 #6        — ``/api/dashboard.latest_health`` shares the
             ``BrainState._latest_live_wearable_snapshot`` source
             of truth with ``/api/health/summary``.
@@ -441,8 +441,8 @@ def test_lagging_source_cannot_demote_live_wearable():
 
 def test_per_source_baseline_namespacing(monkeypatch):
     """Recording a known live-wearable HR must train BOTH the bare
-    ``hr_resting`` row (back-compat) AND the per-source row
-    ``hr_resting:<source>``.  Two simultaneous wearables therefore
+    ``hr`` row (back-compat) AND the per-source row
+    ``hr:<source>``.  Two simultaneous wearables therefore
     keep independent means."""
     records: list[tuple[str, float]] = []
 
@@ -460,8 +460,8 @@ def test_per_source_baseline_namespacing(monkeypatch):
         "heart_rate_sample_ts": time.time(),
     })
     metric_ids = {mid for mid, _ in records}
-    assert "hr_resting" in metric_ids, "bare row preserved for back-compat"
-    assert "hr_resting:jw_health_glasses" in metric_ids, (
+    assert "hr" in metric_ids, "bare row preserved for back-compat"
+    assert "hr:jw_health_glasses" in metric_ids, (
         "per-source row must be trained for known live wearables"
     )
 
@@ -474,8 +474,8 @@ def test_per_source_baseline_namespacing(monkeypatch):
         "heart_rate_sample_ts": time.time(),
     })
     metric_ids = {mid for mid, _ in records}
-    assert "hr_resting:veepoo_wristband" in metric_ids
-    assert "hr_resting:jw_health_glasses" not in metric_ids
+    assert "hr:veepoo_wristband" in metric_ids
+    assert "hr:jw_health_glasses" not in metric_ids
 
 
 def test_unknown_source_does_not_get_namespaced_row(monkeypatch):
@@ -496,7 +496,7 @@ def test_unknown_source_does_not_get_namespaced_row(monkeypatch):
         "heart_rate_sample_ts": time.time(),
     })
     metric_ids = {mid for mid, _ in records}
-    assert metric_ids == {"hr_resting"}
+    assert metric_ids == {"hr"}
 
 
 def test_lagging_source_trains_neither_row(monkeypatch):
@@ -538,7 +538,7 @@ async def test_baseline_hr_queries_namespaced_row_first():
     namespaced.values = [60.0, 61.0, 62.0, 60.0, 61.0]
 
     def _get_baseline(metric_id):
-        if metric_id == "hr_resting:jw_health_glasses":
+        if metric_id == "hr:jw_health_glasses":
             return namespaced
         return None
 
@@ -558,7 +558,7 @@ async def test_baseline_hr_queries_namespaced_row_first():
     await eng._evaluate()
 
     fake_baseline.check_anomaly.assert_any_call(
-        "hr_resting:jw_health_glasses", 110,
+        "hr:jw_health_glasses", 110,
     )
     assert any(m.trigger_id == "baseline_hr" for m in captured)
 
@@ -566,7 +566,7 @@ async def test_baseline_hr_queries_namespaced_row_first():
 @pytest.mark.asyncio
 async def test_baseline_hr_falls_back_to_bare_when_namespaced_empty():
     """If the per-source row hasn't trained ≥3 values yet, fall
-    back to bare ``hr_resting`` so the anomaly check still runs
+    back to bare ``hr`` so the anomaly check still runs
     on day one."""
     fake_baseline = MagicMock()
 
@@ -574,7 +574,7 @@ async def test_baseline_hr_falls_back_to_bare_when_namespaced_empty():
     bare.values = [60.0, 61.0, 62.0, 60.0, 61.0]
 
     def _get_baseline(metric_id):
-        if metric_id == "hr_resting":
+        if metric_id == "hr":
             return bare
         return None
 
@@ -593,7 +593,7 @@ async def test_baseline_hr_falls_back_to_bare_when_namespaced_empty():
     eng._baseline = fake_baseline
     await eng._evaluate()
 
-    fake_baseline.check_anomaly.assert_any_call("hr_resting", 110)
+    fake_baseline.check_anomaly.assert_any_call("hr", 110)
     assert any(m.trigger_id == "baseline_hr" for m in captured)
 
 

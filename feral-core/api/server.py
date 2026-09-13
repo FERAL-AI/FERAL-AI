@@ -4492,8 +4492,16 @@ async def sync_peer_endpoint(ws: WebSocket):
 # ─────────────────────────────────────────────
 
 _BIOMETRIC_KEY_MAP = {
-    "heart_rate": ("hr_resting", "health"),
-    "ppg_heart_rate": ("hr_resting", "health"),
+    # `hr`, not `hr_resting`. Every live PPG sample lands here, including
+    # the ones taken while walking, so a metric named "resting" was being
+    # trained on exertion: the operator's install learned a "resting"
+    # baseline of 103.5 bpm from a minute of walking, and the UI showed
+    # it under that name on a health page. Resting HR is derived from the
+    # daily minimum in the vitals trend, which is the honest way to get
+    # it; `hr_resting` stays reserved for sources that genuinely report a
+    # resting value.
+    "heart_rate": ("hr", "health"),
+    "ppg_heart_rate": ("hr", "health"),
     "spo2": ("spo2_pct", "health"),
     "spo2_pct": ("spo2_pct", "health"),
     "skin_temp_c": ("skin_temp", "health"),
@@ -4521,7 +4529,7 @@ _BIOMETRIC_KEY_MAP = {
 # the bare row (per-source rows are reserved for the canonical
 # wearable taxonomy listed below).
 _BASELINE_PER_SOURCE_VITALS: frozenset[str] = frozenset({
-    "hr_resting",
+    "hr",
     "spo2_pct",
 })
 

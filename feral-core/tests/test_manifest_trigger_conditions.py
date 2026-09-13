@@ -447,7 +447,7 @@ class TestBaselineAttachment:
         db = tmp_path / "baselines.db"
         engine = BaselineEngine(db_path=str(db))
         for value in (80, 81, 82, 80, 83, 81, 82):
-            engine.record("hr_resting:jw_health_glasses", float(value), category="health")
+            engine.record("hr:jw_health_glasses", float(value), category="health")
         before = engine._conn.execute(
             "SELECT count(*) FROM baseline_alerts"
         ).fetchone()[0]
