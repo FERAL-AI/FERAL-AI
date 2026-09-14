@@ -31,8 +31,8 @@
     "robotics"
   ],
   "dependencies": {
-    "bonjour-service": "^1.2.1",
-    "ws": "^8.16.0",
+    "bonjour-service": "^1.4.4",
+    "ws": "^8.21.3",
     "zod": "^3.23.8"
   },
   "devDependencies": {
