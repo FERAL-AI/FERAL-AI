@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import logging
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
@@ -1007,3 +1008,110 @@ async def wiki_ingest_repo(body: dict):
         )
     except Exception as e:
         return {"error": str(e)}
+
+
+# ── Recent memory digest (phone-readable) ───────────────────────────
+
+#: Conversation only. Screen-capture episodes are about 90% of a day's
+#: rows and would drown the digest in window titles.
+_RECENT_SUMMARY_TYPES = ("user_command", "assistant_reply", "ambient_conversation")
+_RECENT_SUMMARY_TTL_S = 900.0
+_RECENT_SUMMARY_MAX_INPUT_CHARS = 8000
+_recent_summary_cache: dict[int, dict] = {}
+_recent_summary_logger = logging.getLogger("feral.memory.recent_summary")
+
+_RECENT_SUMMARY_PROMPT = (
+    "Write a short recap of what the user did with their assistant recently, "
+    "across every device (phone chat, voice, web). Cover the main topics, "
+    "requests, and any open follow-ups in 3 to 6 plain sentences or bullet "
+    "points. Use only what is in the log below and do not invent details. "
+    "Leave out timestamps and session ids. Stay under 600 characters.\n\n"
+    "Log:\n"
+)
+
+
+@router.get("/api/memory/recent_summary")
+async def memory_recent_summary(hours: int = 24):
+    """A short model-written digest of recent conversation across sessions.
+
+    Built for the phone, which otherwise rebuilt one from
+    ``/api/sessions/primary/transcript`` and so only ever saw the primary
+    thread, never voice or other chat threads.
+
+    Cheap by construction: no model call when the window holds no
+    conversation, and one cached call per window until a newer episode
+    lands or 15 minutes pass. A failed generation is reported in
+    ``error`` and not cached, so the next request retries.
+    """
+    if not state.memory:
+        raise HTTPException(status_code=503, detail="memory not initialized")
+    hours = max(1, min(int(hours or 24), 72))
+    now = time.time()
+    since = now - hours * 3600
+    episodes = await state.memory.episode_recent(
+        limit=200, event_types=_RECENT_SUMMARY_TYPES, since=since,
+    ) or []
+    base = {
+        "hours": hours,
+        "since": since,
+        "episode_count": len(episodes),
+        "sessions": len({e.get("session_id") for e in episodes if e.get("session_id")}),
+    }
+    if not episodes:
+        return {**base, "summary": "", "generated_at": now, "cached": False}
+
+    newest = str(episodes[0].get("id") or "")
+    hit = _recent_summary_cache.get(hours)
+    if (
+        hit
+        and hit["newest"] == newest
+        and hit["count"] == len(episodes)
+        and now - hit["generated_at"] < _RECENT_SUMMARY_TTL_S
+    ):
+        return {
+            **base, "summary": hit["summary"],
+            "generated_at": hit["generated_at"], "cached": True,
+        }
+
+    llm = getattr(state.orchestrator, "llm", None) if state.orchestrator else None
+    if llm is None:
+        return {
+            **base, "summary": "", "generated_at": now, "cached": False,
+            "error": "no language model is available to write the summary",
+        }
+
+    lines: list[str] = []
+    for ep in reversed(episodes):  # oldest first, so the model reads in order
+        text = str(ep.get("summary") or "").strip()
+        if not text:
+            continue
+        who = "assistant" if ep.get("event_type") == "assistant_reply" else "user"
+        lines.append(f"{who}: {text}")
+    log = "\n".join(lines)
+    if len(log) > _RECENT_SUMMARY_MAX_INPUT_CHARS:
+        # Keep the newest end: a recap of the last day matters most at its end.
+        log = log[-_RECENT_SUMMARY_MAX_INPUT_CHARS:]
+
+    try:
+        response = await llm.chat(
+            [{"role": "user", "content": _RECENT_SUMMARY_PROMPT + log}], tools=None,
+        )
+        summary, _ = llm.extract_response(response)
+        summary = (summary or "").strip()
+    except Exception as exc:
+        _recent_summary_logger.warning("recent_summary generation failed: %s", exc)
+        return {
+            **base, "summary": "", "generated_at": now, "cached": False,
+            "error": f"summary generation failed ({exc.__class__.__name__})",
+        }
+    if not summary:
+        return {
+            **base, "summary": "", "generated_at": now, "cached": False,
+            "error": "the model returned no text",
+        }
+
+    _recent_summary_cache[hours] = {
+        "summary": summary, "newest": newest,
+        "count": len(episodes), "generated_at": now,
+    }
+    return {**base, "summary": summary, "generated_at": now, "cached": False}

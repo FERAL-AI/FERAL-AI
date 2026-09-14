@@ -299,6 +299,21 @@ class VoiceRouter:
     def bind_node_to_session(self, node_id: str, session_id: str):
         self._node_session_map[node_id] = session_id
 
+    def session_for_node(self, node_id: str) -> str:
+        """The session this node's voice is routed to, or ``""``."""
+        return self._node_session_map.get(node_id, "")
+
+    def nodes_bound_to_session(self, session_id: str) -> list[str]:
+        """Nodes whose voice is currently routed to ``session_id``.
+
+        A phone voice session can share its session id with a web tab,
+        since both default to the primary session. The web socket's
+        disconnect must not tear that call down; the phone's own
+        disconnect does, through :meth:`stop_node_voice`, which also
+        removes the entry this reads.
+        """
+        return [n for n, s in self._node_session_map.items() if s == session_id]
+
     # ------------------------------------------------------------------
     # Provider selection helpers
     # ------------------------------------------------------------------

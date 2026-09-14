@@ -2990,6 +2990,8 @@ class MemoryStore:
         session_id: str = None,
         *,
         include_forgotten: bool = False,
+        event_types: list[str] | tuple[str, ...] | None = None,
+        since: float | None = None,
     ) -> list[dict]:
         """Recent episodes by ``created_at`` (newest first). Honours the
         same ``forgotten_at`` filter as the other episode read paths.
@@ -3019,24 +3021,32 @@ class MemoryStore:
         boost exists to rescue OLD memories that are still being used,
         which is exactly what this read path cannot evidence.
         """
-        filter_clause = "" if include_forgotten else " AND forgotten_at IS NULL"
+        # ``event_types`` and ``since`` filter in SQL rather than after the
+        # LIMIT. Screen-capture episodes are about 90% of a day's rows, so
+        # "newest N, then keep the conversation ones" returns almost
+        # nothing for any caller that only wants conversation.
+        clauses: list[str] = []
+        params: list = []
+        if session_id:
+            clauses.append("session_id = ?")
+            params.append(session_id)
+        if not include_forgotten:
+            clauses.append("forgotten_at IS NULL")
+        types = [str(t) for t in (event_types or ()) if t]
+        if types:
+            clauses.append(f"event_type IN ({','.join('?' for _ in types)})")
+            params.extend(types)
+        if since is not None:
+            clauses.append("created_at >= ?")
+            params.append(float(since))
+        where = f"WHERE {' AND '.join(clauses)} " if clauses else ""
         conn = await self._conn()
         try:
-            if session_id:
-                async with conn.execute(
-                    f"SELECT * FROM episodes WHERE session_id = ?{filter_clause} "
-                    "ORDER BY created_at DESC LIMIT ?",
-                    (session_id, limit),
-                ) as cur:
-                    rows = await cur.fetchall()
-            else:
-                # Strip the leading " AND " when this is the only condition.
-                where = "WHERE forgotten_at IS NULL " if not include_forgotten else ""
-                async with conn.execute(
-                    f"SELECT * FROM episodes {where}ORDER BY created_at DESC LIMIT ?",
-                    (limit,),
-                ) as cur:
-                    rows = await cur.fetchall()
+            async with conn.execute(
+                f"SELECT * FROM episodes {where}ORDER BY created_at DESC LIMIT ?",
+                (*params, limit),
+            ) as cur:
+                rows = await cur.fetchall()
         finally:
             await self._release(conn)
         return [self._episode_row_to_dict(r) for r in rows]

@@ -374,6 +374,10 @@ class ChatResponsePayload(BaseModel):
 class VoiceSessionStartPayload(BaseModel):
     """Phone voice session bootstrap metadata."""
     stream_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    # Which conversation this voice session belongs to. Older phone builds
+    # omit it; the brain then defaults a phone to the primary session so
+    # voice, chat and web share one history and memory.
+    session_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     sample_rate: int = Field(..., ge=1)
     channels: int = Field(..., ge=1)
     language_hint: str = Field(default="en-US", max_length=64)

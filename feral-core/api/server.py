@@ -499,6 +499,11 @@ class _PathAllowlist:
 # server-wide state (skill installs, vault writes, autonomy changes,
 # config updates, OAuth grants, etc.) stays gated to the dashboard
 # API key.
+#: Node types that are the operator's phone. Same set hardware/mesh.py uses
+#: to pick PHONE_MANIFEST_TEMPLATE.
+_PHONE_NODE_TYPES = ("phone", "ios", "android")
+
+
 _PHONE_BEARER_GET = _PathAllowlist("_PHONE_BEARER_GET")
 for _p in (
     "/api/context/live",                  # Phase 7b-2 iOS Context tab
@@ -515,6 +520,7 @@ for _p in (
     "/api/conversations",                 # chat history list
     "/api/conversations/active/thread",
     "/api/memory/context",                # memory read
+    "/api/memory/recent_summary",         # short digest of the last day, all sessions
     "/api/timeline",                      # operator timeline (single route, was the stale "/api/timeline/" prefix)
     "/api/autonomy",                      # iOS may surface current tier
     "/api/health/frame",                  # health_update frame for the phone
@@ -2469,7 +2475,21 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         # down here would kill the live call the reconnect just
         # established. Only the socket still registered for this
         # session may stop its voice.
-        if state.voice_router and state.sessions.get(session_id) is ws:
+        # Phone voice now defaults to the primary session, which a web tab
+        # may also hold. Refreshing that tab must not end the phone's call:
+        # when a node's voice is bound to this session, the phone owns the
+        # teardown and does it on its own disconnect (`stop_node_voice`).
+        bound_nodes: list = []
+        nodes_bound = (
+            getattr(state.voice_router, "nodes_bound_to_session", None)
+            if state.voice_router else None
+        )
+        if callable(nodes_bound):
+            try:
+                bound_nodes = [n for n in (nodes_bound(session_id) or []) if isinstance(n, str)]
+            except Exception:
+                bound_nodes = []
+        if state.voice_router and state.sessions.get(session_id) is ws and not bound_nodes:
             try:
                 await state.voice_router.stop_session_voice(session_id)
             except Exception as voice_exc:
@@ -3304,8 +3324,22 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     "source_node": node_id or "",
                     "paired_device_id": paired_device_id or "",
                 }
-                if device_target:
+                if device_target in ("brain", "phone", "glasses"):
                     context["device_target"] = device_target
+                elif str(getattr(ws, "_feral_node_type", "") or "").lower() in _PHONE_NODE_TYPES:
+                    # A paired phone that names no known device is the
+                    # operator asking the brain. Resolve to brain_host
+                    # rather than letting source "phone_surface" fall
+                    # through to http_api, which denies
+                    # agentic_computer_use__execute_task and the desktop
+                    # shell: "check my computer" failed while "check
+                    # something on my Mac" worked, and the only fix was
+                    # each client sending device_target itself. An
+                    # unrecognised value ("tv", "auto") is dropped rather
+                    # than passed on. This grants nothing new: the same
+                    # authenticated node could already send
+                    # device_target "brain".
+                    context["surface"] = "brain_host"
                 if refined_envelope is not None:
                     context["refinement"] = refined_envelope.model_dump()
                 if reply_to:
@@ -3430,7 +3464,26 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         payload_for_hash=payload_dict,
                     )
                     continue
-                session_id = stream_id or f"voice-{node_id}"
+                # Session resolution, same order chat_request uses:
+                #   1. an explicit `session_id` from the payload;
+                #   2. for a phone, the primary session, so voice turns
+                #      land in the same history and working memory as
+                #      phone chat and the web UI. Before this every phone
+                #      voice session ran on `voice-<node>` and nothing said
+                #      by voice was visible to chat;
+                #   3. the stream id, then `voice-<node>`, as before.
+                requested_sid = str(payload_dict.get("session_id") or "").strip()
+                primary_sid = getattr(state, "primary_session_id", "")
+                node_kind = str(getattr(ws, "_feral_node_type", "") or "").lower()
+                if requested_sid:
+                    session_id = requested_sid
+                elif (
+                    node_kind in _PHONE_NODE_TYPES
+                    and isinstance(primary_sid, str) and primary_sid
+                ):
+                    session_id = primary_sid
+                else:
+                    session_id = stream_id or f"voice-{node_id}"
                 if session_id not in state.sessions:
                     state.sessions[session_id] = ws
                 state.bind_session_to_daemon(session_id, node_id)
@@ -3617,7 +3670,21 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         # the honest answer is "nothing to cancel". Same
                         # derivation the start branch uses, so a live
                         # chained session resolves to the same key.
-                        chained_session_id = stream_id or f"voice-{node_id}"
+                        # The session this node's voice is bound to. A
+                        # phone's voice now runs on the primary session, so
+                        # re-deriving `stream_id or voice-<node>` would
+                        # cancel nothing on a chained call. Falls back to
+                        # that derivation when no binding is known.
+                        bound_sid = ""
+                        session_for_node = getattr(state.voice_router, "session_for_node", None)
+                        if callable(session_for_node):
+                            try:
+                                bound_sid = session_for_node(node_id)
+                            except Exception:
+                                bound_sid = ""
+                        if not (isinstance(bound_sid, str) and bound_sid):
+                            bound_sid = ""
+                        chained_session_id = bound_sid or stream_id or f"voice-{node_id}"
                         cancel_chained = getattr(
                             state.voice_router, "cancel_chained_response", None
                         )
