@@ -594,6 +594,43 @@ def _is_webhook_receive(path: str) -> bool:
     return bool(tail) and "/" not in tail
 
 
+def _verify_http_device_credential(store, credential: str):
+    """``(device_id, kind)`` for a device credential on an allowlisted path.
+
+    Accepts a phone bearer, or the pair token a native node holds. Before
+    this only phone bearers were accepted, and ``/pair/complete`` mints one
+    solely for ``browser_node_v2``, so the native iOS app, which holds only
+    its pair token, got 401 on every allowlisted REST call
+    (``/api/sessions/primary``, its transcript, ``/api/memory/recent_summary``).
+
+    Deliberately not ``_verify_credential``, which the ``/v1/node`` handshake
+    uses. Its ``verify_device`` claims an unclaimed token as a side effect and
+    never checks the pairing PIN, so over HTTP it would let anyone holding a
+    pairing QR code read the transcript and memory without the PIN. Here a
+    pair token must already be claimed by its device and have cleared its
+    PIN (tokens issued without a PIN count as cleared), and only then is it
+    verified.
+    """
+    if not store or not credential:
+        return None, None
+    verify_phone_bearer = getattr(store, "verify_phone_bearer", None)
+    if callable(verify_phone_bearer):
+        device_id = verify_phone_bearer(credential)
+        if device_id:
+            return device_id, "phone_bearer"
+    token_claimed = getattr(store, "token_claimed", None)
+    token_pin_verified = getattr(store, "token_pin_verified", None)
+    verify_device = getattr(store, "verify_device", None)
+    if not (callable(token_claimed) and callable(token_pin_verified) and callable(verify_device)):
+        return None, None
+    if token_claimed(credential) is not True or token_pin_verified(credential) is not True:
+        return None, None
+    device_id = verify_device(credential)
+    if isinstance(device_id, str) and device_id:
+        return device_id, "pair_token"
+    return None, None
+
+
 class APIKeyMiddleware(BaseHTTPMiddleware):
     async def dispatch(self, request, call_next):
         path = request.url.path
@@ -661,16 +698,16 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 try:
                     from api.state import state as _state
                     store = getattr(_state, "device_pairing_store", None)
-                    verifier = getattr(store, "verify_phone_bearer", None) if store else None
-                    device_id = verifier(bearer) if callable(verifier) else None
+                    device_id, credential_kind = _verify_http_device_credential(store, bearer)
                 except Exception:
-                    device_id = None
+                    device_id, credential_kind = None, None
                 if device_id:
                     # Stash the verified device id on the request so
                     # downstream handlers can use it for per-device
                     # filtering / auditing without re-verifying.
                     try:
                         request.state.phone_device_id = device_id
+                        request.state.device_credential_kind = credential_kind
                     except Exception:
                         pass
                     return await call_next(request)

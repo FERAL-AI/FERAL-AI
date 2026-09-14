@@ -1094,6 +1094,29 @@ class DevicePairingStore:
             finally:
                 conn.close()
 
+    def token_claimed(self, token: str) -> bool:
+        """Has a device already claimed this pairing token?
+
+        Read-only, unlike :meth:`verify_device`, which claims an unclaimed
+        token as a side effect. HTTP auth uses this to refuse a pairing
+        code that was issued (and perhaps shown on screen as a QR code)
+        but never attached by the device it was meant for. Does not
+        verify the token hash; callers still need :meth:`verify_device`.
+        """
+        if not token:
+            return False
+        lookup = _token_lookup(token)
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute(
+                    "SELECT claimed_at FROM paired_devices WHERE token_lookup = ?",
+                    (lookup,),
+                ).fetchone()
+            finally:
+                conn.close()
+        return row is not None and row["claimed_at"] is not None
+
     def token_pin_verified(self, token: str) -> bool:
         """Has the PIN gate been cleared for this token?
 
