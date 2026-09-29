@@ -3211,6 +3211,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     if state.hardware_mesh:
                         state.hardware_mesh.on_node_disconnected(node_id)
                     state.capability_registry.unregister_node(node_id)
+                    # Same reason as the disconnect path below.
+                    for sid in state.get_sessions_for_daemon(node_id):
+                        state.perception.clear_location(sid)
                 await ws.close(code=1000)
                 return
 
@@ -4363,8 +4366,12 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             if state.hardware_mesh:
                 state.hardware_mesh.on_node_disconnected(node_id)
             state.capability_registry.unregister_node(node_id)
+            # Location is opt-in, held in RAM only, and true only while
+            # the phone that sent it is attached. Nothing writes it to an
+            # episode, so dropping it here is the whole of forgetting it.
             for sid in state.get_sessions_for_daemon(node_id):
                 state.perception.update_connected_nodes(sid, list(state.daemons.keys()))
+                state.perception.clear_location(sid)
 
 
 # ─────────────────────────────────────────────
@@ -6232,6 +6239,17 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             accuracy = _first_present(frame_payload, "accuracy", "accuracy_m")
             if accuracy is not None:
                 gps_reading["accuracy_m"] = accuracy
+            # The fix's own timestamp, not arrival. Location is opt-in on
+            # the phone and updates only when the fix changes, so a
+            # reading can legitimately be minutes old; without this
+            # nothing downstream could tell a fresh fix from a stale one
+            # and "where am I" would answer with equal confidence either
+            # way. Falls back to arrival time when the node omits it.
+            gps_reading["ts"] = _resolve_sample_ts(
+                frame_payload,
+                source=str(_infer_wearable_source_from_node(effective_node) or ""),
+                ts_keys=("ts", "sample_ts", "timestamp"),
+            ) or time.time()
             sensors["gps"] = gps_reading
     elif event_type == "button_press":
         # HUP_SPEC.md §5.4 lists button_press, and this function's
