@@ -493,7 +493,17 @@ class MCPServerConnection:
         })
         if result and "result" in result:
             return result["result"]
-        return {"error": result.get("error", {}).get("message", "Unknown error") if result else "No response"}
+        if not result:
+            return {"error": "No response"}
+        err = result.get("error") or {}
+        # Keep the server's own explanation. "HTTP 403" alone says a call
+        # was refused and nothing about which permission is missing, and
+        # the caller has no other way to reach the body.
+        out = {"error": err.get("message", "Unknown error")}
+        detail = err.get("data")
+        if detail:
+            out["detail"] = detail
+        return out
 
     async def read_resource(self, uri: str) -> dict:
         if not self._connected:

@@ -370,6 +370,29 @@ class SkillExecutor:
             return False, "Docker sandbox is not healthy"
         return True, "ok"
 
+    def _vault_for(self, skill_id: str) -> dict[str, str]:
+        """The vault view a backing implementation is handed.
+
+        ``_vault`` is a process cache. A key stored through
+        :meth:`store_key` also lives in the encrypted vault, and after a
+        restart that is the ONLY place it lives, so passing the bare
+        cache meant a persisted key never reached the skill: the keys
+        route reported ``has_key`` true while the skill reported having
+        none, and the operator had done everything right.
+
+        Resolving through :meth:`_get_key` here makes "saved" and
+        "usable" the same state.
+        """
+        view = dict(self._vault)
+        try:
+            key = self._get_key(skill_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("vault view resolution failed for %s: %s", skill_id, exc)
+            key = None
+        if key:
+            view[skill_id] = key
+        return view
+
     def _get_key(self, skill_id: str) -> Optional[str]:
         """Resolve a skill's API key.
 
@@ -880,7 +903,7 @@ class SkillExecutor:
                 # which is why integrations/email.py moved its IMAP work
                 # to ``asyncio.to_thread`` in the same change.
                 result = await asyncio.wait_for(
-                    impl.execute(endpoint.id, exec_args, self._vault),
+                    impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id)),
                     timeout=time_budget,
                 )
                 # The budget is declared by the manifest for THIS endpoint

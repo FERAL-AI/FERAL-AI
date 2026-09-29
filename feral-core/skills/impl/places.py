@@ -225,7 +225,11 @@ class PlacesSkill(BaseSkill):
             }},
         })
         if isinstance(result, dict) and result.get("error"):
-            return {"ok": False, "reason": "upstream_error", "error": str(result["error"])}
+            upstream = {"ok": False, "reason": "upstream_error",
+                        "error": str(result["error"])}
+            if result.get("detail"):
+                upstream["detail"] = str(result["detail"])[:512]
+            return upstream
 
         places = self._normalise(result, origin, limit)
         unattributed = [p["name"] for p in places if not p["sources"]]
