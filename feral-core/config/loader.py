@@ -474,7 +474,7 @@ DEFAULT_SETTINGS = {
     # currencies, so a price in another one is refused rather than
     # guessed at a rate. See security/commerce.py.
     "commerce": {
-        "currency": "AED",
+        "currency": "USD",
         "per_transaction_max": "0",
         "per_day_max": "0",
         "merchant_allowlist": [],

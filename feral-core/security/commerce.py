@@ -68,7 +68,7 @@ class Verdict:
 @dataclass
 class SpendCaps:
     """Operator limits, read from the ``commerce`` settings section."""
-    currency: str = "AED"
+    currency: str = "USD"
     per_transaction_max: Decimal = Decimal("0")
     per_day_max: Decimal = Decimal("0")
     merchant_allowlist: list[str] = field(default_factory=list)
@@ -83,7 +83,7 @@ class SpendCaps:
                 logger.warning("commerce.%s is not a number; treating as 0 (deny)", key)
                 return Decimal("0")
         return cls(
-            currency=str(block.get("currency") or "AED").upper(),
+            currency=str(block.get("currency") or "USD").upper(),
             per_transaction_max=_dec("per_transaction_max"),
             per_day_max=_dec("per_day_max"),
             merchant_allowlist=[
