@@ -186,3 +186,76 @@ When a tool call needs approval, the following sequence occurs:
 | `hybrid` | `hybrid` | hybrid |
 | `hybrid` | `loose` | hybrid (capped) |
 | `loose` | any | as requested |
+
+## Spend Limits
+
+Autonomy decides whether FERAL asks before acting. Spend limits decide
+whether it may act **at all** where money is involved, and they are
+checked before you are ever asked to approve. An amount over the limit
+is refused, not offered: otherwise the answer to "approve?" would be
+the thing that breaks the limit.
+
+**Nothing works until you set them.** A fresh install ships zeros, and
+zero means refuse:
+
+```json
+{
+  "commerce": {
+    "currency": "USD",
+    "per_transaction_max": "0",
+    "per_day_max": "0",
+    "merchant_allowlist": []
+  }
+}
+```
+
+With those defaults every purchase flow is refused with
+`reason: "no_cap_configured"`. That is deliberate. "No limit
+configured" must never be read as "no limit", so an install nobody has
+configured cannot spend. Set both caps in `~/.feral/settings.json` to
+enable anything:
+
+```json
+{
+  "commerce": {
+    "currency": "USD",
+    "per_transaction_max": "75",
+    "per_day_max": "200",
+    "merchant_allowlist": ["noon.com", "amazon.ae"]
+  }
+}
+```
+
+An empty `merchant_allowlist` means any merchant is acceptable; a
+non-empty one is exhaustive.
+
+### What is refused, and why
+
+| Situation | Outcome |
+|:----------|:--------|
+| No caps configured | Refused. Unset is not unlimited. |
+| Price could not be read | Refused. An unreadable price is not a small one. |
+| Price in another currency | Refused. FERAL never converts: a guessed rate would be the most consequential number in the transaction. |
+| Amount over `per_transaction_max` | Refused before you are asked. |
+| Today's completed spend plus this amount over `per_day_max` | Refused. |
+| Merchant absent from a non-empty allowlist | Refused. |
+
+Only completed purchases count against the daily total, so a day of
+browsing cannot lock you out of your own limit. Every evaluation,
+including each refusal, is appended to `~/.feral/purchases.db`: "nothing
+was bought" and "nothing was attempted" are different facts.
+
+FERAL is never the merchant of record. No tool completes a payment; a
+purchase flow stops at `awaiting_confirmation` and the charge, if any,
+happens on your own card at the real merchant.
+
+### Approvals reach the device you are carrying
+
+A pending approval is pushed to every node attached to the session, not
+just the Mac web UI, as an `approval_request` frame carrying a spoken
+sentence, the merchant, and the amount when it is known. It is settled
+by an `approval_resolved` frame, so answering on the phone stops the
+glasses asking.
+
+Approvals expire after `security.approval_ttl_seconds` (default 300).
+Answering a prompt from an hour ago is not consent to run it now.
