@@ -17,6 +17,9 @@ from typing import Any
 from uuid import uuid4
 
 from skills.base import BaseSkill
+from security.commerce import (
+    PurchaseAudit, evaluate, load_caps, merchant_from_url, parse_money,
+)
 from skills.impl import register_skill
 
 logger = logging.getLogger("feral.skills.web_actions")
@@ -60,6 +63,17 @@ def _build_confirmation_card(
         ]}
     )
     return {"type": "Card", "corner_radius": 16, "padding": 16, "children": children}
+
+
+_AUDIT: PurchaseAudit | None = None
+
+
+def _purchase_audit() -> PurchaseAudit:
+    """Process-wide append-only purchase trail, opened on first use."""
+    global _AUDIT
+    if _AUDIT is None:
+        _AUDIT = PurchaseAudit()
+    return _AUDIT
 
 
 @register_skill
@@ -205,6 +219,41 @@ class WebActionsSkill(BaseSkill):
 
         total_display = raw_prices[0] if raw_prices else "Price not found"
 
+        # The amount exists for the first time HERE. make_purchase takes
+        # no price: it scrapes one. So this is where the spend cap is
+        # checked, and a refusal returns in place of the confirmation
+        # card, because an over-limit purchase must never reach the user
+        # as "approve?" -- then the answer to the question would be the
+        # thing that breaks the limit.
+        #
+        # No default currency is passed: a bare "24.00" with no symbol is
+        # an unknown currency, and guessing the operator's own is exactly
+        # the assumption this module refuses to make elsewhere.
+        caps = load_caps()
+        money = parse_money(total_display)
+        merchant = merchant_from_url(page_info.get("url", url) or url)
+        audit = _purchase_audit()
+        verdict = evaluate(money, merchant, caps, audit=audit)
+        if not verdict.allowed:
+            audit.record(
+                outcome="refused_cap", merchant=merchant, money=money,
+                tool="web_actions__make_purchase", reason=verdict.code,
+            )
+            return {
+                "purchased": False,
+                "awaiting_confirmation": False,
+                "refused": True,
+                "reason": verdict.code,
+                "error": verdict.reason,
+                "merchant": merchant,
+                "total_display": total_display,
+                "page_title": page_title,
+            }
+        audit.record(
+            outcome="offered", merchant=merchant, money=money,
+            tool="web_actions__make_purchase", reason=verdict.code,
+        )
+
         screenshot = await browser.screenshot()
 
         confirmation_card = _build_confirmation_card(
@@ -223,6 +272,11 @@ class WebActionsSkill(BaseSkill):
             "page_title": page_title,
             "detected_prices": raw_prices,
             "total_display": total_display,
+            # Parsed, so the approval frame can speak an amount and a
+            # merchant rather than read a scraped string aloud.
+            "merchant": merchant,
+            "amount": str(money.amount) if money else "",
+            "currency": money.currency if money else "",
             "sdui_card": confirmation_card,
             "screenshot_b64": screenshot.get("image_b64"),
         }

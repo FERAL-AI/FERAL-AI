@@ -540,6 +540,10 @@ class ToolRunner:
             "session_id": session_id,
             "safety_level": level,
             "created_at": time.time(),
+            # A prompt nobody answered must not stay answerable from a
+            # pocket an hour later. The phone greys its card at this
+            # time, and `get_pending` refuses a request past it.
+            "expires_at": time.time() + self._approval_ttl_seconds(),
             # Explainability for the SDUI approval card. Renderers can
             # show "Why are we asking?" using sources without re-running
             # the resolver and without leaking internal types.
@@ -609,10 +613,35 @@ class ToolRunner:
             rows = rows[:limit]
         return [dict(p) for p in rows]
 
+    @staticmethod
+    def _approval_ttl_seconds() -> float:
+        """How long a pending approval stays answerable."""
+        try:
+            from config.loader import load_settings
+            block = (load_settings() or {}).get("security") or {}
+            return max(30.0, float(block.get("approval_ttl_seconds", 300) or 300))
+        except Exception:
+            return 300.0
+
+    def _expired(self, pending: Optional[dict]) -> bool:
+        if not pending:
+            return False
+        expires_at = float(pending.get("expires_at") or 0.0)
+        return bool(expires_at) and time.time() > expires_at
+
     def get_pending(self, request_id: str) -> Optional[dict]:
-        """Return a copy of a pending approval by id, if present."""
+        """Return a copy of a pending approval by id, if present.
+
+        An expired request is dropped and reported as absent: answering
+        "yes" to a question the wearer was asked an hour ago is not
+        consent to run it now.
+        """
         pending = self._pending_approvals.get(request_id)
         if pending is None:
+            return None
+        if self._expired(pending):
+            self._pending_approvals.pop(request_id, None)
+            logger.info("Approval %s expired before it was answered", request_id)
             return None
         return dict(pending)
 
@@ -1185,8 +1214,64 @@ class ToolRunner:
             if request_id:
                 msg += f"\n\nrequest_id: `{request_id}`"
             await send_text(session_id, msg)
+            await self._push_approval_request(session_id, denial)
         except Exception as exc:
             logger.debug("pending_approval user-notify failed: %s", exc)
+
+    async def _push_approval_request(self, session_id: str, denial: dict) -> None:
+        """Tell every node on this session that something needs an answer.
+
+        Until now a pending approval only reached the Mac web UI, and the
+        phone was told to go and approve it there, which is no use for
+        anything acted on while out of the house.
+
+        `speak` is built here rather than left to the client: a screenless
+        surface has to say a sentence, and one derived from a card layout
+        ends up reading a tool id aloud.
+        """
+        try:
+            from api.state import state as _state
+            push = getattr(_state, "push_to_session_nodes", None)
+            if not callable(push):
+                return
+            tool_name = str(denial.get("tool_name", "") or "")
+            args = denial.get("args") or {}
+            merchant = ""
+            url = args.get("url") if isinstance(args, dict) else ""
+            if isinstance(url, str) and url:
+                from security.commerce import merchant_from_url
+                merchant = merchant_from_url(url)
+            merchant = str(args.get("merchant") or merchant) if isinstance(args, dict) else merchant
+            # Present only when the caller already knows it. A scraped
+            # purchase does not: make_purchase is given no price and
+            # discovers one, so the amount arrives after this point.
+            amount = str(args.get("amount") or "") if isinstance(args, dict) else ""
+            currency = str(args.get("currency") or "") if isinstance(args, dict) else ""
+
+            human = tool_name.replace("__", " ").replace("_", " ").strip() or "an action"
+            if amount and currency:
+                speak = f"Approve {amount} {currency}" + (f" at {merchant}?" if merchant else "?")
+            elif merchant:
+                speak = f"Approve {human} at {merchant}?"
+            else:
+                speak = f"Approve {human}?"
+
+            await push(session_id, {"type": "approval_request", "payload": {
+                "request_id": str(denial.get("request_id", "") or ""),
+                "session_id": session_id,
+                "tool_name": tool_name,
+                "title": human,
+                "detail": str(args.get("item_description") or "") if isinstance(args, dict) else "",
+                "speak": speak,
+                "safety_level": str(denial.get("safety_level", "") or ""),
+                "merchant": merchant,
+                "amount": amount,
+                "currency": currency,
+                "created_at": float(denial.get("created_at") or 0.0),
+                "expires_at": float(denial.get("expires_at") or 0.0),
+            }})
+        except Exception as exc:
+            logger.debug("approval_request push failed: %s", exc)
 
     async def execute_tool_call_for_llm(
         self,

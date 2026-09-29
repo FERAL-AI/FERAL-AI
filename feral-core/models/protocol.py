@@ -343,6 +343,52 @@ class SourceRef(BaseModel):
     url: str = Field(..., max_length=MAX_PATH_LEN)
 
 
+class ApprovalRequestPayload(BaseModel):
+    """Brain to client: something needs a yes or no before it happens.
+
+    Pushed to every node attached to the session, because the operator is
+    not necessarily at the Mac. Before this, a pending approval only
+    reached the web UI and the phone was told to go and approve it there,
+    which is useless for anything acted on while out of the house.
+
+    Typed rather than an ``sdui`` card on purpose: a screenless surface
+    needs a sentence it can speak and a hard yes or no, and inferring one
+    from a layout is how a spoken prompt ends up reading a merchant id
+    aloud. ``speak`` is that sentence.
+
+    ``amount`` is a decimal string, never a float: money that round-trips
+    through binary floating point is money that can be wrong by a cent.
+    It is present only when the amount is already known, which for a
+    scraped purchase it is not at the moment the approval is raised.
+    """
+    request_id: str = Field(..., max_length=MAX_ID_LEN)
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+    tool_name: str = Field(default="", max_length=MAX_NAME_LEN)
+    title: str = Field(default="", max_length=MAX_NAME_LEN)
+    detail: str = Field(default="", max_length=MAX_TOKEN_LEN)
+    speak: str = Field(default="", max_length=MAX_TOKEN_LEN)
+    safety_level: str = Field(default="", max_length=MAX_NAME_LEN)
+    merchant: str = Field(default="", max_length=MAX_NAME_LEN)
+    amount: str = Field(default="", max_length=64)
+    currency: str = Field(default="", max_length=8)
+    created_at: float = 0.0
+    expires_at: float = 0.0
+
+
+class ApprovalResolvedPayload(BaseModel):
+    """Brain to client: this approval is settled, stop asking.
+
+    Sent to every node on the session so a prompt answered on one
+    surface disappears from the others. ``outcome`` is ``approved``,
+    ``rejected`` or ``expired``.
+    """
+    request_id: str = Field(..., max_length=MAX_ID_LEN)
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+    outcome: str = Field(default="", max_length=32)
+    resolved_by: str = Field(default="", max_length=MAX_NAME_LEN)
+    tool_name: str = Field(default="", max_length=MAX_NAME_LEN)
+
+
 class ChatResponsePayload(BaseModel):
     """Brain response envelope for phone chat requests.
 
@@ -1687,6 +1733,11 @@ MESSAGE_TYPES = {
     # inbound handler. First frame pair in this feature where one goes
     # each way; HUP_SPEC 5.9 notes the direction of each.
     "ambient_digest": AmbientDigestPayload,
+    # Brain → Client. Pushed when a tool needs a yes or no, and again
+    # when it is settled, so a prompt answered on the phone stops being
+    # asked by the glasses.
+    "approval_request": ApprovalRequestPayload,
+    "approval_resolved": ApprovalResolvedPayload,
     "sdui": SDUIPayload,
     "sdui_patch": SDUIPatchPayload,
     "tts_chunk": TTSChunkPayload,

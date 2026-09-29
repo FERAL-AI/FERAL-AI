@@ -1313,6 +1313,31 @@ class Orchestrator:
             "result": result_data,
         }
 
+    async def _push_approval_resolved(
+        self, session_id: str, request_id: str, outcome: str,
+        tool_name: str, actor: str,
+    ) -> None:
+        """Tell every node on the session to stop asking. Never raises.
+
+        Approvals are pushed to each attached surface, so one answered on
+        the phone has to disappear from the glasses rather than be asked
+        again by whichever surface did not hear the answer.
+        """
+        try:
+            from api.state import state as _state
+            push = getattr(_state, "push_to_session_nodes", None)
+            if not callable(push):
+                return
+            await push(session_id, {"type": "approval_resolved", "payload": {
+                "request_id": request_id,
+                "session_id": session_id,
+                "outcome": outcome,
+                "resolved_by": actor,
+                "tool_name": tool_name,
+            }})
+        except Exception as exc:
+            logger.debug("approval_resolved push failed: %s", exc)
+
     async def resolve_tool_approval_request(
         self,
         request_id: str,
@@ -1358,6 +1383,9 @@ class Orchestrator:
             if denied is None:
                 return {"status": "not_found", "request_id": request_id}
             await self._send_text(effective_session, f"Cancelled `{tool_name}`.")
+            await self._push_approval_resolved(
+                effective_session, request_id, "rejected", tool_name, actor,
+            )
             return {
                 "status": "rejected",
                 "request_id": request_id,
@@ -1372,6 +1400,9 @@ class Orchestrator:
         )
         if accepted is None:
             return {"status": "not_found", "request_id": request_id}
+        await self._push_approval_resolved(
+            effective_session, request_id, "approved", tool_name, actor,
+        )
         return await self._execute_approved_pending_tool(
             effective_session,
             request_id=request_id,

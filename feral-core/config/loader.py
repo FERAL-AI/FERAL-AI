@@ -468,8 +468,24 @@ DEFAULT_SETTINGS = {
             "map_concurrency": 3,
         },
     },
+    # Money. Zero means refuse: an install that has never set a limit
+    # must not treat "unset" as "unlimited". `currency` is the only
+    # currency the caps are expressed in, and nothing converts between
+    # currencies, so a price in another one is refused rather than
+    # guessed at a rate. See security/commerce.py.
+    "commerce": {
+        "currency": "AED",
+        "per_transaction_max": "0",
+        "per_day_max": "0",
+        "merchant_allowlist": [],
+    },
     "security": {
         "node_api_key": "",
+        # How long a pending tool approval stays answerable. A prompt
+        # spoken through the glasses and never answered must not still be
+        # answerable from a pocket an hour later. Read by
+        # agents/tool_runner.py.
+        "approval_ttl_seconds": 300,
         # Tool-approval tier the operator picks in `feral setup`
         # (capabilities step) or the timeline API. Exported to
         # ``FERAL_AUTONOMY`` by ``export_as_env`` because that env var

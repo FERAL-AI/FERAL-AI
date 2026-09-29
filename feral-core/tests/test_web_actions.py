@@ -96,7 +96,42 @@ class TestWebActionsSkill:
         assert "$19.99" in data["results"][0]["prices_found"]
 
     @pytest.mark.asyncio
-    async def test_make_purchase_returns_sdui_card(self) -> None:
+    async def test_make_purchase_is_refused_with_no_spend_limit(self, tmp_path, monkeypatch) -> None:
+        """A stock install has no commerce caps, and unset means refuse.
+
+        Treating "no limit configured" as "no limit" is how an errand
+        agent spends money nobody authorised. See security/commerce.py.
+        """
+        from security.commerce import PurchaseAudit
+        from skills.impl import web_actions
+
+        monkeypatch.setattr(web_actions, "_AUDIT", PurchaseAudit(db_path=str(tmp_path / "p.db")))
+        skill = WebActionsSkill()
+        mock_browser = AsyncMock()
+        mock_browser.connected = True
+        mock_browser.navigate = AsyncMock(return_value={"success": True})
+        mock_browser.wait = AsyncMock(return_value={"success": True})
+        mock_browser.get_page_info = AsyncMock(return_value={"title": "Cool Gadget", "url": "https://shop.com/gadget"})
+        mock_browser.evaluate = AsyncMock(return_value={"result": json.dumps(["$49.99"])})
+        skill._browser = mock_browser
+
+        result = await skill.execute("make_purchase", {"url": "https://shop.com/gadget"}, {})
+        data = result["data"]
+        assert data["purchased"] is False
+        assert data["refused"] is True
+        assert data["reason"] == "no_cap_configured"
+        assert "sdui_card" not in data
+
+    @pytest.mark.asyncio
+    async def test_make_purchase_returns_sdui_card(self, tmp_path, monkeypatch) -> None:
+        from decimal import Decimal
+
+        from security.commerce import PurchaseAudit, SpendCaps
+        from skills.impl import web_actions
+
+        monkeypatch.setattr(web_actions, "_AUDIT", PurchaseAudit(db_path=str(tmp_path / "p.db")))
+        monkeypatch.setattr(web_actions, "load_caps", lambda: SpendCaps(
+            currency="USD", per_transaction_max=Decimal("100"), per_day_max=Decimal("500")))
         skill = WebActionsSkill()
         mock_browser = AsyncMock()
         mock_browser.connected = True

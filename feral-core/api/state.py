@@ -3502,6 +3502,31 @@ class BrainState:
     def get_sessions_for_daemon(self, node_id: str) -> set[str]:
         return self._daemon_session_bindings.get(node_id, set())
 
+    def nodes_for_session(self, session_id: str) -> list[str]:
+        """Nodes attached to this session, for pushing an unsolicited frame.
+
+        The reverse of the binding map. The operator is not necessarily
+        at the Mac, so anything that needs an answer has to be able to
+        reach whatever they are actually wearing or carrying.
+        """
+        if not session_id:
+            return []
+        return [
+            node_id for node_id, sessions in self._daemon_session_bindings.items()
+            if session_id in sessions and node_id in self.daemons
+        ]
+
+    async def push_to_session_nodes(self, session_id: str, msg_dict: dict) -> int:
+        """Send one frame to every node on a session. Never raises."""
+        sent = 0
+        for node_id in self.nodes_for_session(session_id):
+            try:
+                await self.send_to_daemon(node_id, msg_dict)
+                sent += 1
+            except Exception as exc:
+                logger.debug("push to node %s failed: %s", node_id, exc)
+        return sent
+
 
 # The process-wide brain singleton.
 #
