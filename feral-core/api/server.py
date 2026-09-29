@@ -517,6 +517,7 @@ for _p in (
     "/api/devices/connected",             # Phase 10 — live HUP set
     "/api/ambient/next_event",            # ambient calendar context
     "/api/ambient/briefing",              # ambient morning summary (was the stale "/digest")
+    "/api/approvals",                     # pending approvals list (the phone can already approve/reject)
     "/api/conversations",                 # chat history list
     "/api/conversations/active/thread",
     "/api/memory/context",                # memory read
