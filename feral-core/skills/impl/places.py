@@ -26,6 +26,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import os
 from typing import Any, Dict, Optional
 
 from skills.base import BaseSkill
@@ -224,12 +225,35 @@ class PlacesSkill(BaseSkill):
                 "radius_meters": radius,
             }},
         })
+        # MCP reports a refused call as a 200 carrying `isError: true`,
+        # not as a transport error. Checking only the transport made a
+        # permission failure look like a successful search that happened
+        # to find nothing, which is the most dangerous shape a failure
+        # can take: it reads as "there are no cafes near you".
+        if isinstance(result, dict) and result.get("isError"):
+            text = ""
+            for block in result.get("content") or []:
+                if isinstance(block, dict) and block.get("text"):
+                    text = str(block["text"])
+                    break
+            return {
+                "ok": False, "reason": "upstream_error",
+                "error": text or "the places provider refused the request",
+                "detail": json.dumps(result, default=str)[:512],
+            }
+
         if isinstance(result, dict) and result.get("error"):
             upstream = {"ok": False, "reason": "upstream_error",
                         "error": str(result["error"])}
             if result.get("detail"):
                 upstream["detail"] = str(result["detail"])[:512]
             return upstream
+
+        if os.environ.get("FERAL_PLACES_DEBUG"):
+            # The response schema is not published, so when a call comes
+            # back empty the only way to tell "no results" from "parsed
+            # the wrong shape" is to look at what actually arrived.
+            logger.info("places raw result: %s", json.dumps(result, default=str)[:4000])
 
         places = self._normalise(result, origin, limit)
         unattributed = [p["name"] for p in places if not p["sources"]]

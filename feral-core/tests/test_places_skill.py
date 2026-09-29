@@ -149,3 +149,35 @@ async def test_an_unknown_endpoint_is_refused(monkeypatch):
     skill, _ = _skill(monkeypatch)
     out = await skill.execute("book_table", {"query": "x"}, VAULT)
     assert out["ok"] is False
+
+
+@pytest.mark.asyncio
+async def test_a_refused_call_is_not_reported_as_zero_results(monkeypatch):
+    """MCP returns a refusal as HTTP 200 with isError, not a transport error.
+
+    Checking only the transport made "the caller does not have
+    permission" look like a successful search that found nothing, which
+    reads to the user as "there are no cafes near you". Seen live against
+    Grounding Lite before billing was enabled.
+    """
+    skill = PlacesSkill()
+
+    class _Refusing:
+        is_connected = True
+
+        async def call_tool(self, name, args):
+            return {"content": [{"text": "The caller does not have permission",
+                                 "type": "text"}], "isError": True}
+
+    async def _connection(api_key):
+        return _Refusing()
+
+    monkeypatch.setattr(skill, "_connection", _connection)
+    monkeypatch.setattr(PlacesSkill, "_policy_allows", staticmethod(lambda: True))
+    monkeypatch.setattr(PlacesSkill, "_origin", staticmethod(
+        lambda args: dict(ORIGIN, source="device")))
+
+    out = await skill.execute("find_places", {"query": "cafe"}, VAULT)
+    assert out["ok"] is False
+    assert out["reason"] == "upstream_error"
+    assert "permission" in out["error"]
