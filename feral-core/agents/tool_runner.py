@@ -1218,10 +1218,78 @@ class ToolRunner:
             call_id=str(tool_call.get("id") or ""),
             turn_id=self._turn_id_for(session_id),
         ):
-            return await self._execute_tool_call_for_llm_inner(
+            result = await self._execute_tool_call_for_llm_inner(
                 session_id, tool_call, available_skills,
                 effective_surface=effective_surface,
             )
+            self._record_grounding_sources(session_id, result)
+            return result
+
+    #: Attribution links kept per session, capped so one answer cannot
+    #: push an unbounded list onto the reply frame.
+    _GROUNDING_SOURCE_CAP = 10
+
+    def _record_grounding_sources(self, session_id: str, result) -> None:
+        """Keep the attribution links a grounded tool result carried.
+
+        Keyed off ``attribution_required`` rather than a tool-name
+        allowlist, so a future grounded skill is covered by saying so in
+        its result instead of by editing this file.
+
+        The links exist because a provider's terms require them shown in
+        the same interaction as the answer. The reply frame is the only
+        place that reaches the phone, and this is the last layer that
+        still knows which session a tool call belonged to.
+        """
+        if not session_id or not isinstance(result, dict):
+            return
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+        if not isinstance(payload, dict) or payload.get("attribution_required") is not True:
+            return
+
+        collected: list[dict] = []
+        seen: set[str] = set()
+
+        def _take(entries) -> None:
+            for entry in entries or []:
+                if not isinstance(entry, dict):
+                    continue
+                url = entry.get("url")
+                title = entry.get("title")
+                if not isinstance(url, str) or not url or url in seen:
+                    continue
+                seen.add(url)
+                collected.append({"title": str(title or "Source"), "url": url})
+
+        _take(payload.get("sources"))
+        for place in payload.get("places") or []:
+            if isinstance(place, dict):
+                _take(place.get("sources"))
+        if not collected:
+            return
+
+        store = getattr(self, "_grounding_sources", None)
+        if store is None:
+            store = {}
+            self._grounding_sources = store
+        existing = store.get(session_id) or []
+        for item in collected:
+            if len(existing) >= self._GROUNDING_SOURCE_CAP:
+                break
+            if all(item["url"] != prior["url"] for prior in existing):
+                existing.append(item)
+        store[session_id] = existing
+
+    def pop_grounding_sources(self, session_id: str) -> list[dict]:
+        """Take this session's pending attribution links, clearing them.
+
+        Cleared on read on purpose: an answer that was not grounded must
+        never inherit the sources of the one before it.
+        """
+        store = getattr(self, "_grounding_sources", None)
+        if not store:
+            return []
+        return store.pop(session_id, [])
 
     async def _screen_external_result(self, tool_name: str, result):
         """Screen an external tool result and mark it if it is not clean.

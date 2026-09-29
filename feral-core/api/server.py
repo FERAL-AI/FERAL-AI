@@ -3478,6 +3478,16 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 _somatic_turn = _somatic_state_for_turn(target_sid)
                 if _somatic_turn is not None:
                     chat_payload["somatic"] = _somatic_turn
+                # Attribution links for an answer grounded in a third
+                # party. Google Maps' terms allow grounded output to
+                # reach an end user only when its sources are viewable
+                # in the same interaction, and these glasses have no
+                # screen, so the phone renders them while the glasses
+                # speak. Popped, so an ungrounded answer never inherits
+                # the sources of the one before it.
+                _sources_turn = _grounding_sources_for_turn(target_sid)
+                if _sources_turn:
+                    chat_payload["sources"] = _sources_turn
                 await ws.send_json(hup_frame("chat_response", chat_payload))
 
             elif msg.type == "chat_response":
@@ -5901,6 +5911,28 @@ def _somatic_policy_signature(frame: dict) -> tuple:
         round(float(frame.get("cognitive_load") or 0.0), 2),
         bool(frame.get("stale")),
     )
+
+
+def _grounding_sources_for_turn(session_id: str) -> list[dict]:
+    """Attribution links produced by THIS turn's tools, or an empty list.
+
+    Read through the tool runner, which is the only layer that still
+    knows which session a tool call belonged to, and cleared as it is
+    read.
+    """
+    try:
+        runner = getattr(getattr(state, "orchestrator", None), "tool_runner", None)
+        pop = getattr(runner, "pop_grounding_sources", None)
+        if not callable(pop):
+            return []
+        sources = pop(session_id)
+    except Exception:
+        logger.debug("grounding sources lookup failed for turn", exc_info=True)
+        return []
+    return [
+        s for s in (sources or [])
+        if isinstance(s, dict) and isinstance(s.get("url"), str) and s.get("url")
+    ]
 
 
 def _somatic_state_for_turn(session_id: str) -> dict | None:

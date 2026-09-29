@@ -332,6 +332,17 @@ class ChatRequestPayload(BaseModel):
     device_target: Optional[Literal["brain", "phone", "glasses", "auto"]] = None
 
 
+class SourceRef(BaseModel):
+    """One attribution link travelling with a grounded answer.
+
+    ``title`` is passed through exactly as the provider returned it:
+    Google Maps' terms require the source title displayed unaltered, so
+    nothing here may prettify, translate or truncate it.
+    """
+    title: str = Field(..., max_length=MAX_NAME_LEN)
+    url: str = Field(..., max_length=MAX_PATH_LEN)
+
+
 class ChatResponsePayload(BaseModel):
     """Brain response envelope for phone chat requests.
 
@@ -355,6 +366,16 @@ class ChatResponsePayload(BaseModel):
     channel: Literal["chat", "vision_ask"] = "chat"
     reply_to: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     error: Optional[str] = None
+    sources: Optional[list[SourceRef]] = None
+    """Attribution links for an answer grounded in a third-party source.
+
+    Present only when the turn used a grounded tool. Google Maps
+    Grounding Lite permits grounded output to reach an end user only
+    when its source links travel with it and are viewable within the
+    same interaction. These glasses have no screen, so speech alone
+    cannot satisfy that: the phone renders this list while the glasses
+    speak. Optional, so older clients ignore it.
+    """
     somatic: Optional["SomaticStatePayload"] = None
     """The behavioural policy in force for THIS reply, or None.
 
