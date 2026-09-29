@@ -93,6 +93,7 @@ AUTOLOAD_MODULES: tuple[str, ...] = (
     # of skills/impl/browser_use.py: the store must be loadable without a
     # browser.
     "browser_memory",
+    "places",
 )
 
 # module name -> reason it is not loaded. Empty on a healthy install.
