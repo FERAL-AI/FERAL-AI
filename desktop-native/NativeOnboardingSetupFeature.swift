@@ -140,8 +140,8 @@ struct NativeOnboardingSetupFeatureView:View {
         VStack(alignment:.leading,spacing:14){
             Text("Connect your assistant").font(.title.bold())
             Text("Your avatar stays selected. Choose a chat provider and model next. Saved settings and cached suggestions load without automatic provider probes, grants or live discovery.").foregroundStyle(.secondary)
-            if let error=localError ?? model.error{Text(error).foregroundStyle(.orange).textSelection(.enabled)}
-            if let notice=model.notice{Text(notice).font(.callout).textSelection(.enabled)}
+            if let error=localError ?? model.error{NativeSelectableText(error).foregroundStyle(.orange)}
+            if let notice=model.notice{NativeSelectableText(notice).font(.callout)}
             if model.providers.isEmpty{Text("An encrypted-memory installation may need explicit vault unlock and separately reviewed bootstrap continuation before the provider catalogue is available.").font(.caption).foregroundStyle(.secondary)}
             Picker("Chat provider",selection:Binding(get:{model.selected},set:{id in secret="";Task{await model.select(id)}})){Text("Choose provider").tag("");ForEach(model.providers){provider in Text(provider.name+(provider.local ? " · local" : " · cloud")).tag(provider.id)}}.disabled(model.busy)
             if let provider=model.providers.first(where:{$0.id==model.selected}){
@@ -149,7 +149,7 @@ struct NativeOnboardingSetupFeatureView:View {
                 TextField("Model name",text:$model.model).textFieldStyle(.roundedBorder)
                 if !model.models.isEmpty{Menu("Cached suggestions (\(model.modelsSource))"){ForEach(model.models,id:\.self){id in Button(id){model.model=id}}}}
                 TextField("Provider endpoint (empty selects runtime default)",text:$model.endpoint).textFieldStyle(.roundedBorder)
-                if let template=provider.endpointTemplate{Text("Workspace endpoint template (not a usable default): "+template).font(.caption).textSelection(.enabled);Text("Enter the resolved endpoint explicitly before activation or key storage.").font(.caption).foregroundStyle(.secondary)}
+                if let template=provider.endpointTemplate{NativeSelectableText("Workspace endpoint template (not a usable default): "+template).font(.caption);Text("Enter the resolved endpoint explicitly before activation or key storage.").font(.caption).foregroundStyle(.secondary)}
                 if provider.needsKey{SecureField("Provider API key",text:$secret).textFieldStyle(.roundedBorder).disabled(!model.vaultReady);Text(model.vaultReady ? "Existing vault authenticated; saving the key requires review." : "Cloud key storage requires explicit existing-vault unlock. Fresh-vault initialization is unavailable; local providers can be selected without adding a key.").font(.caption).foregroundStyle(.secondary);Button("Review key storage…"){prepare(.saveCredential)}.disabled(model.busy || !model.vaultReady || secret.isEmpty)}
                 HStack{Button("Review activation…"){prepare(.activate)};Button("Review saved-provider probe…"){prepare(.probe)}}.disabled(model.busy)
             }

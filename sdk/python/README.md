@@ -170,11 +170,35 @@ existing thread. Independent clients have independent default threads. Concurren
 calls for the same thread on one client raise `ChatTurnError(code="session_busy")`;
 separate explicit threads can run independently. Sharing the same explicit thread
 across other surfaces remains subject to the server's attachment/delivery rules.
-Each invocation currently opens and closes its own socket. The server clears
-volatile conversation history when the last attachment to a nonprimary thread
-leaves. Stable IDs and durable turn receipts therefore do not guarantee
-continuous in-memory chat history across SDK calls. Keeping a negotiated socket
-open or restoring durable conversation threads remains a follow-up contract.
+Each thread now retains its negotiated socket and one owned reader between
+calls. Later turns reuse the live server history instead of disconnecting after
+every response. This is live continuity: closing the last nonprimary attachment
+still clears the server's volatile context. Saved UI messages and durable turn
+receipts are separate from model history; process-restart durability remains a
+backend follow-up. A new client attaching an old explicit ID cannot certify that
+its earlier context survived.
+
+Set `max_chat_threads=8` on the client (default 8; integer 1 through 64) to bound
+live threads. `thread_quota` refuses a new thread without evicting existing
+history. `await client.close_thread(session_id)` releases that owned thread;
+omitting the ID closes the default thread. Explicit close, idle disconnect,
+malformed protocol, timeout or cancellation retires the old ID on that client.
+A later prompt to that ID raises `ChatTurnError(code="context_lost")` before any
+reconnect or user command. The SDK does not silently start an empty conversation
+under a previously used ID. Choose a **new** explicit ID for deliberate new
+work, after reconciling any uncertain earlier action; this does not resume the
+old task. Up to 1,024 live/retired identities are recorded per client, after which
+`thread_identity_quota` refuses further IDs. There is no automatic eviction or
+reset of those identity records. `close()` permanently closes the client;
+further chat raises `client_closed`.
+
+```python
+async with FeralClient(session_id="thread-A", max_chat_threads=4) as client:
+    await client.chat("Remember violet maple 47 for this conversation")
+    answer = await client.chat("What did I ask you to remember?")
+    await client.close_thread()  # Releases A; it cannot silently reopen.
+    fresh = await client.chat("Start a separate conversation", session_id="thread-B")
+```
 
 Chat authenticates first, then sends a read-only `chat.capabilities` request.
 Only a correlated response confirming version 1, durable receipts, whole-turn
@@ -225,7 +249,8 @@ deployment. See [dated evidence](../../docs/roadmap/theora-personal-agent/PYTHON
 Tracked-chat tests additionally bridge to the actual registered session handler,
 real SQLite turn receipts and a controlled real orchestrator, with disposable
 homes and in-memory OS-vault wrappers. No real model or account is used. See
-[tracked SDK evidence](../../docs/roadmap/theora-personal-agent/SDK_WEBSOCKET_EVIDENCE.md).
+[tracked SDK evidence](../../docs/roadmap/theora-personal-agent/SDK_WEBSOCKET_EVIDENCE.md)
+and [live thread evidence](../../docs/roadmap/theora-personal-agent/SDK_THREAD_CONTINUITY_EVIDENCE.md).
 
 ## Requirements
 

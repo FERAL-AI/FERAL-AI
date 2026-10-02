@@ -14,13 +14,15 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Latest published source: `739a20c0b56d2a2aa9956cde395a79b6dd5e0935`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,252 backend tests,83 skipped,74% rounded coverage; non-blocking mypy852 versus812 baseline. [WORK_STATE](WORK_STATE.md) names exact runs. The following table retains prior evidence. New CORE04/DEV01B working-wave integration passed309 tests/1 skipped, plus53 locked Node tests; full remote acceptance belongs to its subsequent commit.
+Latest published source: `4e19f07f8603196fd73ecdafd0e127dbad865e69`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,278 backend tests,83 skipped,74% rounded coverage; generic Python/Node transport jobs passed. Non-blocking mypy850 versus812 baseline remains failed. [WORK_STATE](WORK_STATE.md) names exact runs. The following table retains prior evidence. The next frozen runtime/SDK wave passed330 integrated tests and72 Node tests locally; its remote acceptance belongs to its subsequent commit.
 
 Actual immutable9.27 passed exact reviewed Deny/Allow, local reply and copy/link,
 but New conversation caused another accessibility recursion SIGSEGV and context
 growth blocked later tasks. [Candidate evidence](NATIVE_9_27_ACCEPTANCE.md).
-Next ready cards are native crash repair, MODEL01B context-growth repair and
-DEV01C durable thread continuity. These take precedence over cosmetic expansion.
+Native crash repair, MODEL01B context fitting and DEV01C live thread continuity
+are in the next source checkpoint. They require new native9.28 acceptance.
+Durable model context after restart is a separate backend checkpoint card;
+retained SDK sockets alone do not establish it.
 
 | Evidence | Observed result | Boundary |
 |---|---|---|

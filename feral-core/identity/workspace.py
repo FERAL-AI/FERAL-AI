@@ -289,9 +289,9 @@ class IdentityWorkspace:
             return
 
         if session_id:
-            recent = memory_store.episode_recent(limit=20, session_id=session_id)
+            recent = await memory_store.episode_recent(limit=20, session_id=session_id)
         else:
-            recent = memory_store.episode_recent(limit=20)
+            recent = await memory_store.episode_recent(limit=20)
         if not recent:
             return
 

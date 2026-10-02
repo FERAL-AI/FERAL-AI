@@ -31,11 +31,34 @@ Each client has a stable isolated UUID thread unless a session is supplied.
 Same-client overlapping calls to the same thread refuse with `session_busy`;
 different threads can run concurrently. Other surfaces sharing an explicit
 thread remain subject to the server's attachment/delivery behavior.
-Each invocation currently opens and closes a socket. The server clears volatile
-conversation history after the last nonprimary attachment disconnects; the
-stable ID and durable receipts do not certify retained multi-turn chat history.
-Persistent negotiated connections or durable thread restoration remain follow-up
-work.
+Each thread retains one negotiated socket and its message listeners between
+calls, so later messages use the live server history. Continuity lasts while
+that connection stays alive. The last nonprimary disconnect still clears volatile
+context; saved UI messages and durable receipts are separate from model history.
+Persistence across client shutdown or server restart remains a backend follow-up.
+Attaching an old explicit ID from a new client does not certify restored context.
+
+`maxChatThreads` defaults to 8 (integer 1 through 64). New threads at the limit
+refuse with `thread_quota`, preserving existing live history. Call
+`closeThread(sessionId)` to release an owned thread, or omit the ID for the
+default. Explicit close, idle disconnection, malformed protocol, timeout or
+AbortSignal retires that ID: further prompts refuse with `context_lost` before
+any new connection or command. Choose a **new** explicit ID for deliberate new
+work after reconciling uncertain prior effects; it does not resume the old task.
+Live and retired identity records are bounded to 1,024 per client, after which
+`thread_identity_quota` refuses further IDs. Records are never silently evicted
+or reset. `close()` permanently terminates the client; later chat refuses with
+`client_closed`.
+
+```ts
+const client = new FeralClient('http://localhost:9090', {sessionId: 'thread-A', maxChatThreads: 4});
+try {
+  await client.chat('Remember violet maple 47 for this conversation');
+  const answer = await client.chat('What did I ask you to remember?');
+  client.closeThread();
+  const fresh = await client.chat('Start a separate conversation', {sessionId: 'thread-B'});
+} finally { client.close(); }
+```
 
 Chat negotiates `chat.capabilities` before sending any user command. An older
 server, wrong session or missing version/durable/whole-terminal support refuses
@@ -66,7 +89,7 @@ redirects are not followed. Malformed JSON/schema or a transport/deadline failur
 raises a bounded diagnostic. No automatic HTTP retries occur.
 
 ```sh
-npm install
+npm ci
 npm test
 ```
 
@@ -74,4 +97,5 @@ The test runner builds the generic package and runs Node's built-in tests. Tests
 use controlled Fetch/WebSocket transports, not accounts or live model inference.
 Python SDK integration separately checks the shared protocol against the actual
 registered server, SQLite receipts and real controlled orchestration. See
-[evidence](../../docs/roadmap/theora-personal-agent/SDK_WEBSOCKET_EVIDENCE.md).
+[tracked-turn evidence](../../docs/roadmap/theora-personal-agent/SDK_WEBSOCKET_EVIDENCE.md)
+and [live thread evidence](../../docs/roadmap/theora-personal-agent/SDK_THREAD_CONTINUITY_EVIDENCE.md).

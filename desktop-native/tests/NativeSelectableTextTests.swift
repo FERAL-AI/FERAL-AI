@@ -29,6 +29,29 @@ import SwiftUI
         let preservedBold = field.attributedStringValue.attribute(.font, at: 0, effectiveRange: nil) as! NSFont
         precondition(NSFontManager.shared.traits(of: preservedBold).contains(.boldFontMask))
         precondition(field.attributedStringValue.attribute(.link, at: 17, effectiveRange: nil) as? URL == URL(string: "https://example.com"))
+        let diagnostic = NativeSelectableText(verbatim: "**exact** [not a link](file:///synthetic)")
+            .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
+            .lineLimit(2).accessibilityLabel("Exact diagnostic")
+        precondition(diagnostic.text == "**exact** [not a link](file:///synthetic)")
+        precondition(diagnostic.attributed == nil && diagnostic.maximumNumberOfLines == 2)
+        precondition(diagnostic.font.pointSize == NativeSelectableFont.caption.value.pointSize)
+        let limited = NativeSelectableTextField(text: diagnostic.text, font: diagnostic.font,
+            color: diagnostic.color, attributed: nil, wraps: true,
+            maximumNumberOfLines: diagnostic.maximumNumberOfLines, label: diagnostic.label)
+        limited.configure(field)
+        precondition(field.maximumNumberOfLines == 2 && field.accessibilityLabel() == "Exact diagnostic")
+        let title = NativeSelectableText("Synthetic title").font(.title2.bold())
+        precondition(NSFontManager.shared.traits(of: title.font).contains(.boldFontMask))
+        precondition(title.font.pointSize == NativeSelectableFont.title2.value.pointSize)
+        precondition(NativeSelectableText("**plain dynamic value**").attributed == nil)
+        let production = URL(fileURLWithPath: FileManager.default.currentDirectoryPath)
+        let names = try! FileManager.default.contentsOfDirectory(atPath: production.path)
+        precondition(names.contains("NativeViews.swift") && names.contains("NativeRichText.swift"), "Run native fixtures from desktop-native")
+        let unsafe = try! NSRegularExpression(pattern: #"\.textSelection\s*\(\s*\.enabled\s*\)"#)
+        for name in names where name.hasSuffix(".swift") {
+            let source = try! String(contentsOf: production.appendingPathComponent(name))
+            precondition(unsafe.firstMatch(in: source, range: NSRange(source.startIndex..., in: source)) == nil, "Unsafe SwiftUI selectable text returned in " + name)
+        }
         print("PASS native selectable text: read-only selection, dynamic wrapping, unwrapped code, secondary style, Markdown bold/italic/link retention. Actual link activation requires GUI verification.")
     }
 }

@@ -6,6 +6,8 @@ on:
       - 'desktop-native/**'
       - 'scripts/check_native_bundle.py'
       - 'scripts/tests/test_check_native_bundle.py'
+      - 'scripts/check_packaged_core.py'
+      - 'scripts/tests/test_check_packaged_core.py'
       - '.github/workflows/native-checks.yml'
   push:
     branches: [main]
@@ -13,6 +15,8 @@ on:
       - 'desktop-native/**'
       - 'scripts/check_native_bundle.py'
       - 'scripts/tests/test_check_native_bundle.py'
+      - 'scripts/check_packaged_core.py'
+      - 'scripts/tests/test_check_packaged_core.py'
       - '.github/workflows/native-checks.yml'
   workflow_dispatch:
 
@@ -45,6 +49,8 @@ jobs:
         run: python -m unittest -v test_native_lifeline.py
       - name: Bundle-audit regression checks
         run: python -m unittest discover -s scripts/tests -p test_check_native_bundle.py -v
+      - name: Frozen-runtime source comparison checks
+        run: python -m unittest discover -s scripts/tests -p test_check_packaged_core.py -v
 
 # These checks do not install or publish an app, access user accounts, or establish
 # physical-device, GUI, payment, signing or notarization acceptance.

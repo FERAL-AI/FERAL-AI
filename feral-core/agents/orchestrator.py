@@ -62,7 +62,7 @@ from perception.fusion import PerceptionEngine, PerceptionFrame
 # Sub-modules — orchestrator delegates to these focused classes
 from agents.tool_runner import ToolRunner
 from security.dangerous_tools import resolve_surface_from_context
-from agents.context_manager import ContextManager, _chars_from
+from agents.context_manager import ContextManager, OllamaContextRefusal, _chars_from
 from agents.refusal_handler import RefusalHandler
 from agents.identity_loader import IdentityLoader
 from agents.tool_display import friendly_tool_label
@@ -3702,7 +3702,7 @@ class Orchestrator:
                     logger.error(
                         "[%s] LLM provider failed: %s", session_id[:8], provider_error,
                     )
-                    await self._send_error(session_id, provider_error)
+                    await self._send_error(session_id, provider_error, code=str(response.get("error_code") or "llm_provider_error"))
                     sent_response = True
                     break
 
@@ -3788,6 +3788,9 @@ class Orchestrator:
 
                 history.append(assistant_msg)
 
+            except OllamaContextRefusal as exc:
+                await self._send_error(session_id, str(exc), code=exc.code)
+                return
             except Exception as e:
                 logger.error(f"LLM failed: {e}")
                 await self._direct_execute(session_id, text, relevant_skills)
@@ -4422,12 +4425,15 @@ class Orchestrator:
                         await self._send_error(
                             session_id,
                             str(delta.get("content") or "unknown stream error"),
-                            code="llm_stream_error",
+                            code=str(delta.get("error_code") or "llm_stream_error"),
                         )
                         return
                 # Safety net: flush any tail prose if the stream ended
                 # without an explicit `done` event.
                 await _flush_stream_prose()
+            except OllamaContextRefusal as exc:
+                await self._send_error(session_id, str(exc), code=exc.code)
+                return
             except Exception as e:
                 if streamed_text or tool_calls_received or terminal_received or turn.get("tool_dispatch_started"):
                     # Once output/tool instructions/terminal state arrived,

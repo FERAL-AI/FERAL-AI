@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
 
 import httpx
 
@@ -26,6 +27,7 @@ _DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 # Share of that window the conversation may occupy. The remainder is
 # the system prompt, the tool schemas and the model's own reply.
 _HISTORY_SHARE = 0.5
+OLLAMA_TEMPLATE_RESERVE = 256
 
 
 class OllamaContextRefusal(ValueError):
@@ -33,7 +35,48 @@ class OllamaContextRefusal(ValueError):
 
     def __init__(self, code: str, message: str):
         self.code = code
+        self.context_capacity: int | None = None
         super().__init__(message)
+
+
+def fit_request_history(messages: list[dict], fits: Callable[[list[dict]], bool]) -> list[dict]:
+    """Fit a wire view by removing only old whole turns, never protected input.
+
+    All system rows, the latest user turn (including current tool rounds), and
+    the nearest preceding completed assistant turn with its user are protected.
+    The transcript and message objects are not rewritten. If this minimum does
+    not fit, return it for the caller's typed refusal, never truncate content.
+    """
+    if fits(messages):
+        return messages
+    users = [i for i, row in enumerate(messages) if row.get("role") == "user"]
+    if not users:
+        return messages
+    protected = users[-1]
+    for n in range(len(users) - 2, -1, -1):
+        group = messages[users[n]:users[n + 1]]
+        if any(row.get("role") == "assistant" and not row.get("tool_calls") for row in group):
+            protected = users[n]
+            break
+    # An incomplete prior tool round must not be lost merely because it lacks
+    # a final prose answer. Keep the immediate prior user group in that case.
+    if len(users) > 1 and protected == users[-1]:
+        protected = users[-2]
+    selected = messages
+    announced = {call.get("id") for row in messages for call in row.get("tool_calls", []) or [] if isinstance(call, dict)}
+    for start in users:
+        if start > protected:
+            break
+        candidate = [row for i, row in enumerate(messages) if i >= start or row.get("role") == "system"]
+        retained = {call.get("id") for row in candidate for call in row.get("tool_calls", []) or [] if isinstance(call, dict)}
+        if any(row.get("role") == "tool" and row.get("tool_call_id") in announced - retained for row in candidate):
+            continue
+        selected = candidate
+        if fits(selected):
+            break
+    if selected != messages:
+        logger.info("Local request history view: rows=%d retained=%d; transcript unchanged", len(messages), len(selected))
+    return selected
 
 
 def declared_ollama_context_tokens() -> int | None:
@@ -63,7 +106,7 @@ def _ollama_model_name(name: str) -> str:
     return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
 
 
-async def verify_ollama_request_context(client: httpx.AsyncClient, body: dict) -> int:
+async def verify_ollama_request_context(client: httpx.AsyncClient, body: dict, *, fit_history: bool = False) -> int:
     """Refuse unverified/oversized input before inference without changing allocation.
 
     Runtime allocation is preferred. An unloaded model must declare num_ctx;
@@ -134,22 +177,28 @@ async def verify_ollama_request_context(client: httpx.AsyncClient, body: dict) -
     output = body.get("max_tokens", 1024)
     if type(output) is not int or output <= 0:
         raise OllamaContextRefusal("local_context_configuration", "Local max_tokens must be a positive integer; no model inference was sent.")
-    serialized = json.dumps({"messages": body.get("messages", []), "tools": body.get("tools", [])},
-                            ensure_ascii=False, separators=(",", ":"), allow_nan=False)
-    estimated = estimate_tokens(serialized)
     # Reserve template overhead explicitly; the estimate is not the model tokenizer.
-    template_reserve = 256
+    template_reserve = OLLAMA_TEMPLATE_RESERVE
+    def input_tokens(rows):
+        serialized = json.dumps({"messages": rows, "tools": body.get("tools", [])},
+                                ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        return estimate_tokens(serialized)
+    if fit_history:
+        body["messages"] = fit_request_history(body.get("messages", []), lambda rows: input_tokens(rows) + output + template_reserve <= window)
+    estimated = input_tokens(body.get("messages", []))
     required = estimated + output + template_reserve
     logger.info("Ollama context preflight: input_estimate=%d output_reserve=%d template_reserve=%d capacity=%d tokenizer_verified=false",
                 estimated, output, template_reserve, window)
     if required > window:
-        raise OllamaContextRefusal(
+        refusal = OllamaContextRefusal(
             "local_context_overflow",
             f"Local request needs an estimated {required} tokens including output and template reserve; "
             f"the checked Ollama context budget is {window}. Shorten attached context or explicitly configure "
-            "a larger local context within your memory budget. No prompt was truncated, inference sent or fallback used. "
+            "a larger local context within your memory budget. Protected input was not truncated; no inference was sent or fallback used. "
             "This estimate is heuristic, not an exact model tokenizer count.",
         )
+        refusal.context_capacity = window
+        raise refusal
     return window
 
 

@@ -9,6 +9,12 @@ from __future__ import annotations
 import json
 import re
 
+from agents.context_manager import OllamaContextRefusal, fit_request_history
+
+
+class LocalRequestRefusal(OllamaContextRefusal):
+    """A local request planning refusal, never a provider/action failover."""
+
 DISCOVERY = ("self_introspection__describe_skill", "self_introspection__list_capabilities")
 MAX_TOOLS = 12
 MAX_SCHEMA_BYTES = 12_000
@@ -20,7 +26,7 @@ def _name(tool):
     return (tool.get("function") or {}).get("name", "")
 
 
-def retrieve_local_tools(messages, tools, force_tool=None, *, max_tools=MAX_TOOLS, max_schema_bytes=MAX_SCHEMA_BYTES):
+def retrieve_local_tools(messages, tools, force_tool=None, *, max_tools=MAX_TOOLS, max_schema_bytes=MAX_SCHEMA_BYTES, request_fits=None):
     """Return new wire messages/definitions; never mutate policy or latest input.
 
     Explicit/forced definitions and discovery are mandatory, failing visibly if
@@ -58,19 +64,45 @@ def retrieve_local_tools(messages, tools, force_tool=None, *, max_tools=MAX_TOOL
     mandatory = [name for name in DISCOVERY if name in definitions]
     if force_tool:
         if force_tool not in definitions:
-            raise ValueError("The forced local tool is not available")
+            raise LocalRequestRefusal("local_tool_unavailable", "The forced local tool is not available; no inference was sent.")
         mandatory.insert(0, force_tool)
     mandatory += [name for name in definitions if name.lower() in query.lower()]
+    current_start = next((i for i in range(len(messages) - 1, -1, -1) if messages[i].get("role") == "user"), len(messages))
+    for row in messages[current_start:]:
+        for call in row.get("tool_calls", []) or []:
+            name = (call.get("function") or {}).get("name")
+            if name:
+                if name not in definitions:
+                    raise LocalRequestRefusal("local_tool_unavailable", "A current tool-round definition is unavailable; no inference was sent.")
+                mandatory.append(name)
     mandatory = list(dict.fromkeys(mandatory))
     if len(mandatory) > max_tools:
-        raise ValueError("Explicit local tool definitions exceed the bounded retrieval limit")
+        raise LocalRequestRefusal("local_tool_schema_budget", "Explicit local tool definitions exceed the bounded retrieval limit; no inference was sent.")
 
     def wire_bytes(selected):
         return len(json.dumps(selected, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8"))
 
     selected = [definitions[name] for name in mandatory]
     if wire_bytes(selected) > max_schema_bytes:
-        raise ValueError("Explicit local tool schemas exceed the bounded retrieval size")
+        raise LocalRequestRefusal("local_tool_schema_budget", "Explicit local tool schemas exceed the bounded retrieval size; no inference was sent.")
+    def wire_messages(selected):
+        if len(selected) == len(tools):
+            return messages
+        notice = ("Local tool discovery: this request contains " + str(len(selected)) + " of " + str(len(tools))
+                  + " available definitions under a schema byte/count and complete request limit (not a measured token count). "
+                  "A missing definition does not mean a capability is unavailable. Use the provided "
+                  "self_introspection discovery/describe_skill tools when available to inspect a skill; "
+                  "the next request retrieves matching authorized definitions. Do not claim an action succeeded without its actual tool result.")
+        copied = [dict(row) for row in messages]
+        for row in copied:
+            if row.get("role") == "system" and isinstance(row.get("content"), str):
+                row["content"] += "\n\n" + notice
+                break
+        else:
+            copied.insert(0, {"role": "system", "content": notice})
+        return copied
+    if request_fits is not None and not request_fits(wire_messages(selected), selected):
+        raise LocalRequestRefusal("local_request_byte_overflow", "Required local context and tool schemas cannot fit the bounded request; no request was sent. Start a new conversation or explicitly select a model with sufficient context. Policy, latest input and required schemas were preserved.")
     ranked = []
     for name, tool in definitions.items():
         if name in mandatory:
@@ -86,29 +118,32 @@ def retrieve_local_tools(messages, tools, force_tool=None, *, max_tools=MAX_TOOL
         if len(selected) == max_tools:
             break
         candidate = selected + [definitions[name]]
-        if wire_bytes(candidate) <= max_schema_bytes:
+        if wire_bytes(candidate) <= max_schema_bytes and (request_fits is None or request_fits(wire_messages(candidate), candidate)):
             selected = candidate
     if len(selected) == len(tools):
         return messages, tools
-    notice = ("Local tool discovery: this request contains " + str(len(selected)) + " of " + str(len(tools))
-              + " available definitions under a schema byte/count limit (not a measured token count). "
-              "A missing definition does not mean a capability is unavailable. Use the provided "
-              "self_introspection discovery/describe_skill tools when available to inspect a skill; "
-              "the next request retrieves matching authorized definitions. Do not claim an action succeeded without its actual tool result.")
-    copied = [dict(row) for row in messages]
-    for row in copied:
-        if row.get("role") == "system" and isinstance(row.get("content"), str):
-            row["content"] += "\n\n" + notice
-            break
-    else:
-        copied.insert(0, {"role": "system", "content": notice})
-    return copied, selected
+    return wire_messages(selected), selected
 
 
 MAX_REQUEST_BYTES = 32_000
 
+
+def local_input_bytes(messages, tools):
+    return len(json.dumps({"messages": messages, "tools": tools or []}, ensure_ascii=False,
+                          separators=(",", ":"), allow_nan=False).encode("utf-8"))
+
+
+def fit_local_request(body, provider, *, max_bytes=MAX_REQUEST_BYTES):
+    """Select a non-mutating history view against complete serialized input."""
+    if provider not in ("ollama", "lmstudio"):
+        return
+    def fits(rows):
+        return local_input_bytes(rows, body.get("tools", [])) <= max_bytes
+    body["messages"] = fit_request_history(body.get("messages", []), fits)
+    validate_local_request(body, provider, max_bytes=max_bytes)
+
 def validate_local_request(body, provider, *, max_bytes=MAX_REQUEST_BYTES):
-    """Bound complete local chat input before transport, without truncating it.
+    """Validate complete local chat input after immutable wire-view planning.
 
     This is a conservative serialized byte ceiling, not a tokenizer/context
     fit claim. Arbitrary oversized identity/history/latest input is refused,
@@ -129,6 +164,6 @@ def validate_local_request(body, provider, *, max_bytes=MAX_REQUEST_BYTES):
         system_bytes, history_bytes, schema_bytes, total, max_bytes,
     )
     if total > max_bytes:
-        raise ValueError("Local request exceeds the bounded input byte budget; no request was sent. "
-                         "Start a shorter conversation or reduce attached context. Identity/policy and latest input were preserved. "
+        raise LocalRequestRefusal("local_request_byte_overflow", "Local request exceeds the bounded input byte budget; no request was sent. "
+                         "Start a new conversation or reduce attached context. Identity/policy, required tools and latest input were preserved. "
                          "Model tokenizer/context capacity was not measured.")

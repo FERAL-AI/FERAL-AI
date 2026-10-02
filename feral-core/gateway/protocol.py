@@ -241,10 +241,10 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("chat.abort")
     async def chat_abort(session_id: str, params: dict, session: GatewaySession):
-        from agents.chat_turns import ChatTurnError, get_chat_turn_manager
+        from agents.chat_turns import ChatTurnError, exact_uuid, get_chat_turn_manager
         try:
             return await get_chat_turn_manager(state).abort(owner=session._ws, session_id=session_id,
-                                                            turn_id=params.get("turn_id"), request_id=params.get("request_id"))
+                                                            turn_id=exact_uuid(params.get("turn_id")), request_id=exact_uuid(params.get("request_id")))
         except ChatTurnError as exc:
             raise GatewayError(exc.code, "Exact tracked turn identity is required") from None
 

@@ -322,41 +322,48 @@ async def test_oversized_policy_is_refused_before_each_actual_local_http_transpo
     ]
     original = copy.deepcopy(messages)
     try:
-        with pytest.raises(ValueError, match="no request was sent"):
+        if path in ("chat", "stream"):
             if path == "chat":
-                await llm.chat(messages, tools=None)
-            elif path == "stream":
-                async for _ in llm.chat_stream(messages, tools=None):
-                    pass
-            elif path == "routed":
-                await llm._call_provider(
-                    "ollama",
-                    {"model": llm.model},
-                    messages,
-                    None,
-                    temperature=0.7,
-                    max_tokens=1024,
-                )
+                failure = await llm.chat(messages, tools=None)
             else:
-                original_client = httpx.AsyncClient
-
-                def isolated_client(*args, **kwargs):
-                    kwargs["transport"] = httpx.MockTransport(respond)
-                    return original_client(*args, **kwargs)
-
-                with patch("agents.llm_provider.httpx.AsyncClient", isolated_client):
-                    await llm._call_provider(
-                        "lmstudio",
-                        {
-                            "model": "fixture",
-                            "api_key": "lm-studio",
-                            "base_url": "http://127.0.0.1:1234/v1",
-                        },
-                        messages,
-                        None,
-                        temperature=0.7,
-                        max_tokens=1024,
-                    )
+                failure = [event async for event in llm.chat_stream(messages, tools=None)][0]
+            assert failure["error_code"] == "local_request_byte_overflow"
+            assert "no request was sent" in failure.get("error", failure.get("content"))
+        else:
+            with pytest.raises(ValueError, match="no request was sent"):
+                await _refused_routed_call(llm, path, messages, respond)
         assert sent == [] and messages == original
     finally:
         await llm.client.aclose()
+
+
+async def _refused_routed_call(llm, path, messages, respond):
+    if path == "routed":
+        await llm._call_provider(
+            "ollama",
+            {"model": llm.model},
+            messages,
+            None,
+            temperature=0.7,
+            max_tokens=1024,
+        )
+    else:
+        original_client = httpx.AsyncClient
+
+        def isolated_client(*args, **kwargs):
+            kwargs["transport"] = httpx.MockTransport(respond)
+            return original_client(*args, **kwargs)
+
+        with patch("agents.llm_provider.httpx.AsyncClient", isolated_client):
+            await llm._call_provider(
+                "lmstudio",
+                {
+                    "model": "fixture",
+                    "api_key": "lm-studio",
+                    "base_url": "http://127.0.0.1:1234/v1",
+                },
+                messages,
+                None,
+                temperature=0.7,
+                max_tokens=1024,
+            )

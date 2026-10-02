@@ -151,8 +151,8 @@ struct NativeVoiceConfigurationFeatureView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Text("Speech settings").font(.title.bold()); Spacer(); Button("Refresh saved state") { Task { await model.refresh(); bindDrafts() } }.disabled(model.busy || baseURL == nil) }
-            if let error = localError ?? model.actionError { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            if let receipt = model.receipt { Text(receipt).textSelection(.enabled) }
+            if let error = localError ?? model.actionError { NativeSelectableText(error).foregroundStyle(.red) }
+            if let receipt = model.receipt { NativeSelectableText(receipt) }
             ForEach(model.errors.keys.sorted(), id: \.self) { key in Text("\(key): \(model.errors[key]!)").foregroundStyle(.red) }
             if model.busy { ProgressView("Working with the local agent…") }
             ScrollView { LazyVStack(alignment: .leading, spacing: 16) {
@@ -190,7 +190,7 @@ struct NativeVoiceConfigurationFeatureView: View {
                 }
             }.disabled(model.busy || baseURL == nil).frame(maxWidth: .infinity, alignment: .leading) }
         }.padding(20).task(id: baseURL) { review = nil; model.configure(baseURL); if baseURL != nil { await model.refresh() }; bindDrafts() }
-        .sheet(item: $review) { held in VStack(alignment: .leading, spacing: 14) { Text(held.title).font(.title2.bold()); ScrollView { VStack(alignment: .leading, spacing: 12) { Text(held.scope).textSelection(.enabled); if !held.previous.isEmpty { Text("Previous saved state").bold(); Text(held.previous).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }; if !held.proposed.isEmpty { Text("Proposed value").bold(); Text(held.proposed).font(.system(.caption, design: .monospaced)).textSelection(.enabled) } } }; if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.busy).keyboardShortcut(.cancelAction); Button("Confirm") { Task { if await model.perform(held) { review = nil; bindDrafts() } } }.disabled(model.busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width: 620, height: 520).interactiveDismissDisabled(model.busy) }
+        .sheet(item: $review) { held in VStack(alignment: .leading, spacing: 14) { Text(held.title).font(.title2.bold()); ScrollView { VStack(alignment: .leading, spacing: 12) { NativeSelectableText(held.scope); if !held.previous.isEmpty { Text("Previous saved state").bold(); NativeSelectableText(held.previous).font(.system(.caption, design: .monospaced)) }; if !held.proposed.isEmpty { Text("Proposed value").bold(); NativeSelectableText(held.proposed).font(.system(.caption, design: .monospaced)) } } }; if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.busy).keyboardShortcut(.cancelAction); Button("Confirm") { Task { if await model.perform(held) { review = nil; bindDrafts() } } }.disabled(model.busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width: 620, height: 520).interactiveDismissDisabled(model.busy) }
     }
     private func bindDrafts() { realtime = model.realtimeOrder.joined(separator: ", "); primary = model.audio["realtime_primary"] as? String ?? ""; realtimeModel = model.audio["realtime_model"] as? String ?? ""; legacyVoice = model.audio["tts_voice"] as? String ?? ""; for key in NativeVoiceConfigurationModel.chainedKeys { chainedDraft[key] = model.chained[key] as? String ?? "" } }
     private func prepare(_ make: () throws -> NativeSpeechConfigurationReview) { do { localError = nil; review = try make() } catch { localError = voiceConfigurationSafeError(error) } }

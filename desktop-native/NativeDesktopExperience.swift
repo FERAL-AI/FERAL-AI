@@ -204,8 +204,8 @@ struct NativeDesktopExperienceView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             HStack { Text("Desktop behavior").font(.title2.bold()); Spacer(); Button("Refresh macOS status") { experience.refreshLoginStatus() }.disabled(!experience.preferencesAvailable) }
-            if let message = experience.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
-            if let message = experience.notice { Text(message).foregroundStyle(.secondary).textSelection(.enabled) }
+            if let message = experience.error { NativeSelectableText(message).foregroundStyle(.red) }
+            if let message = experience.notice { NativeSelectableText(message).foregroundStyle(.secondary) }
             preferenceRow("After the last window closes", value: experience.keepRunningWhenClosed ? "Keep app and brain running" : "Quit app and owned brain", action: .keepRunning(!experience.keepRunningWhenClosed))
             preferenceRow("Menu-bar access", value: experience.menuBarEnabled ? "Enabled" : "Disabled", action: .menuBar(!experience.menuBarEnabled))
             preferenceRow("Restore navigation", value: experience.restoreLastDestination ? "Remember validated destination: \(experience.lastDestination)" : "Open \(experience.initialDestination)", action: .rememberDestination(!experience.restoreLastDestination))
@@ -215,7 +215,7 @@ struct NativeDesktopExperienceView: View {
             HStack { Button("Review enable at login…") { review = experience.review(.login(true)) }.disabled(!experience.registrationEligible || experience.loginStatus == .enabled); Button("Review unregister…") { review = experience.review(.login(false)) }.disabled(experience.loginStatus == .notRegistered); Button("Open Login Items settings") { experience.openLoginSettings() } }.disabled(!experience.preferencesAvailable)
             Text("No global shortcut is registered. Closing a window does not undo completed agent actions. Background operation and login registration are separate preferences.").font(.caption).foregroundStyle(.secondary)
         }.padding()
-        .sheet(item: $review, onDismiss: { experience.discardReviews() }) { item in VStack(alignment: .leading, spacing: 12) { Text(item.title).font(.title2.bold()); Text(item.scope).textSelection(.enabled); Text("Previous: \(item.previous)\nProposed: \(item.proposed)").textSelection(.enabled); HStack { Button("Cancel") { experience.cancel(item); review = nil }; Spacer(); Button("Confirm") { _ = experience.perform(item); review = nil } } }.padding(24).frame(width: 620) }
+        .sheet(item: $review, onDismiss: { experience.discardReviews() }) { item in VStack(alignment: .leading, spacing: 12) { Text(item.title).font(.title2.bold()); NativeSelectableText(item.scope); NativeSelectableText("Previous: \(item.previous)\nProposed: \(item.proposed)"); HStack { Button("Cancel") { experience.cancel(item); review = nil }; Spacer(); Button("Confirm") { _ = experience.perform(item); review = nil } } }.padding(24).frame(width: 620) }
     }
     private func preferenceRow(_ title: String, value: String, action: NativeDesktopPreferenceAction) -> some View { HStack { VStack(alignment: .leading) { Text(title).font(.headline); Text(value).font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Review change…") { review = experience.review(action) }.accessibilityLabel("Review change: " + title).disabled(!experience.preferencesAvailable) } }
 }

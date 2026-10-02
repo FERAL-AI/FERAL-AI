@@ -351,7 +351,7 @@ struct NativeVoiceFeatureView: View {
             Text("Wear headphones to reduce speaker feedback. Native echo cancellation and real microphone/provider operation have not yet been verified.").font(.caption).foregroundStyle(.secondary)
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
-                    ForEach(engine.transcripts) { row in VStack(alignment: .leading, spacing: 4) { Text(row.role.capitalized + (row.partial ? " · partial" : "")).font(.caption.bold()); Text(row.text).textSelection(.enabled); if let confidence = row.confidence { Text("Provider confidence: \(confidence.formatted()) (provider-specific scale)").font(.caption).foregroundStyle(.secondary) } }.padding(10).background(Color.secondary.opacity(0.06)) }
+                    ForEach(engine.transcripts) { row in VStack(alignment: .leading, spacing: 4) { Text(row.role.capitalized + (row.partial ? " · partial" : "")).font(.caption.bold()); NativeSelectableText(row.text); if let confidence = row.confidence { Text("Provider confidence: \(confidence.formatted()) (provider-specific scale)").font(.caption).foregroundStyle(.secondary) } }.padding(10).background(Color.secondary.opacity(0.06)) }
                 }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }.padding(20)

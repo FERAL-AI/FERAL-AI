@@ -250,8 +250,8 @@ struct NativeAgentFeatureView: View {
             if !model.available { Text("Waiting for the app’s local service.").foregroundStyle(.secondary) }
             Picker("Section",selection:$tab) { Text("Personas").tag("personas");Text("Registered").tag("agents");Text("Proposals").tag("proposals");Text("Custom").tag("custom");Text("Runtime").tag("stats") }.pickerStyle(.segmented).disabled(model.acting)
             if model.loading || model.acting { ProgressView(model.acting ? "Checking review and service receipt…" : "Reading specialist inventory…") }
-            if let error = localError ?? model.actionError { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            if let receipt = model.receipt { Text(receipt).foregroundStyle(.secondary).textSelection(.enabled) }
+            if let error = localError ?? model.actionError { NativeSelectableText(error).foregroundStyle(.red) }
+            if let receipt = model.receipt { NativeSelectableText(receipt).foregroundStyle(.secondary) }
             ScrollView {
                 VStack(alignment:.leading,spacing:14) {
                     if tab == "custom" { customForm }
@@ -270,7 +270,7 @@ struct NativeAgentFeatureView: View {
         .sheet(item:$review) { item in
             VStack(alignment:.leading,spacing:16) {
                 Text(item.title).font(.title2.bold())
-                ScrollView { Text(item.explanation).font(.callout).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading) }
+                ScrollView { NativeSelectableText(item.explanation).font(.callout).frame(maxWidth:.infinity,alignment:.leading) }
                 HStack { Spacer();Button("Cancel") { review = nil };Button("Confirm reviewed change") { review = nil;Task { _ = await model.perform(item) } }.disabled(model.loading || model.acting || !model.available) }
             }.padding(24).frame(width:680,height:540)
         }
@@ -304,11 +304,11 @@ struct NativeAgentFeatureView: View {
         VStack(alignment:.leading,spacing:9) {
             Text(row.title).font(.headline)
             Text(row.id).font(.caption.monospaced()).foregroundStyle(.secondary)
-            if let description = row.raw["description"] as? String { Text(description).textSelection(.enabled) }
+            if let description = row.raw["description"] as? String { NativeSelectableText(description) }
             let tools = (row.raw["tool_permissions"] ?? row.raw["tools"]) as? [String] ?? []
-            Text("Tool scope: " + (tools.isEmpty ? "No tools listed" : tools.joined(separator:", "))).font(.callout).textSelection(.enabled)
+            NativeSelectableText("Tool scope: " + (tools.isEmpty ? "No tools listed" : tools.joined(separator:", "))).font(.callout)
             if let schedule = row.raw["schedule"] as? String { Text("Schedule metadata: \(schedule)").font(.caption) }
-            DisclosureGroup("Definition and observed metadata") { Text(NativeAgentWire.json(row.raw)).font(.system(.caption,design:.monospaced)).textSelection(.enabled) }
+            DisclosureGroup("Definition and observed metadata") { NativeSelectableText(NativeAgentWire.json(row.raw)).font(.system(.caption,design:.monospaced)) }
             HStack {
                 if tab == "personas" { Button("Review registration…") { prepare(.persona(row.id)) } }
                 else if tab == "proposals" { Button("Review model generation…") { prepare(.proposal(row.id)) } }

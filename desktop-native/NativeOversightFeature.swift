@@ -256,7 +256,7 @@ struct NativeOversightFeatureView: View {
                     }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                         .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.06)))
                 if let error = model.decisionError { oversightNotice(error) }
-                if let receipt = model.receipt { Text(receipt).font(.callout).textSelection(.enabled) }
+                if let receipt = model.receipt { NativeSelectableText(receipt).font(.callout) }
                 Text("Pending approvals").font(.title2.weight(.semibold))
                 Text("Up to 500 pending core tool approvals across sessions. Coding engine approvals remain in Coding. Approving a core tool grants it for that session and runs this request.").font(.callout).foregroundStyle(.secondary)
                 if let error = model.queueError { oversightNotice("Queue could not be refreshed. " + error) }
@@ -264,7 +264,7 @@ struct NativeOversightFeatureView: View {
                 ForEach(model.approvals) { request in
                         VStack(alignment: .leading, spacing: 12) {
                             Text(request.tool).font(.headline)
-                            Text("Session: \(request.sessionID) · Safety: \(request.safety)").font(.caption).textSelection(.enabled)
+                            NativeSelectableText("Session: \(request.sessionID) · Safety: \(request.safety)").font(.caption)
                             Text(request.created.formatted(date: .abbreviated, time: .standard)).font(.caption).foregroundStyle(.secondary)
                             oversightCode("Proposed arguments", text: request.arguments)
                             DisclosureGroup("Policy that held this request") { oversightCode("Policy sources", text: request.policy) }
@@ -291,10 +291,10 @@ struct NativeOversightFeatureView: View {
                 if model.events.isEmpty && model.eventsError == nil && !model.loading { Text("No audit events returned for these filters.").foregroundStyle(.secondary) }
                 ForEach(model.events) { event in
                     DisclosureGroup {
-                        Text(event.summary).textSelection(.enabled)
-                        Text(event.date.formatted(date: .abbreviated, time: .standard)).font(.caption).textSelection(.enabled)
-                        Text("\(event.source) · \(event.actor)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
-                        Text("Session: \(event.sessionID)").font(.caption).textSelection(.enabled)
+                        NativeSelectableText(event.summary)
+                        NativeSelectableText(event.date.formatted(date: .abbreviated, time: .standard)).font(.caption)
+                        NativeSelectableText("\(event.source) · \(event.actor)").font(.caption).foregroundStyle(.secondary)
+                        NativeSelectableText("Session: \(event.sessionID)").font(.caption)
                         oversightCode("Detail", text: event.detail)
                     } label: {
                         Text("\(event.kind) · \(event.decision) · \(event.summary)")
@@ -330,11 +330,11 @@ struct NativeOversightFeatureView: View {
         }
     }
 
-    private func oversightNotice(_ text: String) -> some View { Text(text).font(.callout).foregroundStyle(.red).textSelection(.enabled) }
+    private func oversightNotice(_ text: String) -> some View { NativeSelectableText(text).font(.callout).foregroundStyle(.red) }
     private func oversightCode(_ title: String, text: String) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             Text(title).font(.caption.weight(.semibold))
-            ScrollView(.vertical) { Text(text).font(.system(.callout, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(10) }
+            ScrollView(.vertical) { NativeSelectableText(text).font(.system(.callout, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).padding(10) }
                 .frame(height: 160)
         }
     }

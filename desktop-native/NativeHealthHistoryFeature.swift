@@ -107,7 +107,7 @@ struct NativeHealthHistoryFeatureView:View {
             HStack{Text("Recorded history").font(.title2.bold());Spacer();if model.loading{ProgressView().controlSize(.small)};Button("Refresh recorded samples"){Task{await model.refresh()}}.disabled(model.loading || baseURL==nil)}
             Text("Reads stored samples from the local service. No connected-device query, cloud-provider fetch or phone broadcast is requested. Points show recorded timestamps; fetch time is separate. Gaps are left empty and samples are never interpolated.").font(.caption).foregroundStyle(.secondary)
             Picker("Recorded window",selection:Binding(get:{model.selectedDays},set:{model.selectWindow($0);Task{await model.refresh()}})){ForEach(NativeHealthHistoryWire.windows,id:\.self){days in Text("\(days) days").tag(days)}}.pickerStyle(.segmented)
-            if let error=model.error{Text(error).foregroundStyle(.orange).textSelection(.enabled)}
+            if let error=model.error{NativeSelectableText(error).foregroundStyle(.orange)}
             if let snapshot=model.snapshot {
                 if snapshot.windowDays != model.selectedDays || model.error != nil || model.loading{Text("Showing previously fetched \(snapshot.windowDays)-day history. It does not represent a successful refresh of the selected window.").font(.caption).foregroundStyle(.orange)}
                 Text("\(snapshot.count) stored samples across \(snapshot.series.count) metric/source series · \(snapshot.windowDays) days").font(.callout)
@@ -125,7 +125,7 @@ private struct NativeHealthHistorySeriesView:View {
         GroupBox {
             VStack(alignment:.leading,spacing:10) {
                 Text(series.label+(series.unit.isEmpty ? "" : " ("+series.unit+")")).font(.headline)
-                Text("Recorded source: "+(series.source.isEmpty ? "Unavailable" : (series.sourceName.isEmpty ? series.source : series.sourceName)+" ["+series.source+"]")).font(.caption).textSelection(.enabled)
+                NativeSelectableText("Recorded source: "+(series.source.isEmpty ? "Unavailable" : (series.sourceName.isEmpty ? series.source : series.sourceName)+" ["+series.source+"]")).font(.caption)
                 Text("\(series.points.count) stored samples · No continuous sensor coverage is inferred.").font(.caption).foregroundStyle(.secondary)
                 if let first=series.points.first,let last=series.points.last{Text(first.sampledAt.formatted(date:.abbreviated,time:.standard)+" → "+last.sampledAt.formatted(date:.abbreviated,time:.standard)).font(.caption)}
                 Chart(series.points){point in
@@ -135,7 +135,7 @@ private struct NativeHealthHistorySeriesView:View {
                         .accessibilityValue(point.recordedValue+(series.unit.isEmpty ? "" : " "+series.unit))
                 }.frame(height:180).accessibilityLabel(series.label+", "+String(series.points.count)+" recorded points")
                 DisclosureGroup("Inspect recorded points",isExpanded:$expanded){
-                    ForEach(Array(series.points.prefix(200))){point in HStack{Text(point.sampledAt.formatted(date:.abbreviated,time:.standard));Spacer();Text(point.recordedValue+(series.unit.isEmpty ? "" : " "+series.unit))}.font(.caption).textSelection(.enabled)}
+                    ForEach(Array(series.points.prefix(200))){point in HStack{NativeSelectableText(point.sampledAt.formatted(date:.abbreviated,time:.standard)).font(.caption);Spacer();NativeSelectableText(point.recordedValue+(series.unit.isEmpty ? "" : " "+series.unit)).font(.caption)}}
                     if series.points.count>200{Text("First 200 points shown in this inspection table; the chart and count include all returned points.").font(.caption).foregroundStyle(.secondary)}
                 }
             }.frame(maxWidth:.infinity,alignment:.leading)

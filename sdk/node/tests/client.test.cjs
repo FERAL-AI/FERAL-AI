@@ -64,6 +64,8 @@ test('public exports, auth-first negotiation, proxy/session and exact terminal',
   assert.deepEqual(wire.sent.map(frame => frame.type), ['auth', 'req', 'text_command']);
   assert.deepEqual(wire.sent[0], {type: 'auth', token: 'fixture-secret'});
   assert.deepEqual(commands(wire)[0].payload, {text: '31 + 11', turn_contract_version: 1});
+  assert.ok(!wire.closed);
+  client.close();
   assert.ok(wire.closed);
 });
 
@@ -79,7 +81,9 @@ for (const outcome of ['awaiting_approval', 'failed', 'cancelled', 'outcome_unkn
     assert.deepEqual(receipt.approval_request_ids, ['review-fixture']);
     await assert.rejects(client.chat('fixture'), error => error instanceof ChatTurnError
       && error.code === outcome && error.receipt.processing_outcome === outcome);
-    assert.equal(sockets.length, 2); // Two explicit caller invocations, never an SDK retry.
+    assert.equal(sockets.length, 1);
+    assert.equal(commands(sockets[0]).length, 2); // Explicit calls share a live thread, never an SDK retry.
+    client.close();
   });
 }
 

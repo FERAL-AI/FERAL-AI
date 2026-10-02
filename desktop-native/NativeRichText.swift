@@ -1,6 +1,30 @@
 import SwiftUI
 import AppKit
 
+/// Explicit AppKit styles keep selection readable without relying on opaque
+/// SwiftUI Font values or selectable SwiftUI accessibility nodes.
+struct NativeSelectableFont {
+    var value: NSFont
+    static let body = Self(value: .preferredFont(forTextStyle: .body))
+    static let callout = Self(value: .preferredFont(forTextStyle: .callout))
+    static let caption = Self(value: .preferredFont(forTextStyle: .caption1))
+    static let headline = Self(value: .preferredFont(forTextStyle: .headline))
+    static let title = Self(value: .preferredFont(forTextStyle: .title1))
+    static let title2 = Self(value: .preferredFont(forTextStyle: .title2))
+    static let title3 = Self(value: .preferredFont(forTextStyle: .title3))
+    static let largeTitle = Self(value: .preferredFont(forTextStyle: .largeTitle))
+    static func system(_ style: Self, design: NSFontDescriptor.SystemDesign = .default) -> Self {
+        guard let descriptor = style.value.fontDescriptor.withDesign(design),
+              let font = NSFont(descriptor: descriptor, size: style.value.pointSize) else { return style }
+        return Self(value: font)
+    }
+    func weight(_ weight: NSFont.Weight) -> Self {
+        Self(value: .systemFont(ofSize: value.pointSize, weight: weight))
+    }
+    func bold() -> Self { Self(value: NSFontManager.shared.convert(value, toHaveTrait: .boldFontMask)) }
+    func monospaced() -> Self { Self.system(self, design: .monospaced) }
+}
+
 /// AppKit owns selection and accessibility for read-only text. SwiftUI selectable
 /// Text can recursively resolve its AX label on macOS 27 (see acceptance evidence).
 struct NativeSelectableText: View {
@@ -9,9 +33,42 @@ struct NativeSelectableText: View {
     var color: NSColor = .labelColor
     var attributed: NSAttributedString? = nil
     var wraps = true
+    var maximumNumberOfLines = 0
+    var label: String? = nil
+
+    init(text: String, font: NSFont = .systemFont(ofSize: NSFont.systemFontSize), color: NSColor = .labelColor,
+         attributed: NSAttributedString? = nil, wraps: Bool = true, maximumNumberOfLines: Int = 0) {
+        self.text = text; self.font = font; self.color = color
+        self.attributed = attributed; self.wraps = wraps; self.maximumNumberOfLines = maximumNumberOfLines
+    }
+
+    init(_ text: String) { self.init(text: text) }
+
+    init(verbatim text: String) { self.init(text: text) }
+
+    func font(_ style: NativeSelectableFont) -> Self {
+        var copy = self; copy.font = style.value
+        return copy
+    }
+
+    func foregroundStyle(_ color: Color) -> Self {
+        var copy = self; copy.color = NSColor(color); return copy
+    }
+
+    func foregroundColor(_ color: Color?) -> Self {
+        var copy = self; copy.color = color.map(NSColor.init) ?? .labelColor; return copy
+    }
+
+    func lineLimit(_ count: Int?) -> Self {
+        var copy = self; copy.maximumNumberOfLines = max(0, count ?? 0); return copy
+    }
+
+    func accessibilityLabel(_ label: String) -> Self {
+        var copy = self; copy.label = label; return copy
+    }
 
     var body: some View {
-        NativeSelectableTextField(text: text, font: font, color: color, attributed: attributed, wraps: wraps)
+        NativeSelectableTextField(text: text, font: font, color: color, attributed: attributed, wraps: wraps, maximumNumberOfLines: maximumNumberOfLines, label: label)
             .contextMenu {
                 Button("Copy text") {
                     NSPasteboard.general.clearContents()
@@ -27,6 +84,8 @@ struct NativeSelectableTextField: NSViewRepresentable {
     let color: NSColor
     let attributed: NSAttributedString?
     let wraps: Bool
+    var maximumNumberOfLines = 0
+    var label: String? = nil
 
     func makeNSView(context: Context) -> NSTextField {
         Self.makeField(text: text)
@@ -50,7 +109,7 @@ struct NativeSelectableTextField: NSViewRepresentable {
     func configure(_ field: NSTextField) {
         field.font = font
         field.textColor = color
-        field.maximumNumberOfLines = 0
+        field.maximumNumberOfLines = maximumNumberOfLines
         field.lineBreakMode = wraps ? .byWordWrapping : .byClipping
         field.cell?.wraps = wraps
         field.cell?.isScrollable = false
@@ -63,7 +122,7 @@ struct NativeSelectableTextField: NSViewRepresentable {
             }
             field.attributedStringValue = styled
         } else { field.stringValue = text }
-        field.setAccessibilityLabel(field.stringValue)
+        field.setAccessibilityLabel(label ?? field.stringValue)
         field.invalidateIntrinsicContentSize()
     }
 

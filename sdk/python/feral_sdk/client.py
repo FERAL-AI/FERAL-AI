@@ -18,7 +18,7 @@ import logging
 import math
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import Any, AsyncIterator
+from typing import Any, AsyncContextManager, AsyncIterator, Protocol, TypeVar
 from contextlib import asynccontextmanager
 from urllib.parse import urlencode, urlsplit, urlunsplit
 from uuid import UUID, uuid4
@@ -99,6 +99,34 @@ def _canonical_uuid(value: object) -> bool:
         return False
 
 
+@dataclass
+class _ChatChannel:
+    session_id: str
+    capability_id: str
+    ready: asyncio.Future[None]
+    socket: _ChatSocket | None = None
+    connection: AsyncContextManager[_ChatSocket] | None = None
+    reader: asyncio.Task[None] | None = None
+    pending: asyncio.Future[ChatTurnReceipt] | None = None
+    request_id: str | None = None
+    turn_id: str | None = None
+    lost: bool = False
+
+
+class _ChatSocket(Protocol):
+    async def send(self, message: str) -> None: ...
+    async def recv(self) -> str | bytes: ...
+    async def close(self) -> None: ...
+
+
+_FutureValue = TypeVar("_FutureValue")
+
+
+def _consume_future(future: asyncio.Future[_FutureValue]) -> None:
+    if not future.cancelled():
+        future.exception()
+
+
 class FeralClient:
     """HTTP + WebSocket client for the FERAL Brain API."""
 
@@ -111,6 +139,7 @@ class FeralClient:
         transport: httpx.AsyncBaseTransport | None = None,
         session_id: str | None = None,
         chat_timeout: float = 60,
+        max_chat_threads: int = 8,
     ):
         parsed = urlsplit(base_url)
         if parsed.scheme not in ("http", "https") or not parsed.netloc or parsed.username is not None or parsed.query or parsed.fragment:
@@ -124,6 +153,8 @@ class FeralClient:
             headers["Authorization"] = f"Bearer {bearer_token}"
         sdk_session = _session_identity(session_id) if session_id is not None else str(uuid4())
         sdk_deadline = _chat_deadline(chat_timeout)
+        if type(max_chat_threads) is not int or not 1 <= max_chat_threads <= 64:
+            raise ValueError("max_chat_threads must be an integer from 1 to 64")
         self._http = httpx.AsyncClient(
             base_url=self.base_url, timeout=timeout, headers=headers, transport=transport,
             follow_redirects=False,
@@ -132,8 +163,13 @@ class FeralClient:
         self._bearer_token = bearer_token
         self._session_id = sdk_session
         self._chat_timeout = sdk_deadline
-        self._chat_sockets: set[Any] = set()
+        self._chat_sockets: set[_ChatSocket] = set()
+        self._chat_readers: set[asyncio.Task[None]] = set()
         self._chat_sessions: set[str] = set()
+        self._channels: dict[str, _ChatChannel] = {}
+        self._lost_threads: set[str] = set()
+        self._max_chat_threads = max_chat_threads
+        self._closed = False
 
     async def __aenter__(self):
         return self
@@ -142,11 +178,62 @@ class FeralClient:
         await self.close()
 
     async def close(self):
+        self._closed = True
+        await asyncio.gather(*(self._retire_channel(channel, ChatTurnError("client_closed"))
+                               for channel in tuple(self._channels.values())))
+        # A reader may have removed a lost channel while still releasing its
+        # transport. Keep its reference until cleanup finishes, including idle loss.
+        if self._chat_readers:
+            await asyncio.gather(*tuple(self._chat_readers), return_exceptions=True)
         await self._http.aclose()
         if self._ws:
             await self._ws.close()
         if self._chat_sockets:
             await asyncio.gather(*(ws.close() for ws in tuple(self._chat_sockets)), return_exceptions=True)
+
+    async def close_thread(self, session_id: str | None = None) -> None:
+        """Release an owned live thread; its old context must not silently reopen."""
+        sid = _session_identity(session_id) if session_id is not None else self._session_id
+        channel = self._channels.get(sid)
+        if channel is not None:
+            await self._retire_channel(channel, ChatTurnError("context_lost"))
+
+    def _mark_channel_lost(self, channel: _ChatChannel, error: Exception) -> None:
+        channel.lost = True
+        self._lost_threads.add(channel.session_id)
+        if self._channels.get(channel.session_id) is channel:
+            self._channels.pop(channel.session_id)
+        for future in (channel.ready, channel.pending):
+            if future is not None and not future.done():
+                future.set_exception(error)
+
+    async def _retire_channel(self, channel: _ChatChannel, error: Exception) -> None:
+        already_lost = channel.lost
+        self._mark_channel_lost(channel, error)
+        reader = channel.reader
+        # A reader that detected loss is already closing its context. Do not
+        # cancel that cleanup when its awaiting caller receives the error.
+        if reader is not None and reader is not asyncio.current_task() and not already_lost:
+            reader.cancel()
+        if reader is not None and reader is not asyncio.current_task():
+            await asyncio.gather(reader, return_exceptions=True)
+        await self._release_transport(channel)
+
+    async def _release_transport(self, channel: _ChatChannel) -> None:
+        connection, channel.connection = channel.connection, None
+        try:
+            if channel.socket is not None:
+                await channel.socket.close()
+        except Exception:
+            logger.debug("Chat transport cleanup failed; thread remains unavailable")
+        finally:
+            if channel.socket is not None:
+                self._chat_sockets.discard(channel.socket)
+        try:
+            if connection is not None:
+                await connection.__aexit__(None, None, None)
+        except Exception:
+            logger.debug("Chat connection context cleanup failed; thread remains unavailable")
 
     async def health(self) -> dict:
         """Check brain health."""
@@ -194,116 +281,179 @@ class FeralClient:
             raise ChatTurnError("missing_response", receipt=receipt)
         return receipt.final_text
 
+    async def _open_channel(self, channel: _ChatChannel, duration: float) -> None:
+        import websockets
+        url = urlsplit(self.ws_url)
+        ws_url = urlunsplit((url.scheme, url.netloc, url.path,
+                            urlencode({"session_id": channel.session_id}), ""))
+        channel.connection = websockets.connect(
+            ws_url, open_timeout=duration, close_timeout=min(duration, 1), logger=_websocket_logger,
+        )
+        channel.socket = await channel.connection.__aenter__()
+        if channel.lost or self._closed:
+            await channel.socket.close()
+            raise ChatTurnError("client_closed" if self._closed else "context_lost")
+        self._chat_sockets.add(channel.socket)
+        if self._bearer_token is not None:
+            await channel.socket.send(json.dumps({"type": "auth", "token": self._bearer_token}))
+        await channel.socket.send(json.dumps({"type": "req", "id": channel.capability_id,
+                                            "method": "chat.capabilities", "params": {}}))
+
+    async def _read_channel(self, channel: _ChatChannel, duration: float) -> None:
+        from websockets.exceptions import ConnectionClosed, WebSocketException
+        try:
+            await self._open_channel(channel, duration)
+            socket = channel.socket
+            if socket is None:
+                raise ChatTurnError("connection_failed")
+            while True:
+                try:
+                    frame = json.loads(await socket.recv())
+                except (ValueError, TypeError):
+                    raise ChatTurnError("invalid_json") from None
+                self._dispatch_chat_frame(channel, frame)
+        except asyncio.CancelledError:
+            # Event-loop/application shutdown may cancel an idle owned reader
+            # without going through close_thread. It still invalidates context.
+            if not channel.lost:
+                self._mark_channel_lost(channel, ChatTurnError("context_lost"))
+            raise
+        except ConnectionClosed as exc:
+            close = getattr(exc, "rcvd", None)
+            self._mark_channel_lost(channel, ChatTurnError(
+                "unauthorized" if getattr(close, "code", None) == 4001 else "connection_closed"))
+        except (OSError, WebSocketException):
+            self._mark_channel_lost(channel, ChatTurnError("connection_failed"))
+        except ChatTurnError as exc:
+            self._mark_channel_lost(channel, exc)
+        except Exception:
+            # Never put remote bodies or transport exception credentials in errors.
+            self._mark_channel_lost(channel, ChatTurnError("connection_failed"))
+        finally:
+            await self._release_transport(channel)
+
+    def _dispatch_chat_frame(self, channel: _ChatChannel, frame: object) -> None:
+        sid = channel.session_id
+        if not isinstance(frame, dict) or not isinstance(frame.get("type"), str):
+            raise ChatTurnError("invalid_frame")
+        kind = frame["type"]
+        if kind == "res" and frame.get("id") == channel.capability_id and not channel.ready.done():
+            capability = frame.get("payload")
+            if (frame.get("ok") is not True or not isinstance(capability, dict)
+                    or not isinstance(capability.get("turn_contract_versions"), list)
+                    or not any(type(version) is int and version == 1 for version in capability["turn_contract_versions"])
+                    or capability.get("durable_receipts") is not True
+                    or capability.get("whole_turn_terminal") is not True or capability.get("session_id") != sid):
+                raise ChatTurnError("unsupported_turn_contract")
+            channel.ready.set_result(None)
+            return
+        payload = frame.get("payload", {})
+        if not isinstance(payload, dict):
+            raise ChatTurnError("invalid_payload")
+        if kind == "error":
+            if channel.request_id is not None and payload.get("request_id") == channel.request_id:
+                code = payload.get("code")
+                known = ("chat_turn_request_conflict", "chat_turn_invalid_request", "chat_turn_quota", "chat_turn_receipt_unavailable")
+                raise ChatTurnError(code if code in known else "request_rejected")
+            return
+        if kind not in ("chat_turn_accepted", "chat_turn_terminal"):
+            return
+        if not channel.ready.done():
+            raise ChatTurnError("unnegotiated_turn_receipt")
+        pending = channel.pending
+        # An old/foreign receipt cannot satisfy a later invocation or idle thread.
+        if pending is None or pending.done() or channel.request_id is None or payload.get("request_id") != channel.request_id:
+            return
+        if (frame.get("session_id") != sid or payload.get("session_id") != sid
+                or type(payload.get("contract_version")) is not int or payload["contract_version"] != 1
+                or payload.get("durable") is not True or not _canonical_uuid(payload.get("turn_id"))
+                or type(payload.get("replayed")) is not bool):
+            raise ChatTurnError("invalid_turn_receipt")
+        if kind == "chat_turn_accepted":
+            if payload.get("status") != "accepted" or (channel.turn_id is not None and channel.turn_id != payload["turn_id"]):
+                raise ChatTurnError("invalid_turn_acceptance")
+            channel.turn_id = payload["turn_id"]
+            return
+        if channel.turn_id is None or payload["turn_id"] != channel.turn_id:
+            raise ChatTurnError("uncorrelated_terminal")
+        raw_outcome = payload.get("processing_outcome")
+        if not isinstance(raw_outcome, str):
+            raise ChatTurnError("invalid_turn_outcome")
+        try:
+            outcome = TurnProcessingOutcome(raw_outcome)
+        except ValueError:
+            raise ChatTurnError("invalid_turn_outcome") from None
+        approvals, final_text, action = payload.get("approval_request_ids"), payload.get("final_text"), payload.get("action_outcome")
+        if (not isinstance(final_text, str) or action not in ("not_asserted", "unknown")
+                or not isinstance(approvals, list) or any(not isinstance(item, str) or not item for item in approvals)):
+            raise ChatTurnError("invalid_turn_receipt")
+        pending.set_result(ChatTurnReceipt(channel.request_id, channel.turn_id, sid, outcome,
+                                          final_text, action, tuple(approvals), payload["replayed"]))
+
     async def chat_turn(
         self, message: str, session_id: str | None = None, *, timeout: float | None = None,
     ) -> ChatTurnReceipt:
-        """Request one tracked turn and inspect its exact correlated terminal receipt.
+        """Run a turn on a retained live thread. Lost threads never reconnect.
 
         No automatic approvals, retries or reconnects. Cancelling this coroutine
-        closes its transport; it does not assert that server effects were cancelled.
+        closes its thread transport; server effect cancellation is not asserted.
         """
         import websockets
-        from websockets.exceptions import ConnectionClosed
-
         if not isinstance(message, str) or not message.strip():
             raise ValueError("message must be nonempty text")
         sid = _session_identity(session_id) if session_id is not None else self._session_id
         duration = _chat_deadline(timeout) if timeout is not None else self._chat_timeout
+        if self._closed:
+            raise ChatTurnError("client_closed")
+        if sid in self._lost_threads:
+            raise ChatTurnError("context_lost")
         if sid in self._chat_sessions:
             raise ChatTurnError("session_busy")
+        channel = self._channels.get(sid)
+        if channel is None:
+            if len(self._channels) >= self._max_chat_threads:
+                raise ChatTurnError("thread_quota")
+            if len(self._channels) + len(self._lost_threads) >= 1024:
+                raise ChatTurnError("thread_identity_quota")
+            ready = asyncio.get_running_loop().create_future()
+            ready.add_done_callback(_consume_future)
+            channel = _ChatChannel(sid, str(uuid4()), ready)
+            self._channels[sid] = channel
         self._chat_sessions.add(sid)
-        request_id = str(uuid4())
-        capability_id = str(uuid4())
-        url = urlsplit(self.ws_url)
-        ws_url = urlunsplit((url.scheme, url.netloc, url.path, urlencode({"session_id": sid}), ""))
-        turn_id = None
-        negotiated = False
-        ws = None
         try:
             async with asyncio.timeout(duration):
-                async with websockets.connect(ws_url, open_timeout=duration, close_timeout=min(duration, 1), logger=_websocket_logger) as ws:
-                    self._chat_sockets.add(ws)
-                    if self._bearer_token is not None:
-                        await ws.send(json.dumps({"type": "auth", "token": self._bearer_token}))
-                    await ws.send(json.dumps({"type": "req", "id": capability_id,
-                                              "method": "chat.capabilities", "params": {}}))
-                    while True:
-                        try:
-                            frame = json.loads(await ws.recv())
-                        except (ValueError, TypeError):
-                            raise ChatTurnError("invalid_json") from None
-                        if not isinstance(frame, dict) or not isinstance(frame.get("type"), str):
-                            raise ChatTurnError("invalid_frame")
-                        kind = frame["type"]
-                        if kind == "res" and frame.get("id") == capability_id and not negotiated:
-                            capability = frame.get("payload")
-                            if (frame.get("ok") is not True or not isinstance(capability, dict)
-                                    or not isinstance(capability.get("turn_contract_versions"), list)
-                                    or not any(type(version) is int and version == 1 for version in capability["turn_contract_versions"])
-                                    or capability.get("durable_receipts") is not True
-                                    or capability.get("whole_turn_terminal") is not True or capability.get("session_id") != sid):
-                                raise ChatTurnError("unsupported_turn_contract")
-                            negotiated = True
-                            await ws.send(json.dumps({
-                                "msg_id": request_id, "type": "text_command", "session_id": sid,
-                                "payload": {"text": message, "turn_contract_version": 1},
-                            }))
-                            continue
-                        payload = frame.get("payload", {})
-                        if not isinstance(payload, dict):
-                            raise ChatTurnError("invalid_payload")
-                        if kind == "error":
-                            # Uncorrelated legacy errors cannot establish this
-                            # tracked turn's outcome; the terminal receipt must.
-                            if payload.get("request_id") == request_id:
-                                code = payload.get("code")
-                                known = ("chat_turn_request_conflict", "chat_turn_invalid_request", "chat_turn_quota", "chat_turn_receipt_unavailable")
-                                raise ChatTurnError(code if code in known else "request_rejected")
-                            continue
-                        if kind not in ("chat_turn_accepted", "chat_turn_terminal"):
-                            continue
-                        if not negotiated:
-                            raise ChatTurnError("unnegotiated_turn_receipt")
-                        if payload.get("request_id") != request_id:
-                            continue
-                        if (frame.get("session_id") != sid or payload.get("session_id") != sid
-                                or type(payload.get("contract_version")) is not int or payload["contract_version"] != 1
-                                or payload.get("durable") is not True or not _canonical_uuid(payload.get("turn_id"))
-                                or type(payload.get("replayed")) is not bool):
-                            raise ChatTurnError("invalid_turn_receipt")
-                        if kind == "chat_turn_accepted":
-                            if payload.get("status") != "accepted" or (turn_id is not None and turn_id != payload["turn_id"]):
-                                raise ChatTurnError("invalid_turn_acceptance")
-                            turn_id = payload["turn_id"]
-                            continue
-                        if turn_id is None or payload["turn_id"] != turn_id:
-                            raise ChatTurnError("uncorrelated_terminal")
-                        raw_outcome = payload.get("processing_outcome")
-                        if not isinstance(raw_outcome, str):
-                            raise ChatTurnError("invalid_turn_outcome")
-                        try:
-                            outcome = TurnProcessingOutcome(raw_outcome)
-                        except (ValueError, TypeError):
-                            raise ChatTurnError("invalid_turn_outcome") from None
-                        approvals = payload.get("approval_request_ids")
-                        final_text = payload.get("final_text")
-                        action = payload.get("action_outcome")
-                        if (not isinstance(final_text, str) or action not in ("not_asserted", "unknown")
-                                or not isinstance(approvals, list) or any(not isinstance(item, str) or not item for item in approvals)):
-                            raise ChatTurnError("invalid_turn_receipt")
-                        return ChatTurnReceipt(request_id, turn_id, sid, outcome, final_text, action, tuple(approvals), payload["replayed"])
+                if channel.reader is None:
+                    channel.reader = asyncio.create_task(self._read_channel(channel, duration))
+                    self._chat_readers.add(channel.reader)
+                    channel.reader.add_done_callback(self._chat_readers.discard)
+                await asyncio.shield(channel.ready)
+                if channel.lost or self._closed or channel.socket is None:
+                    raise ChatTurnError("client_closed" if self._closed else "context_lost")
+                channel.request_id, channel.turn_id = str(uuid4()), None
+                channel.pending = asyncio.get_running_loop().create_future()
+                channel.pending.add_done_callback(_consume_future)
+                await channel.socket.send(json.dumps({
+                    "msg_id": channel.request_id, "type": "text_command", "session_id": sid,
+                    "payload": {"text": message, "turn_contract_version": 1},
+                }))
+                return await asyncio.shield(channel.pending)
         except TimeoutError:
+            await self._retire_channel(channel, ChatTurnTimeout())
             raise ChatTurnTimeout() from None
-        except ConnectionClosed as exc:
-            close = getattr(exc, "rcvd", None)
-            code = "unauthorized" if getattr(close, "code", None) == 4001 else "connection_closed"
-            raise ChatTurnError(code) from None
+        except asyncio.CancelledError:
+            await self._retire_channel(channel, ChatTurnError("transport_cancelled"))
+            raise
+        except ChatTurnError:
+            await self._retire_channel(channel, ChatTurnError("context_lost"))
+            raise
         except (OSError, websockets.exceptions.WebSocketException):
+            await self._retire_channel(channel, ChatTurnError("connection_failed"))
             raise ChatTurnError("connection_failed") from None
         finally:
             self._chat_sessions.discard(sid)
-            if ws is not None:
-                self._chat_sockets.discard(ws)
+            channel.pending = None
+            channel.request_id = None
+            channel.turn_id = None
 
     async def list_skills(self) -> list[dict]:
         """List all registered skills."""

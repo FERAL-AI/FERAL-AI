@@ -207,9 +207,9 @@ struct NativeProviderRoutingFeatureView: View {
             VStack(alignment: .leading, spacing: 14) {
                 HStack { Text("Provider routing").font(.title2.bold()); Spacer(); if model.busy { ProgressView().controlSize(.small) }; Button("Refresh saved state") { Task { await model.refresh() } }.disabled(model.busy) }
                 Text("Inspect runtime target resolution and configure per-call-site tiers. Opening this screen reads saved/catalogue state only; it does not probe providers, discover models or submit model content.").foregroundStyle(.secondary)
-                if let message = localError ?? model.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
-                if let receipt = model.receipt { Text(receipt).foregroundStyle(.secondary).textSelection(.enabled) }
-                if let status = model.runtime { Text("Runtime primary: \(status)").font(.caption).textSelection(.enabled) }
+                if let message = localError ?? model.error { NativeSelectableText(message).foregroundStyle(.red) }
+                if let receipt = model.receipt { NativeSelectableText(receipt).foregroundStyle(.secondary) }
+                if let status = model.runtime { NativeSelectableText("Runtime primary: \(status)").font(.caption) }
                 VStack(alignment: .leading, spacing: 8) {
                     Text("Saved defaults").font(.headline)
                     VStack(alignment: .leading, spacing: 8) {
@@ -222,7 +222,7 @@ struct NativeProviderRoutingFeatureView: View {
                     Text("Explicit target override").font(.headline)
                     VStack(alignment: .leading, spacing: 8) {
                         let saved = model.savedTarget(site: site, tier: tier)
-                        Text("\(site)/\(tier) saved override: \(saved.0.isEmpty ? "automatic" : saved.0) / \(saved.1.isEmpty ? "provider default" : saved.1)").font(.caption).textSelection(.enabled)
+                        NativeSelectableText("\(site)/\(tier) saved override: \(saved.0.isEmpty ? "automatic" : saved.0) / \(saved.1.isEmpty ? "provider default" : saved.1)").font(.caption)
                         HStack { Text("Provider"); NativeRoutingPopup(label: "Target provider", options: [NativeRoutingOption(value: "", title: "Choose provider")] + model.providers.map { entry in NativeRoutingOption(value: entry.id, title: "\(entry.name)\(entry.chatReady ? "" : " · preview")\(entry.configured ? "" : " · not configured")") }, selection: $provider, enabled: !model.busy).frame(width: 360, height: 26) }
                         TextField("Explicit model identifier", text: $targetModel)
                         Text("Model IDs are entered explicitly. Availability, model capability, authentication and cost are not verified by this form.").font(.caption).foregroundStyle(.secondary)
@@ -236,7 +236,7 @@ struct NativeProviderRoutingFeatureView: View {
                         HStack { Text("Inspect"); NativeRoutingPopup(label: "Route inspection tier", options: [NativeRoutingOption(value: "saved", title: "Runtime saved/default tiers")] + NativeProviderRoutingModel.tiers.map { NativeRoutingOption(value: $0, title: "Explicit \($0) tier") }, selection: $inspection, enabled: !model.busy).frame(width: 300, height: 26); Button("Inspect four call sites") { Task { await model.inspect(tier: inspection == "saved" ? nil : inspection) } }.disabled(model.busy) }
                         Text("A pure routing lookup. Interactive requests can additionally apply budget downshifts, local-first policy and failover; this preview does not prove provider connectivity.").font(.caption).foregroundStyle(.secondary)
                         if !model.routes.isEmpty { Text("Results for: \(model.inspectedTier ?? "runtime saved/default")").font(.caption) }
-                        ForEach(model.routes) { route in VStack(alignment: .leading, spacing: 3) { Text("\(route.id.capitalized) · \(route.tier) → \(route.provider) / \(route.model)").font(.headline).textSelection(.enabled); Text("\(route.supported ? "Runtime adapter supported" : "Runtime adapter unsupported") · source: \(route.source) · fallbacks: \(route.fallbacks.joined(separator: ", "))").font(.caption).textSelection(.enabled) } }
+                        ForEach(model.routes) { route in VStack(alignment: .leading, spacing: 3) { NativeSelectableText("\(route.id.capitalized) · \(route.tier) → \(route.provider) / \(route.model)").font(.headline); NativeSelectableText("\(route.supported ? "Runtime adapter supported" : "Runtime adapter unsupported") · source: \(route.source) · fallbacks: \(route.fallbacks.joined(separator: ", "))").font(.caption) } }
                         ForEach(model.routeErrors.keys.sorted(), id: \.self) { key in Text("\(key): \(model.routeErrors[key] ?? "Unavailable")").foregroundStyle(.red) }
                     }.frame(maxWidth: .infinity, alignment: .leading)
                 }
@@ -253,8 +253,8 @@ struct NativeProviderRoutingFeatureView: View {
     private func reviewPanel(_ item: NativeRoutingReview) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(item.title).font(.title2.bold())
-            Text(item.scope).textSelection(.enabled)
-            Text("Previous: \(item.previous)\nProposed: \(item.proposed)").font(.system(.body, design: .monospaced)).textSelection(.enabled)
+            NativeSelectableText(item.scope)
+            NativeSelectableText("Previous: \(item.previous)\nProposed: \(item.proposed)").font(.system(.body, design: .monospaced))
             Text("This review expires after five minutes.").font(.caption).foregroundStyle(.secondary)
             if model.busy { ProgressView(); Text("Applying changes. Closing cannot undo a completed write.").font(.caption) }
             HStack { Button("Cancel") { model.cancel(item); review = nil }.disabled(model.busy); Spacer(); Button("Confirm") { Task { _ = await model.perform(item); review = nil } }.disabled(model.busy) }

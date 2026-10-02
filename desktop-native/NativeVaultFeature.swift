@@ -224,8 +224,8 @@ struct NativeVaultFeatureView:View {
                     if !status.unlockSupported{Text("Explicit unlock is unsupported for this service. No fallback, initialization or reset is attempted.").font(.caption).foregroundStyle(.secondary)}
                 }else{Text("Vault state unavailable. No credential readiness is inferred.").foregroundStyle(.secondary)}
                 if let fetched=model.fetchedAt{Text("Status fetched \(fetched.formatted(date:.abbreviated,time:.standard)).").font(.caption).foregroundStyle(.secondary)}
-                if let error=model.error{Text(error).foregroundStyle(.orange).textSelection(.enabled)}
-                if let receipt=model.receipt{Text(receipt).font(.callout).textSelection(.enabled)}
+                if let error=model.error{NativeSelectableText(error).foregroundStyle(.orange)}
+                if let receipt=model.receipt{NativeSelectableText(receipt).font(.callout)}
                 HStack{Button("Refresh passive status"){Task{await model.refresh()}}.disabled(model.busy || bootstrap.busy || baseURL==nil);Button("Prepare unlock review…"){Task{review=await model.prepareReview()}}.disabled(model.busy || bootstrap.busy || model.status?.canReview != true);if model.busy{ProgressView().controlSize(.small)}}
                 Divider()
                 Text("Resume agent startup").font(.title3.bold())
@@ -240,8 +240,8 @@ struct NativeVaultFeatureView:View {
                     if !state.supported{Text("Reviewed continuation is unavailable for this service.").font(.caption)}
                 }else{Text("Continuation status unavailable. Unlock alone does not establish agent readiness.").foregroundStyle(.secondary)}
                 if let fetched=bootstrap.fetchedAt{Text("Continuation status fetched \(fetched.formatted(date:.abbreviated,time:.standard)).").font(.caption).foregroundStyle(.secondary)}
-                if let error=bootstrap.error{Text(error).foregroundStyle(.orange).textSelection(.enabled)}
-                if let receipt=bootstrap.receipt{Text(receipt).font(.callout).textSelection(.enabled)}
+                if let error=bootstrap.error{NativeSelectableText(error).foregroundStyle(.orange)}
+                if let receipt=bootstrap.receipt{NativeSelectableText(receipt).font(.callout)}
                 HStack{
                     Button("Refresh continuation status"){Task{await bootstrap.refresh()}}.disabled(model.busy || bootstrap.busy || baseURL==nil)
                     Button("Review agent startup…"){Task{bootstrapReview=await bootstrap.prepareReview()}}.disabled(model.busy || bootstrap.busy || !bootstrap.canPrepareReview)

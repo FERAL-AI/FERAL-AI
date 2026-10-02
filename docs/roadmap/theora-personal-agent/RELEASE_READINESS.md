@@ -4,10 +4,10 @@ Updated October 2, 2026. This is an implementation and acceptance roadmap, not a
 
 ## Latest October 2 checkpoint
 
-Published source739a20c0b passed required CI/native checks. Full Ubuntu/Python3.11
-PR backend: **12,252 passed,83 skipped,567 warnings**, coverage74% rounded.
+Published source4e19f07f passed required CI/native checks. Full Ubuntu/Python3.11
+PR backend: **12,278 passed,83 skipped,574 warnings**, coverage74% rounded.
 Live-brain and main Linux matrix were skipped. Non-blocking mypy remains failed
-at852 errors versus812 baseline; this is not a clean type gate.
+at850 errors versus812 baseline; this is not a clean type gate.
 
 The assembled **9.27** candidate stages source34a43e640, independently matched
 against all478 production Python files. Actual local model response, reviewed
@@ -21,8 +21,14 @@ negotiation, exact cancellation and corrected generic developer clients. Parent
 integration:309 passed/1 skipped/79 warnings; locked Node build/test:53 passed.
 [Receipt evidence](CHAT_TURN_RECEIPTS_EVIDENCE.md) and [SDK evidence](SDK_WEBSOCKET_EVIDENCE.md)
 state their limits. Shared lifetime memory, task effects, user read/seen and
-phone HUP receipts are separate gates. The SDK socket-close/history-clear
-continuity limitation needs a follow-up repair.
+phone HUP receipts are separate gates. DEV01C now retains one authenticated
+socket per live SDK thread; actual provider context continues across turns,
+with explicit context loss after closure and no automatic reconnect/replay.
+Parent combined next-wave tests:330 passed; Node72 passed. Durable model context
+after restart, native adoption and packaged9.28 acceptance remain open.
+Nine affected dependency copies pass patched advisory floors and1,416 web/
+extension/device SDK tests. Default-branch alerts remain open until the relevant
+changes reach that branch. [Security evidence](SECURITY_DEPENDENCY_EVIDENCE.md).
 
 ## Earlier boundary and retained evidence
 

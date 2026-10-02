@@ -289,28 +289,28 @@ struct NativeHardwareFeatureView: View {
         VStack(alignment: .leading, spacing: 12) {
             HStack { Text("Device methods").font(.title2.bold()); Spacer(); Button("Read registered devices") { Task { await model.refresh() } }.disabled(!model.available || model.busy) }
             Text("Declared interfaces and reviewed passive sensor reads. Physical actuators, privileged commands and methods needing another confirmation are inspection only. No hardware has been certified by this preview.").foregroundStyle(.secondary)
-            if let issue = localError ?? model.error { Text(issue).foregroundStyle(.red).textSelection(.enabled) }
+            if let issue = localError ?? model.error { NativeSelectableText(issue).foregroundStyle(.red) }
             if model.busy { ProgressView("Checking declared device and live registration…") }
             HSplitView {
                 if deviceID == nil { ScrollView { VStack(alignment: .leading) {
                     if let devices = model.devices { if devices.isEmpty { Text("No registered devices returned.") }; ForEach(Array(devices.enumerated()), id: \.offset) { _, row in Button(row["name"] as? String ?? row["device_id"] as? String ?? "Device") { if let id = row["device_id"] as? String { command = ""; showPrivateReport = false; Task { await model.inspect(id) } } }.disabled(model.busy) } }
                     else { Text("Registered device inventory is unknown until read.") }
-                    if let stats = model.stats { DisclosureGroup("Registry counters — not physical proof") { Text(NativeHardwareWire.pretty(stats)).font(.caption).textSelection(.enabled) } }
-                    if let context = model.context { DisclosureGroup("Server hardware context") { Text(context).textSelection(.enabled) } }
+                    if let stats = model.stats { DisclosureGroup("Registry counters — not physical proof") { NativeSelectableText(NativeHardwareWire.pretty(stats)).font(.caption) } }
+                    if let context = model.context { DisclosureGroup("Server hardware context") { NativeSelectableText(context) } }
                 }.padding() }.frame(minWidth: 180, maxWidth: 300) }
                 ScrollView { VStack(alignment: .leading, spacing: 10) {
                     if let detail = model.detail {
                         Text(detail["name"] as? String ?? "Declared device").font(.headline)
                         Text(model.node == nil ? "No matching live mesh node. Inspection only." : "Live registration returned; availability can change before dispatch.").foregroundStyle(.secondary)
                         ForEach(Array((detail["capabilities"] as? [[String: Any]] ?? []).enumerated()), id: \.offset) { _, cap in
-                            DisclosureGroup(cap["name"] as? String ?? cap["id"] as? String ?? "Method") { Text(NativeHardwareWire.pretty(cap)).font(.caption.monospaced()).textSelection(.enabled); Button("Select declared method") { command = cap["id"] as? String ?? "" } }
+                            DisclosureGroup(cap["name"] as? String ?? cap["id"] as? String ?? "Method") { NativeSelectableText(NativeHardwareWire.pretty(cap)).font(.caption.monospaced()); Button("Select declared method") { command = cap["id"] as? String ?? "" } }
                         }
                         Text("Method: " + (command.isEmpty ? "Choose a declaration" : command))
                         NativePlainTextEditor(text: $params, label: "Exact sensor parameters JSON", monospaced: true).frame(minHeight: 100)
                         TextField("Timeout seconds (1–30)", text: $timeout)
                         Button("Review sensor read…") { do { guard let data = params.data(using: .utf8), let object = try JSONSerialization.jsonObject(with: data) as? [String: Any], let seconds = Double(timeout) else { throw NativeHardwareFailure("Supply an exact JSON object and finite timeout.") }; review = try model.review(command: command, params: object, timeout: seconds); localError = nil } catch { localError = (error as? NativeHardwareFailure)?.message ?? "Parameters are not valid JSON." } }.disabled(model.busy || model.node == nil || command.isEmpty)
                     } else { Text("Select a registered device to inspect its declared methods.") }
-                    if let receipt = model.receipt { Button("Check this command ledger") { Task { await model.refreshReceipt() } }.disabled(model.busy); Text(receipt.explanation).textSelection(.enabled).id(receipt.state); if let id = receipt.commandID { Text("Server command ID: " + id).font(.caption).textSelection(.enabled) }; Toggle("Reveal private device report", isOn: $showPrivateReport); if showPrivateReport { Text(NativeHardwareWire.pretty(receipt.raw)).font(.caption.monospaced()).textSelection(.enabled) } }
+                    if let receipt = model.receipt { Button("Check this command ledger") { Task { await model.refreshReceipt() } }.disabled(model.busy); NativeSelectableText(receipt.explanation).id(receipt.state); if let id = receipt.commandID { NativeSelectableText("Server command ID: " + id).font(.caption) }; Toggle("Reveal private device report", isOn: $showPrivateReport); if showPrivateReport { NativeSelectableText(NativeHardwareWire.pretty(receipt.raw)).font(.caption.monospaced()) } }
                 }.padding() }
             }
         }.padding().task(id: (baseURL?.absoluteString ?? "") + "|" + (deviceID ?? "")) { model.configure(baseURL: baseURL); if let deviceID { await model.inspect(deviceID) } }

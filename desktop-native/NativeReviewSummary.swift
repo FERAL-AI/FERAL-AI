@@ -38,12 +38,11 @@ struct NativeReviewSummaryView: View {
             ForEach(Array(review.targets.enumerated()), id: \.offset) { entry in
                 VStack(alignment: .leading, spacing: 3) {
                     Text(verbatim: entry.element.label).font(.caption).foregroundStyle(.secondary)
-                    Text(verbatim: entry.element.value).textSelection(.enabled)
+                    NativeSelectableText(verbatim: entry.element.value)
                 }.accessibilityElement(children: .contain)
             }
             DisclosureGroup("Full scope and details", isExpanded: $expanded) {
-                Text(verbatim: review.details)
-                    .textSelection(.enabled)
+                NativeSelectableText(verbatim: review.details)
                     .frame(maxWidth: .infinity, alignment: .leading)
                     .padding(.top, 6)
             }

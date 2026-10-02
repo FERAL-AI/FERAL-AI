@@ -512,8 +512,8 @@ struct NativeAppSurfaceFeatureView:View {
         VStack(alignment:.leading,spacing:12) {
             HStack { Text("App surfaces").font(.title2.bold());Spacer();Button("Refresh installed apps") { Task { await model.refresh() } }.disabled(!model.available || model.loading || model.acting) }
             Text("Installed app interfaces rendered with native controls. Install, verified update and uninstall remain in Skills & Store. App actions use a separate agent session; they do not receive this Chat thread’s conversation history, and their agent replies are not mounted in Chat. Dispatch receipts below do not prove completion. Embedded web content and unsupported components stay inactive.").foregroundStyle(.secondary)
-            if let error = localError ?? model.error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            if let receipt = model.receipt { Text(receipt).font(.callout).textSelection(.enabled) }
+            if let error = localError ?? model.error { NativeSelectableText(error).foregroundStyle(.red) }
+            if let receipt = model.receipt { NativeSelectableText(receipt).font(.callout) }
             if model.loading || model.acting { ProgressView(model.acting ? "Checking contract and receipt…" : "Reading installed app contracts…") }
             HStack { Text("App session: "+model.sessionStatus).font(.caption);Spacer();Button("Disconnect app session") { model.closeSession() }.disabled(model.sessionStatus=="Disconnected") }
             HSplitView {
@@ -525,7 +525,7 @@ struct NativeAppSurfaceFeatureView:View {
                         }
                     } else { Text("Installed inventory is unavailable.") }
                     ForEach(Array(model.surfaces.enumerated()),id:\.offset) { _,surface in surfaceCard(surface) }
-                    if let manifest = model.manifest { DisclosureGroup("Declared manifest") { Text(NativeSurfaceWire.json(manifest)).font(.system(.caption,design:.monospaced)).textSelection(.enabled) } }
+                    if let manifest = model.manifest { DisclosureGroup("Declared manifest") { NativeSelectableText(NativeSurfaceWire.json(manifest)).font(.system(.caption,design:.monospaced)) } }
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(8) }.frame(minWidth:220,idealWidth:280,maxWidth:360)
                 ScrollView { VStack(alignment:.leading,spacing:12) {
                     if let node = model.root {
@@ -536,7 +536,7 @@ struct NativeAppSurfaceFeatureView:View {
                     Divider()
                     Text("Dedicated app-session replies").font(.headline)
                     Text("Direct Chat history is separate. Memory, identity, tools and persistent folder permissions remain shared across the brain. Disconnect does not undo or reliably cancel REST actions.").font(.caption).foregroundStyle(.secondary)
-                    ForEach(model.transcript){row in VStack(alignment:.leading,spacing:4){Text(row.role.capitalized).font(.caption.bold());Text(verbatim:row.text).textSelection(.enabled)}}
+                    ForEach(model.transcript){row in VStack(alignment:.leading,spacing:4){Text(row.role.capitalized).font(.caption.bold());NativeSelectableText(verbatim:row.text)}}
                     NativeSurfaceSessionEvents(model:model)
                 }.frame(maxWidth:.infinity,alignment:.leading).padding(12) }.frame(minWidth:320)
             }
@@ -621,7 +621,7 @@ private struct NativeSurfaceNodeView:View {
             VStack(alignment:.leading,spacing:10) { children }.padding(node.type == "Card" ? 12 : 0)
         } else if ["HStack","Row"].contains(node.type) { HStack(alignment:.top,spacing:10) { children } }
         else if ["Text","Markdown","CodeBlock","Badge"].contains(node.type) {
-            Text(verbatim:node.raw["content"] as? String ?? display(node.raw["value"])).font(node.raw["style"] as? String == "headline" ? .headline : .body).textSelection(.enabled)
+            NativeSelectableText(verbatim:node.raw["content"] as? String ?? display(node.raw["value"])).font(node.raw["style"] as? String == "headline" ? .headline : .body)
         } else if node.type == "Button" {
             Button(node.raw["label"] as? String ?? "Review action…") { emit(node.raw["value"] ?? NSNull()) }.disabled(node.actionID == nil || NativeSurfaceWire.bool(node.raw["disabled"]) == true)
         } else if node.type == "TextField" {

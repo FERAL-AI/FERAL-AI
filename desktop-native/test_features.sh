@@ -43,7 +43,7 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
 "$model_binary"
 
 desktop_binary=/private/tmp/theora-native-desktop-experience-tests
-xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 -module-cache-path "$test_cache" -parse-as-library NativeDesktopExperience.swift tests/NativeDesktopExperienceTests.swift -o "$desktop_binary"
+xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 -module-cache-path "$test_cache" -parse-as-library NativeRichText.swift NativeDesktopExperience.swift tests/NativeDesktopExperienceTests.swift -o "$desktop_binary"
 "$desktop_binary"
 
 error_binary=/private/tmp/theora-native-error-presentation-tests

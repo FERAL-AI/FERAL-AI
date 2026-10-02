@@ -366,13 +366,13 @@ struct NativeIntegrationFeatureView:View {
             HStack { VStack(alignment:.leading) { Text("Integrations").font(.largeTitle.bold());Text("Connect accounts and tools with explicit permission.").foregroundStyle(.secondary) };Spacer();Button("Refresh saved status") { Task { await model.refresh() } }.disabled(busy || baseURL == nil) }
             Picker("Integration section",selection:$tab) { ForEach(["Accounts","Channels","MCP","Vault"],id:\.self) { Text($0).tag($0) } }.pickerStyle(.segmented).disabled(model.busy)
             if baseURL == nil { Text("The local integration service is not ready.").foregroundStyle(.secondary) }
-            if let message = error ?? model.actionError { Text(message).foregroundStyle(.red).textSelection(.enabled) }
+            if let message = error ?? model.actionError { NativeSelectableText(message).foregroundStyle(.red) }
             if let message = model.receipt { Text(message).foregroundStyle(.secondary) }
             if model.loading { ProgressView("Reading saved status…") }
             ScrollView { VStack(alignment:.leading,spacing:16) { if tab == "Accounts" { accounts };if tab == "Channels" { channelSection };if tab == "MCP" { mcp };if tab == "Vault" { vault } }.frame(maxWidth:.infinity,alignment:.leading) }
         }.padding(24)
         .task(id:baseURL?.absoluteString ?? "") { review = nil;selected = nil;browserReview = nil;editingMCP = false;environmentDrafts = [];headerDrafts = [];secret = "";await model.configure(baseURL:baseURL) }
-        .sheet(item:$review) { item in VStack(alignment:.leading,spacing:16) { Text(item.title).font(.title2.bold());ScrollView { Text(item.detail).textSelection(.enabled) }.frame(maxHeight:300);if let error = model.actionError { Text(error).foregroundStyle(.red) };HStack { Spacer();Button("Cancel") { secret = "";review = nil }.disabled(model.busy);Button(model.busy ? "Applying…" : "Confirm") { Task { if await model.perform(item) { secret = "";review = nil } } }.disabled(busy) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.busy) }
+        .sheet(item:$review) { item in VStack(alignment:.leading,spacing:16) { Text(item.title).font(.title2.bold());ScrollView { NativeSelectableText(item.detail) }.frame(maxHeight:300);if let error = model.actionError { Text(error).foregroundStyle(.red) };HStack { Spacer();Button("Cancel") { secret = "";review = nil }.disabled(model.busy);Button(model.busy ? "Applying…" : "Confirm") { Task { if await model.perform(item) { secret = "";review = nil } } }.disabled(busy) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.busy) }
         .sheet(item:$selected) { row in accountForm(row) }
         .sheet(isPresented:$editingMCP,onDismiss:{ environmentDrafts = [];headerDrafts = [];argumentText = "" }) { mcpForm }
         .onChange(of:tab) { _ in secret = "";browserReview = nil }

@@ -180,23 +180,23 @@ struct NativeAppConfirmationFeatureView:View {
     init(model:NativeAppConfirmationModel,onResponse:((NativeAppConfirmationResponse)async throws->Void)?=nil){self.model=model;self.onResponse=onResponse}
     var body:some View{
         VStack(alignment:.leading,spacing:12){
-            if let error=model.error{Text(error).foregroundStyle(.red).textSelection(.enabled)}
+            if let error=model.error{NativeSelectableText(error).foregroundStyle(.red)}
             ForEach(Array(model.notices.enumerated()),id:\.offset){_,notice in Text(notice).font(.caption).foregroundStyle(.secondary)}
             ForEach(model.requests){request in
                 VStack(alignment:.leading,spacing:8){
                     Text("App confirmation: "+request.appID).font(.headline)
-                    Text(verbatim:request.prompt).textSelection(.enabled)
+                    NativeSelectableText(verbatim:request.prompt)
                     Text("Action: \(request.actionID) · \(request.state.replacingOccurrences(of:"_",with:" "))").font(.caption)
                     Text("Accepted dispatch is not verified tool or purchase completion. This does not grant folder access.").font(.caption).foregroundStyle(.secondary)
                     if request.state=="pending",onResponse != nil{
                         HStack{Button("Review confirmation…"){prepare(request.id,confirm:true)};Button("Review rejection…"){prepare(request.id,confirm:false)}}
                     }
-                    DisclosureGroup("Exact app action and submitted value"){Text(NativeAppConfirmationWire.json(request.metadata)).font(.system(.caption,design:.monospaced)).textSelection(.enabled)}
+                    DisclosureGroup("Exact app action and submitted value"){NativeSelectableText(NativeAppConfirmationWire.json(request.metadata)).font(.system(.caption,design:.monospaced))}
                 }.padding(14).frame(maxWidth:.infinity,alignment:.leading).background(Color.orange.opacity(0.07),in:RoundedRectangle(cornerRadius:12))
             }
         }
         .sheet(item:$review){item in VStack(alignment:.leading,spacing:16){
-            Text(item.title).font(.title2.bold());ScrollView{Text(verbatim:item.explanation).textSelection(.enabled).frame(maxWidth:.infinity,alignment:.leading)}
+            Text(item.title).font(.title2.bold());ScrollView{NativeSelectableText(verbatim:item.explanation).frame(maxWidth:.infinity,alignment:.leading)}
             HStack{Button("Cancel"){review=nil};Spacer();Button(item.confirm ? "Send reviewed confirmation" : "Send rejection"){review=nil;Task{if let onResponse=onResponse{await model.respond(item,send:onResponse)}}}.disabled(!model.canRespond(item))}
         }.padding(24).frame(width:680,height:540)}
     }

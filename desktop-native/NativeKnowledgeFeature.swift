@@ -292,11 +292,11 @@ struct NativeKnowledgeFeatureView: View {
             Text("Read compiled memory pages and their source references. Page editing and deletion are unavailable in the current backend.").foregroundStyle(.secondary)
             HStack { TextField("Search pages", text: $query).onSubmit { search() }; Picker("Kind", selection: $kind) { Text("All").tag(""); ForEach(model.kinds, id: \.self) { Text($0).tag($0) } }.frame(width: 180); Button("Search") { search() }.disabled(model.busy) }
             if let count = model.total { Text("\(count) stored pages · showing up to 100 matches").font(.caption) }
-            if let message = localError ?? model.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
-            if let receipt = model.receipt { Text(receipt).foregroundStyle(.secondary).textSelection(.enabled) }
+            if let message = localError ?? model.error { NativeSelectableText(message).foregroundStyle(.red) }
+            if let receipt = model.receipt { NativeSelectableText(receipt).foregroundStyle(.secondary) }
             HSplitView {
                 ScrollView { LazyVStack(alignment: .leading) { ForEach(model.pages) { item in Button { Task { await model.open(item.id) } } label: { VStack(alignment: .leading) { Text(item.title).font(.headline); Text("\(item.kind) · \(item.updated)").font(.caption).foregroundStyle(.secondary) }.frame(maxWidth: .infinity, alignment: .leading).padding(8) }.buttonStyle(.plain) } } }.frame(minWidth: 180, idealWidth: 250)
-                ScrollView { if let page = model.page { VStack(alignment: .leading, spacing: 10) { Text(page.title).font(.title3.bold()); Text(page.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading); Divider(); Text("Source references").font(.headline); ForEach(Array(page.references.enumerated()), id: \.offset) { _, ref in Text(ref).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }; if page.references.isEmpty { Text("No references reported.").foregroundStyle(.secondary) } }.padding(8) } else { Text("Select a page to read its stored content.").foregroundStyle(.secondary).padding() } }.frame(minWidth: 300)
+                ScrollView { if let page = model.page { VStack(alignment: .leading, spacing: 10) { Text(page.title).font(.title3.bold()); NativeSelectableText(page.body).frame(maxWidth: .infinity, alignment: .leading); Divider(); Text("Source references").font(.headline); ForEach(Array(page.references.enumerated()), id: \.offset) { _, ref in NativeSelectableText(ref).font(.system(.caption, design: .monospaced)) }; if page.references.isEmpty { Text("No references reported.").foregroundStyle(.secondary) } }.padding(8) } else { Text("Select a page to read its stored content.").foregroundStyle(.secondary).padding() } }.frame(minWidth: 300)
             }.frame(minHeight: 220)
             DisclosureGroup("Import text into memory") {
                 TextField("Source label", text: $label)
@@ -327,16 +327,16 @@ struct NativeKnowledgeFeatureView: View {
     private func reviewPanel(_ item: NativeKnowledgeReview) -> some View {
         VStack(alignment: .leading, spacing: 12) {
             Text(item.title).font(.title2.bold())
-            Text(item.scope).textSelection(.enabled)
+            NativeSelectableText(item.scope)
             if !item.compile {
                 Text("Source: \(item.sourceLabel)")
                 if let folder = item.folder {
                     Text("\(folder.files.count) supported files · \(folder.bytes) bytes · \(folder.skipped) skipped entries").font(.caption)
-                    ScrollView { VStack(alignment: .leading, spacing: 8) { ForEach(folder.files.keys.sorted(), id: \.self) { path in Text("\(path)\nSHA-256: \(folder.files[path] ?? "")").font(.system(.caption, design: .monospaced)).textSelection(.enabled) } } }.frame(height: 250)
+                    ScrollView { VStack(alignment: .leading, spacing: 8) { ForEach(folder.files.keys.sorted(), id: \.self) { path in NativeSelectableText("\(path)\nSHA-256: \(folder.files[path] ?? "")").font(.system(.caption, design: .monospaced)) } } }.frame(height: 250)
                 } else if let bytes = item.pdfBytes, let hash = item.pdfSHA256 {
-                    Text("Frozen size: \(bytes.count) bytes\nSHA-256: \(hash)").font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                    NativeSelectableText("Frozen size: \(bytes.count) bytes\nSHA-256: \(hash)").font(.system(.body, design: .monospaced))
                 } else {
-                    ScrollView { Text(item.content).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }.frame(height: 250)
+                    ScrollView { NativeSelectableText(item.content).font(.system(.body, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading) }.frame(height: 250)
                 }
             }
             if model.busy { Text("Import in progress. Closing the window cannot undo notes already written.").foregroundStyle(.secondary); ProgressView() }

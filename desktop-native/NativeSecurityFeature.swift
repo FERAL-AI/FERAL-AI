@@ -221,7 +221,7 @@ struct NativeSecurityFeatureView: View {
             VStack(alignment: .leading, spacing: 14) {
                 Text("Review \(review.section) change").font(.title2.bold())
                 Text(review.scope).fixedSize(horizontal: false, vertical: true)
-                ScrollView { VStack(alignment: .leading, spacing: 12) { Text("Before").font(.headline); Text(review.previous).font(.system(.caption, design: .monospaced)).textSelection(.enabled); Text("Proposed").font(.headline); Text(review.proposed).font(.system(.caption, design: .monospaced)).textSelection(.enabled) } }
+                ScrollView { VStack(alignment: .leading, spacing: 12) { Text("Before").font(.headline); NativeSelectableText(review.previous).font(.system(.caption, design: .monospaced)); Text("Proposed").font(.headline); NativeSelectableText(review.proposed).font(.system(.caption, design: .monospaced)) } }
                 HStack { Spacer(); Button("Cancel") { proposed = nil }; Button("Confirm reviewed change") { proposed = nil; Task { await model.commit(review, confirmed: true) } }.keyboardShortcut(.defaultAction) }
             }.padding(24).frame(width: 640, height: 560)
         }
@@ -233,12 +233,12 @@ struct NativeSecurityFeatureView: View {
             if let rows = model.data["grants"]?["grants"] as? [[String: Any]] {
                 if rows.isEmpty { Text("No explicit folder grants returned. Other policy access may still exist.").foregroundStyle(.secondary) }
                 ForEach(Array(rows.enumerated()), id: \.offset) { _, row in
-                    HStack { VStack(alignment: .leading) { Text(row["path"] as? String ?? "Unknown folder").textSelection(.enabled); Text(row["mode"] as? String ?? "Unknown mode").font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Review revoke") { propose { try model.revokeReview(path: row["path"] as? String ?? "") } }.disabled(model.busy || model.errors["grants"] != nil) }
+                    HStack { VStack(alignment: .leading) { NativeSelectableText(row["path"] as? String ?? "Unknown folder"); Text(row["mode"] as? String ?? "Unknown mode").font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Review revoke") { propose { try model.revokeReview(path: row["path"] as? String ?? "") } }.disabled(model.busy || model.errors["grants"] != nil) }
                 }
             }
             Divider()
             Button("Choose folder…") { let panel = NSOpenPanel(); panel.canChooseFiles = false; panel.canChooseDirectories = true; panel.allowsMultipleSelection = false; if panel.runModal() == .OK { folder = panel.url?.path ?? "" } }.disabled(model.busy)
-            Text(folder.isEmpty ? "No folder selected" : folder).textSelection(.enabled)
+            NativeSelectableText(folder.isEmpty ? "No folder selected" : folder)
             Picker("Access", selection: $folderMode) { Text("Read only").tag("read"); Text("Read and write").tag("readwrite") }.pickerStyle(.segmented)
             Button("Review folder grant") { propose { try model.grantReview(path: folder, mode: folderMode) } }.disabled(folder.isEmpty || model.busy || model.data["grants"] == nil || model.errors["grants"] != nil)
         }
@@ -277,7 +277,7 @@ struct NativeSecurityFeatureView: View {
         VStack(alignment: .leading, spacing: 12) {
             Text("Configured spending caps").font(.headline)
             Text("Current spend and reset times are unavailable here; the backend has no cost snapshot endpoint. These are configuration values, not measured spend or billing guarantees.").font(.caption).foregroundStyle(.secondary)
-            if let cost = model.data["cost"]?["cost"] { Text(NativeSecurityWire.json(cost)).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
+            if let cost = model.data["cost"]?["cost"] { NativeSelectableText(NativeSecurityWire.json(cost)).font(.system(.caption, design: .monospaced)) }
             Picker("Cap", selection: $costKey) { Text("Global / hour").tag("global_per_hour_usd"); Text("Global / day").tag("global_per_day_usd"); ForEach(model.costSites, id: \.self) { Text($0 + " / hour").tag($0) } }
             TextField("USD amount; empty removes limit", text: $amount).textFieldStyle(.roundedBorder)
             Button("Review cap change") { propose { try model.costReview(key: costKey, amount: amount) } }.disabled(model.busy || model.data["cost"] == nil || model.errors["cost"] != nil)

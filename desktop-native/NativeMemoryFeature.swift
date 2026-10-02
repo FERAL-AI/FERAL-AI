@@ -331,12 +331,12 @@ struct NativeMemoryFeatureView: View {
                         }.frame(maxWidth: 170)
                     }
                 }
-                if store.section == .search, store.records != nil { Text("Results for: " + store.loadedQuery).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                if store.section == .search, store.records != nil { NativeSelectableText("Results for: " + store.loadedQuery).font(.caption).foregroundStyle(.secondary) }
                 counts
                 if let error = store.error { errorBanner(error) }
                 if let notice = store.notice { Text(notice).foregroundStyle(.secondary).accessibilityLabel(notice) }
                 if !store.degradations.isEmpty {
-                    Text("Partial search: some tiers could not answer. \(NativeMemoryWire.json(store.degradations))").font(.callout).foregroundStyle(.orange).textSelection(.enabled)
+                    NativeSelectableText("Partial search: some tiers could not answer. \(NativeMemoryWire.json(store.degradations))").font(.callout).foregroundStyle(.orange)
                 }
                 HSplitView {
                     VStack(alignment: .leading) {
@@ -397,13 +397,13 @@ struct NativeMemoryFeatureView: View {
         }
     }
     private func errorBanner(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.triangle").foregroundStyle(.red).textSelection(.enabled)
+        HStack(alignment: .top) { Image(systemName: "exclamationmark.triangle").accessibilityHidden(true); NativeSelectableText(text).foregroundStyle(.red) }.foregroundStyle(.red).accessibilityElement(children: .contain)
     }
     @ViewBuilder private var inspector: some View {
         if let record = store.selected {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(record.text).font(.title3).textSelection(.enabled)
+                    NativeSelectableText(record.text).font(.title3)
                     if store.section == .recent, record.backendID != nil {
                         Button("Delete note…", role: .destructive) { pendingDelete = record }.disabled(store.busy || store.loading)
                     }
@@ -414,14 +414,14 @@ struct NativeMemoryFeatureView: View {
                             errorBanner(error)
                             Button("Retry entity lookup") { Task { await store.inspect() } }
                         }
-                        if let detail = store.detail { Text(NativeMemoryWire.json(detail)).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
+                        if let detail = store.detail { NativeSelectableText(NativeMemoryWire.json(detail)).font(.system(.body, design: .monospaced)) }
                     }
                     DisclosureGroup("Record metadata") {
-                        Text(NativeMemoryWire.json(record.raw)).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                        NativeSelectableText(NativeMemoryWire.json(record.raw)).font(.system(.caption, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading)
                     }
                     if let observability = store.observability {
                         DisclosureGroup("Search engine details") {
-                            Text(NativeMemoryWire.json(observability)).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                            NativeSelectableText(NativeMemoryWire.json(observability)).font(.system(.caption, design: .monospaced))
                             Text("A fallback index is a configuration fact; it does not by itself mean poorer search results.").font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -449,7 +449,7 @@ private struct NativeMemorySaveSheet: View {
             }
             Text("Private is the default. A shared note is eligible for exchange only with peers granted that exact scope.").font(.caption).foregroundStyle(.secondary)
             if let error = store.scopeError { Text("Sharing unavailable: \(error)").font(.caption).foregroundStyle(.orange) }
-            if let error = store.error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            if let error = store.error { NativeSelectableText(error).foregroundStyle(.red) }
             HStack {
                 Spacer()
                 Button("Cancel") { dismiss() }.keyboardShortcut(.cancelAction).disabled(store.busy)

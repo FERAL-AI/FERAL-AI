@@ -682,9 +682,9 @@ private struct NativeCodingView: View {
                     nativeCard {
                         VStack(alignment: .leading, spacing: 14) {
                             HStack { Label("Project", systemImage: "folder").font(.headline); Spacer(); Button("Choose folder…", action: chooseFolder).disabled(!model.ready || running || model.codingBusy) }
-                            Text(model.coding.workspace.isEmpty ? "Choose a project folder to begin." : model.coding.workspace)
+                            NativeSelectableText(model.coding.workspace.isEmpty ? "Choose a project folder to begin." : model.coding.workspace)
+                                .foregroundStyle(.secondary).lineLimit(3)
                                 .id(model.coding.workspace)
-                                .foregroundStyle(.secondary).textSelection(.enabled).lineLimit(3)
                             Text("FERAL asks before making changes. Choosing a folder grants access to that project.").font(.caption).foregroundStyle(.secondary)
                         }.accessibilityElement(children: .contain)
                     }
@@ -731,15 +731,15 @@ private struct NativeCodingView: View {
                         }
                     }
                     if !model.coding.text.isEmpty {
-                        nativeCard { VStack(alignment: .leading, spacing: 10) { Text("Agent message").font(.headline); Text(model.coding.text).textSelection(.enabled) } }
+                        nativeCard { VStack(alignment: .leading, spacing: 10) { Text("Agent message").font(.headline); NativeSelectableText(model.coding.text) } }
                     }
                     if !model.coding.actions.isEmpty {
                         VStack(alignment: .leading, spacing: 12) {
                             Text("Observed actions").font(.headline)
                             ForEach(model.coding.actions) { action in
                                 DisclosureGroup {
-                                    Text(action.detail.isEmpty ? "No result detail was provided." : action.detail)
-                                        .font(.system(.callout, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+                                    NativeSelectableText(action.detail.isEmpty ? "No result detail was provided." : action.detail)
+                                        .font(.system(.callout, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
                                 } label: {
                                     HStack { Text(action.title); Spacer(); Text(action.status).font(.caption).foregroundStyle(.secondary) }
                                 }.padding(12).background(RoundedRectangle(cornerRadius: 10).fill(Color(nsColor: .controlBackgroundColor)))
@@ -773,7 +773,7 @@ private struct NativePermissionView: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
             Label("Your approval is needed", systemImage: "hand.raised").font(.headline)
-            Text(permission.title).textSelection(.enabled)
+            NativeSelectableText(permission.title)
             if !permission.before.isEmpty || !permission.after.isEmpty {
                 HStack(alignment: .top, spacing: 12) {
                     codeColumn("Before", text: permission.before)
@@ -796,7 +796,7 @@ private struct NativePermissionView: View {
         VStack(alignment: .leading, spacing: 7) {
             Text(title).font(.caption.weight(.semibold))
             ScrollView([.horizontal, .vertical]) {
-                Text(text.isEmpty ? "(empty file)" : text).font(.system(.callout, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading).padding(12)
+                NativeSelectableText(text.isEmpty ? "(empty file)" : text).font(.system(.callout, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading).padding(12)
             }.frame(minHeight: 80, maxHeight: 220).background(Color(nsColor: .textBackgroundColor)).clipShape(RoundedRectangle(cornerRadius: 8))
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
@@ -810,7 +810,7 @@ private struct NativeMemoryView: View {
             if model.memories.isEmpty {
                 NativeEmptyView(icon: "brain", title: "Room to remember", detail: "No memories are available yet. Memories will appear here as you use FERAL.")
             } else {
-                List(model.memories) { item in VStack(alignment: .leading, spacing: 7) { Text(item.title).font(.headline); Text(item.detail).foregroundStyle(.secondary).textSelection(.enabled) }.padding(.vertical, 10) }.listStyle(.inset)
+                List(model.memories) { item in VStack(alignment: .leading, spacing: 7) { Text(item.title).font(.headline); NativeSelectableText(item.detail).foregroundStyle(.secondary) }.padding(.vertical, 10) }.listStyle(.inset)
             }
         }
     }
@@ -824,7 +824,7 @@ private struct NativeDevicesView: View {
             if model.devices.isEmpty {
                 NativeEmptyView(icon: "eyeglasses", title: "Your devices belong here", detail: "No devices are connected. Paired glasses and other devices will appear when the connection is available.")
             } else {
-                List(model.devices) { item in HStack(alignment: .top, spacing: 14) { Image(systemName: "network").font(.title2).foregroundStyle(nativeAccent); VStack(alignment: .leading, spacing: 7) { Text(item.title).font(.headline); Text(item.detail).foregroundStyle(.secondary).textSelection(.enabled) } }.padding(.vertical, 12) }.listStyle(.inset)
+                List(model.devices) { item in HStack(alignment: .top, spacing: 14) { Image(systemName: "network").font(.title2).foregroundStyle(nativeAccent); VStack(alignment: .leading, spacing: 7) { Text(item.title).font(.headline); NativeSelectableText(item.detail).foregroundStyle(.secondary) } }.padding(.vertical, 12) }.listStyle(.inset)
             }
         }
     }
@@ -881,15 +881,19 @@ private struct NativeErrorBanner: View {
     let text: String
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
-            Label(NativeErrorPresentation.summary(text), systemImage: "exclamationmark.circle")
-                .lineLimit(2).textSelection(.enabled)
-                .accessibilityLabel("Error: " + NativeErrorPresentation.summary(text))
+            HStack(alignment: .top) {
+                Image(systemName: "exclamationmark.circle").accessibilityHidden(true)
+                NativeSelectableText(NativeErrorPresentation.summary(text)).font(.callout)
+                    .foregroundStyle(.red).lineLimit(2)
+                    .accessibilityLabel("Error: " + NativeErrorPresentation.summary(text))
+            }.accessibilityElement(children: .contain)
             DisclosureGroup("Error details") {
                 ScrollView([.horizontal, .vertical]) {
-                    Text(verbatim: text).font(.system(.caption, design: .monospaced))
-                        .textSelection(.enabled).fixedSize(horizontal: false, vertical: true)
-                        .frame(maxWidth: .infinity, alignment: .leading)
+                    NativeSelectableText(verbatim: text).font(.system(.caption, design: .monospaced))
+                        .foregroundStyle(.secondary)
                         .accessibilityLabel("Exact error details: " + text)
+                        .fixedSize(horizontal: false, vertical: true)
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }.frame(height: 80)
             }.font(.caption).foregroundStyle(.secondary)
         }.font(.callout).foregroundStyle(Color.red).padding(10)

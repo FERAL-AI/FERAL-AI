@@ -253,15 +253,15 @@ struct NativeWorkflowFeatureView: View {
             Picker("Workflow section",selection:$tab) { ForEach(["Packs","TaskFlows","Routines","Intents"],id:\.self) { Text($0).tag($0) } }.pickerStyle(.segmented).disabled(model.acting)
             if baseURL == nil { Text("The local workflow service is not ready.").foregroundStyle(.secondary);Spacer() }
             else {
-                if let error = localError ?? model.actionError { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-                if let receipt = model.receipt { Text(receipt).foregroundStyle(.secondary).textSelection(.enabled) }
+                if let error = localError ?? model.actionError { NativeSelectableText(error).foregroundStyle(.red) }
+                if let receipt = model.receipt { NativeSelectableText(receipt).foregroundStyle(.secondary) }
                 if model.loading { ProgressView("Refreshing safe workflow reads…") }
                 ScrollView { VStack(alignment:.leading,spacing:16) { if tab == "Packs" { packs };if tab == "TaskFlows" { flows };if tab == "Routines" { routines };if tab == "Intents" { intents } }.frame(maxWidth:.infinity,alignment:.leading) }
             }
         }.padding(24)
         .task(id:(baseURL?.absoluteString ?? "") + "|" + (sessionID ?? "")) { review = nil;draft = "";selectedPack = nil; await model.configure(baseURL:baseURL,sessionID:sessionID) }
         .onChange(of:model.selectedFlow) { _ in Task { await model.inspectFlow() } }
-        .sheet(item:$review) { reviewed in VStack(alignment:.leading,spacing:16) { Text(reviewed.title).font(.title2.bold());ScrollView { Text(reviewed.explanation).textSelection(.enabled) }.frame(maxHeight:340);if let error = model.actionError { Text(error).foregroundStyle(.red) };HStack { Spacer();Button("Cancel") { review = nil }.disabled(model.acting);Button(model.acting ? "Applying…" : "Confirm") { Task { if await model.perform(reviewed) { review = nil } } }.disabled(busy) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.acting) }
+        .sheet(item:$review) { reviewed in VStack(alignment:.leading,spacing:16) { Text(reviewed.title).font(.title2.bold());ScrollView { NativeSelectableText(reviewed.explanation) }.frame(maxHeight:340);if let error = model.actionError { Text(error).foregroundStyle(.red) };HStack { Spacer();Button("Cancel") { review = nil }.disabled(model.acting);Button(model.acting ? "Applying…" : "Confirm") { Task { if await model.perform(reviewed) { review = nil } } }.disabled(busy) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.acting) }
         .sheet(isPresented:Binding(get:{ !draft.isEmpty },set:{ if !$0 { draft = "" } })) { draftSheet }
         .sheet(item:$selectedPack) { pack in packSheet(pack) }
     }
@@ -282,7 +282,7 @@ struct NativeWorkflowFeatureView: View {
         } }
         if model.inspecting { ProgressView("Inspecting flow…") }
         if let error = model.detailError { Text(error).foregroundStyle(.red) }
-        if let detail = model.detail { card("Flow steps and results") { ForEach(Array((detail["steps"] as? [[String:Any]] ?? []).enumerated()),id:\.offset) { i,step in VStack(alignment:.leading,spacing:5) { Text("\(i+1). \(step["step_type"] as? String ?? "Unknown") · \(step["status"] as? String ?? "Unavailable")");if let error = step["error"] as? String { Text(error).foregroundStyle(.red) };DisclosureGroup("Original step fields") { Text(NativeWorkflowWire.json(step)).font(.system(.caption,design:.monospaced)).textSelection(.enabled) } } } } }
+        if let detail = model.detail { card("Flow steps and results") { ForEach(Array((detail["steps"] as? [[String:Any]] ?? []).enumerated()),id:\.offset) { i,step in VStack(alignment:.leading,spacing:5) { Text("\(i+1). \(step["step_type"] as? String ?? "Unknown") · \(step["status"] as? String ?? "Unavailable")");if let error = step["error"] as? String { Text(error).foregroundStyle(.red) };DisclosureGroup("Original step fields") { NativeSelectableText(NativeWorkflowWire.json(step)).font(.system(.caption,design:.monospaced)) } } } } }
     }
     @ViewBuilder private var routines:some View {
         Text("Loading the backend routine list can restart its scheduler; enabled jobs may execute.").font(.caption).foregroundStyle(.orange)
@@ -293,7 +293,7 @@ struct NativeWorkflowFeatureView: View {
             if let next = routine.raw["next_run"] as? NSNumber { Text("Next reported run: " + Date(timeIntervalSince1970:next.doubleValue).formatted()).font(.caption) }
             if let reason = routine.raw["disabled_reason"] as? String,!reason.isEmpty { Text(reason).foregroundStyle(.orange) }
             HStack { Button(NativeWorkflowWire.bool(routine.raw["enabled"]) == true ? "Pause…" : "Resume…") { request(.routine(id:routine.id,verb:NativeWorkflowWire.bool(routine.raw["enabled"]) == true ? "pause" : "resume")) };Button("Delete schedule…",role:.destructive) { request(.routine(id:routine.id,verb:"delete")) } }.disabled(busy)
-            DisclosureGroup("Original payload") { Text(NativeWorkflowWire.json(routine.raw["payload"] ?? [:])).font(.system(.caption,design:.monospaced)).textSelection(.enabled) }
+            DisclosureGroup("Original payload") { NativeSelectableText(NativeWorkflowWire.json(routine.raw["payload"] ?? [:])).font(.system(.caption,design:.monospaced)) }
         } }
     }
     @ViewBuilder private var intents:some View {

@@ -6,8 +6,8 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Latest source739a20c0b required CI/native passed: **12,252 backend tests,
-  83 skipped, coverage74% rounded**. Non-blocking mypy remains failed at852
+- Latest source4e19f07f required CI/native passed: **12,278 backend tests,
+  83 skipped, coverage74% rounded**. Non-blocking mypy remains failed at850
   versus812 baseline. Live-brain and main Linux matrix skipped.
 - [Actual9.27](NATIVE_9_27_ACCEPTANCE.md) passed local reply, exact native
   reviewed Deny/Allow and copy/link. New conversation caused a confirmed
@@ -17,7 +17,10 @@ The detailed contracts and acceptance work packages remain in [release readiness
   [generic SDK](SDK_WEBSOCKET_EVIDENCE.md) source slices passed integrated309
   tests/1 skipped and locked Node53 tests. They add durable processing status,
   exact cancellation and compatibility negotiation before tasks; no read/seen
-  or external-effect success claim. SDK thread continuity remains a repair card.
+  or external-effect success claim. DEV01C repairs live SDK thread continuity;
+  closed/restarted model context remains a separate checkpoint card. Current
+  runtime/SDK integration passed330 tests plus72 Node tests; new-source remote
+  CI and native9.28 acceptance remain pending.
 
 The following bullets retain earlier evidence; their counts and artifacts do
 not describe this new source wave.

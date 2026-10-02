@@ -72,7 +72,7 @@ struct NativeMemoryContextFeatureView: View {
             HStack { Text("Memory context").font(.title2.bold()); Spacer(); if model.loading { ProgressView().controlSize(.small) }; Button("Refresh recorded turns") { Task { await model.refresh() } }.disabled(model.loading) }
             Text("Read the latest 20 recorded memory assemblies across this brain’s sessions, including specialist turns. This local inspector does not generate a response or run a new memory search. Recorded queries and context can contain private information.").foregroundStyle(.secondary)
             Text("These are recorded memory blocks, not the complete model prompt or proof that the model used every source. The in-process ring holds up to 50 snapshots and is lost when the brain restarts. Missing layers mean none were recorded in that block.").font(.caption).foregroundStyle(.secondary)
-            if let error = model.error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
+            if let error = model.error { NativeSelectableText(error).foregroundStyle(.red) }
             if let loaded = model.loadedAt { Text("\(model.stale ? "Stale retained data — last successful read" : "Last successful read"): \(loaded.formatted())").font(.caption).foregroundStyle(model.stale ? Color.orange : Color.secondary) }
             if let rows = model.snapshots {
                 if rows.isEmpty { Text("No memory assemblies are currently recorded. This does not prove memory was unused; earlier snapshots may have been cleared or expired from the ring.").foregroundStyle(.secondary) }
@@ -83,12 +83,12 @@ struct NativeMemoryContextFeatureView: View {
     private func snapshotCard(_ snapshot: NativeMemoryContextSnapshot) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             Text(snapshot.timestamp.formatted()).font(.headline)
-            Text("Session: \(snapshot.session) · Assembly: \(snapshot.latency.formatted()) ms").font(.caption).textSelection(.enabled)
-            Text(snapshot.specialist.isEmpty ? "Specialist filter: none recorded" : "Specialist filter: \(snapshot.specialist)").font(.caption).textSelection(.enabled)
-            DisclosureGroup("Recorded query") { Text(snapshot.query.isEmpty ? "No query recorded." : snapshot.query).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            NativeSelectableText("Session: \(snapshot.session) · Assembly: \(snapshot.latency.formatted()) ms").font(.caption)
+            NativeSelectableText(snapshot.specialist.isEmpty ? "Specialist filter: none recorded" : "Specialist filter: \(snapshot.specialist)").font(.caption)
+            DisclosureGroup("Recorded query") { NativeSelectableText(snapshot.query.isEmpty ? "No query recorded." : snapshot.query).frame(maxWidth: .infinity, alignment: .leading) }
             if snapshot.layers.isEmpty { Text("The recorded memory block is empty. Source success or failure cannot be inferred from this alone.").foregroundStyle(.secondary) }
-            ForEach(snapshot.layers) { layer in DisclosureGroup(layer.title.isEmpty ? "Untitled recorded layer" : layer.title) { Text(layer.body).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) } }
-            DisclosureGroup("Complete recorded memory block") { Text(snapshot.context).font(.system(.body, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading) }
+            ForEach(snapshot.layers) { layer in DisclosureGroup(layer.title.isEmpty ? "Untitled recorded layer" : layer.title) { NativeSelectableText(layer.body).font(.system(.body, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading) } }
+            DisclosureGroup("Complete recorded memory block") { NativeSelectableText(snapshot.context).font(.system(.body, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading) }
         }.padding(14).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12))
     }
 }

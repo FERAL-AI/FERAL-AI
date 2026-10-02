@@ -242,8 +242,11 @@ verified external outcomes. A notification cannot approve the action.
 Gateway `chat.status` reads the exact session-bound receipt; `chat.abort` needs
 exact request/turn and the original socket owner. Reconnection does not acquire
 abort authority or permission to replay. The SDK does not auto-retry a task.
-Stable SDK thread identity currently preserves receipts, while disconnect can
-clear non-primary runtime history; continuity is a separate repair card.
+DEV01C retains authenticated per-thread sockets so consecutive live SDK turns
+use actual runtime history. Closure/timeout/transport loss explicitly retires
+that client thread; it does not reconnect or replay automatically. Durable model
+context across closed sockets/restart remains a separate backend checkpoint
+card. [Live continuity evidence](SDK_THREAD_CONTINUITY_EVIDENCE.md).
 Keep the existing iOS outbox/ACK and rich transcript semantics until an explicitly
 tested node adapter supplies equivalent guarantees. No iOS or physical-device
 acceptance is established by this desktop source wave.

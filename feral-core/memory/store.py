@@ -1768,6 +1768,8 @@ class MemoryStore:
             async with conn.execute("SELECT COUNT(*), SUM(CASE WHEN status != 'terminal' THEN 1 ELSE 0 END), SUM(CASE WHEN session_id = ? AND status != 'terminal' THEN 1 ELSE 0 END) FROM chat_turn_receipts",
                                     (session_id,)) as cursor:
                 counts = await cursor.fetchone()
+            if counts is None:
+                raise RuntimeError("Chat receipt capacity could not be read")
             if counts[0] >= receipt_limit or (counts[1] or 0) >= 128 or (counts[2] or 0) >= 8:
                 await conn.rollback()
                 return {"created": False, "quota": True}
@@ -1819,7 +1821,7 @@ class MemoryStore:
         try:
             await conn.execute("BEGIN IMMEDIATE")
             async with conn.execute("SELECT session_id, turn_id, receipt_json FROM chat_turn_receipts WHERE status != 'terminal'") as cursor:
-                rows = await cursor.fetchall()
+                rows = list(await cursor.fetchall())
             for session_id, turn_id, payload in rows:
                 receipt = json.loads(payload)
                 receipt.update(processing_outcome="outcome_unknown", final_text="", action_outcome="unknown",

@@ -7,11 +7,18 @@ frozen runtime source34a43e640 matches478 packaged production Python files.
 Actual local-model reply, reviewed file Deny/Allow and chat copy/link passed.
 **New conversation caused another confirmed accessibility recursion SIGSEGV**;
 growing context blocks later ordinary turns. [Exact candidate evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_27_ACCEPTANCE.md).
-Source739a20c0b required CI/native passed; its full backend suite is separate
+Source4e19f07f required CI/native passed; its full backend suite is separate
 from GUI acceptance. Historical9.26 onboarding/quit/relaunch and earlier imports,
 coding/synthetic hardware remain bounded earlier results. Hardware evidence is
 synthetic; real encrypted-profile/OS Keychain and full parity remain open.
 No row is release-certified.
+
+Next candidate9.28 is not yet assembled. Current source adds local request
+context fitting and systematically replaces remaining SwiftUI selectable text
+with AppKit views after a minimal New conversation crash reproduction. Source
+checks and a minimal A/B probe do not establish packaged-app recovery. Live SDK
+thread continuity is repaired; native exact-turn receipt/context adoption and
+durable model context after restart remain separate cards.
 
 Current integration additions: native passive device reads use the new server-bound review/command ledger, with exact socket-generation correlation and explicit readback; physical outcomes and per-browser authority remain unverified. Native Vault exposes separate reviewed startup after unlocking existing encrypted memory; fresh vault initialization stays gated and unwired. Real OS Keychain and actual encrypted-profile continuation remain unverified. Local schema retrieval limits definition count and UTF-8 bytes, without claiming tokenizer fit. Native first-use embeddings default to cached models; absent models degrade under the existing search fallback rather than silently downloading. Cloud credentials, full context handling, safe embedding-space transitions, speech, glasses, commerce, migration, signed distribution and Linux remain open.
 

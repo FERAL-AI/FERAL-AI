@@ -187,8 +187,8 @@ struct NativeCapabilitiesFeatureView: View {
             HStack { Text("Capabilities").font(.largeTitle.bold()); Spacer(); Button("Refresh local inventory") { Task { await model.refresh() } }.disabled(model.busy || baseURL == nil) }
             Picker("Section", selection: $tab) { ForEach(NativeCapabilitiesTab.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented)
             if baseURL == nil { Text("Start the local agent to inspect its capabilities.").foregroundStyle(.secondary) }
-            if let error = localError ?? model.actionError { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-            if let receipt = model.receipt { Text(receipt).textSelection(.enabled) }
+            if let error = localError ?? model.actionError { NativeSelectableText(error).foregroundStyle(.red) }
+            if let receipt = model.receipt { NativeSelectableText(receipt) }
             if model.busy { ProgressView("Working with the local agent…") }
             ScrollView { LazyVStack(alignment: .leading, spacing: 14) {
                 switch tab {
@@ -210,7 +210,7 @@ struct NativeCapabilitiesFeatureView: View {
                 }
             }.frame(maxWidth: .infinity, alignment: .leading) }
         }.padding(24).task(id: baseURL) { review = nil; model.configure(baseURL: baseURL); if baseURL != nil { await model.refresh() } }
-        .sheet(item: $review) { held in VStack(alignment: .leading, spacing: 14) { Text(held.title).font(.title2.bold()); ScrollView { VStack(alignment: .leading, spacing: 12) { Text(held.explanation).textSelection(.enabled); if let disclosure = held.disclosure { rowDisclosure(disclosure) }; if case .install = held.action, let install = model.install { disclosure(install.payload) } } }; if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.busy).keyboardShortcut(.cancelAction); Button("Confirm") { Task { if await model.perform(held) { review = nil } } }.disabled(model.busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width: 640, height: 540).interactiveDismissDisabled(model.busy) }
+        .sheet(item: $review) { held in VStack(alignment: .leading, spacing: 14) { Text(held.title).font(.title2.bold()); ScrollView { VStack(alignment: .leading, spacing: 12) { NativeSelectableText(held.explanation); if let disclosure = held.disclosure { rowDisclosure(disclosure) }; if case .install = held.action, let install = model.install { disclosure(install.payload) } } }; if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.busy).keyboardShortcut(.cancelAction); Button("Confirm") { Task { if await model.perform(held) { review = nil } } }.disabled(model.busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width: 640, height: 540).interactiveDismissDisabled(model.busy) }
     }
     private func requestReview(_ action: NativeCapabilityAction) { do { localError = nil; review = try model.review(action) } catch { localError = error.localizedDescription } }
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View { VStack(alignment: .leading, spacing: 10, content: content).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 12)) }
@@ -221,11 +221,11 @@ struct NativeCapabilitiesFeatureView: View {
         ForEach(model.rows[source] ?? []) { row in
             card {
                 Text(row.name).font(.headline)
-                Text(row.key).font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                NativeSelectableText(row.key).font(.caption).foregroundStyle(.secondary)
                 Text(row.description).lineLimit(3).foregroundStyle(.secondary)
                 if let version = row.raw["version"] as? String { Text("Version \(version)").font(.caption) }
                 DisclosureGroup("Details and actions") {
-                    Text(row.description).textSelection(.enabled)
+                    NativeSelectableText(row.description)
                     rowDisclosure(row)
                 }
                 actions(row)
@@ -234,17 +234,17 @@ struct NativeCapabilitiesFeatureView: View {
     }
     private func decisionButtons(_ row: NativeCapabilityRow) -> some View { HStack { Button("Review registration…") { requestReview(.decision(source: row.source, id: row.key, approve: true)) }; Button("Discard…", role: .destructive) { requestReview(.decision(source: row.source, id: row.key, approve: false)) } }.disabled(model.busy) }
     @ViewBuilder private func rowDisclosure(_ row: NativeCapabilityRow) -> some View {
-        if let endpoints = row.raw["endpoints"] as? [[String: Any]] { ForEach(Array(endpoints.enumerated()), id: \.offset) { _, e in Text("\(e["method"] as? String ?? "") \(e["id"] as? String ?? "") — \(e["description"] as? String ?? "")").font(.caption).textSelection(.enabled) } }
-        if let preview = row.raw["preview"] as? String ?? row.raw["python_impl"] as? String { DisclosureGroup(row.source == "toolDrafts" ? "Truncated implementation preview" : "Generated implementation") { Text(preview).font(.system(.caption, design: .monospaced)).textSelection(.enabled) } }
+        if let endpoints = row.raw["endpoints"] as? [[String: Any]] { ForEach(Array(endpoints.enumerated()), id: \.offset) { _, e in NativeSelectableText("\(e["method"] as? String ?? "") \(e["id"] as? String ?? "") — \(e["description"] as? String ?? "")").font(.caption) } }
+        if let preview = row.raw["preview"] as? String ?? row.raw["python_impl"] as? String { DisclosureGroup(row.source == "toolDrafts" ? "Truncated implementation preview" : "Generated implementation") { NativeSelectableText(preview).font(.system(.caption, design: .monospaced)) } }
         disclosure(row.raw)
     }
     @ViewBuilder private func disclosure(_ payload: [String: Any]) -> some View {
-        if let signature = payload["signature"] as? [String: Any] { Text(capabilitiesBool(signature["verified"]) == true ? "Backend verified publisher signature" : "Publisher signature not verified").foregroundStyle(capabilitiesBool(signature["verified"]) == true ? Color.secondary : Color.orange); if let hash = signature["sha256"] as? String { Text("SHA-256: \(hash)").font(.caption).textSelection(.enabled) } }
-        if let permissions = payload["permission_details"] as? [[String: Any]] { Text("Declared permissions").font(.headline); if permissions.isEmpty { Text("None declared; this is not a runtime safety guarantee.").font(.caption) }; ForEach(Array(permissions.enumerated()), id: \.offset) { _, p in Text("\(p["label"] as? String ?? p["title"] as? String ?? p["id"] as? String ?? "Permission"): \(p["description"] as? String ?? p["detail"] as? String ?? "No explanation returned")").textSelection(.enabled) } }
-        if let permissions = payload["permissions"] as? [String], !permissions.isEmpty { Text(permissions.joined(separator: ", ")).font(.caption).textSelection(.enabled) }
+        if let signature = payload["signature"] as? [String: Any] { Text(capabilitiesBool(signature["verified"]) == true ? "Backend verified publisher signature" : "Publisher signature not verified").foregroundStyle(capabilitiesBool(signature["verified"]) == true ? Color.secondary : Color.orange); if let hash = signature["sha256"] as? String { NativeSelectableText("SHA-256: \(hash)").font(.caption) } }
+        if let permissions = payload["permission_details"] as? [[String: Any]] { Text("Declared permissions").font(.headline); if permissions.isEmpty { Text("None declared; this is not a runtime safety guarantee.").font(.caption) }; ForEach(Array(permissions.enumerated()), id: \.offset) { _, p in NativeSelectableText("\(p["label"] as? String ?? p["title"] as? String ?? p["id"] as? String ?? "Permission"): \(p["description"] as? String ?? p["detail"] as? String ?? "No explanation returned")") } }
+        if let permissions = payload["permissions"] as? [String], !permissions.isEmpty { NativeSelectableText(permissions.joined(separator: ", ")).font(.caption) }
         if let dependencies = payload["skill_dependencies"] as? [String: Any] { ForEach(["already_installed", "to_install", "unavailable"], id: \.self) { group in if let deps = dependencies[group] as? [[String: Any]], !deps.isEmpty { Text(group == "to_install" ? "Skills to install" : group == "unavailable" ? "Unavailable dependencies" : "Existing dependencies").font(.headline); ForEach(Array(deps.enumerated()), id: \.offset) { _, dep in VStack(alignment: .leading) { Text(dep["skill_id"] as? String ?? "Unknown skill").bold(); if let reason = dep["reason"] as? String { Text(reason) }; if let impact = dep["impact"] as? String { Text(impact) }; permissionList(dep) } } } } }
         if let missing = payload["missing_skill_dependencies"] as? [[String: Any]], !missing.isEmpty { Text("Missing dependencies: " + missing.compactMap { $0["skill_id"] as? String }.joined(separator: ", ")).foregroundStyle(.orange) }
         if let warnings = payload["warnings"] as? [String] { ForEach(Array(warnings.enumerated()), id: \.offset) { _, warning in Text(warning).foregroundStyle(.orange) } }
     }
-    @ViewBuilder private func permissionList(_ payload: [String: Any]) -> some View { if let permissions = payload["permission_details"] as? [[String: Any]] { ForEach(Array(permissions.enumerated()), id: \.offset) { _, p in Text("\(p["label"] as? String ?? p["id"] as? String ?? "Permission"): \(p["description"] as? String ?? "")").font(.caption).textSelection(.enabled) } } }
+    @ViewBuilder private func permissionList(_ payload: [String: Any]) -> some View { if let permissions = payload["permission_details"] as? [[String: Any]] { ForEach(Array(permissions.enumerated()), id: \.offset) { _, p in NativeSelectableText("\(p["label"] as? String ?? p["id"] as? String ?? "Permission"): \(p["description"] as? String ?? "")").font(.caption) } } }
 }

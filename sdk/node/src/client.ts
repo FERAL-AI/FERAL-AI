@@ -6,6 +6,7 @@ export interface FeralClientOptions {
   timeoutMs?: number;
   chatTimeoutMs?: number;
   sessionId?: string;
+  maxChatThreads?: number;
 }
 export interface ChatOptions {
   sessionId?: string;
@@ -51,6 +52,19 @@ function processingOutcome(value: unknown): value is TurnProcessingOutcome {
     'outcome_unknown', 'unavailable', 'refused', 'budget_exceeded'].includes(value);
 }
 
+interface LiveChannel {
+  sid: string;
+  capabilityId: string;
+  ready: Promise<void>;
+  resolveReady: () => void;
+  rejectReady: (error: Error) => void;
+  negotiated: boolean;
+  lost: boolean;
+  ws?: WebSocket;
+  pending?: {requestId: string; turnId?: string;
+    finish: (error?: Error, receipt?: ChatTurnReceipt) => void};
+}
+
 export class FeralClient {
   private readonly baseUrl: string;
   private readonly wsUrl: string;
@@ -60,6 +74,10 @@ export class FeralClient {
   private readonly sessionId: string;
   private readonly sockets = new Set<WebSocket>();
   private readonly sessions = new Set<string>();
+  private readonly channels = new Map<string, LiveChannel>();
+  private readonly lostThreads = new Set<string>();
+  private readonly maxChatThreads: number;
+  private closed = false;
 
   constructor(baseUrl = 'http://localhost:9090', options: FeralClientOptions = {}) {
     let url: URL;
@@ -76,6 +94,10 @@ export class FeralClient {
     this.bearerToken = options.bearerToken;
     this.timeoutMs = positiveTimeout(options.timeoutMs ?? 30000);
     this.chatTimeoutMs = positiveTimeout(options.chatTimeoutMs ?? 60000);
+    this.maxChatThreads = options.maxChatThreads ?? 8;
+    if (!Number.isInteger(this.maxChatThreads) || this.maxChatThreads < 1 || this.maxChatThreads > 64) {
+      throw new Error('maxChatThreads must be an integer from 1 to 64');
+    }
     this.sessionId = options.sessionId === undefined ? crypto.randomUUID() : sessionIdentity(options.sessionId);
   }
 
@@ -146,21 +168,120 @@ export class FeralClient {
     if (!receipt.final_text) throw new ChatTurnError('missing_response', receipt);
     return receipt.final_text;
   }
+  private retire(channel: LiveChannel, error: Error): void {
+    if (channel.lost) return;
+    channel.lost = true;
+    this.lostThreads.add(channel.sid);
+    if (this.channels.get(channel.sid) === channel) this.channels.delete(channel.sid);
+    channel.rejectReady(error);
+    channel.pending?.finish(error);
+    const ws = channel.ws;
+    if (ws) {
+      this.sockets.delete(ws);
+      ws.onopen = null; ws.onmessage = null; ws.onerror = null; ws.onclose = null;
+      try { ws.close(); } catch { /* Already closed; no effect outcome is asserted. */ }
+    }
+  }
+
+  private openChannel(sid: string): LiveChannel {
+    if (this.channels.size >= this.maxChatThreads) throw new ChatTurnError('thread_quota');
+    if (this.channels.size + this.lostThreads.size >= 1024) throw new ChatTurnError('thread_identity_quota');
+    let resolveReady!: () => void;
+    let rejectReady!: (error: Error) => void;
+    const ready = new Promise<void>((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
+    // Idle closure may reject before a caller attaches; preserve rejection without
+    // creating an unhandled promise or exposing remote error bodies.
+    void ready.catch(() => {});
+    const channel: LiveChannel = {sid, capabilityId: crypto.randomUUID(), ready,
+      resolveReady, rejectReady, negotiated: false, lost: false};
+    this.channels.set(sid, channel);
+    const url = new URL(this.wsUrl);
+    url.searchParams.set('session_id', sid);
+    try { channel.ws = new WebSocket(url.toString()); }
+    catch { this.retire(channel, new ChatTurnError('connection_failed')); return channel; }
+    const ws = channel.ws;
+    this.sockets.add(ws);
+    ws.onopen = () => {
+      if (channel.lost) return;
+      try {
+        if (this.bearerToken !== undefined) ws.send(JSON.stringify({type: 'auth', token: this.bearerToken}));
+        ws.send(JSON.stringify({type: 'req', id: channel.capabilityId, method: 'chat.capabilities', params: {}}));
+      } catch { this.retire(channel, new ChatTurnError('connection_failed')); }
+    };
+    ws.onmessage = (event) => {
+      if (channel.lost) return;
+      let frame: unknown;
+      try { frame = JSON.parse(event.data as string); }
+      catch { this.retire(channel, new ChatTurnError('invalid_json')); return; }
+      this.dispatch(channel, frame);
+    };
+    ws.onerror = () => this.retire(channel, new ChatTurnError('connection_failed'));
+    ws.onclose = (event) => this.retire(channel, new ChatTurnError(event.code === 4001 ? 'unauthorized' : 'connection_closed'));
+    return channel;
+  }
+
+  private dispatch(channel: LiveChannel, frame: unknown): void {
+    const fail = (code: string) => this.retire(channel, new ChatTurnError(code));
+    if (!record(frame) || typeof frame.type !== 'string') { fail('invalid_frame'); return; }
+    if (frame.type === 'res' && frame.id === channel.capabilityId && !channel.negotiated) {
+      const capability = frame.payload;
+      if (frame.ok !== true || !record(capability) || !Array.isArray(capability.turn_contract_versions)
+          || !capability.turn_contract_versions.includes(1) || capability.durable_receipts !== true
+          || capability.whole_turn_terminal !== true || capability.session_id !== channel.sid) {
+        fail('unsupported_turn_contract'); return;
+      }
+      channel.negotiated = true;
+      channel.resolveReady();
+      return;
+    }
+    const payload = frame.payload ?? {};
+    if (!record(payload)) { fail('invalid_payload'); return; }
+    const pending = channel.pending;
+    if (frame.type === 'error') {
+      if (pending && payload.request_id === pending.requestId) {
+        const known = ['chat_turn_request_conflict', 'chat_turn_invalid_request', 'chat_turn_quota', 'chat_turn_receipt_unavailable'];
+        fail(typeof payload.code === 'string' && known.includes(payload.code) ? payload.code : 'request_rejected');
+      }
+      return;
+    }
+    if (!['chat_turn_accepted', 'chat_turn_terminal'].includes(frame.type)) return;
+    if (!channel.negotiated) { fail('unnegotiated_turn_receipt'); return; }
+    if (!pending || payload.request_id !== pending.requestId) return;
+    if (frame.session_id !== channel.sid || payload.session_id !== channel.sid || payload.contract_version !== 1
+        || payload.durable !== true || !canonicalUUID(payload.turn_id) || typeof payload.replayed !== 'boolean') {
+      fail('invalid_turn_receipt'); return;
+    }
+    if (frame.type === 'chat_turn_accepted') {
+      if (payload.status !== 'accepted' || (pending.turnId !== undefined && pending.turnId !== payload.turn_id)) {
+        fail('invalid_turn_acceptance'); return;
+      }
+      pending.turnId = payload.turn_id;
+      return;
+    }
+    if (pending.turnId === undefined || payload.turn_id !== pending.turnId) { fail('uncorrelated_terminal'); return; }
+    if (!processingOutcome(payload.processing_outcome)) { fail('invalid_turn_outcome'); return; }
+    if (typeof payload.final_text !== 'string' || (payload.action_outcome !== 'not_asserted' && payload.action_outcome !== 'unknown')
+        || !Array.isArray(payload.approval_request_ids)
+        || !payload.approval_request_ids.every((id): id is string => typeof id === 'string' && !!id)) {
+      fail('invalid_turn_receipt'); return;
+    }
+    pending.finish(undefined, {request_id: pending.requestId, turn_id: pending.turnId, session_id: channel.sid,
+      processing_outcome: payload.processing_outcome, final_text: payload.final_text,
+      action_outcome: payload.action_outcome, approval_request_ids: payload.approval_request_ids,
+      replayed: payload.replayed, durable: true, contract_version: 1});
+  }
+
   async chatTurn(message: string, options: ChatOptions = {}): Promise<ChatTurnReceipt> {
     if (typeof message !== 'string' || !message.trim()) throw new Error('message must be nonempty text');
     const sid = options.sessionId === undefined ? this.sessionId : sessionIdentity(options.sessionId);
     const duration = positiveTimeout(options.timeoutMs ?? this.chatTimeoutMs);
+    if (this.closed) throw new ChatTurnError('client_closed');
+    if (this.lostThreads.has(sid)) throw new ChatTurnError('context_lost');
     if (this.sessions.has(sid)) throw new ChatTurnError('session_busy');
     if (options.signal?.aborted) throw new ChatTurnError('transport_cancelled');
     this.sessions.add(sid);
-    const requestId = crypto.randomUUID();
-    const capabilityId = crypto.randomUUID();
-    const url = new URL(this.wsUrl);
-    url.searchParams.set('session_id', sid);
     return new Promise((resolve, reject) => {
-      let ws: WebSocket | undefined;
-      let turnId: string | undefined;
-      let negotiated = false;
+      let channel: LiveChannel | undefined;
       let settled = false;
       const finish = (error?: Error, receipt?: ChatTurnReceipt) => {
         if (settled) return;
@@ -168,81 +289,39 @@ export class FeralClient {
         clearTimeout(timer);
         options.signal?.removeEventListener('abort', abort);
         this.sessions.delete(sid);
-        if (ws) { this.sockets.delete(ws); try { ws.close(); } catch { /* Already closed. */ } }
+        if (channel) {
+          channel.pending = undefined;
+          if (error) this.retire(channel, error);
+        }
         if (error) reject(error);
         else if (receipt) resolve(receipt);
       };
       const abort = () => finish(new ChatTurnError('transport_cancelled'));
       const timer = setTimeout(() => finish(new ChatTurnTimeout()), duration);
-      options.signal?.addEventListener('abort', abort, { once: true });
-      try { ws = new WebSocket(url.toString()); }
-      catch { finish(new ChatTurnError('connection_failed')); return; }
-      this.sockets.add(ws);
-      ws.onopen = () => {
-        try {
-          if (this.bearerToken !== undefined) ws!.send(JSON.stringify({ type: 'auth', token: this.bearerToken }));
-          ws!.send(JSON.stringify({ type: 'req', id: capabilityId, method: 'chat.capabilities', params: {} }));
-        } catch { finish(new ChatTurnError('connection_failed')); }
-      };
-      ws.onmessage = (event) => {
+      options.signal?.addEventListener('abort', abort, {once: true});
+      try { channel = this.channels.get(sid) ?? this.openChannel(sid); }
+      catch (error) { finish(error instanceof Error ? error : new ChatTurnError('connection_failed')); return; }
+      const owned = channel;
+      void owned.ready.then(() => {
         if (settled) return;
-        let frame: unknown;
-        try { frame = JSON.parse(event.data as string); }
-        catch { finish(new ChatTurnError('invalid_json')); return; }
-        if (!record(frame) || typeof frame.type !== 'string') { finish(new ChatTurnError('invalid_frame')); return; }
-        if (frame.type === 'res' && frame.id === capabilityId && !negotiated) {
-          const capability = frame.payload;
-          if (frame.ok !== true || !record(capability) || !Array.isArray(capability.turn_contract_versions)
-              || !capability.turn_contract_versions.includes(1) || capability.durable_receipts !== true
-              || capability.whole_turn_terminal !== true || capability.session_id !== sid) {
-            finish(new ChatTurnError('unsupported_turn_contract')); return;
-          }
-          negotiated = true;
-          try {
-            ws!.send(JSON.stringify({ msg_id: requestId, type: 'text_command', session_id: sid,
-              payload: { text: message, turn_contract_version: 1 } }));
-          } catch { finish(new ChatTurnError('connection_failed')); }
-          return;
-        }
-        const payload = frame.payload ?? {};
-        if (!record(payload)) { finish(new ChatTurnError('invalid_payload')); return; }
-        if (frame.type === 'error') {
-          if (payload.request_id === requestId) {
-            const known = ['chat_turn_request_conflict', 'chat_turn_invalid_request', 'chat_turn_quota', 'chat_turn_receipt_unavailable'];
-            const code = typeof payload.code === 'string' && known.includes(payload.code) ? payload.code : 'request_rejected';
-            finish(new ChatTurnError(code));
-          }
-          return;
-        }
-        if (!['chat_turn_accepted', 'chat_turn_terminal'].includes(frame.type) || payload.request_id !== requestId) return;
-        if (!negotiated) { finish(new ChatTurnError('unnegotiated_turn_receipt')); return; }
-        if (frame.session_id !== sid || payload.session_id !== sid || payload.contract_version !== 1
-            || payload.durable !== true || !canonicalUUID(payload.turn_id) || typeof payload.replayed !== 'boolean') {
-          finish(new ChatTurnError('invalid_turn_receipt')); return;
-        }
-        if (frame.type === 'chat_turn_accepted') {
-          if (payload.status !== 'accepted' || (turnId !== undefined && turnId !== payload.turn_id)) {
-            finish(new ChatTurnError('invalid_turn_acceptance')); return;
-          }
-          turnId = payload.turn_id;
-          return;
-        }
-        if (turnId === undefined || payload.turn_id !== turnId) { finish(new ChatTurnError('uncorrelated_terminal')); return; }
-        if (!processingOutcome(payload.processing_outcome)) { finish(new ChatTurnError('invalid_turn_outcome')); return; }
-        if (typeof payload.final_text !== 'string' || (payload.action_outcome !== 'not_asserted' && payload.action_outcome !== 'unknown')
-            || !Array.isArray(payload.approval_request_ids)
-            || !payload.approval_request_ids.every((id): id is string => typeof id === 'string' && !!id)) {
-          finish(new ChatTurnError('invalid_turn_receipt')); return;
-        }
-        finish(undefined, { request_id: requestId, turn_id: turnId, session_id: sid,
-          processing_outcome: payload.processing_outcome, final_text: payload.final_text,
-          action_outcome: payload.action_outcome, approval_request_ids: payload.approval_request_ids,
-          replayed: payload.replayed, durable: true, contract_version: 1 });
-      };
-      ws.onerror = () => finish(new ChatTurnError('connection_failed'));
-      ws.onclose = (event) => finish(new ChatTurnError(event.code === 4001 ? 'unauthorized' : 'connection_closed'));
+        if (owned.lost || this.closed) { finish(new ChatTurnError(this.closed ? 'client_closed' : 'context_lost')); return; }
+        const requestId = crypto.randomUUID();
+        owned.pending = {requestId, finish};
+        try {
+          owned.ws!.send(JSON.stringify({msg_id: requestId, type: 'text_command', session_id: sid,
+            payload: {text: message, turn_contract_version: 1}}));
+        } catch { finish(new ChatTurnError('connection_failed')); }
+      }, error => finish(error instanceof Error ? error : new ChatTurnError('connection_failed')));
     });
   }
-  /** Close owned transports. External effect cancellation is never asserted. */
-  close(): void { for (const ws of Array.from(this.sockets)) ws.close(); }
+  /** Release this live thread. Its old context will not silently reconnect. */
+  closeThread(sessionId = this.sessionId): void {
+    const channel = this.channels.get(sessionIdentity(sessionId));
+    if (channel) this.retire(channel, new ChatTurnError('context_lost'));
+  }
+  /** Permanently close this client. External effect cancellation is never asserted. */
+  close(): void {
+    this.closed = true;
+    for (const channel of Array.from(this.channels.values())) this.retire(channel, new ChatTurnError('client_closed'));
+  }
 }

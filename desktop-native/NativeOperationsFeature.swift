@@ -196,8 +196,8 @@ struct NativeOperationsFeatureView: View {
             Picker("View", selection: $model.tab) { ForEach(NativeOperationsTab.allCases, id: \.self) { Text($0.rawValue).tag($0) } }.pickerStyle(.segmented).padding(.horizontal, 24).disabled(model.busy)
             ScrollView(.vertical) {
                 LazyVStack(alignment: .leading, spacing: 18) {
-                    if let error = model.errors[model.tab] { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-                    if let receipt = model.receipt { Text(receipt).textSelection(.enabled) }
+                    if let error = model.errors[model.tab] { NativeSelectableText(error).foregroundStyle(.red) }
+                    if let receipt = model.receipt { NativeSelectableText(receipt) }
                     if !model.fresh.contains(model.tab) { Text("This view is not confirmed. Refresh to load current state.").foregroundStyle(.secondary) }
                     switch model.tab {
                     case .jobs:
@@ -205,10 +205,10 @@ struct NativeOperationsFeatureView: View {
                         if model.jobs.isEmpty && model.fresh.contains(.jobs) { Text("No jobs returned. Some sources may be unavailable if noted above.").foregroundStyle(.secondary) }
                         ForEach(model.jobs, id: \.selfID) { job in
                             card {
-                                Text(job.name).font(.headline).textSelection(.enabled); Text("\(job.kind) · \(job.status)").font(.caption)
+                                NativeSelectableText(job.name).font(.headline); Text("\(job.kind) · \(job.status)").font(.caption)
                                 if let progress = job.progress { ProgressView(value: progress) }
-                                if !job.session.isEmpty { Text("Session: \(job.session)").font(.caption).textSelection(.enabled) }
-                                DisclosureGroup("Details") { Text(job.detail).font(.system(.callout, design: .monospaced)).textSelection(.enabled) }
+                                if !job.session.isEmpty { NativeSelectableText("Session: \(job.session)").font(.caption) }
+                                DisclosureGroup("Details") { NativeSelectableText(job.detail).font(.system(.callout, design: .monospaced)) }
                                 if job.stopRoute != nil { Button(job.stopLabel) { stopReview = job }.disabled(model.busy || !model.fresh.contains(.jobs)) }
                                 else { Text("No supported stop route for this job.").font(.caption).foregroundStyle(.secondary) }
                             }
@@ -226,7 +226,7 @@ struct NativeOperationsFeatureView: View {
                         Text(model.checkpointNote).font(.callout).foregroundStyle(.orange)
                         Text("A revert restores recorded file writes and may undo created calendar/reminder/routine objects. It does not undo shell changes.").font(.callout)
                         ForEach(model.turns) { turn in card {
-                            Text(turn.id).font(.headline).textSelection(.enabled); Text("\(turn.files) file(s) · \(turn.actions) reversible action(s) · \(turn.session)").font(.caption)
+                            NativeSelectableText(turn.id).font(.headline); Text("\(turn.files) file(s) · \(turn.actions) reversible action(s) · \(turn.session)").font(.caption)
                             Text(turn.date.formatted()).font(.caption); Button("Review exact revert targets") { Task { await model.inspect(turn.id) } }.disabled(model.busy || !model.fresh.contains(.checkpoints))
                         } }
                         if let preview = model.preview {
@@ -243,7 +243,7 @@ struct NativeOperationsFeatureView: View {
                         if !model.degraded.isEmpty { Text(model.degraded).foregroundStyle(.orange) }
                         Text("Sessions can be live or indexed for possible resumption. Continuing still requires a configured model and granted project. Only OpenCode sessions can open in this coding workspace.").font(.callout).foregroundStyle(.secondary)
                         ForEach(model.coding) { record in card {
-                            Text(record.agent + " · " + (record.live ? "live" : "indexed")).font(.headline); Text(record.folder).textSelection(.enabled); Text("\(record.turns) turns · \(record.id)").font(.caption).textSelection(.enabled)
+                            Text(record.agent + " · " + (record.live ? "live" : "indexed")).font(.headline); NativeSelectableText(record.folder); NativeSelectableText("\(record.turns) turns · \(record.id)").font(.caption)
                             HStack {
                                 if onOpenCodingSession != nil && model.canOpen(record) { Button("Open in Coding") { if model.canOpen(record) { onOpenCodingSession?(record.id, record.folder) } }.disabled(model.busy) }
                                 if record.live { Button("Close session…") { codingReview = record }.disabled(model.busy || !model.fresh.contains(.coding)) }
@@ -263,7 +263,7 @@ struct NativeOperationsFeatureView: View {
         .alert("Close this coding session?", isPresented: Binding(get: { codingReview != nil }, set: { if !$0 { codingReview = nil } })) { if let record = codingReview { Button("Close", role: .destructive) { codingReview = nil; Task { await model.closeCoding(record) } }; Button("Cancel", role: .cancel) { codingReview = nil } } } message: { Text(codingReview.map { "\($0.id)\n\($0.folder)\nCancellation is requested for any in-flight task. Closing does not revert its file edits." } ?? "") }
     }
     private func card<Content: View>(@ViewBuilder _ content: () -> Content) -> some View { VStack(alignment: .leading, spacing: 10, content: content).padding(16).frame(maxWidth: .infinity, alignment: .leading).background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.06))) }
-    private func entryView(_ entry: NativeOperationEntry) -> some View { card { Text(entry.title).font(.headline).textSelection(.enabled); Text("\(entry.category) · \(entry.date.formatted())").font(.caption); if !entry.context.isEmpty { Text(entry.context).font(.caption).textSelection(.enabled) }; if !entry.content.isEmpty { DisclosureGroup("Read details") { Text(entry.content).textSelection(.enabled) } } } }
-    private func revertEntry(_ entry: NativeRevertEntry) -> some View { card { Text(entry.target).font(.headline).textSelection(.enabled); Text("\(entry.action == "restore" ? "Restore earlier file content" : entry.action == "delete" ? "Delete file created by turn" : entry.action == "compensate" ? "Undo created external object" : "Leave unchanged") · \(entry.status)"); if !entry.detail.isEmpty { Text(entry.detail).font(.callout).textSelection(.enabled) } } }
+    private func entryView(_ entry: NativeOperationEntry) -> some View { card { NativeSelectableText(entry.title).font(.headline); Text("\(entry.category) · \(entry.date.formatted())").font(.caption); if !entry.context.isEmpty { NativeSelectableText(entry.context).font(.caption) }; if !entry.content.isEmpty { DisclosureGroup("Read details") { NativeSelectableText(entry.content) } } } }
+    private func revertEntry(_ entry: NativeRevertEntry) -> some View { card { NativeSelectableText(entry.target).font(.headline); Text("\(entry.action == "restore" ? "Restore earlier file content" : entry.action == "delete" ? "Delete file created by turn" : entry.action == "compensate" ? "Undo created external object" : "Leave unchanged") · \(entry.status)"); if !entry.detail.isEmpty { NativeSelectableText(entry.detail).font(.callout) } } }
 }
 private extension NativeOperationJob { var selfID: String { kind + ":" + id } }

@@ -462,4 +462,4 @@ def test_distinct_sessions_run_concurrently_and_default_thread_is_stable(monkeyp
             fifth = await other.chat_turn("new client")
             assert fifth.session_id != third.session_id
     run(scenario())
-    assert len(sockets) == 5 and all(socket.closed for socket in sockets)
+    assert len(sockets) == 4 and all(socket.closed for socket in sockets)

@@ -240,12 +240,12 @@ struct NativeProvidersFeatureView: View {
             VStack(alignment: .leading, spacing: 20) {
                 HStack { Text("AI providers").font(.largeTitle.weight(.semibold)); Spacer(); Button("Refresh saved status") { Task { await model.refresh() } }.disabled(model.busy); if model.busy { ProgressView().controlSize(.small) } }
                 Button("Provider routing and presets…") { secret = ""; label = ""; confirmation = nil; showRouting = true }.disabled(model.busy || baseURL == nil)
-                Text("Active setting: \(model.activeProvider) · \(model.activeModel)").textSelection(.enabled)
+                NativeSelectableText("Active setting: \(model.activeProvider) · \(model.activeModel)")
                 Text(model.runtimeState).font(.callout)
-                ForEach(Array(model.health.enumerated()), id: \.offset) { _, value in Text(value).font(.caption).foregroundStyle(.secondary).textSelection(.enabled) }
+                ForEach(Array(model.health.enumerated()), id: \.offset) { _, value in NativeSelectableText(value).font(.caption).foregroundStyle(.secondary) }
                 Text("Catalog and cached models load without a live provider request. Probes, live discovery and activation may contact the provider. Coding uses separate model configuration.").font(.callout).foregroundStyle(.secondary)
-                if let error = model.error { Text(error).foregroundStyle(.red).textSelection(.enabled) }
-                if let notice = model.notice { Text(notice).textSelection(.enabled) }
+                if let error = model.error { NativeSelectableText(error).foregroundStyle(.red) }
+                if let notice = model.notice { NativeSelectableText(notice) }
                 Picker("Provider", selection: Binding(get: { model.selected }, set: { id in secret = ""; label = ""; Task { await model.select(id) } })) {
                     Text("Choose provider").tag(""); ForEach(model.providers) { Text($0.name).tag($0.id) }
                 }.disabled(model.busy)
@@ -258,7 +258,7 @@ struct NativeProvidersFeatureView: View {
                         ForEach(model.models.filter { $0 != model.model }, id: \.self) { Text($0).tag($0) }
                     }.disabled(model.busy)
                     TextField("Endpoint override — blank uses runtime default", text: $model.endpoint).textFieldStyle(.roundedBorder).disabled(model.busy)
-                    Text("Catalog endpoint: \(provider.defaultURL.isEmpty ? "not specified" : provider.defaultURL)").font(.caption).foregroundStyle(.secondary).textSelection(.enabled)
+                    NativeSelectableText("Catalog endpoint: \(provider.defaultURL.isEmpty ? "not specified" : provider.defaultURL)").font(.caption).foregroundStyle(.secondary)
                     TextField("Fallback provider IDs, comma separated (blank disables fallbacks)", text: $model.fallbacks).textFieldStyle(.roundedBorder).disabled(model.busy)
                     if provider.needsKey { SecureField("New API key (optional; stored by backend vault)", text: $secret).textFieldStyle(.roundedBorder).disabled(model.busy) }
                     HStack { operationButton("Save provider configuration…", .configure); operationButton("Activate for chat…", .activate); operationButton("Probe provider…", .probe); operationButton("Discover live models…", .refreshModels) }
@@ -270,7 +270,7 @@ struct NativeProvidersFeatureView: View {
                         HStack { TextField("Key label", text: $label).textFieldStyle(.roundedBorder); operationButton("Save labeled key…", .addKey) }.disabled(model.busy)
                         ForEach(model.keys) { key in
                             HStack {
-                                VStack(alignment: .leading) { Text(key.id + (key.active ? " · active" : "")); Text("Fingerprint: \(key.fingerprint) · Probe: \(key.probe.map { $0 ? "passed" : "failed" } ?? "not run")").font(.caption).textSelection(.enabled) }
+                                VStack(alignment: .leading) { Text(key.id + (key.active ? " · active" : "")); NativeSelectableText("Fingerprint: \(key.fingerprint) · Probe: \(key.probe.map { $0 ? "passed" : "failed" } ?? "not run")").font(.caption) }
                                 Spacer(); operationButton("Use key…", .activateKey(key.id)); operationButton("Probe key…", .probeKey(key.id)); operationButton("Remove…", .deleteKey(key.id))
                             }
                         }

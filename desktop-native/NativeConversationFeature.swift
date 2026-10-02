@@ -284,7 +284,7 @@ struct NativeConversationFeatureView: View {
                 if let total = model.total { Text("\(total) conversations\(model.loadedQuery.isEmpty ? "" : " matching “\(model.loadedQuery)”")").font(.caption).foregroundStyle(.secondary) }
                 if let error = model.listError { warning(error) }
                 if let error = model.actionError { warning(error) }
-                if let receipt = model.receipt { Text(receipt).foregroundStyle(.secondary).textSelection(.enabled) }
+                if let receipt = model.receipt { NativeSelectableText(receipt).foregroundStyle(.secondary) }
                 HSplitView {
                     VStack(alignment: .leading) {
                         if model.loading { ProgressView("Loading conversations…") }
@@ -333,13 +333,13 @@ struct NativeConversationFeatureView: View {
         }
     }
     private func warning(_ text: String) -> some View {
-        Label(text, systemImage: "exclamationmark.triangle").foregroundStyle(.red).textSelection(.enabled)
+        HStack(alignment: .top) { Image(systemName: "exclamationmark.triangle").accessibilityHidden(true); NativeSelectableText(text).foregroundStyle(.red) }.foregroundStyle(.red).accessibilityElement(children: .contain)
     }
     @ViewBuilder private var inspector: some View {
         if let thread = model.selected {
             ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text(thread.title).font(.title2.bold()).textSelection(.enabled)
+                    NativeSelectableText(thread.title).font(.title2.bold())
                     HStack {
                         Button("Continue conversation") { onOpen(thread.id) }.disabled(model.document?.id != thread.id || model.inspecting || model.controlsBusy)
                         Menu("Manage") {
@@ -360,7 +360,7 @@ struct NativeConversationFeatureView: View {
                         ForEach(Array(document.messages.enumerated()), id: \.offset) { index, message in
                             VStack(alignment: .leading, spacing: 8) {
                                 Text((message["role"] as? String ?? "Unknown role").capitalized).font(.caption.bold()).foregroundStyle(.secondary)
-                                Text(NativeConversationWire.messageText(message)).textSelection(.enabled)
+                                NativeSelectableText(NativeConversationWire.messageText(message))
                                 DisclosureGroup("Original message fields") { code(message) }
                             }.padding(12).frame(maxWidth: .infinity, alignment: .leading).background(Color.secondary.opacity(0.07), in: RoundedRectangle(cornerRadius: 10))
                         }
@@ -371,6 +371,6 @@ struct NativeConversationFeatureView: View {
         } else { Text("Select a conversation to inspect its original messages.").foregroundStyle(.secondary).frame(maxWidth: .infinity, maxHeight: .infinity) }
     }
     private func code(_ object: Any) -> some View {
-        Text(NativeConversationWire.json(object)).font(.system(.caption, design: .monospaced)).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+        NativeSelectableText(NativeConversationWire.json(object)).font(.system(.caption, design: .monospaced)).frame(maxWidth: .infinity, alignment: .leading)
     }
 }

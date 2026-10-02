@@ -287,8 +287,8 @@ struct NativeConnectionsFeatureView: View {
             Picker("Connection section",selection:$tab) { ForEach(["Devices","Access","Sync","Handoff"],id:\.self) { Text($0).tag($0) } }.pickerStyle(.segmented).disabled(model.acting)
             if baseURL == nil { Text("Connections will be available when the local service is ready.").foregroundStyle(.secondary); Spacer() }
             else {
-                if let error = localError ?? model.actionError { Label(error,systemImage:"exclamationmark.triangle").foregroundStyle(.red).textSelection(.enabled) }
-                if let receipt = model.receipt { Text(receipt).foregroundStyle(.secondary).textSelection(.enabled) }
+                if let error = localError ?? model.actionError { HStack(alignment: .top) { Image(systemName:"exclamationmark.triangle").accessibilityHidden(true); NativeSelectableText(error).foregroundStyle(.red) }.foregroundStyle(.red).accessibilityElement(children: .contain) }
+                if let receipt = model.receipt { NativeSelectableText(receipt).foregroundStyle(.secondary) }
                 if model.loading { ProgressView("Refreshing connection status…") }
                 ScrollView { VStack(alignment:.leading,spacing:18) { if tab == "Devices" { devices }; if tab == "Access" { access }; if tab == "Sync" { sync }; if tab == "Handoff" { handoff } }.frame(maxWidth:.infinity,alignment:.leading) }
             }
@@ -296,7 +296,7 @@ struct NativeConnectionsFeatureView: View {
         .task(id:(baseURL?.absoluteString ?? "") + "|" + (sessionID ?? "")) { review = nil; exportOpen = false; importOpen = false; exportDocument = nil; localError = nil; await model.configure(baseURL:baseURL,sessionID:sessionID) }
         .onChange(of:model.selectedNode) { _ in Task { await model.loadCapabilities() } }
         .sheet(item:$review) { reviewed in
-            VStack(alignment:.leading,spacing:16) { Text(reviewed.title).font(.title2.bold()); Text(reviewed.explanation).textSelection(.enabled); if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.acting).keyboardShortcut(.cancelAction); Button(model.acting ? "Applying…" : "Confirm") { Task { if await model.perform(reviewed) { if let data = model.exportData { exportDocument = NativeConnectionsExport(data:data); exportOpen = true }; review = nil } } }.disabled(busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.acting)
+            VStack(alignment:.leading,spacing:16) { Text(reviewed.title).font(.title2.bold()); NativeSelectableText(reviewed.explanation); if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.acting).keyboardShortcut(.cancelAction); Button(model.acting ? "Applying…" : "Confirm") { Task { if await model.perform(reviewed) { if let data = model.exportData { exportDocument = NativeConnectionsExport(data:data); exportOpen = true }; review = nil } } }.disabled(busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.acting)
         }
         .fileImporter(isPresented:$importOpen,allowedContentTypes:[.json]) { result in
             do { let url = try result.get(); let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }; let values = try url.resourceValues(forKeys:[.fileSizeKey]); guard (values.fileSize ?? 0) <= 10 * 1024 * 1024 else { throw NativeConnectionsFailure("Sync bundle exceeds 10 MB.") }; let bundle = try NativeConnectionsWire.bundle(Data(contentsOf:url)); requestReview(.importBundle(bundle)) } catch { localError = error.localizedDescription }
@@ -305,8 +305,8 @@ struct NativeConnectionsFeatureView: View {
     }
     private func requestReview(_ action: NativeConnectionAction) { do { localError = nil; review = try model.review(action) } catch { localError = error.localizedDescription } }
     private func card<Content:View>(_ title:String,@ViewBuilder content:() -> Content) -> some View { VStack(alignment:.leading,spacing:12) { Text(title).font(.headline); content() }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(Color.secondary.opacity(0.07),in:RoundedRectangle(cornerRadius:12)) }
-    @ViewBuilder private func failure(_ resource:String) -> some View { if let error = model.errors[resource] { Text("Unavailable: " + error).foregroundStyle(.red).textSelection(.enabled) } }
-    private func field(_ label:String,_ value:String) -> some View { HStack(alignment:.top) { Text(label).foregroundStyle(.secondary).frame(width:150,alignment:.leading); Text(value).textSelection(.enabled); Spacer() } }
+    @ViewBuilder private func failure(_ resource:String) -> some View { if let error = model.errors[resource] { NativeSelectableText("Unavailable: " + error).foregroundStyle(.red) } }
+    private func field(_ label:String,_ value:String) -> some View { HStack(alignment:.top) { Text(label).foregroundStyle(.secondary).frame(width:150,alignment:.leading); NativeSelectableText(value); Spacer() } }
     @ViewBuilder private var devices: some View {
         card("Connected and offline") {
             failure("connected")

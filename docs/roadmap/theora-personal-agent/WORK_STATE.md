@@ -30,10 +30,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent publication | `739a20c0b56d2a2aa9956cde395a79b6dd5e0935` (scoped coding fixture correction; prior runtime repair34a43e640) |
+| Most recent publication | `4e19f07f8603196fd73ecdafd0e127dbad865e69` (durable processing receipts, generic SDKs and frozen9.27 evidence) |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | 8.1 GiB available when checked; recheck before parallel compilation/packaging |
+| Disk observation | 6.3 GiB available at latest check; recheck before packaging; no personal/cache cleanup performed |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update
@@ -41,6 +41,17 @@ every historic source identifier to HEAD or regenerate a baseline to make a gate
 appear green.
 
 ## Latest checked source and active candidate
+
+New source **4e19f07f8603196fd73ecdafd0e127dbad865e69** also passed
+[required CI37038556986](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37038556986)
+and [native37038557228](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37038557228).
+Parent fetched backend job110942764029: **12,278 passed/83 skipped/574 warnings
+in829.15s**, coverage74% rounded. New generic Python HTTP/WS and generic Node22
+jobs passed. Existing web/device/registry/lint/syntax/architecture checks passed;
+live-brain/main Linux matrix skipped. Mypy job110942696634 failed **850 errors
+in238 files,1,248 checked**, baseline812. Two newly introduced receipt-store
+diagnostics are repaired in the next working wave; full new-source count is
+separate. Never call the type gate passed.
 
 Source **739a20c0b56d2a2aa9956cde395a79b6dd5e0935**:
 [CI37033165436](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37033165436)
@@ -103,10 +114,10 @@ as containing every later source commit or completing the populated-profile matr
 
 | Worker | Exclusive scope | Active work |
 |---|---|---|
-| Parent | three precise core type repairs, CI, shared docs/publication | Integrate frozen CORE04/SDK contracts, locked Node compiler and exact-source evidence |
-| coding_session_isolation | chat_turns/server/gateway/store/orchestrator/ToolRunner/tests | CORE04 source frozen:226 passed/1 skipped; next context-growth investigation read-only |
-| python_sdk_contracts | generic Python/Node clients/public types/tests/docs | DEV01B source frozen:72 Python/53 Node passed; next thread continuity investigation read-only |
-| native_populated_acceptance | immutable9.27 GUI, acceptance probe/report | Finalize new-conversation crash IPS, persistence and exact reviewed-action outcomes before native repair |
+| Parent | identity/workspace async maintenance, receipt-store type repairs, packaged-core equality tool/tests, shared docs/CI/assemble/publication | Combined runtime/SDK330 tests passed; nine source-equality tests and actual478-file comparison passed; integrating candidate9.28 |
+| coding_session_isolation | Frozen MODEL01B; frozen dependency QA; next new automation plan only | Context fitting verified;1,416 web/extension/device SDK tests passed; no generated asset changes |
+| python_sdk_contracts | Frozen DEV01C; next new DATA01 plan only | Live thread continuity verified;92 Python/72 Node tests passed; durable checkpoint proposal persisted without production edits |
+| native_populated_acceptance | production Swift selectable views/tests, minimal AX probe and follow-up evidence | New conversation/error-banner recursion reproduced; AppKit A/B then systematic remaining172-expression migration |
 
 Original immutable bundle evidence is frozen in [NATIVE_POPULATED_ACCEPTANCE.md](NATIVE_POPULATED_ACCEPTANCE.md): actual rich persistence/search/rename/pin/relaunch and one local-model reply passed. **SIGSEGV with excessive SwiftUI accessibility recursion is confirmed by macOS report and watched exit**. Context truncation, guessed Weather fallback, missing result success key and pending-review false-completion text are also reproduced. Do not call this app release-ready.
 
@@ -218,3 +229,48 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
   whole-request context fitting and typed byte refusal; DEV01C bounded live SDK
   thread sockets. Durable context after process shutdown remains a separate
   backend checkpoint gate. All22 product areas remain in REQUEST_COVERAGE.
+
+## October 2 next source wave integration
+
+- MODEL01B fits a request-only view by omitting older whole turns while retaining
+  protected input and complete required tool schemas. Saved transcript is not
+  rewritten. Byte/schema/context refusals remain typed and cannot trigger an
+  unintended cloud/direct fallback. Controlled16-turn normal/stream regressions
+  pass; actual native conversation-growth acceptance remains pending.
+- DEV01C retains one authenticated socket/reader per exact live SDK thread,
+  with bounded channels/retired IDs and no automatic reconnect/replay. Actual
+  registered ASGI/provider tests demonstrate preceding turns in context and
+  simultaneous A/B isolation. Final worker checks:92 Python/72 Node passed.
+  Closing/restarting does not provide durable model history. [Next backend
+  checkpoint card](DATA01_CONTEXT_CHECKPOINT_PLAN.md) documents inspected writers,
+  privacy and locking gaps; it is a proposal, not implemented durability.
+- Parent frozen runtime/SDK/maintenance integration: **330 passed,7 warnings
+  in9.52s**, exit0, disposable home/data. Exact selected suite inventory is in
+  local `/private/tmp/feral-runtime-sdk-wave2-20261002.log`; Node72 passed with
+  locked TypeScript5.9.3. Edited Python Ruff and diff checks pass.
+- Identity maintenance now awaits real asynchronous SQLite episode reads.
+  Four new real-store cases reproduce and repair the previous TypeError/
+  unawaited-coroutine behavior, test exact-session/global reads and preserve
+  existing content on failure.51 related memory/receipt tests passed.
+- Four attributed CORE04 receipt-store/gateway type diagnostics are repaired without
+  raising the ratchet. Focused checks still find pre-existing store/workspace
+  diagnostics; new-source Ubuntu count remains separate. Exact canonical UUID
+  gateway validation preserves missing/invalid identifier refusal;21 abort/
+  gateway tests pass after this final boundary repair. [Evidence](TYPE_RATCHET_RECEIPT_FOLLOWUP.md).
+- Packaged-core equality tool: nine real temporary-Git tests pass; actual9.27
+  comparison matches478 committed production Python files. It does not certify
+  native compilation, signing, dependency or clean-install provenance.
+- Security patch wave covers all nine affected installed dependency copies.
+  Web1358/extension19/device SDK39 tests, typecheck/build and asset comparison
+  pass. Regenerated web assets are byte-identical. Default-branch alerts remain
+  open until that branch receives the fixes. [Evidence](SECURITY_DEPENDENCY_EVIDENCE.md).
+- Native172-expression AppKit migration passes production typecheck and final
+  selected fixture runner, exit0: component groups plus linked20/desktop39/
+  error5. First runner failed because the standalone desktop fixture omitted
+  the new shared text dependency; parent repaired that compile source list,
+  and the rerun passed. A minimal New conversation/error disclosure A/B
+  reproduces original SIGSEGV and passes exact AppKit copy with normal exit.
+  Package9.28/build2026100202 only after native freeze and source commit;
+  compare staged backend to that full SHA before actual GUI acceptance.
+- All original22 requirement areas remain tracked. No personal data reset,
+  real account/message/purchase, merge or release occurred.

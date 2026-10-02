@@ -71,11 +71,11 @@ from agents.multimodal_blocks import (
     tool_list_contains,
 )
 from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
-from agents.local_tool_budget import retrieve_local_tools, validate_local_request
-from agents.token_estimate import estimate_message_tokens
+from agents.local_tool_budget import retrieve_local_tools, fit_local_request, local_input_bytes, MAX_REQUEST_BYTES, LocalRequestRefusal
+from agents.token_estimate import estimate_message_tokens, estimate_tokens
 from agents.context_manager import (
     configured_context_window_tokens, declared_ollama_context_tokens,
-    verify_ollama_request_context, OllamaContextRefusal,
+    verify_ollama_request_context, OllamaContextRefusal, fit_request_history, OLLAMA_TEMPLATE_RESERVE,
 )
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
@@ -1003,8 +1003,55 @@ class LLMProvider:
         if provider != "ollama":
             return
         self._ollama_context_observation = None
-        window = await verify_ollama_request_context(client, body)
+        window = await verify_ollama_request_context(client, body, fit_history=True)
         self._ollama_context_observation = (str(client.base_url).rstrip("/"), body["model"], window, time.monotonic())
+
+    async def _prepare_local_request(self, client: httpx.AsyncClient, body: dict, provider: str, force_tool: Optional[str]) -> None:
+        if provider not in ("ollama", "lmstudio"):
+            return
+        source_messages, catalogue = body["messages"], body.get("tools")
+        def select(rows, fits=None):
+            if not catalogue:
+                return
+            body["messages"], body["tools"] = retrieve_local_tools(rows, catalogue, force_tool, request_fits=fits)
+            body["tool_choice"] = _resolve_tool_choice(provider, body["tools"], force_tool)
+        select(source_messages)
+        protected = None
+        def protected_messages():
+            nonlocal protected
+            if protected is None:
+                protected = fit_request_history(source_messages, lambda rows: False)
+            return protected
+        def byte_fits(rows, schemas):
+            return local_input_bytes(rows, schemas) <= MAX_REQUEST_BYTES
+        try:
+            fit_local_request(body, provider)
+        except LocalRequestRefusal as exc:
+            if exc.code != "local_request_byte_overflow" or not catalogue:
+                raise
+            try:
+                select(protected_messages(), byte_fits)
+            except LocalRequestRefusal:
+                raise exc from None
+            fit_local_request(body, provider)
+        try:
+            await self._verify_ollama_context(client, body, provider)
+        except OllamaContextRefusal as exc:
+            capacity = exc.context_capacity
+            if exc.code != "local_context_overflow" or capacity is None or not catalogue:
+                raise
+            def capacity_fits(rows, schemas):
+                serialized = json.dumps({"messages": rows, "tools": schemas}, ensure_ascii=False,
+                                        separators=(",", ":"), allow_nan=False)
+                return byte_fits(rows, schemas) and estimate_tokens(serialized) + body["max_tokens"] + OLLAMA_TEMPLATE_RESERVE <= capacity
+            try:
+                select(protected_messages(), capacity_fits)
+            except LocalRequestRefusal:
+                raise exc from None
+            fit_local_request(body, provider)
+            # Recheck allocation after retrieval. Runtime changes never enlarge
+            # the request or enable inference against a stale observation.
+            await self._verify_ollama_context(client, body, provider)
 
     def _init_hybrid_cloud(self):
         """In hybrid mode, cloud is used for complex reasoning."""
@@ -1271,8 +1318,6 @@ class LLMProvider:
             # appear first are the hottest path.
             if self.provider in ("openai",):
                 clean_tools = _cap_openai_chat_tools(clean_tools)
-            if self.provider in ("ollama", "lmstudio"):
-                body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
             body["tools"] = clean_tools
             body["tool_choice"] = _resolve_tool_choice(
                 self.provider, clean_tools, force_tool,
@@ -1284,9 +1329,8 @@ class LLMProvider:
         # This is the exact shape of the v2026.5.0 400s in the shipped
         # terminal log (§A5 of docs/WAVE5_HARDENING_PROMPT.md).
         apply_reasoning_fork(self.provider, self.model, body)
-        validate_local_request(body, self.provider)
         try:
-            await self._verify_ollama_context(self.client, body, self.provider)
+            await self._prepare_local_request(self.client, body, self.provider, force_tool)
         except OllamaContextRefusal as exc:
             return {"error": str(exc), "error_code": exc.code, "choices": []}
 
@@ -2730,6 +2774,8 @@ class LLMProvider:
 
         if not isinstance(result, dict):
             return None
+        if result.get("error") and str(result.get("error_code") or "").startswith("local_"):
+            return [{"type": "error", "content": str(result["error"]), "error_code": result["error_code"]}]
         if result.get("error"):
             return None
         if not result.get("choices"):
@@ -3005,17 +3051,14 @@ class LLMProvider:
             clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
             if self.provider in ("openai",):
                 clean_tools = _cap_openai_chat_tools(clean_tools)
-            if self.provider in ("ollama", "lmstudio"):
-                body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
             body["tools"] = clean_tools
             body["tool_choice"] = _resolve_tool_choice(
                 self.provider, clean_tools, force_tool,
             )
 
         apply_reasoning_fork(self.provider, self.model, body)
-        validate_local_request(body, self.provider)
         try:
-            await self._verify_ollama_context(self.client, body, self.provider)
+            await self._prepare_local_request(self.client, body, self.provider, force_tool)
         except OllamaContextRefusal as exc:
             if exc.code == "local_context_unverified":
                 events = await self._stream_via_nonstream_failover(
@@ -5220,16 +5263,13 @@ class LLMProvider:
                 clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
                 if self.provider in ("openai",):
                     clean_tools = _cap_openai_chat_tools(clean_tools)
-                if provider_name in ("ollama", "lmstudio"):
-                    body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
                 body["tools"] = clean_tools
                 body["tool_choice"] = _resolve_tool_choice(
                     self.provider, clean_tools, force_tool,
                 )
 
             apply_reasoning_fork(self.provider, selected_model, body)
-            validate_local_request(body, provider_name)
-            await self._verify_ollama_context(self.client, body, provider_name)
+            await self._prepare_local_request(self.client, body, provider_name, force_tool)
 
             async def _do_primary():
                 resp = await self.client.post("/chat/completions", json=body)
@@ -5298,16 +5338,13 @@ class LLMProvider:
                 clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
                 if provider_name in ("openai",):
                     clean_tools = _cap_openai_chat_tools(clean_tools)
-                if provider_name in ("ollama", "lmstudio"):
-                    body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
                 body["tools"] = clean_tools
                 body["tool_choice"] = _resolve_tool_choice(
                     provider_name, clean_tools, force_tool,
                 )
 
             apply_reasoning_fork(provider_name, model, body)
-            validate_local_request(body, provider_name)
-            await self._verify_ollama_context(tmp, body, provider_name)
+            await self._prepare_local_request(tmp, body, provider_name, force_tool)
 
             async def _do_fb():
                 resp = await tmp.post("/chat/completions", json=body)
