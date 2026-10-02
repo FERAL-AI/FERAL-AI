@@ -238,11 +238,10 @@ class TestReachesTheDurableStoreForReal:
         assert len(rows) == 1, "a 30-minute-old BP reading was silently dropped"
         assert abs(rows[0]["ts"] - taken_at) < 1.0
 
-    def test_the_health_history_tool_returns_it_with_the_product_name(
+    @pytest.mark.asyncio
+    async def test_the_health_history_tool_returns_it_with_the_product_name(
         self, tmp_path, monkeypatch,
     ):
-        import asyncio
-
         from integrations.health_platforms import HealthAggregator
 
         engine = BaselineEngine(db_path=str(tmp_path / "b3.db"))
@@ -250,13 +249,8 @@ class TestReachesTheDurableStoreForReal:
         engine.record_sample("bp_systolic", 118.0, source="jw_health_glasses", ts=now)
         engine.record_sample("bp_diastolic", 78.0, source="jw_health_glasses", ts=now)
 
-        agg = HealthAggregator.__new__(HealthAggregator)
-        agg._biometric_history = lambda: engine
-        agg._maybe_sync_durable = lambda: asyncio.sleep(0)
-
-        history = asyncio.get_event_loop().run_until_complete(
-            agg.get_health_history(days=1)
-        )
+        agg = HealthAggregator(biometric_history_provider=lambda: engine)
+        history = await agg.get_health_history(days=1)
         assert "bp_systolic" in history["metrics"]
         assert "bp_diastolic" in history["metrics"]
         assert history["sources"] == ["Theora glasses"]

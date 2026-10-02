@@ -1,0 +1,50 @@
+name: Native macOS checks
+
+on:
+  pull_request:
+    paths:
+      - 'desktop-native/**'
+      - 'scripts/check_native_bundle.py'
+      - 'scripts/tests/test_check_native_bundle.py'
+      - '.github/workflows/native-checks.yml'
+  push:
+    branches: [main]
+    paths:
+      - 'desktop-native/**'
+      - 'scripts/check_native_bundle.py'
+      - 'scripts/tests/test_check_native_bundle.py'
+      - '.github/workflows/native-checks.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: native-checks-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  native-contracts:
+    runs-on: macos-15
+    timeout-minutes: 35
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Verify Apple Silicon runner
+        run: test "$(uname -m)" = arm64
+      - name: Typecheck actual app entry and production sources
+        working-directory: desktop-native
+        run: bash build.sh --typecheck
+      - name: Native feature, linked-model and desktop checks
+        working-directory: desktop-native
+        run: bash test_features.sh
+      - name: Real child-process lifeline checks
+        working-directory: desktop-native
+        run: python -m unittest -v test_native_lifeline.py
+      - name: Bundle-audit regression checks
+        run: python -m unittest discover -s scripts/tests -p test_check_native_bundle.py -v
+
+# These checks do not install or publish an app, access user accounts, or establish
+# physical-device, GUI, payment, signing or notarization acceptance.

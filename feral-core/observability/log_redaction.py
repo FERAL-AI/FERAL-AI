@@ -88,6 +88,16 @@ class SecretRedactingFilter(logging.Filter):
     _exc_formatter = logging.Formatter()
 
     def filter(self, record: logging.LogRecord) -> bool:  # noqa: A003, stdlib name
+        if (record.name == "uvicorn.access" and isinstance(record.args, tuple)
+                and len(record.args) == 5):
+            # Uvicorn's AccessFormatter consumes the structured five-field
+            # tuple before formatting. Flattening it makes every successful
+            # request emit a formatter traceback. Redact its string fields
+            # in place while retaining the numeric status and tuple shape.
+            record.args = tuple(redact(value) if isinstance(value, str) else value
+                                for value in record.args)
+            if isinstance(record.msg, str):
+                record.msg = redact(record.msg)
         try:
             message = record.getMessage()
         except Exception:
@@ -95,7 +105,9 @@ class SecretRedactingFilter(logging.Filter):
             # handleError path; there is nothing safe to redact against.
             return True
         redacted = redact(message)
-        if redacted != message or record.args:
+        structured_access = (record.name == "uvicorn.access"
+                             and isinstance(record.args, tuple) and len(record.args) == 5)
+        if not structured_access and (redacted != message or record.args):
             record.msg = redacted
             record.args = ()
         if record.exc_info and not record.exc_text:

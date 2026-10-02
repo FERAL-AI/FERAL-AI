@@ -64,6 +64,36 @@ SKILLS = {
 }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler_name", ["handle_command", "handle_command_stream"])
+async def test_attachment_turn_reaches_model_with_multi_agent_default_enabled(handler_name):
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = True
+    orch._multi_agent = MagicMock()
+    orch._multi_agent.run = AsyncMock(return_value="ungrounded multi-agent reply")
+    captured = []
+    async def buffered(messages, **kwargs):
+        captured.extend(messages)
+        return {"choices": [{"message": {"role": "assistant", "content": "violet maple 47"}}]}
+    async def streaming(messages, **kwargs):
+        captured.extend(messages)
+        yield {"type": "text_delta", "content": "violet maple 47"}
+        yield {"type": "done"}
+    orch.llm.chat_with_failover = buffered
+    orch.llm.chat_stream = streaming
+    orch.llm.extract_response = MagicMock(return_value=("violet maple 47", []))
+    _capture_sends(orch)
+    await getattr(orch, handler_name)(
+        session_id="attachment-fixture", text="Read the file",
+        context={"_attachment_model_data": "\n[ATTACHMENT_DATA fixture: violet maple 47]"},
+    )
+    orch._multi_agent.run.assert_not_awaited()
+    users = [message for message in captured if message.get("role") == "user"]
+    assert users and "violet maple 47" in json.dumps(users[-1])
+    assert orch._route_prompt.await_args.args[0] == "Read the file"
+
+
 def _make_orchestrator() -> Orchestrator:
     reg = MagicMock()
     reg.skills = SKILLS
@@ -533,3 +563,140 @@ class TestParityMultiAgentPrePath:
             assert assistant_pushes == [
                 {"role": "assistant", "text": multi_agent_text[:300]}
             ], f"{handler_name} did not write assistant turn from multi-agent output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('failure',['closed','missing','terminal'])
+async def test_stream_delivery_loss_never_replays_command(failure):
+    from agents.orchestrator import SessionDeliveryLost
+    orch=_make_default_gate_orchestrator()
+    orch._streaming_enabled=True; orch._multi_agent_enabled=False
+    fallback=AsyncMock()
+    orch._handle_command_impl=fallback
+    calls=[]
+    async def sender(sid,msg):
+        calls.append(msg)
+        if msg.type=='stream_delta':
+            if failure=='missing': return False
+            if failure!='terminal' or msg.payload.get('is_final'):
+                raise RuntimeError("Unexpected ASGI message 'websocket.send', after sending 'websocket.close'")
+        return True
+    orch.send=sender
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream('delivery-fixture','29+13')
+    fallback.assert_not_awaited()
+    orch.llm.chat_with_failover.assert_not_awaited()
+    assert any(msg.type=='stream_delta' for msg in calls)
+
+
+@pytest.mark.asyncio
+async def test_stream_delivery_missing_before_inference_does_not_call_provider():
+    from agents.orchestrator import SessionDeliveryLost
+    orch=_make_default_gate_orchestrator()
+    orch._streaming_enabled=True; orch._multi_agent_enabled=False
+    invoked=[]
+    async def stream(*a,**k):
+        invoked.append(True)
+        yield {'type':'text_delta','content':'42'}
+    orch.llm.chat_stream=stream
+    orch.send=AsyncMock(return_value=False)
+    orch._handle_command_impl=AsyncMock()
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream('delivery-fixture','29+13')
+    assert invoked==[]
+    orch._handle_command_impl.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_interruption_after_tool_instructions_never_replays():
+    from agents.orchestrator import SessionDeliveryLost
+    orch=_make_default_gate_orchestrator()
+    orch._streaming_enabled=True; orch._multi_agent_enabled=False
+    async def stream(*a,**k):
+        yield {'type':'tool_call_delta','tool_call':{'name':'fixture__write','args':{}}}
+        raise RuntimeError('upstream disconnected')
+    orch.llm.chat_stream=stream
+    orch.send=AsyncMock(return_value=True)
+    orch._handle_command_impl=AsyncMock()
+    orch._execute_tool_call_for_llm=AsyncMock()
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream('delivery-fixture','write requested file')
+    orch._handle_command_impl.assert_not_awaited()
+    orch._execute_tool_call_for_llm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_next_round_does_not_repeat_already_dispatched_tool():
+    from agents.orchestrator import SessionDeliveryLost
+    orch=_make_default_gate_orchestrator()
+    orch._streaming_enabled=True; orch._multi_agent_enabled=False
+    rounds=[]
+    async def stream(*a,**k):
+        rounds.append(True)
+        if len(rounds)==1:
+            yield {'type':'tool_call_delta','tool_call':{'name':'notes_memory__default','args':{},'id':'once'}}
+            yield {'type':'done'}
+        else: raise RuntimeError('provider failed before next chunk')
+    orch.llm.chat_stream=stream
+    orch.send=AsyncMock(return_value=True)
+    orch._handle_command_impl=AsyncMock()
+    orch._execute_tool_call_for_llm=AsyncMock(return_value={'success':True,'data':{'written':True}})
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream('delivery-fixture','write requested note')
+    assert len(rounds)==2
+    orch._handle_command_impl.assert_not_awaited()
+    orch._execute_tool_call_for_llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('handler',['handle_command','handle_command_stream'])
+@pytest.mark.parametrize('failure',['closed','missing','sdui'])
+async def test_multiagent_response_delivery_loss_never_runs_single_agent(handler,failure):
+    from agents.orchestrator import SessionDeliveryLost
+    orch=_make_default_gate_orchestrator()
+    orch._streaming_enabled=True; orch._multi_agent_enabled=True
+    reply='{"type":"Text","text":"42"}' if failure=='sdui' else '42'
+    orch._multi_agent=MagicMock(); orch._multi_agent.run=AsyncMock(return_value=reply)
+    async def sender(*args):
+        if failure=='missing': return False
+        raise RuntimeError('closed websocket transport')
+    orch.send=sender
+    with pytest.raises(SessionDeliveryLost):
+        await getattr(orch,handler)('delivery-fixture','29+13')
+    orch._multi_agent.run.assert_awaited_once()
+    orch._route_prompt.assert_not_awaited()
+    orch.llm.chat_with_failover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('handler',['handle_command','handle_command_stream'])
+@pytest.mark.parametrize('outcome',['empty','exception'])
+async def test_entered_multiagent_unknown_outcome_has_no_implicit_command_replay(handler,outcome):
+    orch=_make_default_gate_orchestrator()
+    orch._streaming_enabled=True; orch._multi_agent_enabled=True
+    orch._multi_agent=MagicMock()
+    orch._multi_agent.run=AsyncMock(return_value='') if outcome=='empty' else AsyncMock(side_effect=RuntimeError('unknown prior effects'))
+    frames=[]
+    async def send(sid,msg): frames.append(msg); return True
+    orch.send=send
+    assert await getattr(orch,handler)('delivery-fixture','write file') is None
+    orch._route_prompt.assert_not_awaited()
+    orch.llm.chat_with_failover.assert_not_awaited()
+    errors=[f for f in frames if f.type=='error']
+    assert len(errors)==1 and errors[0].payload['code'].startswith('multi_agent_')
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize('reply',['42','null','true','[1,2]','"hello"'])
+async def test_multiagent_scalar_or_list_json_answer_delivers_as_plain_text(reply):
+    orch=_make_default_gate_orchestrator()
+    orch._streaming_enabled=True; orch._multi_agent_enabled=True
+    orch._multi_agent=MagicMock(); orch._multi_agent.run=AsyncMock(return_value=reply)
+    frames=[]
+    async def send(sid,msg): frames.append(msg); return True
+    orch.send=send
+    assert await orch.handle_command_stream('delivery-fixture','answer')==reply
+    texts=[f.payload['text'] for f in frames if f.type=='text_response']
+    assert texts==[reply]
+    assert not [f for f in frames if f.type=='error']
+    orch._route_prompt.assert_not_awaited()

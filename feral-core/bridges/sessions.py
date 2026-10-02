@@ -289,7 +289,14 @@ class SessionRegistry:
                 fallback=broker,
             )
 
-        if env is None and not _env_jail_enabled():
+        coding_extra = None
+        if env is None and agent_id == "opencode":
+            from bridges.coding_setup import opencode_environment, validate_workspace
+            coding_extra = opencode_environment() or None
+            if coding_extra:
+                validate_workspace(cwd)
+
+        if env is None and coding_extra is None and not _env_jail_enabled():
             logger.warning(
                 "external_agents.env_jail is off: spawning %s with the "
                 "operator's full environment, so it can read ~/.claude, "
@@ -299,7 +306,7 @@ class SessionRegistry:
             env = dict(os.environ)
 
         process = await AcpAgentProcess.spawn(
-            command, cwd=cwd, env=env, broker=broker
+            command, cwd=cwd, env=env, env_extra=coding_extra, broker=broker
         )
         origin = "new"
         try:

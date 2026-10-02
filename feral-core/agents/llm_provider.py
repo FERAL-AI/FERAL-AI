@@ -13,6 +13,7 @@ import json
 import logging
 import time
 import uuid
+import ipaddress
 import httpx
 from typing import Any, Optional, AsyncGenerator
 
@@ -70,6 +71,7 @@ from agents.multimodal_blocks import (
     tool_list_contains,
 )
 from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
+from agents.local_tool_budget import retrieve_local_tools, validate_local_request
 from agents.token_estimate import estimate_message_tokens
 from agents.context_manager import configured_context_window_tokens
 
@@ -470,6 +472,13 @@ def _cooldown_state_path() -> str:
         return ""
 
 
+def _unsupported_live_error(provider_name: str, model: str) -> str:
+    from providers.model_classes import is_unsupported_live_model
+    if is_unsupported_live_model(provider_name, model):
+        return "unsupported_live_protocol: GPT-Live requires a dedicated Live session/delegation adapter; chat and legacy Realtime are unsupported."
+    return ""
+
+
 def _responses_endpoint_for(provider_name: str, model: str) -> bool:
     """True when ``(provider, model)`` must be served by ``/v1/responses``.
 
@@ -837,7 +846,22 @@ class LLMProvider:
             headers["anthropic-version"] = "2023-06-01"
         elif self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        return httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=60.0)
+        # Cold local inference can spend over a minute loading/prefilling
+        # before emitting its first token. Only loopback local engines get
+        # that longer read window; cloud and remote endpoints keep 60s.
+        host = httpx.URL(self.base_url).host
+        local = host == "localhost"
+        if not local:
+            try:
+                local = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                pass
+        timeout = (
+            httpx.Timeout(60.0, connect=10.0, read=180.0)
+            if self.provider in {"ollama", "lmstudio"} and local
+            else httpx.Timeout(60.0)
+        )
+        return httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=timeout)
 
     def _get_codex_adapter(self):
         adapter = getattr(self, "_codex_adapter", None)
@@ -999,6 +1023,9 @@ class LLMProvider:
         caller (digital twin, proactive, ideas engine, wherever) gains
         cross-provider failover without knowing about the distinction.
         """
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            return {"error": live_error, "choices": [], "error_code": "unsupported_live_protocol"}
         # Permanent-auth short-circuit. If a previous call established
         # that the current key is invalid (HTTP 401 + "invalid_api_key"),
         # don't keep poking the wire every 60s -- return the cached
@@ -1225,6 +1252,8 @@ class LLMProvider:
             # appear first are the hottest path.
             if self.provider in ("openai",):
                 clean_tools = _cap_openai_chat_tools(clean_tools)
+            if self.provider in ("ollama", "lmstudio"):
+                body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
             body["tools"] = clean_tools
             body["tool_choice"] = _resolve_tool_choice(
                 self.provider, clean_tools, force_tool,
@@ -1236,6 +1265,7 @@ class LLMProvider:
         # This is the exact shape of the v2026.5.0 400s in the shipped
         # terminal log (§A5 of docs/WAVE5_HARDENING_PROMPT.md).
         apply_reasoning_fork(self.provider, self.model, body)
+        validate_local_request(body, self.provider)
 
         from observability.metrics import increment, measure
         increment("feral.llm.calls_total", attributes={"provider": self.provider, "model": self.model})
@@ -1686,6 +1716,9 @@ class LLMProvider:
         the probe is advisory at boot time, not a circuit breaker
         for in-flight traffic.
         """
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            return False, live_error
         try:
             from providers.model_classes import classify_endpoint
             endpoint_class = classify_endpoint(self.provider, self.model)
@@ -2083,6 +2116,9 @@ class LLMProvider:
         from agents.llm_reasoning import apply_responses_param_fork
 
         model = model or self.model
+        live_error = _unsupported_live_error("openai", model)
+        if live_error:
+            raise ValueError(live_error)
         instructions, input_items = self._messages_to_responses_input(messages)
         body: dict = {
             "model": model,
@@ -2135,6 +2171,11 @@ class LLMProvider:
             else:
                 body["tool_choice"] = "auto"
         apply_responses_param_fork(model, body)
+        if model in {"gpt-6.1-sol", "gpt-6-luna"}:
+            # GPT-6 guidance rejects sampling controls with reasoning enabled.
+            if body.get("reasoning", {}).get("effort") != "none":
+                for key in ("temperature", "top_p", "top_logprobs"):
+                    body.pop(key, None)
         return body
 
     async def _post_responses(
@@ -2704,6 +2745,10 @@ class LLMProvider:
         into their own caps by passing ``call_site="screen_loop"``,
         ``"learner"``, etc. (Wave 2 Lane 09).
         """
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            yield {"type": "error", "content": live_error, "error_code": "unsupported_live_protocol"}
+            return
         if self._messages_contain_vision(messages):
             ok, reason = self._vision_support_status()
             if not ok:
@@ -2937,12 +2982,15 @@ class LLMProvider:
             clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
             if self.provider in ("openai",):
                 clean_tools = _cap_openai_chat_tools(clean_tools)
+            if self.provider in ("ollama", "lmstudio"):
+                body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
             body["tools"] = clean_tools
             body["tool_choice"] = _resolve_tool_choice(
                 self.provider, clean_tools, force_tool,
             )
 
         apply_reasoning_fork(self.provider, self.model, body)
+        validate_local_request(body, self.provider)
 
         # Ask for the usage chunk. On chat-completions this is opt-in:
         # without ``stream_options.include_usage`` the provider closes
@@ -5068,6 +5116,9 @@ class LLMProvider:
             selected_model = str(config.get("model") or self.model)
         else:
             selected_model = str(config.get("model", "") or "")
+        live_error = _unsupported_live_error(provider_name, selected_model)
+        if live_error:
+            raise RuntimeError(live_error)
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens", 1024)
 
@@ -5133,12 +5184,15 @@ class LLMProvider:
                 clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
                 if self.provider in ("openai",):
                     clean_tools = _cap_openai_chat_tools(clean_tools)
+                if provider_name in ("ollama", "lmstudio"):
+                    body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
                 body["tools"] = clean_tools
                 body["tool_choice"] = _resolve_tool_choice(
                     self.provider, clean_tools, force_tool,
                 )
 
             apply_reasoning_fork(self.provider, selected_model, body)
+            validate_local_request(body, provider_name)
 
             async def _do_primary():
                 resp = await self.client.post("/chat/completions", json=body)
@@ -5207,12 +5261,15 @@ class LLMProvider:
                 clean_tools = [{k: v for k, v in t.items() if k != "_feral_meta"} for t in tools]
                 if provider_name in ("openai",):
                     clean_tools = _cap_openai_chat_tools(clean_tools)
+                if provider_name in ("ollama", "lmstudio"):
+                    body["messages"], clean_tools = retrieve_local_tools(messages, clean_tools, force_tool)
                 body["tools"] = clean_tools
                 body["tool_choice"] = _resolve_tool_choice(
                     provider_name, clean_tools, force_tool,
                 )
 
             apply_reasoning_fork(provider_name, model, body)
+            validate_local_request(body, provider_name)
 
             async def _do_fb():
                 resp = await tmp.post("/chat/completions", json=body)

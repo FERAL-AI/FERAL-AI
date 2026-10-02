@@ -912,6 +912,10 @@ class ConfigLoader:
                 True. :func:`load_settings` is the caller that does not,
                 and its docstring already promised as much.
         """
+        from security.vault import native_vault_deferred
+        deferred = native_vault_deferred()
+        if deferred:
+            load_credentials = False
         self._merged = copy.deepcopy(DEFAULT_SETTINGS)
         self._sources = []
 
@@ -951,6 +955,10 @@ class ConfigLoader:
         # state the web "Same WiFi" button used to produce — which
         # advertises a LAN pair URL that nothing is listening on.
         self._repair_access_mode()
+
+        if deferred:
+            # Preserve explicit setup completion without opening stored keys.
+            self._setup_complete = self._merged.get("meta", {}).get("setup_complete") is True
 
         if load_credentials:
             # Load credentials separately
@@ -1182,9 +1190,9 @@ class ConfigLoader:
             )
 
         try:
-            from security.vault import BlindVault
+            from security.vault import BlindVault, get_vault, native_vault_deferred
 
-            vault = BlindVault(vault_path=str(cred_path))
+            vault = get_vault(vault_path=str(cred_path)) if native_vault_deferred() else BlindVault(vault_path=str(cred_path))
             for key in vault.list_keys():
                 value = vault.get_credential(key)
                 if isinstance(value, str) and value.strip():
@@ -1502,6 +1510,8 @@ class ConfigLoader:
         only, which matches the HTTP-route behaviour that has always
         skipped the vault for them.
         """
+        from security.vault import get_vault, native_vault_deferred
+        ready_vault = get_vault(vault_path=str(self.user_home / "credentials.json")) if native_vault_deferred() else None
         self.user_home.mkdir(parents=True, exist_ok=True)
         self._credentials.update(credentials)
 
@@ -1528,7 +1538,9 @@ class ConfigLoader:
         # ``feral_home()``) keep the encrypted payload inside the
         # expected directory. The BlindVault maps ``*.json`` → ``*.enc``
         # internally, so this never creates a plaintext file.
-        vault = BlindVault(vault_path=str(self.user_home / "credentials.json"))
+        from security.vault import get_vault, native_vault_deferred
+        vault_path = str(self.user_home / "credentials.json")
+        vault = ready_vault if native_vault_deferred() else BlindVault(vault_path=vault_path)
         for key, value in flat_creds.items():
             vault.set_credential(key, value)
         logger.info(

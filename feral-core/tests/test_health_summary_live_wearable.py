@@ -15,10 +15,8 @@ sees the same fresh wearable HR/SpO2 the WebUI's
 These tests pin:
 
 * The aggregator surfaces ``current_hr`` / ``current_hr_source`` from
-  the provider when no Whoop/Oura recovery data is present, AND
-  promotes the wearable bpm into the ``resting_hr`` slot so the
-  manifest-declared shape never returns ``None`` while a live
-  reading exists.
+  the provider when no Whoop/Oura recovery data is present, without
+  treating an unqualified live reading as resting heart rate.
 * Wearable sources are appended to the ``sources`` array so the LLM
   prompt can describe where the reading came from.
 * When Whoop/Oura DO contribute, the wearable adds a ``current_hr``
@@ -44,14 +42,15 @@ from integrations.health_platforms import HealthAggregator  # noqa: E402
 
 
 @pytest.mark.asyncio
-async def test_health_summary_surfaces_w300_when_whoop_oura_offline():
+@pytest.mark.parametrize("bpm", [72, 145])
+async def test_health_summary_surfaces_w300_when_whoop_oura_offline(bpm):
     """No cloud platforms connected, but the W300 is streaming HR into
     perception. The chat path must surface the live reading instead
     of returning the all-null snapshot that triggered the operator's
     "no current data" complaint."""
     def provider():
         return {
-            "heart_rate": 72,
+            "heart_rate": bpm,
             "heart_rate_source": "jw_health_glasses",
         }
 
@@ -59,13 +58,26 @@ async def test_health_summary_surfaces_w300_when_whoop_oura_offline():
     result = await aggregator.execute("health_summary", {}, vault={})
     data = result["data"]
 
-    assert data["current_hr"] == 72
+    assert data["current_hr"] == bpm
     assert data["current_hr_source"] == "Theora glasses"
-    # When no cloud platform contributed a resting_hr, the live
-    # wearable bpm is the best answer for the manifest-declared
-    # ``resting_hr`` slot.
-    assert data["resting_hr"] == 72
+    # Neither freshness nor a plausible value establishes a resting state.
+    assert data["resting_hr"] is None
     assert "Theora glasses" in data["sources"]
+
+
+@pytest.mark.asyncio
+async def test_live_workout_hr_is_not_emitted_as_resting_in_health_update():
+    aggregator = HealthAggregator(live_wearable_provider=lambda: {
+        "heart_rate": 145,
+        "heart_rate_source": "jw_health_glasses",
+    })
+
+    frame = await aggregator.build_health_update(node_id="phone-test")
+    readings = {r["metric"]: r for r in frame["payload"]["data"]["readings"]}
+
+    assert readings["hr"]["value"] == 145
+    assert readings["hr"]["source_name"] == "Theora glasses"
+    assert "resting_hr" not in readings
 
 
 @pytest.mark.asyncio

@@ -47,6 +47,9 @@ build/
 htmlcov/
 coverage.xml
 .coverage
+.mypy_cache/
+playwright-report/
+test-results/
 
 # Packaging
 *.egg-info/
@@ -129,3 +132,12 @@ docs/WAVE5_HARDENING_PROMPT.md
 # content-hashed files, shipping an index.html that referenced two
 # files absent from the repository.
 feral-client/
+
+# Workspace-local pinned coding-engine installation (package lock is retained).
+.tools/opencode/node_modules/
+
+# The desktop is an application; retain its exact Rust dependency resolution.
+!desktop/src-tauri/Cargo.lock
+
+# Generated desktop payloads contain downloaded interpreters and dependencies.
+desktop/src-tauri/resources/

@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Higher-level browser automation for purchases, bookings, price comparison and structured data extraction. Always stops before financial commitment and shows a confirmation card. Every endpoint drives a real browser through FERAL's CDP controller, so it needs a browser FERAL can attach to; with none available the call fails with the driver's error rather than returning partial data. Use coding_tools__web_fetch when plain page text is enough, and this skill only when the page has to be interacted with.",
+    "description": "Higher-level browser automation for product previews, booking form preparation, price comparison and structured data extraction. Purchase support is a read-only preview with unverified page prices; checkout/payment is unavailable and no purchase approval is created. Every endpoint drives a real browser through FERAL's CDP controller, so it needs a browser FERAL can attach to; with none available the call fails with the driver's error rather than returning partial data. Use coding_tools__web_fetch when plain page text is enough, and this skill only when the page has to be interacted with.",
     "trigger_phrases": [
         "buy",
         "purchase",
@@ -57,12 +57,12 @@
             "id": "make_purchase",
             "method": "PYTHON",
             "url": "feral://web_actions/make_purchase",
-            "description": "Navigate to product page, extract price — returns SDUI confirmation card. Does NOT complete purchase without explicit user confirmation.",
+            "description": "Preview an unverified observed product-page price with spend-cap screening. Returns a read-only SDUI card. Checkout/payment is unavailable; no purchase or approval is created.",
             "params": [
                 {"name": "url", "type": "string", "required": true, "description": "Product or checkout URL"},
                 {"name": "item_description", "type": "string", "required": false, "description": "Human-readable item description"}
             ],
-            "returns_description": "{purchased: false, awaiting_confirmation: true, sdui_card, detected_prices, screenshot_b64}",
+            "returns_description": "{purchased: false, awaiting_confirmation: false, preview_only: true, checkout_available: false, price_verified: false, observed_price_display, sdui_card, detected_prices, screenshot_b64}",
             "ui_hint": "sdui"
         },
         {

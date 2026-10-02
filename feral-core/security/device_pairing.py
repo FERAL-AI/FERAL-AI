@@ -228,6 +228,11 @@ class DevicePairingStore:
         with self._lock:
             conn = self._conn()
             try:
+                # Instances/processes share the database, not self._lock.
+                # Hold SQLite's writer lock across schema inspection and
+                # legacy-token migration so another startup cannot add or
+                # drop a column between this connection's checks.
+                conn.execute("BEGIN IMMEDIATE")
                 # Base table — fresh installs land here directly.
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS paired_devices (
@@ -355,8 +360,6 @@ class DevicePairingStore:
                     "CREATE INDEX IF NOT EXISTS idx_ppc_expires_at "
                     "ON pending_pair_codes(expires_at)"
                 )
-                conn.commit()
-
                 # Migrate any  rows: copy to needs_rotation_log,
                 # null out the plaintext token, drop the column.
                 self._migrate_legacy_plaintext_rows(conn)

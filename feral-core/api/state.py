@@ -296,7 +296,25 @@ class VisionBuffer:
 
 class BrainState:
     def __init__(self):
-        self._load_stored_credentials()
+        from security.vault import native_vault_deferred, register_deferred_vault_coordinator
+        self._native_vault_deferred = native_vault_deferred()
+        self._native_hydrated_env = {}
+        self._native_previous_llm_credentials = None
+        self._native_bootstrap_required = False
+        self._native_continuation_checkpoint = None
+        self._native_agent_hooks_complete = False
+        self._native_pending_memory_close = []
+        self._native_pending_agent_turns = []
+        self.agent_bootstrap_controller = None
+        self.vault_coordinator = None
+        self._deferred_vault_facade = None
+        if self._native_vault_deferred:
+            from security.vault_coordinator import VaultCoordinator, DeferredBootVaultFacade
+            self.vault_coordinator = VaultCoordinator(credential_hydrator=self._hydrate_native_vault, disable_dependents=self._disable_native_vault_dependents)
+            self._deferred_vault_facade = DeferredBootVaultFacade(self.vault_coordinator)
+            register_deferred_vault_coordinator(self.vault_coordinator)
+        else:
+            self._load_stored_credentials()
         self.config = ConfigLoader()
         self.config.discover()
         for env_key, env_value in self.config.export_as_env().items():
@@ -372,7 +390,14 @@ class BrainState:
         # Non-default backends (``chroma``, ``qdrant``) are built in
         # ``init()`` where their constructors can fail loudly on
         # missing deps without crashing module import.
-        self.memory = MemoryStore(vec_index=_load_configured_vec_index_or_default())
+        try:
+            self.memory = MemoryStore(vec_index=_load_configured_vec_index_or_default())
+        except Exception as exc:
+            from security.vault_coordinator import VaultLockedRefusal
+            if not self._native_vault_deferred or not isinstance(exc, VaultLockedRefusal):
+                raise
+            self.memory = None
+            self._native_bootstrap_required = True
         self.vision_buffer = VisionBuffer()
         # HUP v1.3.0 §5.4.3 — per-device ring buffer for smart-glasses
         # (and glasses-equivalent phone-camera fallback) frames. Lane
@@ -788,7 +813,113 @@ class BrainState:
             snap["skin_temperature_c"] = skin_temp_c
         return snap
 
+    def _hydrate_native_vault(self, opened):
+        """Activate authenticated local credentials without probing providers.
+
+        Encrypted-memory restoration may complete, but a previously blocked
+        full agent bootstrap remains a separately reported pending action.
+        Federation and background integration jobs are not started here.
+        """
+        from security.vault_keys import _PROVIDER_ENV_KEYS, get_active_provider_key
+        from api.routes.config import _is_accepted_env_key, _should_export_to_env
+        credentials = {}
+        for name in opened.list_keys():
+            value = opened.get_credential(name)
+            if isinstance(value, str) and _is_accepted_env_key(name):
+                credentials[name] = value
+        for provider, env_name in _PROVIDER_ENV_KEYS.items():
+            if not os.environ.get(env_name):
+                value = get_active_provider_key(provider, vault=opened)
+                if value:
+                    credentials[env_name] = value
+        for name, value in credentials.items():
+            if _should_export_runtime_env_key(name) and _should_export_to_env(name) and not os.environ.get(name):
+                previous = os.environ.get(name)
+                os.environ[name] = value
+                self._native_hydrated_env[name] = (previous, value)
+        self.config._credentials = credentials
+        if self.memory is None:
+            # Explicit authenticated injection bypasses deferred global reads;
+            # encrypted memory never opens a fallback plaintext database.
+            self.memory = MemoryStore(authenticated_vault=opened)
+        llm = getattr(getattr(self, "orchestrator", None), "llm", None)
+        if llm is not None:
+            key_name = _PROVIDER_ENV_KEYS.get(llm.provider, "")
+            key = os.environ.get(key_name, "") if key_name else ""
+            if key and llm.provider not in ("ollama", "lmstudio", "codex"):
+                previous_headers = dict(llm.client.headers) if getattr(llm, "client", None) is not None else None
+                self._native_previous_llm_credentials = (llm, llm.api_key, key, previous_headers)
+                llm.api_key = key
+                if getattr(llm, "client", None) is not None:
+                    if llm.provider == "anthropic": llm.client.headers["x-api-key"] = key
+                    else: llm.client.headers["Authorization"] = f"Bearer {key}"
+        # Keep the facade until after coordinator readiness; load only token
+        # values, never prune pending states or start refresh/probe jobs here.
+        if getattr(self, "oauth", None) is not None:
+            self.oauth._vault = opened
+            self.oauth.reload_providers()
+            self.oauth._load_tokens()
+        self.vault = opened
+
+    def _disable_native_vault_dependents(self):
+        controller = getattr(self, "agent_bootstrap_controller", None)
+        teardown_owned = controller.invalidate() if controller is not None else False
+        from security.agent_turn_lease import invalidate_agent_turns
+        turns = invalidate_agent_turns(self)
+        self._native_pending_agent_turns.extend(turns)
+        teardown_owned = teardown_owned or bool(turns)
+        self.vault = None
+        if hasattr(self, "config"): self.config._credentials = {}
+        if self._native_bootstrap_required and getattr(self, "memory", None) is not None:
+            memory = self.memory
+            self.memory = None  # Unavailable to new actions immediately.
+            if teardown_owned:
+                # Producers may retain the restored MemoryStore. The owned
+                # continuation teardown drains them before closing this object.
+                self._native_pending_memory_close.append(memory)
+            else:
+                memory.close()
+        for name, (previous, activated) in self._native_hydrated_env.items():
+            if os.environ.get(name) == activated:
+                if previous is None: os.environ.pop(name, None)
+                else: os.environ[name] = previous
+        self._native_hydrated_env.clear()
+        oauth = getattr(self, "oauth", None)
+        if oauth is not None:
+            oauth._vault = self._deferred_vault_facade
+            oauth._tokens.clear(); oauth._pending_states.clear()
+        previous = self._native_previous_llm_credentials
+        if previous is not None:
+            llm, old_key, activated, headers = previous
+            if llm.api_key == activated:
+                llm.api_key = old_key
+                if headers is not None and getattr(llm, "client", None) is not None:
+                    llm.client.headers.clear(); llm.client.headers.update(headers)
+        self._native_previous_llm_credentials = None
+
+    async def _checked_bootstrap_await(self, operation):
+        # Cancellation is a BaseException, so optional boot_subsystem blocks
+        # cannot swallow an identity change and continue credential use.
+        import asyncio
+        checkpoint = self._native_continuation_checkpoint
+        try:
+            if checkpoint is not None: checkpoint()
+        except Exception:
+            close = getattr(operation, "close", None)
+            if callable(close): close()
+            raise asyncio.CancelledError() from None
+        result = await operation
+        try:
+            if checkpoint is not None: checkpoint()
+        except Exception:
+            raise asyncio.CancelledError() from None
+        return result
+
     async def init(self):
+        if self._native_vault_deferred and self.memory is None:
+            self._native_bootstrap_required = True
+            self._boot_report.mark_degraded("EncryptedMemory", "Stored memory is locked. HTTP security remains available; no plaintext fallback or agent bootstrap was started.")
+            return
         _boot_start = time.time()
         with boot_subsystem(self._boot_report, "SkillRegistry", optional=False):
             self.skill_registry.load_builtin_skills()
@@ -983,7 +1114,7 @@ class BrainState:
                     _old = getattr(_shared_llm, "client", None)
                     if _old is not None:
                         try:
-                            await _old.aclose()
+                            await self._checked_bootstrap_await(_old.aclose())
                         except Exception:
                             pass
                     _shared_llm.client = _shared_llm._build_client()
@@ -1197,7 +1328,15 @@ class BrainState:
             skill_registry=self.skill_registry,
         )
 
-        self.vault = BlindVault()
+        if self._native_vault_deferred:
+            # Native unlock already authenticated this exact object. Never
+            # replace it or perform another OS keychain read during continuation.
+            if self._native_continuation_checkpoint is not None:
+                self.vault = self.vault_coordinator.require_ready()
+            else:
+                self.vault = None
+        else:
+            self.vault = BlindVault()
         self.sandbox = ExecutionSandbox(
             max_tier=os.environ.get("FERAL_MAX_TIER", "active")
         )
@@ -1209,9 +1348,12 @@ class BrainState:
         # ``$FERAL_HOME/sync_passphrase.first_boot`` chmod 0600) so
         # the operator can pair another brain. Pre-fix, an unset env
         # var made /sync a zero-auth endpoint.
-        with boot_subsystem(self._boot_report, "SyncPassphrase"):
-            from memory.sync import ensure_sync_passphrase
-            ensure_sync_passphrase()
+        if not self._native_vault_deferred:
+            with boot_subsystem(self._boot_report, "SyncPassphrase"):
+                from memory.sync import ensure_sync_passphrase
+                ensure_sync_passphrase()
+        else:
+            self._boot_report.mark_degraded("SyncPassphrase", "Credential-dependent federation is dormant until explicit secure activation.")
 
         self.policy = SandboxPolicy.load_default()
         self.device_registry = DeviceRegistry()
@@ -1222,10 +1364,10 @@ class BrainState:
         )
         self.mcp_client = MCPClientManager()
         with boot_subsystem(self._boot_report, "MCPClientManager"):
-            await self.mcp_client.load_and_connect()
+            await self._checked_bootstrap_await(self.mcp_client.load_and_connect())
         self.channel_manager = ChannelManager()
 
-        self.oauth = OAuthManager(vault=self.vault)
+        self.oauth = OAuthManager(vault=self._deferred_vault_facade if self._native_vault_deferred else self.vault)
         self.spotify = SpotifyIntegration(oauth_manager=self.oauth)
         self.home_assistant = HomeAssistantIntegration(oauth_manager=self.oauth)
         self.notion = NotionIntegration(oauth_manager=self.oauth)
@@ -1315,7 +1457,7 @@ class BrainState:
             event_bus=self.event_bus, store=self.webhook_store,
         )
         with boot_subsystem(self._boot_report, "WebhookReceiverHydrate"):
-            await self.webhook_receiver.hydrate_from_store()
+            await self._checked_bootstrap_await(self.webhook_receiver.hydrate_from_store())
         self.marketplace = MarketplaceClient(skill_registry=self.skill_registry)
 
         # v2026.5.34 (PR 2 D12): the HLC node_id is now a persistent
@@ -1325,33 +1467,37 @@ class BrainState:
         # crash got every op replayed. ``stable_node_id`` writes a
         # one-shot UUID-v7-shaped value to
         # ``~/.feral/sync_node_id`` and re-reads it on every boot.
-        from memory.sync import stable_node_id
-        sync_node_id = stable_node_id()
-        self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
-        # Bind the engine to THIS brain's roster rather than letting it
-        # fall back to the process global. ``/sync`` already reads
-        # ``state.peer_roster`` for authentication, and the scope
-        # grants the engine enforces have to come off the same roster
-        # or a grant an operator can see in `feral sync peer list`
-        # would not be the one the exchange honours.
-        self.sync_engine.set_peer_roster(self.peer_roster)
-        self.memory.set_sync_engine(self.sync_engine)
-        await self.sync_engine.start_discovery()
+        if not self._native_vault_deferred:
+            from memory.sync import stable_node_id
+            sync_node_id = stable_node_id()
+            self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
+            # Bind the engine to THIS brain's roster rather than letting it
+            # fall back to the process global. ``/sync`` already reads
+            # ``state.peer_roster`` for authentication, and the scope
+            # grants the engine enforces have to come off the same roster
+            # or a grant an operator can see in `feral sync peer list`
+            # would not be the one the exchange honours.
+            self.sync_engine.set_peer_roster(self.peer_roster)
+            self.memory.set_sync_engine(self.sync_engine)
+            await self._checked_bootstrap_await(self.sync_engine.start_discovery())
 
-        # v2026.5.34 (PR 2 D12): kick the SyncScheduler — it walks
-        # every known peer on a cadence, applies exponential
-        # backoff to flaky ones, and exposes per-peer health to
-        # /api/sync/status. start() is a no-op when
-        # settings.memory.sync.enabled is false.
-        from memory.sync_scheduler import SchedulerConfig, SyncScheduler
-        self.sync_scheduler = SyncScheduler(
-            self.sync_engine,
-            SchedulerConfig.from_settings(_load_settings()),
-        )
-        try:
-            await self.sync_scheduler.start()
-        except Exception as exc:
-            logger.warning("SyncScheduler.start() failed: %s", exc)
+            # v2026.5.34 (PR 2 D12): kick the SyncScheduler — it walks
+            # every known peer on a cadence, applies exponential
+            # backoff to flaky ones, and exposes per-peer health to
+            # /api/sync/status. start() is a no-op when
+            # settings.memory.sync.enabled is false.
+            from memory.sync_scheduler import SchedulerConfig, SyncScheduler
+            self.sync_scheduler = SyncScheduler(
+                self.sync_engine,
+                SchedulerConfig.from_settings(_load_settings()),
+            )
+            try:
+                await self._checked_bootstrap_await(self.sync_scheduler.start())
+            except Exception as exc:
+                logger.warning("SyncScheduler.start() failed: %s", exc)
+
+        else:
+            self._boot_report.mark_degraded("SyncScheduler", "Federation remains dormant; unlock alone does not activate network synchronization.")
 
         # v2026.5.34 (PR 2 D11): kick the decay sweeper. ``start()``
         # is a no-op when ``settings.memory.decay.enabled`` is false,
@@ -1361,7 +1507,7 @@ class BrainState:
         # is unbounded episode growth, which a follow-up cron can
         # clean up.
         try:
-            await self.memory_decay.start()
+            await self._checked_bootstrap_await(self.memory_decay.start())
         except Exception as exc:
             logger.warning("MemoryDecayService.start() failed: %s", exc)
 
@@ -1373,7 +1519,7 @@ class BrainState:
         # disabling it.
         if self.orchestrator:
             try:
-                await self.orchestrator.start_consolidation_scheduler()
+                await self._checked_bootstrap_await(self.orchestrator.start_consolidation_scheduler())
             except Exception as exc:
                 logger.warning("consolidation scheduler start failed: %s", exc)
 
@@ -1393,7 +1539,7 @@ class BrainState:
         unified = bool(((f1_settings.get("memory") or {}).get("kg") or {}).get("unified", True))
         if unified and self.memory:
             try:
-                result = await self.memory.migrate_knowledge_to_kg()
+                result = await self._checked_bootstrap_await(self.memory.migrate_knowledge_to_kg())
                 if result.get("ported") or result.get("deprecated"):
                     logger.info(
                         "F1 KG migration: ported=%d skipped=%d deprecated=%s",
@@ -1461,7 +1607,7 @@ class BrainState:
                 memory_store=self.memory,
                 skill_registry=self.skill_registry,
             )
-            await self.taskflows.start()
+            await self._checked_bootstrap_await(self.taskflows.start())
 
         with boot_subsystem(self._boot_report, "UploadStore"):
             # PR 10: canonical chat-attachment store. Lives entirely on
@@ -1486,6 +1632,11 @@ class BrainState:
                 taskflows=self.taskflows,
                 approval_manager=self.approval_manager,
             )
+            # Bind this runner before any await or background subsystem can
+            # dispatch a tool. Pending reviewed startup is fenced; successful
+            # commit keeps the same generation, while lock revokes it forever.
+            from security.agent_turn_lease import attach_agent_dispatch_lease
+            attach_agent_dispatch_lease(self)
             self.orchestrator.set_llm(_shared_llm)
             # Live-voice "different event loop" fix: pin the
             # orchestrator's owning loop to the brain's main loop the
@@ -1803,7 +1954,11 @@ class BrainState:
                     # runtime self-description (QtBot.capabilities()["actions"])
                     # rather than a static fallback. Registration + the generic
                     # skill then expose exactly what the device reports.
-                    connected = await adapter.connect()
+                    if self._native_continuation_checkpoint is not None:
+                        # Capture before awaiting connect so cancellation cannot
+                        # strand a connected adapter before publication.
+                        self._native_continuation_resources.append(adapter)
+                    connected = await self._checked_bootstrap_await(adapter.connect())
                     self.device_registry.register_device(adapter.manifest, adapter)
                     self._register_generic_hardware_skill(adapter)
                     if connected:
@@ -1846,7 +2001,7 @@ class BrainState:
 
         self.screen_loop = None
         with boot_subsystem(self._boot_report, "ScreenLoop"):
-            from perception.screen_loop import ScreenLoop
+            from perception.screen_loop import ScreenLoop, ambient_screen_capture_allowed
             self.screen_loop = ScreenLoop(
                 perception=self.perception,
                 memory=self.memory,
@@ -1860,7 +2015,8 @@ class BrainState:
             # regardless of ``features.vision`` / ``vision.enabled``.
             # The config loader coalesces both keys into
             # ``FERAL_VISION_ENABLED`` (see ``config/loader.py``).
-            if _feature_flag_enabled("FERAL_VISION_ENABLED"):
+            if (_feature_flag_enabled("FERAL_VISION_ENABLED")
+                    and ambient_screen_capture_allowed()):
                 import asyncio
                 self.register_background_task(
                     asyncio.create_task(
@@ -1871,7 +2027,7 @@ class BrainState:
             else:
                 logger.info(
                     "ScreenLoop gated off at boot "
-                    "(FERAL_VISION_ENABLED not truthy)"
+                    "(vision disabled or Screen Recording permission not already granted)"
                 )
 
         self.session_handoff = None
@@ -2134,7 +2290,7 @@ class BrainState:
             # ``ProactiveEngine.start`` schedules its inner loop task
             # and returns fast (A7), so it's safe to ``await`` it.
             if _feature_flag_enabled("FERAL_PROACTIVE"):
-                await self.proactive.start()
+                await self._checked_bootstrap_await(self.proactive.start())
                 if getattr(self.proactive, "_task", None) is not None:
                     self.register_background_task(self.proactive._task)
             else:
@@ -2146,7 +2302,7 @@ class BrainState:
         with boot_subsystem(self._boot_report, "MQTTBridge"):
             self.mqtt_bridge = MQTTBridge()
             if self.mqtt_bridge.configured:
-                await self.mqtt_bridge.start()
+                await self._checked_bootstrap_await(self.mqtt_bridge.start())
                 # audit-r14 finding 18 #3 — register MQTT's polling
                 # task in BrainState so shutdown_event cancels it
                 # symmetrically alongside ScreenLoop / Proactive /
@@ -2203,7 +2359,7 @@ class BrainState:
 
             self.email_watcher = EmailWatcher(on_email=_handle_email)
             if self.email_watcher.configured:
-                await self.email_watcher.start()
+                await self._checked_bootstrap_await(self.email_watcher.start())
                 # audit-r14 finding 18 #3 — register the watcher's
                 # task in BrainState so shutdown_event cancels it
                 # symmetrically with the other background loops.
@@ -2235,7 +2391,7 @@ class BrainState:
                     logger.info("mDNS: no phone bridge found on LAN (continuing without)")
 
         # Wire inbound channels to the orchestrator
-        await self._start_channels()
+        await self._checked_bootstrap_await(self._start_channels())
 
         if os.environ.get("FERAL_DEMO"):
             logger.warning("FERAL_DEMO is deprecated and ignored. Use FERAL_DEV_DEMO=1 for dev-only demo mode.")
@@ -2270,7 +2426,7 @@ class BrainState:
         except Exception as exc:
             logger.warning("Could not determine code provenance: %s", exc)
 
-        stats = await self.memory.stats()
+        stats = await self._checked_bootstrap_await(self.memory.stats())
         demo_tag = " [DEMO MODE]" if self._demo else ""
         logger.info(
             f"Brain v{__version__} initialized{demo_tag} — {len(self.skill_registry.skills)} skills, "

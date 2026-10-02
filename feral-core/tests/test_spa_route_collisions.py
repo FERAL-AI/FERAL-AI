@@ -146,6 +146,18 @@ def test_health_still_reports_what_it_always_did(client):
     assert "version" in body
 
 
+def test_native_instance_marker_is_opt_in_and_preserves_health_json(client, monkeypatch):
+    with monkeypatch.context() as environment:
+        environment.delenv("FERAL_DESKTOP_INSTANCE_ID", raising=False)
+        original = client.get("/health", headers=CURL)
+        assert "X-Feral-Desktop-Instance" not in original.headers
+        environment.setenv("FERAL_DESKTOP_INSTANCE_ID", "isolated-desktop-instance")
+        owned = client.get("/health", headers=CURL)
+        assert owned.headers["X-Feral-Desktop-Instance"] == "isolated-desktop-instance"
+        assert owned.json()["status"] == original.json()["status"] == "ok"
+        assert owned.json().keys() == original.json().keys()
+
+
 class TestOneUrlTwoRepresentationsNeedsVary:
     """The shim served both a page and JSON from one URL and said nothing.
 

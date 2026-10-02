@@ -1,11 +1,73 @@
 """MCP JSON-RPC and management endpoints."""
 
-from fastapi import APIRouter
+import asyncio
+import re
+
+from fastapi import APIRouter, Response
 
 from api.state import state, _log_activity
 from mcp.client import MCPServerConfig
 
 router = APIRouter()
+
+
+@router.post("/api/mcp/disconnect")
+async def mcp_disconnect(body: dict, response: Response):
+    """Close one captured runtime connection; leave saved configuration intact.
+
+    The manager's legacy disconnect method removes before close and swallows
+    errors. Here a failed close or concurrent replacement remains observable.
+    No claim is made that a remote server acknowledged session deletion.
+    """
+    name = body.get("name")
+    if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,127}", name):
+        response.status_code = 422
+        return {"success": False, "reason": "invalid_name"}
+    manager = state.mcp_client
+    if manager is None:
+        response.status_code = 503
+        return {"success": False, "reason": "manager_unavailable"}
+    servers = getattr(manager, "_servers", None)
+    if not isinstance(servers, dict):
+        response.status_code = 501
+        return {"success": False, "reason": "unsupported_manager"}
+    connection = servers.get(name)
+    if connection is None:
+        response.status_code = 404
+        return {"success": False, "reason": "not_connected", "name": name}
+    close = getattr(connection, "disconnect", None)
+    if not callable(close):
+        response.status_code = 501
+        return {"success": False, "reason": "unsupported_connection", "name": name}
+    process = getattr(connection, "_process", None)
+    http_client = getattr(connection, "_http_client", None)
+    try:
+        await asyncio.wait_for(close(), timeout=10)
+        # The stdio implementation kills after its timeout but does not reap
+        # the killed child. Reap only the process belonging to this capture.
+        if process is not None and getattr(process, "returncode", None) is None:
+            await asyncio.wait_for(process.wait(), timeout=5)
+        if bool(getattr(connection, "_connected", False)):
+            raise RuntimeError("connection still marked connected")
+        if http_client is not None and getattr(http_client, "is_closed", None) is False:
+            raise RuntimeError("captured HTTP client did not close")
+    except Exception:
+        response.status_code = 502
+        return {"success": False, "reason": "disconnect_failed", "name": name,
+                "runtime_outcome": "uncertain"}
+    if (state.mcp_client is not manager or getattr(manager, "_servers", None) is not servers
+            or servers.get(name) is not connection):
+        response.status_code = 409
+        return {"success": False, "reason": "connection_replaced", "name": name,
+                "captured_connection_closed": True}
+    del servers[name]
+    for attribute in ("_server_configs", "_degraded_servers"):
+        entries = getattr(manager, attribute, None)
+        if isinstance(entries, dict):
+            entries.pop(name, None)
+    return {"success": True, "name": name, "disconnected": True,
+            "scope": "runtime_only", "saved_configuration_changed": False,
+            "credentials_revoked": False, "remote_session_closed": "unverified"}
 
 
 @router.post("/mcp")

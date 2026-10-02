@@ -328,6 +328,7 @@ class IdentityLoader:
         memory_filter: str = "",
         query: str = "",
         plan_mode: bool = False,
+        compact_tool_catalog: bool = False,
     ) -> str:
         """Assemble the full system prompt for an LLM conversation turn.
 
@@ -601,10 +602,25 @@ class IdentityLoader:
                 build_tooling_catalog,
                 build_ui_route_map,
             )
-            tooling_block = build_tooling_catalog(
-                active=skills or [],
-                full=full_catalog or skills or [],
-            )
+            if compact_tool_catalog:
+                # Local HTTP adapters retrieve a bounded schema set at the wire
+                # boundary. Re-enumerating every endpoint here defeats that
+                # bound and falsely advertises definitions not sent this round.
+                tooling_block = (
+                    "## Tooling (local discovery)\n"
+                    "Tool definitions in this request are retrieved from the installed registry. "
+                    "The registry is not reproduced in this prompt. A missing definition does not "
+                    "prove a capability is unavailable. Use self_introspection__list_capabilities "
+                    "and self_introspection__describe_skill to discover the relevant skill; "
+                    "the next request retrieves matching authorized definitions. "
+                    "Permissions and prerequisite checks still apply. Never invent tool names "
+                    "or claim execution without an actual result."
+                )
+            else:
+                tooling_block = build_tooling_catalog(
+                    active=skills or [],
+                    full=full_catalog or skills or [],
+                )
             if tooling_block:
                 prompt += f"\n{tooling_block}\n"
             # Names the capabilities whose tools were withheld this turn

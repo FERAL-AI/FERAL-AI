@@ -3,7 +3,7 @@
 import time
 from uuid import uuid4
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 
 from api.state import state
 
@@ -36,9 +36,35 @@ async def list_conversations(limit: int = 25, offset: int = 0, q: str = ""):
 
 @router.post("/api/conversations/new")
 async def create_conversation(body: dict | None = None):
+    payload = body or {}
+    if "create_if_missing" in payload and type(payload["create_if_missing"]) is not bool:
+        raise HTTPException(status_code=422, detail="create_if_missing must be a Boolean")
+    if payload.get("create_if_missing") is True:
+        # Opt-in atomic contract. Never fall back to the legacy upsert.
+        identifier = payload.get("id")
+        title = payload.get("title", "New conversation")
+        if (not isinstance(identifier, str) or not identifier or identifier.strip() != identifier
+                or len(identifier.encode("utf-8")) > 256 or any(ord(c) < 32 or ord(c) == 127 for c in identifier)
+                or not isinstance(title, str) or len(title.encode("utf-8")) > 800
+                or set(payload) - {"id", "title", "create_if_missing"}):
+            raise HTTPException(status_code=422, detail="Atomic creation requires a bounded exact ID/title and no message payload")
+        if not state.memory:
+            raise HTTPException(status_code=503, detail="Memory not initialized")
+        operation = getattr(state.memory, "conversation_create_if_missing", None)
+        if not callable(operation):
+            raise HTTPException(status_code=501, detail="Atomic conversation creation is unavailable")
+        try:
+            result = await operation(identifier, title=title)
+            document = result.get("conversation") if isinstance(result, dict) else None
+            if (not isinstance(result, dict) or type(result.get("created")) is not bool or not isinstance(document, dict)
+                    or document.get("id") != identifier or not isinstance(document.get("messages"), list)):
+                raise ValueError("Unverified atomic creation result")
+        except Exception:
+            raise HTTPException(status_code=502, detail="Atomic conversation creation was not confirmed; inspect the exact thread before retrying") from None
+        return {"ok": True, "id": identifier, "create_if_missing": True,
+                "created": result["created"], "conversation": document}
     if not state.memory:
         return {"error": "Memory not initialized"}
-    payload = body or {}
     conversation_id = payload.get("id") or f"thread-{str(uuid4())[:10]}"
     title = payload.get("title", "New conversation")
     created = await state.memory.conversation_save(conversation_id, [], title=title)

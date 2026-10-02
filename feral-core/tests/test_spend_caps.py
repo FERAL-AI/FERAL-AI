@@ -18,7 +18,8 @@ from decimal import Decimal
 import pytest
 
 from security.commerce import (
-    Money, PurchaseAudit, SpendCaps, evaluate, merchant_from_url, parse_money,
+    Money, PurchaseAudit, PurchaseAuditUnavailable, SpendCaps, evaluate,
+    merchant_from_url, parse_money,
 )
 
 CAPS = SpendCaps(currency="AED", per_transaction_max=Decimal("200"),
@@ -80,6 +81,41 @@ class TestVerdicts:
 
 
 class TestAuditAndDailyTotal:
+    def test_unavailable_ledger_refuses_instead_of_resetting_spending(self, tmp_path):
+        import sqlite3
+
+        path = tmp_path / "unavailable.db"
+        audit = PurchaseAudit(db_path=str(path))
+        audit.record(outcome="completed", money=Money(Decimal("450"), "AED"))
+        candidate = parse_money("AED 100.00")
+        healthy = evaluate(candidate, "noon.com", CAPS, audit=audit)
+        assert not healthy.allowed and healthy.code == "over_per_day"
+        assert healthy.spent_today == Decimal("450")
+
+        with sqlite3.connect(str(path)) as conn:
+            conn.execute("ALTER TABLE purchases RENAME TO purchases_unavailable")
+
+        with pytest.raises(PurchaseAuditUnavailable, match="could not be verified"):
+            audit.spent_today("AED")
+        unavailable = evaluate(candidate, "noon.com", CAPS, audit=audit)
+        assert not unavailable.allowed and unavailable.code == "audit_unavailable"
+        assert unavailable.spent_today is None
+
+    def test_failed_audit_write_reports_failure_and_preserves_existing_rows(self, tmp_path):
+        import sqlite3
+
+        path = tmp_path / "unwritable.db"
+        audit = PurchaseAudit(db_path=str(path))
+        assert audit.record(outcome="completed", money=Money(Decimal("50"), "AED")) is None
+        with sqlite3.connect(str(path)) as conn:
+            conn.execute("ALTER TABLE purchases RENAME TO purchases_unavailable")
+
+        with pytest.raises(PurchaseAuditUnavailable, match="could not be saved"):
+            audit.record(outcome="completed", money=Money(Decimal("100"), "AED"))
+        with sqlite3.connect(str(path)) as conn:
+            rows = conn.execute("SELECT outcome, amount FROM purchases_unavailable").fetchall()
+        assert rows == [("completed", "50")]
+
     def test_only_completed_purchases_count_against_the_day(self, tmp_path):
         audit = PurchaseAudit(db_path=str(tmp_path / "p.db"))
         audit.record(outcome="offered", money=Money(Decimal("100"), "AED"))
@@ -161,12 +197,15 @@ async def test_an_unreadable_price_is_refused(monkeypatch, tmp_path):
 
 
 @pytest.mark.asyncio
-async def test_a_within_limit_purchase_is_offered_and_still_never_completes(
+async def test_a_within_limit_purchase_is_previewed_without_approval_or_checkout(
     monkeypatch, tmp_path,
 ):
     result, _ = await _purchase(monkeypatch, tmp_path, "AED 24.00")
     assert result["purchased"] is False, "nothing may ever complete a purchase"
-    assert result["awaiting_confirmation"] is True
+    assert result["awaiting_confirmation"] is False
+    assert result["preview_only"] is True
+    assert result["checkout_available"] is False
+    assert result["price_verified"] is False
     assert "sdui_card" in result
     # Parsed for the approval frame, so the glasses can speak an amount.
     assert (result["merchant"], result["amount"], result["currency"]) == (
@@ -181,3 +220,32 @@ async def test_every_evaluation_lands_in_the_trail(monkeypatch, tmp_path):
     conn = sqlite3.connect(str(tmp_path / "p.db"))
     outcomes = [r[0] for r in conn.execute("SELECT outcome FROM purchases ORDER BY id")]
     assert outcomes == ["offered", "refused_cap"]
+
+
+@pytest.mark.asyncio
+async def test_failed_offer_audit_cannot_return_a_confirmation_card(monkeypatch, tmp_path):
+    import sqlite3
+    from skills.impl import web_actions
+
+    path = tmp_path / "offer.db"
+    audit = PurchaseAudit(db_path=str(path))
+    with sqlite3.connect(str(path)) as conn:
+        conn.execute("""CREATE TRIGGER reject_offer BEFORE INSERT ON purchases
+                        WHEN NEW.outcome = 'offered'
+                        BEGIN SELECT RAISE(FAIL, 'synthetic write failure'); END""")
+    skill = web_actions.WebActionsSkill()
+    browser = _Browser("AED 24.00")
+
+    async def _ensure():
+        return browser
+
+    monkeypatch.setattr(skill, "_ensure_browser", _ensure)
+    monkeypatch.setattr(web_actions, "load_caps", lambda: CAPS)
+    monkeypatch.setattr(web_actions, "_AUDIT", audit)
+    result = await skill.execute("make_purchase", {"url": "https://www.noon.com/item"}, {})
+    assert result["success"] is False
+    assert result["data"] is None
+    assert "could not be saved" in result["error"]
+    assert browser.screenshots == 0
+    with sqlite3.connect(str(path)) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM purchases").fetchone()[0] == 0

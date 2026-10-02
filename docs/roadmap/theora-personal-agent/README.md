@@ -1,0 +1,65 @@
+# Theora personal agent: product and engineering plan
+
+**Current implementation checkpoint: October 1, 2026 / native macOS 2026.9.23.** Bounded actual local chat, review accessibility/cancel and same-process transient-probe recovery passed. This remains a partial native app: signed distribution, real encrypted-profile/Keychain acceptance, physical glasses, comprehensive cross-owner continuity, live commerce, iOS and Linux remain open. Start with [release readiness](RELEASE_READINESS.md) for work packages, contracts and evidence gates, and the [native inventory](../../../desktop-native/FEATURE_PARITY.md) for feature omissions.
+
+Prepared September 30, 2026 from FERAL and Theora source inspection, focused verification, and primary-source research. This is a proposed product plan, not a claim that the described capabilities are shipping. No application implementation, publishing, payments, deployments or external messages were performed for this plan.
+
+**Subsequent verification:** the user requested direct testing of core/desktop while leaving iOS with its separate agent. Bounded corrections to reproduced defects were made after this initial plan. See [the verification report](VERIFICATION_REPORT.md) for exact evidence, results and remaining limits; the paragraph above describes the initial planning phase.
+
+Historical verification-phase checks (not a fresh run of the current native product): **11,667 core tests passed (50 skipped), 1,348 client tests passed, 30 real-brain destination checks passed, five selected real-brain control walks passed**. Native macOS compile and production JS builds passed. See the report for overlap, warnings, test fixtures and hardware/platform/payment scenarios that remain unverified.
+
+## What we are building
+
+One personal agent that a person can talk to through their glasses, iPhone, Mac or Linux computer. It remembers useful context with permission, uses quality-labelled health observations where relevant, carries out explicitly authorized tasks, and reports verified outcomes. The person chooses its name, avatar and voice, can inspect and correct its memory, and can use supported self-hosted or hosted deployments. The native Theora iPhone app and FERAL desktop are clients of the same agent rather than separate assistants with occasionally exchanged summaries.
+
+Suggested first promise: **Remember what matters and help me follow through.** The platform can eventually cover shopping and more integrations; the first product must demonstrate a recurring benefit before expanding its claims.
+
+The candidate advantage is the complete loop from real-world context to grounded memory, approved action and verified outcome. Memory, agent tools, avatars and biometric coaching individually have competitors. Product-market fit and a claim that no company has solved a problem cannot be established by repository review or public research.
+
+## Read this plan
+
+| Document | Purpose |
+|---|---|
+| [Current release readiness](RELEASE_READINESS.md) | Full-product work packages, source gaps, actual evidence, task/memory/social/voice/payment/messaging contracts and CI/distribution gates |
+| [Product research](PRODUCT_RESEARCH.md) | Current competition, initial customer hypothesis, interviews, paid pilot and sensor-value experiments |
+| [Architecture and contracts](ARCHITECTURE_AND_CONTRACTS.md) | Agent ownership, deployment, durable memory, device sync, actions, voice, health and integrations |
+| [Core and commerce research](CORE_COMMERCE_RESEARCH.md) | Existing FERAL evidence, payment-protocol access limits, purchase state machine, relay and desktop work |
+| [iOS agent handoff](IOS_AGENT_HANDOFF.md) | Eleven file-specific tickets, dependencies, Apple constraints and acceptance tests |
+| [Experience and avatars](EXPERIENCE_AND_AVATARS.md) | Glasses journeys, consumer UI, avatar choice, accessibility and truthful state |
+| [Execution and release gates](EXECUTION_AND_RELEASE_GATES.md) | Ordered cross-team backlog, testing, open-source release, operations, costs and decision register |
+| [Direct verification](VERIFICATION_REPORT.md) | Reproduced defects, bounded corrections, test evidence and unverified release scenarios |
+
+These documents are linked parts of one plan. The architecture defines proposed shared contracts; the research documents explain evidence and uncertainties; the handoff is intended to be directly usable by the Theora iOS agent.
+
+## Existing foundation and the gaps that matter
+
+FERAL already supplies orchestration, tools, approvals, SQLite memory, voice providers, HUP device communication, peer sharing and a Tauri desktop shell. Theora already supplies a native SwiftUI app, account/backend services, health ingestion, glasses/wristband adapters, audio handling, partial brain pairing and durable ambient-transcript forwarding. Those are substantial foundations.
+
+The remaining work changes their relationship. There are presently two conversation/memory paths on iPhone, no comprehensive owner-isolated consumer identity model, and incomplete native protocol handling. Same-owner private continuity is different from FERAL's existing scoped sharing between brains. The current purchase helper produces a preview, not a completed transaction. The relay needs real-edge validation. Desktop release signing/updating and iOS reproducible builds are incomplete.
+
+Hardware must remain accurately described: current Theora health-temple glasses, Veepoo wristband and Theora Eye camera/microphone glasses expose different capabilities. Future synchronized raw PPG/PTT and additional temple sensing need their own hardware and validation track. A vendor SDK method does not prove a sensor exists or produces validated measurements on a particular unit.
+
+## Recommended sequence
+
+1. Establish clean builds, owner/account isolation and shared event/action contracts. Reproduce the source-level interoperability concerns before fixing them.
+2. Deliver one agent across phone and desktop: grounded conversation memory, glasses voice, durable offline capture, tasks and a reviewable action inbox.
+3. Run a narrow paid pilot around conversation commitments and follow-through. Evaluate whether glasses and health context add value beyond phone-only memory.
+4. Add shopping search and trustworthy phone checkout handoff. Build and test the transaction engine with a merchant simulator and approved provider sandboxes.
+5. Enable completed purchases only for named integrated merchants after approval, idempotency, receipts, reconciliation and support work pass release gates.
+6. Expand integrations, constrained delegated purchases, sensors and shared workflows according to measured demand.
+
+Avatar choice can ship during the consumer pilot with a small licensed catalog. It should not delay reliable capture, memory or approvals.
+
+## Working assumptions and decisions still open
+
+The planning default is an adult, US-first pilot among iPhone/Mac glasses wearers with frequent conversations and commitments. Linux support is an explicit engineering cohort, not assumed to have identical customer demand. An optional isolated hosted brain plus supported self-hosting is the recommended availability design; choosing the operator, business model and permitted data flows remains a product decision. Pending user answers may change these defaults.
+
+Other decisions: exact launch countries and intended health claims; supported OS/CPU/device matrix; whether Theora is the product name and FERAL the engine; the first integrations and merchant; hardware redistribution rights; retention defaults; price; account requirements; hosting budget. The referenced “Instinct” product has not been identified. Dot's official closure notice has an ambiguous year, so it is treated as a historical UX reference.
+
+These are design questions, not permission to enable cloud processing, recording, research training or spending for a user. The actual product must collect those permissions at the relevant moment.
+
+## Verification performed
+
+The focused existing suite for spend caps, wearer approvals, paired-token REST authentication, scoped sharing and relay behavior passed **138 tests** after running with permitted local socket access. The initial sandbox run had 119 passes and localhost-bind failures/errors; the permitted rerun resolved them. Tests used isolated temporary FERAL storage and the hash embedding provider. This verifies existing mocked/local behavior, not live merchant payments, a production relay, a clinical sensor, or a built iPhone/desktop release.
+
+Earlier project exploration passed 161 selected backend/client/website tests. No iOS builds, vendor-device tests or live purchases were performed. Release evidence still required is enumerated in [the release plan](EXECUTION_AND_RELEASE_GATES.md).

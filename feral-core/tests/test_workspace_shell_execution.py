@@ -21,7 +21,9 @@ state). These tests prove both directions:
 
 from __future__ import annotations
 
+import shlex
 import subprocess
+import sys
 
 import pytest
 
@@ -248,10 +250,14 @@ async def test_bash_runs_git_ls_and_pytest_inside_a_granted_workspace(monkeypatc
     subprocess.run(["git", "init", "-q"], cwd=tmp_path, check=True)
     (tmp_path / "README.md").write_text("hello\n")
 
+    # Running pytest with the pinned interpreter does not activate its bin
+    # directory on PATH. Exercise the real shell using this test runner's
+    # installed pytest, rather than assuming the operator's python3 has it.
+    pytest_command = f"{shlex.quote(sys.executable)} -m pytest --version"
     for command, expected in (
         ("git status --porcelain", "README.md"),
         ("ls", "README.md"),
-        ("python3 -m pytest --version", "pytest"),
+        (pytest_command, "pytest"),
     ):
         result = await skill.execute("bash", {"command": command, "cwd": str(tmp_path)}, vault={})
         assert result["success"] is True, (command, result)

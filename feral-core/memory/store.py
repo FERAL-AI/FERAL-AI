@@ -520,6 +520,7 @@ class MemoryStore:
         *,
         vec_index: Optional[VectorIndexBackend] = None,
         conn_pool_size: int = 4,
+        authenticated_vault=None,
     ):
         """Construct a MemoryStore.
 
@@ -559,11 +560,23 @@ class MemoryStore:
         _db_path_obj = _Path(db_path)
         _enc_path_obj = _db_path_obj.with_name(_db_path_obj.name + ".enc")
         if _enc_path_obj.exists():
+            from security.vault import native_vault_deferred
+            if native_vault_deferred() and _db_path_obj.exists():
+                # Do not silently prefer a potentially stale plaintext copy
+                # over an encrypted checkpoint during reviewed restoration.
+                from security.vault_coordinator import VaultLockedRefusal
+                raise VaultLockedRefusal()
             try:
                 from memory.at_rest import ensure_plaintext_db
                 from security.vault import get_vault
-                ensure_plaintext_db(vault=get_vault(), db_path=_db_path_obj)
+                ensure_plaintext_db(vault=authenticated_vault if authenticated_vault is not None else get_vault(), db_path=_db_path_obj)
             except Exception as exc:
+                from security.vault import native_vault_deferred
+                if native_vault_deferred():
+                    # Locked/failed encrypted memory must not open a stale or
+                    # newly created plaintext database in native mode.
+                    from security.vault_coordinator import VaultLockedRefusal
+                    raise VaultLockedRefusal() from exc
                 logger.warning(
                     "MemoryStore boot: ensure_plaintext_db failed (%s); "
                     "proceeding with whatever %s contains. Operator may "
@@ -1730,6 +1743,47 @@ class MemoryStore:
     # ``messages[-500:]`` in one place; named because the atomic append
     # path has to enforce the same ceiling from SQL.
     CONVERSATION_MESSAGE_CAP = 500
+
+    async def conversation_create_if_missing(self, conversation_id: str, title: str = "") -> dict:
+        """Insert an empty thread without ever updating an existing row.
+
+        SQLite serialises the single INSERT across connections/processes.
+        Read the winning row while the write transaction is still held,
+        so the receipt contains an existing-or-created snapshot, including
+        opaque message fields, pinned/custom titles and original timestamps.
+        """
+        now = time.time()
+        conn = await self._conn()
+        try:
+            cursor = await conn.execute(
+                "INSERT INTO conversations "
+                "(id, title, preview, messages_json, message_count, created_at, updated_at) "
+                "VALUES (?, ?, '', '[]', 0, ?, ?) ON CONFLICT(id) DO NOTHING",
+                (conversation_id, title or "New conversation", now, now),
+            )
+            created = cursor.rowcount == 1
+            await cursor.close()
+            async with conn.execute(
+                "SELECT id, title, preview, messages_json, message_count, created_at, updated_at, "
+                "pinned, title_custom FROM conversations WHERE id = ?",
+                (conversation_id,),
+            ) as reader:
+                row = await reader.fetchone()
+            if row is None:
+                raise RuntimeError("Atomic conversation creation did not return its row")
+            document = {
+                "id": row[0], "title": row[1], "preview": row[2],
+                "messages": json.loads(row[3]) if row[3] else [],
+                "message_count": row[4], "created_at": row[5], "updated_at": row[6],
+                "pinned": bool(row[7]), "title_custom": bool(row[8]),
+            }
+            await conn.commit()
+            return {"created": created, "conversation": document}
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
 
     async def conversation_save(self, conversation_id: str, messages: list[dict], title: str = "") -> dict:
         """Save/update a conversation thread."""

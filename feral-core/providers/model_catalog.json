@@ -85,6 +85,8 @@
         "gpt-5.6-sol",
         "gpt-5.6-terra",
         "gpt-6-astra",
+        "gpt-6-luna",
+        "gpt-6.1-sol",
         "gpt-audio",
         "gpt-audio-1.5",
         "gpt-audio-2025-08-28",
@@ -221,6 +223,28 @@
         "gpt-5-nano": {
           "input": 5e-05,
           "output": 0.0004
+        },
+        "gpt-6.1-sol": {
+          "input": 0.002,
+          "output": 0.01,
+          "cache_read": 0.0001,
+          "cache_write": 0.0025,
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+          "verified_at": "2026-10-01",
+          "notes": "Standard short-context rates in USD per 1,000 tokens. Above 272K input tokens, input/cache rates double and output rate increases 1.5x. Regional processing and processing tiers change rates; this entry is not a complete invoice."
+        },
+        "gpt-6-luna": {
+          "input": 0.0001,
+          "output": 0.0005,
+          "cache_read": 1e-05,
+          "cache_write": 0.000125,
+          "context_window": 1050000,
+          "max_output_tokens": 128000,
+          "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+          "verified_at": "2026-10-01",
+          "notes": "Standard short-context rates in USD per 1,000 tokens. Above 272K input tokens, input/cache rates double and output rate increases 1.5x. Regional processing and processing tiers change rates; this entry is not a complete invoice."
         }
       },
       "capabilities": {
@@ -244,6 +268,79 @@
         "gpt-5.6-luna": {
           "image_input": true,
           "reasoning": true
+        },
+        "gpt-6.1-sol": {
+          "max_input_tokens": 1050000,
+          "max_tokens": 128000,
+          "image_input": true,
+          "reasoning": true,
+          "reasoning_efforts": [
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_reasoning_effort": "medium",
+          "streaming": true,
+          "structured_outputs": true,
+          "function_calling": true,
+          "function_calling_endpoint": "responses",
+          "audio_input": false,
+          "audio_output": false,
+          "source": "https://developers.openai.com/api/docs/models/gpt-6.1-sol",
+          "verified_at": "2026-10-01",
+          "notes": "FERAL uses Responses to preserve reasoning with function tools. Chat Completions has no tool calling."
+        },
+        "gpt-6-luna": {
+          "max_input_tokens": 1050000,
+          "max_tokens": 128000,
+          "image_input": true,
+          "reasoning": true,
+          "reasoning_efforts": [
+            "none",
+            "low",
+            "medium",
+            "high",
+            "xhigh",
+            "max"
+          ],
+          "default_reasoning_effort": "medium",
+          "streaming": true,
+          "structured_outputs": true,
+          "function_calling": true,
+          "function_calling_endpoint": "responses",
+          "audio_input": false,
+          "audio_output": false,
+          "source": "https://developers.openai.com/api/docs/models/gpt-6-luna",
+          "verified_at": "2026-10-01",
+          "notes": "FERAL uses Responses to preserve reasoning with function tools. Chat Completions function calling requires reasoning_effort=none."
+        }
+      },
+      "unsupported_models": {
+        "gpt-live-1": {
+          "name": "GPT-Live 1",
+          "api_protocol": "live",
+          "endpoint": "/v1/live/sessions",
+          "runtime_supported": false,
+          "text_input": true,
+          "text_output": true,
+          "audio_input": true,
+          "audio_output": true,
+          "image_input": false,
+          "video_input": false,
+          "structured_outputs": false,
+          "full_duplex": true,
+          "tool_execution": "backend_delegation",
+          "pricing": {
+            "unit": "USD per minute",
+            "session_duration": 0.05,
+            "billed_per_second": true,
+            "backend_usage_separate": true
+          },
+          "source": "https://developers.openai.com/api/docs/models/gpt-live-1",
+          "verified_at": "2026-10-01",
+          "notes": "Informational only, excluded from selectable bundled models. Requires a new Live session/delegation adapter; it is not compatible with FERAL legacy Realtime or Chat Completions connectors. The token-pricing schema cannot bill session duration; no token rate is fabricated."
         }
       }
     },

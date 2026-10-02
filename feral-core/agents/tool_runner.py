@@ -15,6 +15,7 @@ import time
 from typing import Optional, TYPE_CHECKING
 from uuid import uuid4
 
+from security.agent_turn_lease import guard_agent_dispatch
 from security.content_defense import screen_content, wrap_external_content
 from security.exec_approvals import ApprovalManager
 from security.trust_ledger import TrustLedger, get_ledger
@@ -226,6 +227,7 @@ class ToolRunner:
         approval_manager: Optional[ApprovalManager] = None,
     ):
         self._orch = orchestrator
+        self._native_agent_dispatch_lease = None
         self._tool_repeat_state: dict[str, dict] = {}
         # Strong references to in-flight background-job reapers. The
         # loop holds tasks only weakly, so a bare create_task can be
@@ -440,11 +442,15 @@ class ToolRunner:
             registry=self._skill_registry(),
         )
 
+    def _guard_agent_lease(self):
+        guard_agent_dispatch(getattr(self, "_native_agent_dispatch_lease", None))
+
     def enforce_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket") -> Optional[dict]:
         """
         Returns a denial dict if the action should be blocked, a pending-approval
         dict if the user must confirm, or None if the action is allowed.
         """
+        self._guard_agent_lease()
         decision = self.policy_for(tool_name, args, surface=surface)
 
         if decision.level == SafetyLevel.DENY:
@@ -893,6 +899,7 @@ class ToolRunner:
     # ─────────────────────────────────────────────
 
     async def execute_daemon_command(self, session_id: str, node_id: str, action: str, args: dict):
+        self._guard_agent_lease()
         actual_node_id = node_id.replace("daemon_", "")
         daemons = self._orch.daemons
 
@@ -915,6 +922,7 @@ class ToolRunner:
             return
 
         self._daemon_session_map[request_id] = session_id
+        self._guard_agent_lease()
         await ws.send_json(gate.frame)
         await self._orch._send_text(session_id, f"Action sent to node '{actual_node_id}'...")
 
@@ -940,6 +948,7 @@ class ToolRunner:
         ``device_target`` work — together they close the loop on the
         operator's complaint #8.
         """
+        self._guard_agent_lease()
         registry = getattr(self._orch, "capability_registry", None)
         if registry is None:
             # Fall back to legacy behaviour for tests / contexts that
@@ -1104,6 +1113,7 @@ class ToolRunner:
           * times out with ``success: False`` after ``timeout`` seconds so a
             misbehaving daemon can't hang the LLM loop.
         """
+        self._guard_agent_lease()
         actual_node_id = node_id.replace("daemon_", "")
         daemons = self._orch.daemons
 
@@ -1138,7 +1148,15 @@ class ToolRunner:
         self._pending_daemon_acks[request_id] = future
         self._daemon_session_map[request_id] = session_id
         try:
+            self._guard_agent_lease()
             await ws.send_json(daemon_msg)
+        except asyncio.CancelledError:
+            self._pending_daemon_acks.pop(request_id, None)
+            self._daemon_session_map.pop(request_id, None)
+            future.cancel()
+            # The transport may already have sent bytes; cancellation is not
+            # evidence of device rollback or a failed physical action.
+            raise
         except Exception as exc:
             self._pending_daemon_acks.pop(request_id, None)
             return {
@@ -1289,6 +1307,7 @@ class ToolRunner:
         publishes the identity on a contextvar so implementations can read
         it without a signature change. See ``skills/call_context.py``.
         """
+        self._guard_agent_lease()
         effective_surface = surface or self._resolve_surface_for_session(session_id)
         # Wave 1's per-tool instrumentation. It lived at the top of the
         # body this method was split out of, so it stays here: once per
@@ -1573,6 +1592,7 @@ class ToolRunner:
         if validation.fixed_args is not None:
             args = validation.fixed_args
 
+        self._guard_agent_lease()
         result = await self._orch.executor.execute(
             tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
         )
@@ -1651,6 +1671,7 @@ class ToolRunner:
         *,
         surface: Optional[str] = None,
     ):
+        self._guard_agent_lease()
         effective_surface = surface or self._resolve_surface_for_session(session_id)
         self._record_tool_invocation(
             str(tool_call.get("name") or ""), session_id, effective_surface,
@@ -1727,6 +1748,7 @@ class ToolRunner:
             await self._orch._send_text(session_id, f"Endpoint not found: {endpoint_id}")
             return
 
+        self._guard_agent_lease()
         result = await self._orch.executor.execute(
             tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
         )
@@ -1753,6 +1775,7 @@ class ToolRunner:
 
     async def spawn_subagents(self, session_id: str, args: dict) -> dict:
         """Run multiple sub-tasks in parallel with isolated subagent contexts."""
+        self._guard_agent_lease()
         # Defence in depth. `_execute_tool_call_for_llm_inner` already
         # refuses `subagent__spawn_subagent` in plan mode, but this method
         # is public and is also reachable via

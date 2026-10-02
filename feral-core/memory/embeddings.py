@@ -1507,7 +1507,8 @@ class EmbeddingProvider:
             return False
         try:
             from fastembed import TextEmbedding
-            self._fastembed_model = TextEmbedding(model_name=FASTEMBED_MODEL)
+            kwargs = {"local_files_only": True} if os.environ.get("FERAL_EMBED_MODEL_CACHE_ONLY") == "1" else {}
+            self._fastembed_model = TextEmbedding(model_name=FASTEMBED_MODEL, **kwargs)
             return True
         except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
             self._fastembed_unavailable = True
@@ -1562,7 +1563,8 @@ class EmbeddingProvider:
             return False
         try:
             from sentence_transformers import SentenceTransformer
-            self._model = SentenceTransformer("all-MiniLM-L6-v2")
+            kwargs = {"local_files_only": True} if os.environ.get("FERAL_EMBED_MODEL_CACHE_ONLY") == "1" else {}
+            self._model = SentenceTransformer("all-MiniLM-L6-v2", **kwargs)
             return True
         except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
             self._model = None

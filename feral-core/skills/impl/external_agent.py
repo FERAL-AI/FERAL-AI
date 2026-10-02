@@ -486,7 +486,14 @@ class ExternalAgentSkill(BaseSkill):
         }
 
         if state == "completed" and managed.turn is not None:
-            error = managed.turn.exception() if not managed.turn.cancelled() else None
+            # Task cancellation is a terminal protocol outcome, not a result
+            # that can be read via Future.result() (which would raise again).
+            if managed.turn.cancelled():
+                payload.update(status="failed", error_code="agent_turn_cancelled",
+                               error="The coding turn was cancelled. Already-started actions may have an unknown outcome.",
+                               stop_reason="cancelled", tool_outcome_verified=False)
+                return payload
+            error = managed.turn.exception()
             if error is not None:
                 payload["status"] = "failed"
                 payload["error"] = f"{type(error).__name__}: {error}"
@@ -494,6 +501,14 @@ class ExternalAgentSkill(BaseSkill):
             else:
                 result = managed.turn.result()
                 payload["stop_reason"] = getattr(result, "stop_reason", "")
+                # ACP end_turn proves only the prompt request ended. OpenCode
+                # can emit it with usage metadata and no answer/tool activity.
+                # Never publish that as a completed coding result or retry a
+                # potentially mutating task automatically.
+                if not payload["text"].strip() and not payload["tool_calls"]:
+                    payload.update(status="failed", error_code="empty_agent_turn",
+                                   error="The coding agent ended the turn without an answer or tool activity. No execution evidence was received.",
+                                   tool_outcome_verified=False)
         return payload
 
 

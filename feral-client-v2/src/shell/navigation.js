@@ -3,7 +3,7 @@ import {
   Settings as SettingsIcon, AppWindow, Shield,
   Hammer, Wrench, Database, BookOpen, Users, UserCircle2,
   HeartPulse, Crosshair, Clock, BrainCircuit, Globe, MapPin, Store,
-  BrainCog, Upload, ShieldAlert, Undo2, FolderLock, Gauge, Activity,
+  BrainCog, Upload, ShieldAlert, Undo2, FolderLock, Gauge, Activity, Code2,
 } from 'lucide-react';
 
 /**
@@ -39,14 +39,12 @@ import {
  */
 export const DESTINATIONS = [
   // Core loop
-  // Console is the default landing view, and the design's headline is
-  // why: "the default view is the machine, not a transcript. Chat is
-  // one place you go." Home stays reachable by name for anyone who
-  // wants the briefing.
+  // Chat is the everyday entry. Detailed runtime views remain searchable.
   { to: '/console', label: 'Console', Icon: Gauge, desc: 'What the machine is doing right now', group: 'Core' },
   { to: '/jobs', label: 'Jobs', Icon: Activity, desc: 'Everything running, across all six sources', group: 'Core' },
-  { to: '/', label: 'Home', Icon: LayoutDashboard, desc: 'Overview, resume where you left off', group: 'Core' },
+  { to: '/home', label: 'Home', Icon: LayoutDashboard, desc: 'Overview, daily briefing and suggestions', group: 'Core' },
   { to: '/chat', label: 'Chat', Icon: MessageSquare, desc: 'Talk to the brain', group: 'Core' },
+  { to: '/coding', label: 'Coding', Icon: Code2, desc: 'Work on a project with a coding agent', group: 'Work' },
   { to: '/canvas', label: 'Canvas', Icon: SquareStack, desc: 'Gen-UI surfaces the brain drew', group: 'Core' },
 
   // Work
@@ -98,26 +96,10 @@ export const DESTINATIONS = [
  * `DESTINATIONS`; the guard test enforces that, because a Dock path
  * with no destination entry is a tile the palette cannot find.
  */
-// The eight the approved design pins, verbatim: "Console, Chat, Needs
-// you, Jobs, Skills, Memory, Devices, Settings. Chosen because you
-// return to them, not because they are important."
-//
-// The previous eight (Home, Chat, Flows, Devices, Apps, Canvas,
-// Oversight, Settings) were picked on importance, which is exactly the
-// selection rule the design rejects: Oversight matters enormously and
-// you visit it twice a year, so it belongs in the palette, while Needs
-// you blocks work every day and had no tile at all.
-//
-// Home is back, and first. Dropping it followed the design's selection
-// rule correctly and still got the result wrong: Home is the overview
-// the whole v2 UI was built around (briefing, skills, in-flight work,
-// suggestions, hardware, consciousness, channels, LLM, digital twin),
-// and with no tile the only route to it was the palette. A destination
-// people return to constantly, reachable only by remembering a keyboard
-// shortcut, is exactly what a dock is for.
+// Four everyday destinations, plus approval and settings utilities.
+// Every other destination remains one explicit More/search interaction away.
 export const DOCK_PATHS = [
-  '/', '/console', '/chat', '/approvals', '/jobs',
-  '/skills', '/memory', '/devices', '/settings',
+  '/chat', '/coding', '/memory', '/devices', '/approvals', '/settings',
 ];
 
 const byPath = new Map(DESTINATIONS.map((d) => [d.to, d]));

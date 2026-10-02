@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import time
+from types import SimpleNamespace
 from typing import Any, Optional, Callable, Awaitable, TYPE_CHECKING
 from uuid import uuid4
 
@@ -38,6 +39,7 @@ from models.protocol import (
 )
 from models.skill_manifest import SkillManifest
 from memory.execution_audit import claimed_by_caller, status_of as audit_status_of
+from memory.attachment_context import durable_chat_context, append_attachment_model_data
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
 from skills.availability import filter_unavailable_tools
@@ -104,6 +106,10 @@ def _smart_loops_enabled() -> bool:
     switch (mirrors the FERAL_GENERIC_HARDWARE_SKILLS pattern)."""
     val = os.environ.get("FERAL_SMART_LOOPS", "1")
     return str(val).strip().lower() not in ("0", "false", "no", "off", "")
+
+
+class SessionDeliveryLost(asyncio.CancelledError):
+    """A streaming turn cannot reach its owning transport; never replay it."""
 
 
 class Orchestrator:
@@ -1199,6 +1205,7 @@ class Orchestrator:
             memory_filter=memory_filter,
             query=query,
             plan_mode=plan_mode,
+            compact_tool_catalog=getattr(self.llm, "provider", "") in ("ollama", "lmstudio"),
         )
 
     def _load_identity(self) -> str:
@@ -3234,7 +3241,7 @@ class Orchestrator:
             # phone) the rest of a long message was unrecoverable once
             # compaction fired. ``episodes_fts`` indexes ``detail``
             # alongside ``summary``, so this is searchable on arrival.
-            detail=json.dumps({"text": text, "context": context or {}}),
+            detail=json.dumps({"text": text, "context": durable_chat_context(context)}),
         )
 
         # S1 live-path closure (non-stream parity). The forced-tool
@@ -3260,6 +3267,7 @@ class Orchestrator:
         # Multi-agent path
         if (
             not vision_fast_path
+            and not context_data.get("_attachment_model_data")
             and self._multi_agent_enabled
             and self._multi_agent
             and self.llm
@@ -3310,7 +3318,7 @@ class Orchestrator:
                         _model, _usage = self._pop_multi_agent_attribution(session_id)
                         await self._try_send_sdui(
                             session_id, response_text,
-                            model=_model, usage=_usage,
+                            model=_model, usage=_usage, require_delivery=True,
                         )
                         if self.memory:
                             # Full text, not [:300] — the phone's chat_response
@@ -3330,6 +3338,8 @@ class Orchestrator:
                         # chat_request handler) can carry it in chat_response
                         # instead of relying on the working-memory fallback.
                         return response_text
+                    await self._send_error(session_id, "The agent turn ended without a final answer; prior actions may have an unknown outcome.", code="multi_agent_no_output")
+                    return None
                 except MultiAgentProviderError as exc:
                     # The provider itself failed. Deliver an error
                     # frame and stop: the single-agent fallback below
@@ -3344,8 +3354,10 @@ class Orchestrator:
                     )
                     await self._send_error(session_id, str(exc))
                     return None
-                except Exception as e:
-                    logger.warning(f"Multi-agent failed, falling back to single-agent: {e}")
+                except Exception:
+                    logger.warning("Multi-agent turn interrupted; no command replay")
+                    await self._send_error(session_id, "The agent turn was interrupted; prior actions may have an unknown outcome.", code="multi_agent_interrupted")
+                    return None
 
         # Step 1: Semantic Tool Routing
         relevant_skills = await self._route_prompt(text, session_id=session_id)
@@ -3461,6 +3473,7 @@ class Orchestrator:
         user_content = self._attach_vision_context(
             user_content, context=context, session_id=session_id,
         )
+        user_content = append_attachment_model_data(user_content, context)
         user_message = {"role": "user", "content": user_content}
         self.conversation_history[session_id].append(user_message)
         turn["user_recorded"] = True
@@ -3984,7 +3997,7 @@ class Orchestrator:
             # phone) the rest of a long message was unrecoverable once
             # compaction fired. ``episodes_fts`` indexes ``detail``
             # alongside ``summary``, so this is searchable on arrival.
-            detail=json.dumps({"text": text, "context": context or {}}),
+            detail=json.dumps({"text": text, "context": durable_chat_context(context)}),
         )
 
         # S1 live-path closure: the timeline side-channel scheduling
@@ -4006,6 +4019,7 @@ class Orchestrator:
         vision_fast_path = context_data.get("channel") == "vision_ask"
         if (
             not vision_fast_path
+            and not context_data.get("_attachment_model_data")
             and self._multi_agent_enabled
             and self._multi_agent
             and self.llm
@@ -4019,7 +4033,7 @@ class Orchestrator:
                     _model, _usage = self._pop_multi_agent_attribution(session_id)
                     await self._try_send_sdui(
                         session_id, response_text,
-                        model=_model, usage=_usage,
+                        model=_model, usage=_usage, require_delivery=True,
                     )
                     if self.memory:
                         # Full text (no [:300]) — see the non-stream
@@ -4028,14 +4042,12 @@ class Orchestrator:
                             session_id,
                             {"role": "assistant", "text": response_text},
                         )
-                    if self.learner:
-                        # AUDIT-FIXES F-06, same as the non-stream branch.
-                        self._track_background_task(
-                            asyncio.ensure_future(
-                                self.learner.on_message(session_id, "user", text)
-                            )
-                        )
+                    # SDUI delivery bypasses _send_text's transcript note.
+                    # The shared finalizer owns persistence and learning.
+                    turn["reply_text"] = response_text
                     return response_text
+                await self._send_error(session_id, "The agent turn ended without a final answer; prior actions may have an unknown outcome.", code="multi_agent_no_output")
+                return None
             except MultiAgentProviderError as exc:
                 # Same as the non-stream branch: error frame, no
                 # single-agent retry against the failing provider.
@@ -4045,10 +4057,10 @@ class Orchestrator:
                 )
                 await self._send_error(session_id, str(exc))
                 return None
-            except Exception as e:
-                logger.warning(
-                    f"Multi-agent (stream) failed, falling back to single-agent: {e}"
-                )
+            except Exception:
+                logger.warning("Multi-agent streaming turn interrupted; no command replay")
+                await self._send_error(session_id, "The agent turn was interrupted; prior actions may have an unknown outcome.", code="multi_agent_interrupted")
+                return None
 
         relevant_skills = await self._route_prompt(text, session_id=session_id)
         relevant_skills = self._ensure_core_skills(relevant_skills)
@@ -4145,6 +4157,7 @@ class Orchestrator:
         user_content = self._attach_vision_context(
             user_content, context=context, session_id=session_id,
         )
+        user_content = append_attachment_model_data(user_content, context)
         self.conversation_history[session_id].append({"role": "user", "content": user_content})
         turn["user_recorded"] = True
         # Per-request view; see the matching comment in the non-stream
@@ -4218,7 +4231,7 @@ class Orchestrator:
                 if _stream_buf:
                     merged = "".join(_stream_buf)
                     _stream_buf = []
-                    await self.send(session_id, FeralMessage(
+                    await self._send_stream_frame(session_id, FeralMessage(
                         session_id=session_id, hop="brain", type="stream_delta",
                         payload=StreamDeltaPayload(
                             delta=merged, stream_id=stream_id, is_final=False,
@@ -4226,9 +4239,13 @@ class Orchestrator:
                     ))
                 _stream_last_flush = time.monotonic()
 
+            terminal_received = False
             try:
                 stream_model = getattr(self.llm, 'model_name', 'llm')
-                await self._emit_brain_event(session_id, "llm_call", {"model": stream_model})
+                await self._send_stream_frame(session_id, FeralMessage(
+                    session_id=session_id, hop="brain", type="brain_event",
+                    payload={"event": "llm_call", "model": stream_model},
+                ))
                 stream_kw: dict[str, Any] = {"call_site": "chat"}
                 if forced_tool:
                     stream_kw["force_tool"] = forced_tool
@@ -4265,7 +4282,7 @@ class Orchestrator:
                         accumulated_text += piece
                         if _stream_batch_ms <= 0:
                             # Legacy per-token path (debug).
-                            await self.send(session_id, FeralMessage(
+                            await self._send_stream_frame(session_id, FeralMessage(
                                 session_id=session_id, hop="brain", type="stream_delta",
                                 payload=StreamDeltaPayload(
                                     delta=piece, stream_id=stream_id, is_final=False,
@@ -4280,6 +4297,7 @@ class Orchestrator:
                         if tc:
                             tool_calls_received.append(tc)
                     elif delta["type"] == "done":
+                        terminal_received = True
                         # Flush any buffered prose before the terminal frame.
                         await _flush_stream_prose()
                         if streamed_text:
@@ -4292,7 +4310,7 @@ class Orchestrator:
                             # "answered by hop 4 of the failover chain".
                             # Absent keys stay absent rather than rendering
                             # a fabricated zero.
-                            await self.send(session_id, FeralMessage(
+                            await self._send_stream_frame(session_id, FeralMessage(
                                 session_id=session_id, hop="brain", type="stream_delta",
                                 payload=StreamDeltaPayload(
                                     delta="", stream_id=stream_id, is_final=True,
@@ -4301,6 +4319,7 @@ class Orchestrator:
                                 ).model_dump(),
                             ))
                     elif delta["type"] == "budget_exceeded":
+                        terminal_received = True
                         # WS8 — surface as a structured frame, not a
                         # stack trace. Lane 12 renders the banner.
                         await _flush_stream_prose()
@@ -4310,6 +4329,7 @@ class Orchestrator:
                         )
                         return
                     elif delta["type"] == "error":
+                        terminal_received = True
                         await _flush_stream_prose()
                         # Error frame, not "Stream error: ..." prose:
                         # ``_send_text`` records what it sends and
@@ -4325,6 +4345,12 @@ class Orchestrator:
                 # without an explicit `done` event.
                 await _flush_stream_prose()
             except Exception as e:
+                if streamed_text or tool_calls_received or terminal_received or turn.get("tool_dispatch_started"):
+                    # Once output/tool instructions/terminal state arrived,
+                    # restarting the same command can duplicate earlier-round
+                    # side effects. A dropped response is not a provider retry.
+                    logger.warning("Streaming turn interrupted after provider output; no command replay")
+                    raise SessionDeliveryLost("Streaming turn interrupted after output; outcome may be unknown") from None
                 logger.error(f"Streaming failed, falling back: {e}")
                 # The stream path already appended this turn's user
                 # row to ``conversation_history``. The non-stream body
@@ -4441,6 +4467,7 @@ class Orchestrator:
                         # own execution_log row, so it claims the call and
                         # the executor does not write a duplicate.
                         with claimed_by_caller():
+                            turn["tool_dispatch_started"] = True
                             result_data = await self._execute_tool_call_for_llm(
                                 session_id, tc, relevant_skills,
                             )
@@ -5896,6 +5923,7 @@ class Orchestrator:
     ) -> None:
         confirmation_id = str(uuid4())[:8]
         self._pending_confirmations[confirmation_id] = {
+            "session_id": session_id,
             "tool_call": {"name": tool_call["name"], "args": tool_call.get("args", {})},
             "skills": available_skills,
             "reason": reason,
@@ -6095,6 +6123,20 @@ class Orchestrator:
     # Response Helpers
     # ─────────────────────────────────────────────
 
+    async def _send_stream_frame(self, session_id: str, msg: FeralMessage):
+        try:
+            delivered = await self.send(session_id, msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.info("Streaming delivery ended; turn cancelled without replay")
+            raise SessionDeliveryLost("Streaming delivery is unavailable") from None
+        if delivered is False:
+            logger.info("Streaming frame undeliverable; turn cancelled without replay")
+            raise SessionDeliveryLost("Streaming delivery is unavailable")
+        # Legacy injected adapters return None; production state returns bool.
+        return delivered
+
     async def _send_text(
         self,
         session_id: str,
@@ -6166,9 +6208,19 @@ class Orchestrator:
         *,
         model: str = "",
         usage: dict | None = None,
+        require_delivery: bool = False,
     ):
+        delivery = self
+        if require_delivery:
+            # Scoped proxy: concurrent turns keep their own send callbacks;
+            # do not temporarily replace shared self.send across an await.
+            delivery = SimpleNamespace(
+                send=self._send_stream_frame,
+                voice_router=getattr(self, "voice_router", None),
+                _text_response_suppressed=getattr(self, "_text_response_suppressed", {}),
+            )
         await helper_try_send_sdui(
-            self, session_id=session_id, text=text, model=model, usage=usage,
+            delivery, session_id=session_id, text=text, model=model, usage=usage,
         )
 
     async def _try_genui_for_result(self, session_id: str, tool_call: dict, result_data: dict):

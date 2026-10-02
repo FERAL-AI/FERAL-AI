@@ -746,8 +746,10 @@ class AgentWorker:
 
         return WorkerResult(
             worker_id=self.worker_id,
-            text="Something went wrong and I couldn't generate a reply — please try that again.",
+            error="The model did not generate a reply. Please try again or choose another model.",
+            provider_error=True,
             tool_calls_made=tool_calls_made,
+            tool_results=tool_results,
             usage=w_usage,
             model=w_model,
         )

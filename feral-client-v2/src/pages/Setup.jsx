@@ -28,10 +28,10 @@ import { apiJson, apiFetch } from '../lib/api';
 
 const STEPS = [
   { id: 'welcome', label: 'Welcome' },
-  { id: 'llm', label: 'LLM provider' },
-  { id: 'audio', label: 'Voice (STT + TTS)' },
+  { id: 'llm', label: 'AI provider' },
+  { id: 'audio', label: 'Voice' },
   { id: 'identity', label: 'About you' },
-  { id: 'pair', label: 'Pair your phone' },
+  { id: 'pair', label: 'Connect devices' },
   { id: 'done', label: 'Ready' },
 ];
 
@@ -207,7 +207,7 @@ export default function Setup() {
 
   const saveLlm = useCallback(async () => {
     if (!pickedProvider || !pickedModel) {
-      setLlmError('Pick a provider + model before continuing.');
+      setLlmError('Choose an AI provider and model before continuing.');
       return false;
     }
     setLlmBusy(true);
@@ -434,8 +434,7 @@ export default function Setup() {
         )}
       >
         <p className="v2-p v2-p--muted">
-          Same steps as <code>feral setup</code> in your terminal. Everything you enter here writes to the same
-          <code> ~/.feral/settings.json</code> so the two wizards are interchangeable.
+          Make FERAL your own. Choose how it responds, add a few details about you, and connect your devices.
         </p>
       </Pane>
 
@@ -517,16 +516,17 @@ function WelcomeStep() {
   return (
     <Pane title="Welcome">
       <p className="v2-p">
-        This wizard sets up your local FERAL brain in four steps:
+        Let’s get your personal assistant ready:
       </p>
       <ol>
-        <li>Choose an LLM provider (cloud or local).</li>
-        <li>Pick STT + TTS providers for voice.</li>
-        <li>Tell the agent who you are.</li>
+        <li>Choose an AI provider that runs on this device or in the cloud.</li>
+        <li>Set up voice if you’d like to speak with FERAL.</li>
+        <li>Add a few details about yourself (optional).</li>
+        <li>Connect your devices, or keep FERAL on this Mac.</li>
         <li>Start chatting.</li>
       </ol>
       <p className="v2-p v2-p--muted">
-        Prefer terminal? Run <code>feral setup</code> on your shell — same endpoints, same config.
+        You can change these choices later in Settings.
       </p>
     </Pane>
   );
@@ -541,7 +541,7 @@ function LLMStep({
   return (
     <>
       <Pane
-        title="Providers"
+        title="AI provider"
         actions={(
           <button type="button" className="v2-btn v2-btn--ghost" onClick={onRefresh} aria-label="Refresh">
             <RefreshCw size={13} />
@@ -549,9 +549,8 @@ function LLMStep({
         )}
       >
         <p className="v2-p v2-p--muted">
-          Click any provider to select it. Local providers show <strong>ready</strong> when detected.
-          Cloud providers show <strong>needs API key</strong> until you enter one — you can still select
-          them and add the key on the right.
+          Choose how FERAL answers you. Local providers run on this device; cloud providers
+          connect to an online service. A cloud provider may need your API key.
         </p>
         <div className="v2-skills-grid" data-testid="v2-setup-providers">
           {providers.map((p) => {
@@ -572,7 +571,7 @@ function LLMStep({
                   <div style={{ fontWeight: 600 }}>{p.display_name}</div>
                 </header>
                 <div className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 6 }}>
-                  {p.supports_local ? `local · ${p.default_base_url}` : `env: ${p.credential_env_var || '—'}`}
+                  {p.supports_local ? 'Runs on this device' : 'Cloud service'}
                 </div>
                 <div className="v2-p v2-p--tiny" style={{ marginBottom: 8 }}>
                   {p.reachable ? 'ready' : p.configured ? 'unreachable' : 'needs API key'}
@@ -606,7 +605,7 @@ function LLMStep({
       {descriptor && descriptor.requires_api_key && !descriptor.reachable && (
         <Pane title={`API key for ${descriptor.display_name}`}>
           <p className="v2-p v2-p--muted">
-            Routed into the BlindVault under <code>{descriptor.credential_env_var}</code> — never written to settings.json in plaintext.
+            Enter your provider’s API key to connect FERAL to this service.
           </p>
           <input
             type="password"
@@ -624,14 +623,14 @@ function LLMStep({
         <Pane title="Model">
           <p className="v2-p v2-p--muted">
             {models.length > 0
-              ? `Found ${models.length} models (source: ${modelSource}). Pick one or type a newer name.`
-              : 'No models discovered yet — type the exact model id.'}
+              ? `Choose one of ${models.length} available models, or enter another model name.`
+              : 'No models found yet. Enter a model name from your provider.'}
           </p>
           <input
             type="text"
             value={pickedModel}
             onChange={(e) => onPickModel(e.target.value)}
-            placeholder="Model id"
+            placeholder="Model name"
             className="v2-input"
             data-testid="v2-setup-model"
             style={{ width: '100%', padding: 8, marginBottom: 8 }}
@@ -663,14 +662,14 @@ function LLMStep({
 function AudioStep({ providers, value, onChange, error }) {
   return (
     <>
-      <Pane title="Speech in / out">
+      <Pane title="Voice">
         <p className="v2-p v2-p--muted">
-          Cloud (OpenAI) needs the key you already entered. Local
-          (faster-whisper + piper) runs entirely offline once installed.
+          Choose how FERAL understands your speech and speaks back. Cloud voice needs
+          a provider API key. Local voice runs on this device once available.
         </p>
       </Pane>
 
-      <Pane title="Speech-to-text">
+      <Pane title="Speech recognition">
         <div className="v2-skills-grid">
           {(providers.stt || []).map((p) => {
             const picked = value.stt_provider === p.id;
@@ -690,7 +689,7 @@ function AudioStep({ providers, value, onChange, error }) {
                   <div style={{ fontWeight: 600 }}>{p.display_name}</div>
                 </header>
                 <div className="v2-p v2-p--tiny v2-p--muted">
-                  {p.is_local ? (p.available ? 'installed' : 'install via pip install feral-ai[stt]') : `env: ${p.credential_env_var}`}
+                  {p.is_local ? (p.available ? 'Available on this device' : 'Requires additional setup') : 'Cloud service'}
                 </div>
                 <button
                   type="button"
@@ -711,7 +710,7 @@ function AudioStep({ providers, value, onChange, error }) {
         </div>
         {value.stt_provider && (
           <div style={{ marginTop: 10 }}>
-            <label className="v2-p v2-p--muted">STT model</label>
+            <label className="v2-p v2-p--muted">Speech recognition model</label>
             <input
               type="text"
               value={value.stt_model || ''}
@@ -723,7 +722,7 @@ function AudioStep({ providers, value, onChange, error }) {
         )}
       </Pane>
 
-      <Pane title="Text-to-speech">
+      <Pane title="Spoken responses">
         <div className="v2-skills-grid">
           {(providers.tts || []).map((p) => {
             const picked = value.tts_provider === p.id;
@@ -762,7 +761,7 @@ function AudioStep({ providers, value, onChange, error }) {
         </div>
         {value.tts_provider && (
           <div style={{ marginTop: 10, display: 'grid', gap: 6, gridTemplateColumns: '1fr 1fr' }}>
-            <label className="v2-p v2-p--muted">TTS model</label>
+            <label className="v2-p v2-p--muted">Speech model</label>
             <label className="v2-p v2-p--muted">Voice</label>
             <input
               type="text"
@@ -792,7 +791,7 @@ function IdentityStep({ value, onChange }) {
   return (
     <Pane title="About you (optional)">
       <p className="v2-p v2-p--muted">
-        Short identity block the agent can reference. You can edit it anytime in Settings → Self.
+        Help FERAL get to know you. Share only what you’re comfortable with; you can edit this anytime in Settings.
       </p>
       <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
         <label className="v2-p v2-p--muted">Name</label>
@@ -978,10 +977,10 @@ function DoneStep({ saved, error, pairChoice }) {
       <div style={{ textAlign: 'center', padding: 20 }}>
         <CheckCircle2 size={48} style={{ color: saved ? 'var(--v2-state-live)' : 'var(--v2-text-tertiary)' }} />
         <h2 style={{ marginTop: 12 }}>
-          {saved ? 'Setup complete.' : 'Click Finish to write settings to disk.'}
+          {saved ? 'Setup complete.' : 'You’re ready. Select Finish to start chatting.'}
         </h2>
         <p className="v2-p v2-p--muted">
-          Start a chat at <code>/chat</code> or open the dashboard at <code>/</code>.
+          Your conversation with FERAL is next.
         </p>
         {pairChoice === 'localhost' && (
           <p className="v2-p v2-p--muted" style={{ marginTop: 10 }}>

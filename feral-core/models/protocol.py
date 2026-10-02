@@ -7,7 +7,7 @@ This is the single source of truth for all message types.
 """
 
 from __future__ import annotations
-from pydantic import AliasChoices, BaseModel, Field, field_validator
+from pydantic import AliasChoices, BaseModel, Field, field_validator, ValidationInfo
 from typing import Optional, Literal, Any
 from uuid import uuid4
 from time import time
@@ -962,11 +962,31 @@ class TranscriptPayload(BaseModel):
     seq: Optional[int] = Field(default=None, ge=0)
 
 
+class AppActionConfirmationPayload(BaseModel):
+    """Authoritative envelope metadata; never extracted from generated root."""
+    contract_version: Literal[1] = 1
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    session_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    app_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    surface_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    action_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    screen_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    scope: Literal["app_action"] = "app_action"
+    created_at: float
+    expires_at: float
+    handler: str = Field(..., max_length=64)
+    target: str = Field(default="", max_length=MAX_ID_LEN)
+    event: str = Field(default="tap", max_length=64)
+    value: Any = None
+    requires_confirmation: Literal[True] = True
+
+
 class SDUIPayload(BaseModel):
     """Server-Driven UI — the generated interface."""
     screen_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
     ttl_seconds: int = Field(default=300, ge=0)
     root: dict  # The SDUI tree (see genui/schema/)
+    confirmation: Optional[AppActionConfirmationPayload] = None
 
 
 class SDUIPatchPayload(BaseModel):
@@ -1220,6 +1240,50 @@ class NodeRegisterPayload(BaseModel):
     # brain is a passive consumer that re-emits whatever the node
     # published. Validation lives in the registry, not here.
     skills: list[dict] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    # Optional full registered-device schema, bounded and owner-checked before
+    # it reaches Mesh. Legacy flat-capability registrations remain unchanged.
+    device_manifest: Optional[dict] = None
+
+    @field_validator("device_manifest", mode="before")
+    @classmethod
+    def validate_device_manifest(cls, value, info: ValidationInfo):
+        if value is None:
+            return None
+        import json
+        from hardware.protocol import DeviceManifest, DeviceCapability
+        if type(value) is not dict:
+            raise ValueError("device_manifest must be a full object")
+        try:
+            wire = json.dumps(value, allow_nan=False, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError):
+            raise ValueError("device_manifest must be finite JSON") from None
+        if len(wire.encode("utf-8")) > 65536:
+            raise ValueError("device_manifest exceeds 64 KiB")
+        if set(value) - set(DeviceManifest.model_fields):
+            raise ValueError("unsupported device_manifest fields")
+        caps = value.get("capabilities", [])
+        if type(caps) is not list or len(caps) > 128:
+            raise ValueError("device_manifest capabilities exceed bounds")
+        seen = set()
+        for cap in caps:
+            if type(cap) is not dict or set(cap) - set(DeviceCapability.model_fields):
+                raise ValueError("unsupported capability object")
+            ident = cap.get("id")
+            if type(ident) is not str or not 1 <= len(ident) <= MAX_ID_LEN or ident in seen:
+                raise ValueError("invalid or duplicate capability identity")
+            seen.add(ident)
+            parameters = cap.get("parameters", [])
+            if type(parameters) is not list or len(parameters) > 64:
+                raise ValueError("capability parameter declarations exceed bounds")
+        manifest = DeviceManifest.model_validate(value, strict=True)
+        if manifest.device_id != info.data.get("node_id"):
+            raise ValueError("device_manifest owner must match node_id")
+        if manifest.connection_type != "websocket":
+            raise ValueError("node device_manifest must declare websocket transport")
+        normalized = manifest.model_dump()
+        if len(json.dumps(normalized, allow_nan=False, separators=(",", ":")).encode("utf-8")) > 65536:
+            raise ValueError("normalized device_manifest exceeds 64 KiB")
+        return normalized
 
 
 class ExecuteCommandPayload(BaseModel):
@@ -1383,6 +1447,8 @@ class PermissionRequestPayload(BaseModel):
     path: str = Field(..., min_length=1, max_length=MAX_PATH_LEN)
     operation: Literal["read", "write", "readwrite"] = "read"
     reason: str = ""
+    expires_at: float | None = Field(default=None, ge=0)
+    scope: Literal["persistent_workspace"] = "persistent_workspace"
 
 
 class PermissionResponsePayload(BaseModel):
@@ -1390,6 +1456,28 @@ class PermissionResponsePayload(BaseModel):
     request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
     granted: bool = False
     mode: str = Field(default="read", max_length=32)
+
+
+class PermissionDecisionPayload(BaseModel):
+    """Authoritative result for a session-owned folder permission request."""
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    status: Literal["granted", "denied", "expired", "error"]
+    path: str = Field(default="", max_length=MAX_PATH_LEN)
+    mode: str = Field(default="", max_length=32)
+    scope: str = Field(default="", max_length=64)
+
+
+class ConfirmationDecisionPayload(BaseModel):
+    """Session-owned app dispatch decision; never proof of tool completion."""
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    status: Literal["accepted", "rejected", "expired", "error"]
+    app_id: str = Field(default="", max_length=MAX_ID_LEN)
+    surface_id: str = Field(default="", max_length=MAX_ID_LEN)
+    action_id: str = Field(default="", max_length=MAX_ID_LEN)
+    screen_id: str = Field(default="", max_length=MAX_ID_LEN)
+    scope: Literal["app_action"] = "app_action"
+    dispatch_accepted: bool = False
+    tool_outcome_verified: Literal[False] = False
 
 
 # ─────────────────────────────────────────────
@@ -1656,6 +1744,7 @@ class HealthSeriesModel(BaseModel):
     precision: int = Field(default=0, ge=0, le=10)
     category: str = Field(default="vitals", max_length=64)
     source: str = Field(default="", max_length=64)
+    source_name: str = Field(default="", max_length=MAX_NAME_LEN)
     points: list[dict] = Field(default_factory=list)
 
 
@@ -1667,6 +1756,7 @@ class HealthUpdateDataModel(BaseModel):
     """
     sources: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     window_days: int = Field(default=0, ge=0)
+    source_grouping: Optional[Literal["metric_source_unit"]] = None
     note: str = ""
     readings: list[HealthReadingModel] = Field(default_factory=list)
     series: list[HealthSeriesModel] = Field(default_factory=list)
@@ -1783,6 +1873,8 @@ MESSAGE_TYPES = {
     "confirmation_response": ConfirmationResponsePayload,
     "permission_request": PermissionRequestPayload,
     "permission_response": PermissionResponsePayload,
+    "permission_decision": PermissionDecisionPayload,
+    "confirmation_decision": ConfirmationDecisionPayload,
 
     # Voice Pipeline
     "voice_config": VoiceConfigPayload,

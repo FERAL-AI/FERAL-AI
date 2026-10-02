@@ -9,6 +9,7 @@ connected platforms with graceful degradation.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -850,17 +851,39 @@ class HealthAggregator:
 
         if str(event_type) == HEALTH_EVENT_TREND:
             history = await self.get_health_history(days=days, include_ids=True)
+            from integrations.health_canonical import metric_spec
+
             series = []
             for name in history.get("metrics", []):
-                entries = history["series"].get(name) or []
-                built = build_series(
-                    name,
-                    [{"ts": e["ts"], "value": e["value"]} for e in entries],
-                    source=entries[0]["source"] if entries else "",
-                )
-                if built:
-                    series.append(built)
-            return build_health_update_frame(
+                spec = metric_spec(name)
+                if spec is None:
+                    continue
+                groups: dict[tuple[str, str], list[dict]] = {}
+                for entry in history["series"].get(name) or []:
+                    # The durable API emits canonical units. Do not silently
+                    # relabel a malformed unit, invent a sample timestamp, or
+                    # blend different devices under the first source id.
+                    stamp, value = entry.get("ts"), entry.get("value")
+                    if (isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+                            or not math.isfinite(stamp) or stamp <= 0
+                            or isinstance(value, bool) or not isinstance(value, (int, float))
+                            or not math.isfinite(value) or entry.get("unit") != spec.unit):
+                        continue
+                    source = str(entry.get("source") or "")
+                    groups.setdefault((source, spec.unit), []).append(entry)
+                for (source, _unit), entries in sorted(groups.items()):
+                    built = build_series(
+                        name,
+                        [{"ts": e["ts"], "value": e["value"]} for e in entries],
+                        source=source,
+                    )
+                    if built:
+                        # Retain source on each point too, so every receiver can
+                        # check the series envelope against point provenance.
+                        for point in built["points"]:
+                            point["source"] = source
+                        series.append(built)
+            frame = build_health_update_frame(
                 event_type=HEALTH_EVENT_TREND,
                 series=series,
                 # The frame matches on ids, not on what a person hears.
@@ -869,6 +892,8 @@ class HealthAggregator:
                 window_days=int(history.get("window_days") or days),
                 note=str(history.get("note") or ""),
             )
+            frame["payload"]["data"]["source_grouping"] = "metric_source_unit"
+            return frame
 
         summary = await self.get_health_summary(include_ids=True)
         now = time.time()
@@ -997,13 +1022,8 @@ class HealthAggregator:
                 summary["current_hr"] = int(hr)
                 if hr_source:
                     summary["current_hr_source"] = str(hr_source)
-                # Treat the fresh wearable HR as the authoritative
-                # "resting"-slot fallback when Whoop/Oura haven't
-                # contributed one. The UI label for ``resting_hr``
-                # is "current resting estimate" — a fresh PPG sample
-                # is a better answer than "null" for that slot.
-                if summary["resting_hr"] is None:
-                    summary["resting_hr"] = int(hr)
+                # A fresh reading does not establish that the wearer
+                # was resting. Only rest-qualified sources fill resting_hr.
                 if hr_source and str(hr_source) not in summary["sources"]:
                     summary["sources"].append(str(hr_source))
             spo2 = snap.get("spo2")
@@ -1027,10 +1047,8 @@ class HealthAggregator:
             trend = self._build_glasses_vitals_trend(days=7)
             if trend is not None:
                 summary["vitals_trend"] = trend
-                # Fill the resting-HR slot from the glasses week when
-                # neither a cloud source nor a fresh live sample did.
-                if summary["resting_hr"] is None and trend.get("resting_hr_estimate"):
-                    summary["resting_hr"] = trend["resting_hr_estimate"]
+                # Keep the daily-minimum heuristic in the explicit trend
+                # estimate; it is not a rest-qualified summary measurement.
                 for src in trend.get("source_ids", []):
                     if src and src not in summary["sources"]:
                         summary["sources"].append(src)

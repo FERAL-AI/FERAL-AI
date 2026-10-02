@@ -899,12 +899,17 @@ async def wiki_ingest_text(body: dict):
         return {"error": str(e)}
 
 
+from fastapi import Request as WikiRequest
+
+
 @router.post("/api/wiki/ingest/pdf")
 async def wiki_ingest_pdf(
+    request: WikiRequest,
     file: UploadFile | None = File(default=None),
     upload_id: str | None = Form(default=None),
     path: str | None = Form(default=None),
     compile_after: bool = Form(default=True),
+    expected_sha256: str | None = Form(default=None),
     body: dict | None = None,
 ):
     """Ingest a PDF into the memory wiki.
@@ -928,6 +933,9 @@ async def wiki_ingest_pdf(
         raise HTTPException(status_code=503, detail="Memory store not initialized")
 
     chosen_path: str | None = None
+    chosen_filename: str | None = None
+    trusted_hash: str | None = None
+    from memory.ingest import MAX_PDF_BYTES
 
     if file is not None and file.filename:
         # multipart upload — stream bytes into the upload store so we
@@ -936,17 +944,27 @@ async def wiki_ingest_pdf(
         if store is None:
             raise HTTPException(status_code=503, detail="Upload store not initialised")
         try:
-            data = await file.read()
+            data = await file.read(MAX_PDF_BYTES + 1)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"failed to read upload: {exc}") from exc
         if not data:
             raise HTTPException(status_code=400, detail="empty file")
+        if len(data) > MAX_PDF_BYTES:
+            raise HTTPException(status_code=413, detail="PDF exceeds the byte limit")
+        if not file.filename.lower().endswith(".pdf") or not data.startswith(b"%PDF-"):
+            raise HTTPException(status_code=400, detail="A PDF file is required")
+        if expected_sha256 is not None:
+            import hashlib
+            if expected_sha256 != hashlib.sha256(data).hexdigest():
+                raise HTTPException(status_code=409, detail="Reviewed PDF hash no longer matches")
         record = store.store(
             data=data,
             filename=file.filename,
             content_type=file.content_type or "application/pdf",
         )
         chosen_path = record.path
+        chosen_filename = file.filename
+        trusted_hash = record.sha256
 
     elif upload_id:
         store = getattr(state, "uploads", None)
@@ -956,12 +974,28 @@ async def wiki_ingest_pdf(
         if record is None:
             raise HTTPException(status_code=404, detail=f"unknown upload_id: {upload_id}")
         chosen_path = record.path
+        chosen_filename = record.filename
+        trusted_hash = record.sha256
+        if expected_sha256 is not None and expected_sha256 != trusted_hash:
+            raise HTTPException(status_code=409, detail="Reviewed upload hash no longer matches")
 
     elif path:
         chosen_path = path
 
     else:
         # Last resort: JSON body (legacy)
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() == "application/json":
+            try:
+                body = await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail="Malformed PDF request")
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="Malformed PDF request")
+            expected_sha256 = body.get("expected_sha256")
+            if "compile_after" in body:
+                if not isinstance(body["compile_after"], bool):
+                    raise HTTPException(status_code=400, detail="compile_after must be a boolean")
+                compile_after = body["compile_after"]
         body = body or {}
         legacy_path = (body or {}).get("path", "")
         if legacy_path:
@@ -981,15 +1015,20 @@ async def wiki_ingest_pdf(
         return await ingestor.ingest_pdf(
             path=chosen_path,
             compile_after=bool(compile_after),
+            expected_sha256=trusted_hash or expected_sha256,
+            filename=chosen_filename,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        # Partial notes can already exist if a store write failed. Never echo private paths/content.
+        raise HTTPException(status_code=400, detail="PDF import failed or exceeded its bounds. Notes may already have been stored; inspect memory before retrying.") from exc
 
 
 @router.post("/api/wiki/ingest/repo")
 async def wiki_ingest_repo(body: dict):
     if not state.memory:
         return {"error": "Memory store not initialized"}
+    if "compile_after" in body and not isinstance(body["compile_after"], bool):
+        return {"error": "compile_after must be a boolean"}
     raw_extensions = (body or {}).get("extensions_filter", [])
     if isinstance(raw_extensions, str):
         ext_list = [e.strip() for e in raw_extensions.split(",") if e.strip()]
@@ -1004,10 +1043,11 @@ async def wiki_ingest_repo(body: dict):
             path=(body or {}).get("path", ""),
             extensions_filter=ext_list or None,
             compile_after=bool((body or {}).get("compile_after", True)),
-            max_files=int((body or {}).get("max_files", 300)),
+            max_files=(body or {}).get("max_files", 100),
+            expected_files=(body or {}).get("expected_files"),
         )
     except Exception as e:
-        return {"error": str(e)}
+        return {"error": "Folder import failed or exceeded its bounds. Notes may already have been stored; inspect memory before retrying."}
 
 
 # ── Recent memory digest (phone-readable) ───────────────────────────

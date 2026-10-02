@@ -52,6 +52,7 @@ from config.runtime import (
     brain_port,
     brain_public_base_url,
     record_runtime_endpoint,
+    record_bound_host,
 )
 from gateway.protocol import GatewaySession
 
@@ -99,6 +100,7 @@ from api.routes.ambient import router as ambient_router
 from api.routes.auth import router as auth_router
 from api.routes.personas import router as personas_router
 from api.routes.jobs import router as jobs_router
+from api.routes.coding import router as coding_router
 from api.routes.consciousness import router as consciousness_router
 from api.routes.about_me import router as about_me_router
 from api.routes.ideas import router as ideas_router
@@ -134,6 +136,19 @@ app = FastAPI(
     description="FERAL — Open AI agent with computer use, GenUI, voice, and hardware control",
     version=__version__,
 )
+
+from security.vault_coordinator import VaultLockedRefusal
+
+
+@app.exception_handler(VaultLockedRefusal)
+async def vault_locked_response(request: Request, exc: VaultLockedRefusal):
+    # A typed readiness refusal is actionable; its originating exception
+    # may contain private context, so never serialize/log its contents.
+    return JSONResponse(status_code=503, content={"detail": {
+        "code": "vault_locked",
+        "message": "Unlock the vault explicitly before using stored credentials.",
+    }})
+
 
 from observability.metrics import init_metrics
 init_metrics("feral")
@@ -308,8 +323,7 @@ def _load_or_generate_api_key() -> str:
         print("=" * 70)
         print("FERAL: Generated new API key on first boot.")
         print(f"Location: {key_path}")
-        print(f"Key: {key}")
-        print("Use this key to authenticate clients (iOS, Android, browser ext).")
+        print("Read the saved key locally to authenticate clients; its value is not logged.")
         print("Set FERAL_API_KEY env var to override.")
         print("=" * 70)
     return key
@@ -833,8 +847,51 @@ async def health_page_or_json(request: Request, response: Response):
     if doc is not None:
         return doc
     response.headers["Vary"] = _NEGOTIATED
+    instance = os.environ.get("FERAL_DESKTOP_INSTANCE_ID")
+    if instance:
+        # Local ownership marker for the native host, not an auth credential.
+        response.headers["X-Feral-Desktop-Instance"] = instance
     return await _dashboard_health_json()
 
+
+async def _start_reviewed_agent_hooks(brain_state, checkpoint=None):
+    """Memory/cron/ambient hooks shared by startup and reviewed continuation.
+
+    Ownership markers prevent duplicate dispatch; failed hooks are not marked
+    complete, and the continuation controller requires restart on partial work.
+    """
+    def check():
+        if checkpoint is not None: checkpoint()
+    check()
+    memory = brain_state.memory
+    if memory is None:
+        return
+    if getattr(brain_state, "_agent_memory_hook_owner", None) is not memory:
+        memory.start_background_tasks()
+        brain_state._agent_memory_hook_owner = memory
+    check()
+    cron = brain_state.cron_service
+    if cron is not None and getattr(brain_state, "_agent_cron_hook_owner", None) is not cron:
+        cron.start(execute_routine_job)
+        brain_state._agent_cron_hook_owner = cron
+    check()
+    if not getattr(brain_state, "_agent_ambient_resume_started", False):
+        brain_state.register_background_task(asyncio.ensure_future(_resume_ambient_backlog()))
+        brain_state._agent_ambient_resume_started = True
+    check()
+    brain_state._native_agent_hooks_complete = True
+
+
+from api.routes.agent_bootstrap import create_agent_bootstrap_router
+from security.agent_bootstrap_lifecycle import create_agent_bootstrap_controller
+from security.agent_bootstrap_fence import AgentBootstrapFence
+
+if state.vault_coordinator is not None:
+    # Deferred hook reference resolves only when explicitly dispatched after
+    # module initialization, never during passive construction.
+    state.agent_bootstrap_controller = create_agent_bootstrap_controller(state, _start_reviewed_agent_hooks)
+app.add_middleware(AgentBootstrapFence, state=state)
+app.include_router(create_agent_bootstrap_router(lambda: state.agent_bootstrap_controller))
 
 app.include_router(dashboard_router)
 app.include_router(config_router)
@@ -899,6 +956,7 @@ app.include_router(ambient_router)
 app.include_router(auth_router)
 app.include_router(personas_router)
 app.include_router(jobs_router)
+app.include_router(coding_router)
 app.include_router(consciousness_router)
 app.include_router(about_me_router)
 app.include_router(ideas_router)
@@ -1688,15 +1746,7 @@ async def startup():
         logger.warning("migration pass failed; continuing boot", exc_info=True)
 
     await state.init()
-    if state.memory:
-        state.memory.start_background_tasks()
-    if state.cron_service:
-        state.cron_service.start(execute_routine_job)
-
-    # Ambient transcripts that were stored and acked but never
-    # summarized, because the brain went down mid-processing. The phone
-    # discarded them on the ack, so our copy is the only one left.
-    state.register_background_task(asyncio.ensure_future(_resume_ambient_backlog()))
+    await _start_reviewed_agent_hooks(state)
 
     async def _state_heartbeat():
         """Push dashboard/system state to all WS clients every 10s."""
@@ -1798,6 +1848,12 @@ async def shutdown_event():
       5. Snapshot ConsciousnessStore last, while SQLite pools are alive.
     """
     logger.info("FERAL Brain shutting down gracefully...")
+    controller = getattr(state, "agent_bootstrap_controller", None)
+    operation = getattr(controller, "_operation", None)
+    if operation is not None and not operation.done():
+        controller.invalidate()
+        await asyncio.gather(operation, return_exceptions=True)
+
 
     # (a) Cancel every registered background task (heartbeat, catalog
     # refresher, ideas brief, screen loop bootstrap, demo, proactive
@@ -1890,6 +1946,15 @@ async def shutdown_event():
         state.snapshot_primary_thread(force=True)
     except Exception as exc:
         logger.warning("Shutdown: primary session snapshot failed: %s", exc)
+
+    # Drain reviewed hardware dispatch before its ledger/storage disappears.
+    mesh = getattr(state, "hardware_mesh", None)
+    close_reviewed = getattr(mesh, "close_reviewed", None)
+    if callable(close_reviewed):
+        try:
+            await close_reviewed()
+        except Exception:
+            logger.warning("Shutdown: reviewed hardware transport could not fully drain")
 
     # (a.3) Close the MemoryStore so the embed queue's background
     # coroutine stops before the event loop starts tearing down.
@@ -2051,6 +2116,15 @@ async def _prepare_chat_turn_context(
     except Exception as exc:
         logger.debug("PromptRefiner skipped: %s", exc)
 
+    if attachments:
+        from memory.attachment_context import attachment_model_context
+        ctx["_attachment_model_data"] = attachment_model_context(
+            getattr(state, "uploads", None), attachments,
+            authorized=ctx.get("attachment_content_authorized") is True,
+        )
+    else:
+        ctx.pop("_attachment_model_data", None)
+
     # Same deterministic routing the HUP phone path uses, so a sentence
     # naming a device resolves to the same surface on both. See the
     # longer note at the phone_surface call site.
@@ -2121,10 +2195,12 @@ def _build_chat_turn_runner(
                 await ws.send_json(FeralMessage(
                     session_id=session_id,
                     hop="brain",
-                    type="text_response",
-                    payload=TextResponsePayload(
-                        text=f"Sorry, something went wrong: {turn_err}",
-                    ).model_dump(),
+                    type="error",
+                    payload={
+                        "code": "chat_turn_failed",
+                        "message": "The chat turn failed. Please try again.",
+                        "recoverable": True,
+                    },
                 ).model_dump())
             except Exception:
                 pass
@@ -2205,7 +2281,8 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     chat_tasks: set[asyncio.Task] = set()
 
     def _spawn_chat_task(coro: "Awaitable[None]") -> asyncio.Task:
-        task = asyncio.create_task(coro)
+        from security.agent_turn_lease import spawn_agent_turn
+        task = spawn_agent_turn(state, coro)
         chat_tasks.add(task)
 
         def _on_done(t: asyncio.Task) -> None:
@@ -2363,6 +2440,19 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     ).model_dump())
                     logger.info(f"Web client voice mode: {mode} (provider: {provider})")
 
+                elif msg.type == "voice_interrupt":
+                    from bridges.client_voice_control import interrupt_client_voice
+
+                    if state.sessions.get(session_id) is not ws:
+                        result = {"status": "superseded", "cancel_requested": False,
+                                  "session_preserved": True}
+                    else:
+                        result = await interrupt_client_voice(state, session_id)
+                    await ws.send_json(FeralMessage(
+                        session_id=session_id, hop="brain", type="voice_interrupt_ack",
+                        payload=result,
+                    ).model_dump())
+
                 elif msg.type == "audio_chunk" and isinstance(payload, AudioChunkPayload):
                     if state.gemini_proxy and state.gemini_proxy.has_session(session_id):
                         await state.gemini_proxy.relay_audio(session_id, payload.data_b64)
@@ -2377,14 +2467,14 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
 
                 elif msg.type == "ui_event" and isinstance(payload, UIEventPayload):
-                    await state.orchestrator.handle_ui_event(
+                    await _spawn_chat_task(state.orchestrator.handle_ui_event(
                         session_id=session_id,
                         action_id=payload.action_id,
                         event=payload.event,
                         value=payload.value,
                         app_id=payload.app_id,
                         screen_id=payload.screen_id,
-                    )
+                    ))
 
                 elif msg.type == "device_register" and isinstance(payload, DeviceRegisterPayload):
                     state.devices[payload.device_id] = payload.model_dump()
@@ -2995,6 +3085,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         "node_type": payload.node_type,
                         "platform": payload.platform,
                         "capabilities": payload.capabilities,
+                        "device_manifest": payload.device_manifest,
                     })
 
                 session_token = str(__import__("uuid").uuid4())
@@ -3034,7 +3125,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 result_payload = raw.get("payload", {})
                 request_id = result_payload.get("request_id", "")
                 if state.hardware_mesh and request_id:
-                    state.hardware_mesh.resolve_invoke(request_id, result_payload)
+                    state.hardware_mesh.resolve_invoke(request_id, result_payload, connection=ws, node_id=node_id)
                 if state.orchestrator:
                     await state.orchestrator.handle_daemon_result(
                         node_id=node_id,
@@ -3194,7 +3285,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 result_payload = raw.get("payload", {})
                 action_id = result_payload.get("action_id", "") or result_payload.get("request_id", "")
                 if state.hardware_mesh and action_id:
-                    state.hardware_mesh.resolve_invoke(action_id, result_payload)
+                    state.hardware_mesh.resolve_invoke(action_id, result_payload, connection=ws, node_id=node_id)
                 if state.orchestrator:
                     await state.orchestrator.handle_daemon_result(
                         node_id=node_id,
@@ -7078,4 +7169,6 @@ if __name__ == "__main__":
     # So a CLI pointed at this FERAL_HOME reaches THIS brain and not
     # whatever is on 9090. See config.runtime.record_runtime_endpoint.
     record_runtime_endpoint(_port)
-    uvicorn.run(app, host=brain_bind_host(), port=_port, log_level="info")
+    _host = brain_bind_host()
+    record_bound_host(_host)
+    uvicorn.run(app, host=_host, port=_port, log_level="info")

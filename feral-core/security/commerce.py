@@ -17,8 +17,8 @@ Three rules this file exists to hold:
 
 The amount is NOT known when a purchase tool is first called:
 ``web_actions.make_purchase(url, item_description)`` takes no price, and
-discovers the total by scraping the page. So the cap is evaluated where
-the amount first exists, which is on the tool's own result, and any
+discovers an unverified observed price by scraping the page. So the cap
+is evaluated where the amount first exists, on the tool's own result, and any
 future completion path must call :func:`evaluate` again with the amount
 it is about to charge.
 """
@@ -164,6 +164,10 @@ def merchant_from_url(url: str) -> str:
     return host[4:] if host.startswith("www.") else host
 
 
+class PurchaseAuditUnavailable(RuntimeError):
+    """The purchase ledger could not persist or verify spending."""
+
+
 class PurchaseAudit:
     """Append-only record of every purchase the brain evaluated."""
 
@@ -204,8 +208,11 @@ class PurchaseAudit:
         self, *, outcome: str, merchant: str = "", money: Optional[Money] = None,
         tool: str = "", session_id: str = "", approval_id: str = "", reason: str = "",
     ) -> None:
-        """Append one row. Never raises: losing the trail must not also
-        lose the refusal that the caller is in the middle of returning."""
+        """Append one row, or raise if the ledger did not persist it.
+
+        Callers must not offer or report a purchase when its audit evidence
+        could not be saved. Healthy calls retain their existing None return.
+        """
         try:
             conn = self._conn()
             try:
@@ -219,8 +226,9 @@ class PurchaseAudit:
                 conn.commit()
             finally:
                 conn.close()
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:
             logger.warning("purchase audit write failed: %s", exc)
+            raise PurchaseAuditUnavailable("purchase audit could not be saved") from exc
 
     def spent_today(self, currency: str, *, now: Optional[float] = None) -> Decimal:
         """Money actually charged today, in ``currency``.
@@ -240,9 +248,9 @@ class PurchaseAudit:
                 ).fetchall()
             finally:
                 conn.close()
-        except Exception as exc:  # pragma: no cover - defensive
+        except Exception as exc:
             logger.warning("purchase audit read failed: %s", exc)
-            return total
+            raise PurchaseAuditUnavailable("purchase spending could not be verified") from exc
         for row in rows:
             try:
                 total += Decimal(str(row["amount"] or "0"))
@@ -280,7 +288,11 @@ def evaluate(
         return Verdict(False, f"{money.amount} {money.currency} is over your "
                               f"{caps.per_transaction_max} {caps.currency} per-purchase limit",
                        "over_per_transaction", money)
-    spent = audit.spent_today(caps.currency) if audit else Decimal("0")
+    try:
+        spent = audit.spent_today(caps.currency) if audit else Decimal("0")
+    except PurchaseAuditUnavailable:
+        return Verdict(False, "the purchase ledger is unavailable, so today's spending "
+                              "cannot be verified", "audit_unavailable", money)
     if spent + money.amount > caps.per_day_max:
         return Verdict(False, f"this would take today's spending to "
                               f"{spent + money.amount} {caps.currency}, over your "

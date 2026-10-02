@@ -305,6 +305,50 @@ def _keyring_get_password(service: str, username: str) -> Optional[str]:
     return result
 
 
+def _macos_default_keychain_state() -> tuple[int, bool]:
+    """Read the default keychain reference/path without unlock or create UI.
+
+    CopyDefault can return a reference whose file is absent. Checking its
+    path avoids the creation/reset dialog in AddGenericPassword's fallback.
+    No password or keychain content is read; no OS preference is changed.
+    """
+    import ctypes
+
+    security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
+    core = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    copy_default = security.SecKeychainCopyDefault
+    copy_default.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
+    copy_default.restype = ctypes.c_int32
+    get_path = security.SecKeychainGetPath
+    get_path.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_char_p]
+    get_path.restype = ctypes.c_int32
+    release = core.CFRelease
+    release.argtypes = [ctypes.c_void_p]
+    release.restype = None
+    reference = ctypes.c_void_p()
+    status = int(copy_default(ctypes.byref(reference)))
+    if not reference.value:
+        return status, False
+    try:
+        if status:
+            return status, False
+        path = ctypes.create_string_buffer(4096)
+        length = ctypes.c_uint32(len(path))
+        status = int(get_path(reference, ctypes.byref(length), path))
+        return status, status == 0 and bool(path.value) and Path(os.fsdecode(path.value)).is_file()
+    finally:
+        release(reference)
+
+
+def _uses_macos_keychain(backend: object) -> bool:
+    modules = {cls.__module__ for cls in type(backend).__mro__}
+    if "keyring.backends.macOS" in modules:
+        return True
+    if "keyring.backends.chainer" in modules:
+        return any(_uses_macos_keychain(item) for item in backend.backends)
+    return False
+
+
 def _keyring_set_password(service: str, username: str, password: str) -> None:
     """Persist a password in the OS keychain.
 
@@ -313,6 +357,22 @@ def _keyring_set_password(service: str, username: str, password: str) -> None:
     instead of silently losing the master key.
     """
     import keyring
+    import sys
+
+    if sys.platform == "darwin" and _uses_macos_keychain(keyring.get_keyring()):
+        try:
+            status, exists = _macos_default_keychain_state()
+        except Exception as exc:
+            raise VaultKeyUnavailableError(
+                "Could not verify the macOS default keychain before storing the vault key. "
+                "No keychain was created or reset. Check Keychain Access and retry."
+            ) from exc
+        if status != 0 or not exists:
+            raise VaultKeyUnavailableError(
+                f"The macOS default keychain is unavailable (OSStatus {status}). "
+                "FERAL will not create or reset your keychain automatically. "
+                "Check the existing keychain in Keychain Access and retry."
+            )
     keyring.set_password(service, username, password)
 
 
@@ -359,6 +419,11 @@ class BlindVault:
     DEFAULT_NAMESPACE = "credentials"
 
     def __init__(self, vault_path: Optional[str] = None):
+        if native_vault_deferred() and not getattr(type(self), "_explicit_deferred_unlock", False):
+            # Never let legacy constructors prompt or migrate during native
+            # boot. Explicit coordinator factories alone open ciphertext.
+            from security.vault_coordinator import VaultLockedRefusal
+            raise VaultLockedRefusal()
         home = _feral_home()
 
         # The vault has TWO disk artefacts:
@@ -977,6 +1042,18 @@ class BlindVault:
 # ─────────────────────────────────────────────────────────────────────
 
 
+_deferred_coordinator = None
+
+
+def native_vault_deferred() -> bool:
+    return os.environ.get("FERAL_NATIVE_DEFER_VAULT") == "1"
+
+
+def register_deferred_vault_coordinator(coordinator) -> None:
+    global _deferred_coordinator
+    _deferred_coordinator = coordinator
+
+
 _vault: Optional[BlindVault] = None
 
 
@@ -990,6 +1067,14 @@ def get_vault(vault_path: Optional[str] = None) -> BlindVault:
         assert v.get_credential("test") == "value"
     """
     global _vault
+    if native_vault_deferred():
+        from security.vault_coordinator import VaultLockedRefusal
+        if _deferred_coordinator is None:
+            raise VaultLockedRefusal()
+        opened = _deferred_coordinator.require_ready()
+        if vault_path is not None and os.path.abspath(vault_path) != os.path.abspath(str(opened._legacy_json_path)):
+            raise VaultLockedRefusal()
+        return opened
     if _vault is None or vault_path is not None:
         _vault = BlindVault(vault_path=vault_path)
     return _vault

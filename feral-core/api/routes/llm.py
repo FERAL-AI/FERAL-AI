@@ -273,6 +273,15 @@ class ConfigureRequest(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+def _require_deferred_key_write_ready():
+    if getattr(state, "_native_vault_deferred", False) is True:
+        from security.vault_coordinator import VaultLockedRefusal
+        try:
+            state.vault_coordinator.require_ready()
+        except VaultLockedRefusal as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)}) from None
+
+
 def _persist_key(env_var: str, api_key: str) -> dict:
     """Write *api_key* through every persistence layer we have.
 
@@ -280,6 +289,7 @@ def _persist_key(env_var: str, api_key: str) -> dict:
     caller (REST endpoint) can surface honest success/failure state
     to the UI instead of silently swallowing errors.
     """
+    _require_deferred_key_write_ready()
     warnings: list[str] = []
     vault_ok = False
     creds_ok = False
@@ -329,6 +339,8 @@ async def configure_llm_provider(provider_id: str, req: ConfigureRequest):
     ``settings.json`` itself never stores the plaintext key — only the
     currently-selected provider + model + base_url.
     """
+    if req.api_key:
+        _require_deferred_key_write_ready()
     catalog = _require_catalog()
     if catalog.get_descriptor(provider_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
@@ -401,6 +413,7 @@ async def get_llm_config():
     """
     if state.config is None:
         raise HTTPException(status_code=503, detail="ConfigLoader not initialised")
+
     provider = state.config.get("llm", "provider", "") or ""
     model = state.config.get("llm", "model", "") or ""
     base_url = state.config.get("llm", "base_url", "") or ""
@@ -517,6 +530,7 @@ class ProviderKeyRequest(BaseModel):
 
 
 def _require_vault():
+    _require_deferred_key_write_ready()
     if state.vault is None:
         raise HTTPException(status_code=503, detail="vault not initialised")
     return state.vault
@@ -787,6 +801,8 @@ async def set_llm_config(req: LLMConfigRequest):
     switch" button hits. After this call completes successfully the
     next chat turn uses the new provider — no reboot needed.
     """
+    if req.api_key:
+        _require_deferred_key_write_ready()
     catalog = _require_catalog()
     resolved = catalog.resolve_alias(req.provider) or req.provider
     if catalog.get_descriptor(resolved) is None:
@@ -796,6 +812,17 @@ async def set_llm_config(req: LLMConfigRequest):
         )
     if state.config is None:
         raise HTTPException(status_code=503, detail="ConfigLoader not initialised")
+
+    previous_provider = state.config.get("llm", "provider", "") or ""
+    previous_resolved = catalog.resolve_alias(previous_provider) or previous_provider
+    # A model-only save on the current provider must keep its custom
+    # endpoint in both persisted and live state. When changing providers,
+    # an omitted URL selects that provider's default, not the old endpoint.
+    effective_base_url = (
+        (state.config.get("llm", "base_url", "") or "")
+        if req.base_url is None and previous_resolved == resolved
+        else (req.base_url or "")
+    )
 
     # Gate catalog-only descriptors (e.g. ``bedrock``, ``together``,
     # ``fireworks``) that ship without a runtime adapter in this build.
@@ -807,7 +834,7 @@ async def set_llm_config(req: LLMConfigRequest):
     if (
         not is_supported_runtime_provider(resolved)
         and resolved not in ("local", "hybrid")
-        and not req.base_url
+        and not effective_base_url
     ):
         raise HTTPException(
             status_code=400,
@@ -821,11 +848,9 @@ async def set_llm_config(req: LLMConfigRequest):
     # Auto-prepend the previous primary as a fallback so failover works
     # by default. User can still explicitly pass `fallback_providers`
     # (including []) to override this.
-    previous_provider = state.config.get("llm", "provider", "") or ""
     state.config.update_settings("llm", "provider", resolved)
     state.config.update_settings("llm", "model", req.model)
-    if req.base_url is not None:
-        state.config.update_settings("llm", "base_url", req.base_url)
+    state.config.update_settings("llm", "base_url", effective_base_url)
     if req.fallback_providers is not None:
         fallbacks = list(req.fallback_providers)
     else:
@@ -840,7 +865,7 @@ async def set_llm_config(req: LLMConfigRequest):
     persisted: dict = {"ok": True, "warnings": []}
     if req.api_key:
         persisted = _persist_key(env_var, req.api_key)
-        catalog.configure(resolved, api_key=req.api_key, base_url=req.base_url)
+        catalog.configure(resolved, api_key=req.api_key, base_url=effective_base_url or None)
 
     state.config.update_settings("meta", "setup_complete", True)
 
@@ -855,7 +880,7 @@ async def set_llm_config(req: LLMConfigRequest):
                 provider=resolved,
                 model=req.model,
                 api_key=req.api_key or "",
-                base_url=req.base_url or "",
+                base_url=effective_base_url,
             )
             # Push the new fallback list into the running LLM so
             # chat_with_failover picks it up on the very next turn.

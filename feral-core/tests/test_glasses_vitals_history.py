@@ -127,10 +127,14 @@ async def test_health_summary_falls_back_to_glasses_trend(monkeypatch):
     assert vt["hr_sample_count"] == 5
     assert vt["spo2_avg"] == 98
     assert vt["resting_hr_estimate"] is not None
-    # The "no data" symptom is gone: the resting-HR slot is filled
-    # from the glasses week.
-    assert data["resting_hr"] == vt["resting_hr_estimate"]
-    assert data["resting_hr"] is not None
+    # The historical minimum remains an explicit estimate, not a
+    # qualified resting measurement in the summary or outbound frame.
+    assert data["resting_hr"] is None
+    frame = await agg.build_health_update(node_id="phone-test")
+    assert all(
+        r["metric"] != "resting_hr"
+        for r in frame["payload"]["data"]["readings"]
+    )
     assert "Theora glasses" in data["sources"]
     assert "glasses" in vt["note"] or "jw_health_glasses" in vt["note"]
 

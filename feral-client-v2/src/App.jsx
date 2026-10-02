@@ -39,6 +39,7 @@ import Checkpoints from './pages/Checkpoints';
 import Grants from './pages/Grants';
 import Console from './pages/Console';
 import Jobs from './pages/Jobs';
+import Coding from './pages/Coding';
 
 export default function App() {
   return (
@@ -64,8 +65,10 @@ export default function App() {
         <Route path="settings" element={<SettingsPanel />} />
       </Route>
       <Route element={<Shell />}>
-        <Route path="/" element={<Home />} />
+        <Route path="/" element={<Navigate to="/chat" replace />} />
+        <Route path="/home" element={<Home />} />
         <Route path="/chat" element={<Chat />} />
+        <Route path="/coding" element={<Coding />} />
         <Route path="/forge" element={<Forge />} />
         <Route path="/skills" element={<Skills />} />
         <Route path="/memory" element={<Memory />} />

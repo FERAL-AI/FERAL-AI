@@ -19,7 +19,7 @@ const ACTIVE_CONVERSATION_KEY = 'feral_v2_active_conversation';
 const DEFAULT_GREETING = {
   id: 'hello',
   role: 'assistant',
-  text: 'FERAL v2 is listening. What do you need?',
+  text: 'How can I help?',
 };
 
 function newMessageId() {
@@ -528,7 +528,14 @@ function ShellFrame() {
   // The design's rail collapses, and says so in its own instructions:
   // "Press B to collapse the rail." It is the only way to give the page
   // the full width on a laptop, and there was no control for it at all.
-  const [railOpen, setRailOpen] = useState(true);
+  const [railOpen, setRailOpen] = useState(() => {
+    try { return localStorage.getItem('feral_v2_activity_open') === 'true'; }
+    catch { return false; }
+  });
+  useEffect(() => {
+    try { localStorage.setItem('feral_v2_activity_open', String(railOpen)); }
+    catch { /* Keep the preference for this session when storage is unavailable. */ }
+  }, [railOpen]);
   useEffect(() => {
     const onKey = (e) => {
       if (e.key !== 'b' && e.key !== 'B') return;
@@ -548,6 +555,7 @@ function ShellFrame() {
     <ChatThreadContext.Provider value={chatThread}>
       <PaletteProvider value={palette}>
         <div className={`v2-shell${voice.active ? ' is-voice-mode' : ''}`}>
+          <a className="v2-skip-link" href="#main-content">Skip to content</a>
           <Ambient />
           {/* The approved design leads with the machine, not a page:
               vitals across the top, the work rail down the left, the
@@ -568,7 +576,7 @@ function ShellFrame() {
           <RuntimeNotice />
           <div className={`v2-shell-body${railOpen ? '' : ' is-rail-collapsed'}`}>
             {railOpen && <WorkRail />}
-            <main className="v2-shell-main">
+            <main className="v2-shell-main" id="main-content" tabIndex={-1}>
               <Outlet />
             </main>
           </div>

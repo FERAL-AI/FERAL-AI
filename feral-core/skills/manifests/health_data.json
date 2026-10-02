@@ -52,9 +52,9 @@
       "id": "health_summary",
       "method": "PYTHON",
       "url": "python://health_data/health_summary",
-      "description": "Single-call snapshot of the user's current biometrics: sleep_hours, sleep_quality, recovery_score, resting_hr, hrv (ms), readiness, activity_score, strain. Each field is null when no connected source provided it; the response lists contributing platforms in 'sources'. Read-only.",
+      "description": "Single-call snapshot of the user's biometrics: sleep_hours, sleep_quality, recovery_score, resting_hr, hrv (ms), readiness, activity_score, strain, current_hr and current_spo2 with their sources. Resting heart rate is null unless a rest-qualified source provides it; a live reading is current_hr, not resting_hr. Each unavailable field is null; the response lists contributing platforms in 'sources'. Any vitals_trend resting_hr_estimate is a historical-minimum heuristic, not a qualified resting measurement. Read-only.",
       "params": [],
-      "returns_description": "{sleep_hours, sleep_quality, recovery_score, resting_hr, hrv, readiness, activity_score, strain, sources}",
+      "returns_description": "{sleep_hours, sleep_quality, recovery_score, resting_hr, hrv, readiness, activity_score, strain, current_hr, current_hr_source, current_spo2, current_spo2_source, sources, vitals_trend?}",
       "ui_hint": "metric",
       "read_only_hint": true,
       "emit_result_preview": true

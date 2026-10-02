@@ -24,6 +24,30 @@ import pytest
 from security.device_pairing import DevicePairingStore
 
 
+def test_parallel_store_startup_serializes_schema_migration(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+
+    path = tmp_path / "concurrent-pairing.db"
+    DevicePairingStore(str(path))
+    # Independent stores have independent Python locks. Reopen together
+    # while each startup temporarily adds then drops the legacy column.
+    for _ in range(3):
+        ready = Barrier(8)
+
+        def reopen():
+            ready.wait(timeout=5)
+            return DevicePairingStore(str(path))
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            stores = list(pool.map(lambda _: reopen(), range(8)))
+        assert len(stores) == 8
+        with sqlite3.connect(path) as conn:
+            columns = {row[1] for row in conn.execute("PRAGMA table_info(paired_devices)")}
+        assert "token" not in columns
+        assert {"token_hash", "token_lookup"} <= columns
+
+
 def _seed_legacy_unique_db(path: Path, rows: list[tuple[str, str]]) -> None:
     """ schema with a UNIQUE plaintext ``token`` column.
 

@@ -179,6 +179,26 @@ class TestCatalogueSettings:
 
 
 class TestCatalogueResolution:
+    def test_environment_binary_override_precedes_settings_and_path(self, tmp_path, monkeypatch):
+        binary = tmp_path / "explicit-opencode"
+        binary.write_text("#!/bin/sh\n")
+        binary.chmod(0o755)
+        monkeypatch.setenv("FERAL_OPENCODE_BIN", str(binary))
+        monkeypatch.setattr(catalog.shutil, "which", lambda name: "/bundled/opencode")
+        settings = {"external_agents": {"opencode_bin": "/persisted/opencode"}}
+        resolved = catalog.resolve("opencode", settings=settings)
+        assert resolved.available is True
+        assert resolved.binary_path == str(binary)
+        assert resolved.command == [str(binary), "acp"]
+
+    def test_invalid_environment_override_does_not_fall_back_to_other_binary(self, tmp_path, monkeypatch):
+        missing = tmp_path / "missing-opencode"
+        monkeypatch.setenv("FERAL_OPENCODE_BIN", str(missing))
+        monkeypatch.setattr(catalog.shutil, "which", lambda name: "/bundled/opencode")
+        resolved = catalog.resolve("opencode", settings={"external_agents": {"opencode_bin": "/persisted/opencode"}})
+        assert resolved.available is False
+        assert resolved.binary_path == ""
+
     def test_opencode_uses_the_explicit_binary_when_set(self, tmp_path):
         binary = tmp_path / "opencode"
         binary.write_text("#!/bin/sh\n")

@@ -1235,86 +1235,96 @@ class ProactiveEngine:
                     getattr(cb, "__qualname__", cb), e, exc_info=True,
                 )
 
-    async def _execute_automation(self, msg: ProactiveMessage):
-        """Execute smart home / automation actions attached to proactive alerts.
+    def _automation_session(self) -> str:
+        """Use the configured primary owner, never an arbitrary active session."""
+        try:
+            resolver = getattr(self._orchestrator, "_primary_session_id_resolver", None)
+            if resolver is not None:
+                session = resolver() if callable(resolver) else resolver
+            else:
+                from api.state import state
+                # Do not borrow another orchestrator's authorization scope.
+                if getattr(state, "orchestrator", None) is not self._orchestrator:
+                    return ""
+                session = getattr(state, "primary_session_id", "")
+            if isinstance(session, str) and session.strip() == session and 0 < len(session) <= 256:
+                return session
+        except Exception as exc:
+            logger.debug("Proactive owner lookup failed (%s)", type(exc).__name__)
+        return ""
 
-        This path bypasses Orchestrator.handle_command (the supervisor
-        only wraps chat-style entry points). So we explicitly call
-        ``state.supervisor.record(source="proactive", actor="system", ...)``
-        so the automation still lands in the audit log.
+    async def _execute_automation(self, msg: ProactiveMessage) -> dict:
+        """Dispatch through the ordinary policy/approval/schema pipeline.
+
+        Proactivity grants no authorization. Pending reviews remain pending;
+        this engine never retries them or calls an implementation directly.
+        Provider success is not proof of a physical scene outcome.
         """
-        if not self._orchestrator:
-            return
-
         payload = msg.action_payload
         action_type = payload.get("smart_home") or payload.get("action_type")
-        if not action_type:
-            return
-
-        supervisor = None
+        session_id = ""
+        decision = "denied"
+        result = {"success": False, "error": "Unsupported proactive action"}
         try:
-            from api.state import state as _state
-            supervisor = getattr(_state, "supervisor", None)
-        except Exception:
-            supervisor = None
-
-        decision = "allowed"
-        result_summary = ""
-
-        try:
-            from skills.impl import get_implementation
-
-            if action_type == "set_scene":
-                scene = payload.get("scene", "calming")
-                impl = get_implementation("smart_home_hue")
-                if impl:
-                    # `set_scene` is not a smart_home_hue endpoint — it
-                    # silently no-op'd. Home Assistant activates scenes via
-                    # the real `call_service` endpoint (scene.turn_on on the
-                    # `scene.<name>` entity), which IS in the manifest.
-                    await impl.execute(
-                        "call_service",
-                        {"domain": "scene", "service": "turn_on", "entity_id": f"scene.{scene}"},
-                        {},
-                    )
-                result_summary = f"set_scene={scene}"
-                logger.info("Automation executed: scene.turn_on scene.%s (trigger=%s)", scene, msg.trigger_id)
-
-            elif action_type == "breathing_exercise":
-                duration = payload.get("duration_minutes", 3)
-                impl = get_implementation("smart_home_hue")
-                if impl:
-                    await impl.execute(
-                        "call_service",
-                        {"domain": "scene", "service": "turn_on", "entity_id": "scene.breathing"},
-                        {},
-                    )
-                result_summary = f"breathing_exercise={duration}min"
-                logger.info("Automation executed: breathing exercise %dmin (trigger=%s)", duration, msg.trigger_id)
-
-            elif action_type == "notification":
-                result_summary = "notification"
-                logger.info("Automation: notification-only for trigger=%s", msg.trigger_id)
-
-        except Exception as e:
+            if action_type == "notification":
+                decision = "notification"
+                result = {"success": True, "notification_only": True}
+            elif action_type in {"set_scene", "breathing_exercise"}:
+                session_id = self._automation_session()
+                runner = getattr(self._orchestrator, "tool_runner", None)
+                dispatch = getattr(runner, "execute_tool_call_for_llm", None)
+                if not session_id or not callable(dispatch):
+                    result = {"success": False, "error": "Proactive authorization context unavailable"}
+                else:
+                    scene = payload.get("scene", "calming") if action_type == "set_scene" else "breathing"
+                    if not isinstance(scene, str) or not scene or len(scene) > 128:
+                        result = {"success": False, "error": "Invalid proactive scene"}
+                    else:
+                        args = {"domain": "scene", "service": "turn_on", "entity_id": f"scene.{scene}"}
+                        # A chat autonomy preference is not unattended scene consent.
+                        # Explicit safe policy may proceed; confirmation-class actions
+                        # must use the shared strict/hybrid approval flow.
+                        permitted = True
+                        if getattr(runner, "autonomy_mode", None) == "loose":
+                            policy = runner.policy_for("smart_home_hue__call_service", args)
+                            from agents.tool_runner import SafetyLevel
+                            permitted = policy.level == SafetyLevel.AUTO
+                        if not permitted:
+                            result = {"success": False, "status": "blocked", "error": "Proactive scene requires reviewed policy; loose mode is insufficient"}
+                        else:
+                            from uuid import uuid4
+                            result = await dispatch(
+                                session_id,
+                                {"id": str(uuid4()), "name": "smart_home_hue__call_service", "args": args},
+                                [],
+                            )
+                        if not isinstance(result, dict):
+                            result = {"success": False, "error": "Proactive dispatch returned no receipt"}
+                        if result.get("status") == "pending_approval":
+                            decision = "pending_approval"
+                        elif result.get("success") is True:
+                            decision = "allowed"
+                        elif result.get("status") in {"PermissionOutcome::Deny", "blocked"}:
+                            decision = "denied"
+                        else:
+                            decision = "error"
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
             decision = "error"
-            result_summary = f"error: {e}"
-            logger.warning("Automation execution failed for %s: %s", msg.trigger_id, e)
+            result = {"success": False, "error": "Proactive dispatch failed"}
+            logger.warning("Proactive dispatch failed (%s)", type(exc).__name__)
 
-        if supervisor is not None:
-            try:
+        # Audit policy outcome, never an unconditional 'executed' receipt.
+        try:
+            from api.state import state
+            supervisor = getattr(state, "supervisor", None)
+            if supervisor is not None:
                 supervisor.record(
-                    source="proactive",
-                    kind="automation",
-                    session_id="",
-                    actor="system",
-                    payload={
-                        "trigger_id": msg.trigger_id,
-                        "action_type": action_type,
-                        "summary": result_summary,
-                    },
-                    decision=decision,
-                    detail={"payload": payload},
+                    source="proactive", kind="automation", session_id=session_id,
+                    actor="system", payload={"trigger_id": msg.trigger_id, "action_type": action_type},
+                    decision=decision, detail={"payload": payload},
                 )
-            except Exception as exc:
-                logger.debug("supervisor.record(proactive) failed: %s", exc)
+        except Exception as exc:
+            logger.debug("supervisor.record(proactive) failed (%s)", type(exc).__name__)
+        return result
