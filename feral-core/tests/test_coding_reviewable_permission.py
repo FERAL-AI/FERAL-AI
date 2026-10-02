@@ -24,7 +24,14 @@ def test_review_requires_concrete_command_or_target(details, expected):
 @pytest.mark.asyncio
 async def test_unknown_approval_never_reaches_engine(monkeypatch):
     request = SimpleNamespace(request_id="missing-target", raw={"toolCall": {"kind": "read", "rawInput": {}}})
-    registry = SimpleNamespace(find_by_permission=lambda _: SimpleNamespace(pending_permissions=lambda: [request]))
+    managed = SimpleNamespace(
+        handle="review-fixture", conversation_id="", pending_permissions=lambda: [request]
+    )
+    registry = SimpleNamespace(
+        find_by_permission=lambda _: managed,
+        get=lambda handle: managed if handle == managed.handle else None,
+        index=SimpleNamespace(get=lambda _: None),
+    )
     monkeypatch.setattr(coding.engine, "_registry", lambda: registry)
     monkeypatch.setattr(coding, "_unpaused", lambda: None)
     execute = AsyncMock()

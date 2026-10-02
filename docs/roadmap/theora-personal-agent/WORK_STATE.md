@@ -142,3 +142,23 @@ dated record instead of overwriting them as if they had passed.
   claiming exact-turn abort, persist receipts before durable claims and dedupe
   identical requests without replay. SDK must wait for the correlated whole-turn
   terminal, not greetings/intermediate prose/provider-round finality.
+
+## October 2 publication and full-CI fixture correction
+
+Repair wave source **34a43e640597ca721fb915149f29c9b73b51394a** is committed and
+pushed. Native9.27 candidate stages that frozen backend; subsequent CORE04/SDK
+working-tree edits belong to a later wave and cannot enter this candidate.
+
+Source3ecb95bbe full Ubuntu backend CI completed **1 failed, 12,157 passed,
+83 skipped, 570 warnings**, coverage74% rounded. Failure was the existing
+`test_unknown_approval_never_reaches_engine` fixture lacking new handle/owner/
+registry-index fields. Parent corrected the fixture to match the real managed
+session contract, preserving its409 refusal and no-engine-execution assertions.
+Final targeted coding-reviewable+REST check: **37 passed, 6 warnings, 3.62s**;
+Ruff passed. The failed full run remains failed; new exact-source remote coverage
+must pass before closing that gate.
+
+Staging first failed when sandbox blocked OpenCode's normal cache initialization;
+properly escalated staging passed pinned Python3.11.15/SQLite3.53.1/FTS5/loadable
+extensions/module imports/webUIv2 and OpenCode version checks. Initial production
+build was blocked by Swift macro sandbox; the escalated build is separate.
