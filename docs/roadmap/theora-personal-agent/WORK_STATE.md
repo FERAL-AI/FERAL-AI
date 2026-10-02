@@ -30,10 +30,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent publication | `4e19f07f8603196fd73ecdafd0e127dbad865e69` (durable processing receipts, generic SDKs and frozen9.27 evidence) |
+| Most recent publication | `66c7cd500d7ec353c68da97f44b99d6201af9abe` (native172 migration, context fitting, live SDK continuity, maintenance and dependency repairs) |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | 6.3 GiB available at latest check; recheck before packaging; no personal/cache cleanup performed |
+| Disk observation | About4.0 GiB available during9.28 acceptance; macOS reported6,967MiB swap used. Stagger heavy model/compiler checks; no personal/cache cleanup performed |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update
@@ -42,7 +42,45 @@ appear green.
 
 ## Latest checked source and active candidate
 
-New source **4e19f07f8603196fd73ecdafd0e127dbad865e69** also passed
+Source **66c7cd500d7ec353c68da97f44b99d6201af9abe** is committed/pushed.
+[CI37043435460](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37043435460)
+and [native37043435313](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37043435313)
+**passed**. Parent fetched completed backend job110958970036: **12,305 passed,
+83 skipped,574 warnings in844.56s**, coverage74% rounded. Generic Python/Node22,
+web/extension/device SDKs, architecture/syntax/Ruff/assets and docs/naming/version
+passed. Live-brain/main Linux matrix skipped. Nonblocking mypy job110958888836
+still failed: **846 errors in238 files,1,250 checked**, baseline812. All four
+attributed receipt follow-up diagnostics are absent; ratchet is not green.
+
+Native **2026.9.28/build2026100202** was built/signed on that frozen source;
+executable SHA256`dba3785d53634fb699986c2ade9290f42ff5c0631c63224510bfb34350d165f0`.
+All479 production Python files match that commit. Bundle audit passed13,054
+files/265 Mach-O/9 internal links, pinned Python3.11.15/SQLite3.53.1/FTS5 and
+OpenCode1.18.10. Ad-hoc verification is not Developer-ID/notarization.
+Actual isolated app acceptance is in progress. Original New conversation/
+retained-error AX path survives, real42 reply passed, and growing context now
+narrows complete optional schemas below the byte budget. **A new SIGTRAP during
+Permissions and Cost navigation is being investigated**; no crash-free claim.
+An earlier unexplained normal exit0 and early response-timeout banner are
+preserved independently. New IPS identifies main-thread EXC_BREAKPOINT/SIGTRAP
+through `+[NSApplication _crashOnException:]` and repeated NSView constraint
+updates, distinct from the old accessibility-label recursion. The exact-time OS
+layout-cycle log points to `NativeSelectableTextField.fittingSize` invalidating
+intrinsic content size during measurement. Minimal reproduction and exact
+exception reason remain pending; disk space is not an established cause.
+Never replace this immutable bundle during acceptance.
+
+The next storage/progress/workflow slice passed **165 integrated backend tests,
+8 warnings in5.80s** on frozen sources. Warnings include an older memory suite's
+event-loop-closed worker warning and restored receipt-limit environment leakage.
+[Progress evidence](CHAT_PROGRESS_IDENTITY_EVIDENCE.md) records the exact command.
+DATA01A independently passed62 new tests, codec mypy and Ruff; checkpoint storage
+does not yet restore live model history. Workflow67 native fixture assertions and
+three real registered-router/SQLite cases passed; linked/app acceptance is separate.
+Native receipt adoption remains uncommitted working code while these independent
+slices are integrated. Do not mistake current working files for the9.28 payload.
+
+Prior source **4e19f07f8603196fd73ecdafd0e127dbad865e69** also passed
 [required CI37038556986](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37038556986)
 and [native37038557228](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37038557228).
 Parent fetched backend job110942764029: **12,278 passed/83 skipped/574 warnings
@@ -114,17 +152,18 @@ as containing every later source commit or completing the populated-profile matr
 
 | Worker | Exclusive scope | Active work |
 |---|---|---|
-| Parent | identity/workspace async maintenance, receipt-store type repairs, packaged-core equality tool/tests, shared docs/CI/assemble/publication | Combined runtime/SDK330 tests passed; nine source-equality tests and actual478-file comparison passed; integrating candidate9.28 |
-| coding_session_isolation | Frozen MODEL01B; frozen dependency QA; next new automation plan only | Context fitting verified;1,416 web/extension/device SDK tests passed; no generated asset changes |
-| python_sdk_contracts | Frozen DEV01C; next new DATA01 plan only | Live thread continuity verified;92 Python/72 Node tests passed; durable checkpoint proposal persisted without production edits |
-| native_populated_acceptance | production Swift selectable views/tests, minimal AX probe and follow-up evidence | New conversation/error-banner recursion reproduced; AppKit A/B then systematic remaining172-expression migration |
+| Parent | Shared docs/CI/Git, backend trusted progress identity and native build-runner integration | Published77-file checkpoint; frozen storage/progress integration165 passed; next independent publication pending; 9.28 immutable |
+| coding_session_isolation | Workflow source/tests frozen; now APIModel/NativeViews/NativeModelTests/new ChatTurn feature/tests | Workflow67 fixtures plus3 real router/SQLite cases passed; native exact-turn negotiation/Stop/read-only reconciliation adoption underway |
+| python_sdk_contracts | DATA01A codec/store/tests/evidence frozen; new runtime-context coordinator, narrow orchestrator, lifecycle tests/evidence | DATA01A accepted; first DATA01B lifecycle slice explicitly inactive until all entry/cleanup/manual/voice writers close |
+| native_populated_acceptance | New9.28 report/probe frozen for publication; NativeRichText/SelectableText tests/new layout evidence and reproduction assets | Layout-cycle log points to intrinsic-size invalidation during fittingSize; production edits held until linked compile finishes |
 
 Original immutable bundle evidence is frozen in [NATIVE_POPULATED_ACCEPTANCE.md](NATIVE_POPULATED_ACCEPTANCE.md): actual rich persistence/search/rename/pin/relaunch and one local-model reply passed. **SIGSEGV with excessive SwiftUI accessibility recursion is confirmed by macOS report and watched exit**. Context truncation, guessed Weather fallback, missing result success key and pending-review false-completion text are also reproduced. Do not call this app release-ready.
 
 Source can change in these exclusive areas during targeted checks; freeze all workers before full integration suites and candidate assembly. Recheck free disk before packaging. Preserve unrelated `AUDIT-FIXES.md`. No real external accounts/messages/purchases or personal data changes occurred.
 
-Next wave: native New conversation crash, conversation-growth byte guard and SDK
-thread continuity, then memory/migration/native parity/voice and exact-device/iOS
+Next: finish exact-turn native adoption; fix/reproduce shared AppKit sizing
+reentrancy; activate runtime checkpoints only after every writer/cleanup/restore
+path is fenced. Then memory migration/native parity/voice and exact-device/iOS
 contracts. Messaging/browser/Link, social/Linux/distribution remain explicit
 cards. Durable processing receipts do not implement read/seen or prove effects.
 

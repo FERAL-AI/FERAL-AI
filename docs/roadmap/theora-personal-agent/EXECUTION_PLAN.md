@@ -14,13 +14,15 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Latest published source: `4e19f07f8603196fd73ecdafd0e127dbad865e69`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,278 backend tests,83 skipped,74% rounded coverage; generic Python/Node transport jobs passed. Non-blocking mypy850 versus812 baseline remains failed. [WORK_STATE](WORK_STATE.md) names exact runs. The following table retains prior evidence. The next frozen runtime/SDK wave passed330 integrated tests and72 Node tests locally; its remote acceptance belongs to its subsequent commit.
+Latest published source: `66c7cd500d7ec353c68da97f44b99d6201af9abe`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,305 backend tests,83 skipped,74% rounded coverage; generic Python/Node transport jobs passed. Non-blocking mypy846 versus812 baseline remains failed. [WORK_STATE](WORK_STATE.md) names exact runs. The following table retains prior evidence. The runtime/SDK wave passed330 integrated tests and72 Node tests locally before this remote check.
 
 Actual immutable9.27 passed exact reviewed Deny/Allow, local reply and copy/link,
 but New conversation caused another accessibility recursion SIGSEGV and context
 growth blocked later tasks. [Candidate evidence](NATIVE_9_27_ACCEPTANCE.md).
 Native crash repair, MODEL01B context fitting and DEV01C live thread continuity
-are in the next source checkpoint. They require new native9.28 acceptance.
+are in the published checkpoint. Actual9.28 passed the old New conversation
+crash path and a local reply but exposed a separate Permissions and Cost SIGTRAP,
+unexplained normal exit and early timeout. [Current report](NATIVE_9_28_ACCEPTANCE.md).
 Durable model context after restart is a separate backend checkpoint card;
 retained SDK sockets alone do not establish it.
 

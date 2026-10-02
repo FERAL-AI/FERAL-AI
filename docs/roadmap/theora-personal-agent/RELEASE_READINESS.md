@@ -4,10 +4,18 @@ Updated October 2, 2026. This is an implementation and acceptance roadmap, not a
 
 ## Latest October 2 checkpoint
 
-Published source4e19f07f passed required CI/native checks. Full Ubuntu/Python3.11
-PR backend: **12,278 passed,83 skipped,574 warnings**, coverage74% rounded.
+Published source66c7cd500 passed required CI/native checks. Full Ubuntu/Python3.11
+PR backend: **12,305 passed,83 skipped,574 warnings**, coverage74% rounded.
 Live-brain and main Linux matrix were skipped. Non-blocking mypy remains failed
-at850 errors versus812 baseline; this is not a clean type gate.
+at846 errors versus812 baseline; this is not a clean type gate.
+
+The assembled **9.28** candidate contains that exact source:479 production Python
+files matched Git; bundle/runtime/ad-hoc signature checks passed. Actual isolated
+testing passed the previously crashing retained-error New conversation path and
+a real local-model42 reply. **A distinct SIGTRAP during Permissions and Cost
+navigation remains under investigation**, alongside an unexplained normal exit
+and an early timeout banner. [Current acceptance](NATIVE_9_28_ACCEPTANCE.md)
+does not certify daily use. Do not replace this candidate during acceptance.
 
 The assembled **9.27** candidate stages source34a43e640, independently matched
 against all478 production Python files. Actual local model response, reviewed
@@ -25,7 +33,11 @@ phone HUP receipts are separate gates. DEV01C now retains one authenticated
 socket per live SDK thread; actual provider context continues across turns,
 with explicit context loss after closure and no automatic reconnect/replay.
 Parent combined next-wave tests:330 passed; Node72 passed. Durable model context
-after restart, native adoption and packaged9.28 acceptance remain open.
+after restart and native adoption remain open; packaged9.28 acceptance has
+reproduced the additional failure above. The next source wave adds native exact
+turn receipts/Stop/status reconciliation, verified scheduled automation controls
+and internal checkpoint storage. Storage tests do not establish live restoration;
+the runtime writer integration remains a separate gate.
 Nine affected dependency copies pass patched advisory floors and1,416 web/
 extension/device SDK tests. Default-branch alerts remain open until the relevant
 changes reach that branch. [Security evidence](SECURITY_DEPENDENCY_EVIDENCE.md).

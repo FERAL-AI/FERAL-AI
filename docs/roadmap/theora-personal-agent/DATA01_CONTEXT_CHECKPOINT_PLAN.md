@@ -5,6 +5,11 @@ client, after checkpoint `4e19f07f8603196fd73ecdafd0e127dbad865e69`.
 This document is a proposal, not implemented or verified durability. Production
 edits remain deferred until the parent commits/stages the current frozen wave.
 
+Implementation follow-up: [DATA01A storage evidence](RUNTIME_CHECKPOINT_STORAGE_EVIDENCE.md)
+now covers versioned SQLite/CAS/codec primitives and their tests. Runtime
+writer, restoration and cleanup integration below remains proposed; the storage
+slice alone does not provide durable model continuity.
+
 ## Outcome and current evidence
 
 Reopening an exact saved thread should restore its server-generated model

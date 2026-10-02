@@ -6,8 +6,8 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Latest source4e19f07f required CI/native passed: **12,278 backend tests,
-  83 skipped, coverage74% rounded**. Non-blocking mypy remains failed at850
+- Latest source66c7cd500 required CI/native passed: **12,305 backend tests,
+  83 skipped, coverage74% rounded**. Non-blocking mypy remains failed at846
   versus812 baseline. Live-brain and main Linux matrix skipped.
 - [Actual9.27](NATIVE_9_27_ACCEPTANCE.md) passed local reply, exact native
   reviewed Deny/Allow and copy/link. New conversation caused a confirmed
@@ -19,8 +19,10 @@ The detailed contracts and acceptance work packages remain in [release readiness
   exact cancellation and compatibility negotiation before tasks; no read/seen
   or external-effect success claim. DEV01C repairs live SDK thread continuity;
   closed/restarted model context remains a separate checkpoint card. Current
-  runtime/SDK integration passed330 tests plus72 Node tests; new-source remote
-  CI and native9.28 acceptance remain pending.
+  runtime/SDK integration passed330 tests plus72 Node tests; that source now
+  passed remote CI. Actual9.28 passed the old New conversation crash path and
+  a local reply, but reproduced a separate Permissions and Cost SIGTRAP,
+  an unexplained normal exit and early timeout. App acceptance remains open.
 
 The following bullets retain earlier evidence; their counts and artifacts do
 not describe this new source wave.

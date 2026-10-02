@@ -77,6 +77,12 @@ except Exception:
 
 from config.loader import feral_data_home
 from memory.fts_query import STRICT as FTS_STRICT, fts5_match_query
+from memory.runtime_session_checkpoint import (
+    FORMAT_VERSION as CHECKPOINT_FORMAT_VERSION,
+    CheckpointContext, CheckpointFence, CheckpointFutureFormat, CheckpointLimits,
+    CheckpointRecord, CheckpointResult, CheckpointStatus, CheckpointValidationError,
+    decode_context, validate_session_id, validate_uuid,
+)
 from memory.sqlite_features import require_fts5
 from security.sync_scopes import INHERIT as SCOPE_INHERIT
 from memory.context_builder import (
@@ -336,7 +342,7 @@ class _CenteredCorpus:
     centroid: "np.ndarray"
     fingerprint: tuple
 
-_SCHEMA_VERSION = 7  # sync_tombstones (deletes survive a peer replay)
+_SCHEMA_VERSION = 8  # exact-session runtime checkpoints (separate from UI/sync)
 
 
 def _message_text(content: Any) -> str:
@@ -521,6 +527,7 @@ class MemoryStore:
         vec_index: Optional[VectorIndexBackend] = None,
         conn_pool_size: int = 4,
         authenticated_vault=None,
+        runtime_checkpoint_limits: CheckpointLimits | None = None,
     ):
         """Construct a MemoryStore.
 
@@ -551,6 +558,7 @@ class MemoryStore:
         is not async and the brain's boot wiring is sync. The async
         surface kicks in for every operation after construction.
         """
+        self._runtime_checkpoint_limits = runtime_checkpoint_limits or CheckpointLimits()
         if db_path is None:
             data_dir = feral_data_home()
             data_dir.mkdir(exist_ok=True)
@@ -1462,6 +1470,15 @@ class MemoryStore:
                 UNIQUE(session_id, request_id)
             )""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_turn_session ON chat_turn_receipts(session_id, updated_at)")
+            # Runtime-only data. Deliberately absent from federated sync/import
+            # allowlists and unrelated to display-only conversations/snapshots.
+            conn.execute("""CREATE TABLE IF NOT EXISTS runtime_session_checkpoints (
+                session_id TEXT PRIMARY KEY, generation TEXT NOT NULL,
+                revision INTEGER NOT NULL, attempt_id TEXT NOT NULL,
+                state TEXT NOT NULL CHECK(state IN ('ready', 'in_progress', 'deleted')),
+                format_version INTEGER NOT NULL, payload_json TEXT NOT NULL,
+                payload_bytes INTEGER NOT NULL, updated_at REAL NOT NULL
+            )""")
 
             # W3: thread management columns.
             #
@@ -1751,6 +1768,159 @@ class MemoryStore:
     # ``messages[-500:]`` in one place; named because the atomic append
     # path has to enforce the same ceiling from SQL.
     CONVERSATION_MESSAGE_CAP = 500
+
+    def _runtime_checkpoint_record(self, row: aiosqlite.Row | None) -> CheckpointResult:
+        if row is None:
+            return CheckpointResult(CheckpointStatus.ABSENT)
+        try:
+            version = row["format_version"]
+            if type(version) is int and version > CHECKPOINT_FORMAT_VERSION:
+                return CheckpointResult(CheckpointStatus.UNSUPPORTED)
+            if type(version) is not int or version != CHECKPOINT_FORMAT_VERSION:
+                raise CheckpointValidationError("Invalid checkpoint version")
+            fence = CheckpointFence(row["session_id"], row["generation"], row["revision"], row["attempt_id"])
+            state = CheckpointStatus(row["state"])
+            if state not in {CheckpointStatus.READY, CheckpointStatus.IN_PROGRESS, CheckpointStatus.DELETED}:
+                raise CheckpointValidationError("Invalid checkpoint state")
+            encoded, size, timestamp = row["payload_json"], row["payload_bytes"], row["updated_at"]
+            if not isinstance(encoded, str) or type(size) is not int or size != len(encoded.encode("utf-8")):
+                raise CheckpointValidationError("Invalid checkpoint size")
+            if not isinstance(timestamp, (int, float)) or not math.isfinite(timestamp) or timestamp < 0:
+                raise CheckpointValidationError("Invalid checkpoint timestamp")
+            context = decode_context(encoded, limits=self._runtime_checkpoint_limits) if encoded else None
+            if (state == CheckpointStatus.READY and context is None) or (state == CheckpointStatus.DELETED and context is not None):
+                raise CheckpointValidationError("Invalid checkpoint payload state")
+            # Pending records may retain the last safe bytes privately. Never
+            # expose those bytes as a restorable ready state after interruption.
+            record = CheckpointRecord(fence, state, float(timestamp), context if state == CheckpointStatus.READY else None)
+            return CheckpointResult(state, record)
+        except CheckpointFutureFormat:
+            return CheckpointResult(CheckpointStatus.UNSUPPORTED)
+        except (CheckpointValidationError, ValueError, TypeError, KeyError, UnicodeError):
+            return CheckpointResult(CheckpointStatus.CORRUPT)
+
+    async def runtime_checkpoint_read(self, session_id: str) -> CheckpointResult:
+        """Exact SID only; no UI transcript/primary-session fallback or effects."""
+        validate_session_id(session_id)
+        conn = await self._conn()
+        try:
+            async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (session_id,)) as cursor:
+                return self._runtime_checkpoint_record(await cursor.fetchone())
+        finally:
+            await self._release(conn)
+
+    async def runtime_checkpoint_begin(self, session_id: str, *, attempt_id: str,
+                                       expected: CheckpointFence | None = None) -> CheckpointResult:
+        """Fence a trusted writer BEFORE work; this method never executes work.
+
+        Absent rows require expected=None. Existing ready rows require the exact
+        prior fence. Pending/deleted rows cannot be reopened or auto-recovered.
+        """
+        validate_session_id(session_id)
+        validate_uuid(attempt_id)
+        if expected is not None and expected.session_id != session_id:
+            return CheckpointResult(CheckpointStatus.CONFLICT)
+        conn = await self._conn()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (session_id,)) as cursor:
+                current = self._runtime_checkpoint_record(await cursor.fetchone())
+            if current.status in {CheckpointStatus.CORRUPT, CheckpointStatus.UNSUPPORTED, CheckpointStatus.DELETED, CheckpointStatus.IN_PROGRESS}:
+                await conn.rollback()
+                return current
+            if (current.record is None and expected is not None) or (current.record is not None and current.record.fence != expected):
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.CONFLICT, current.record)
+            now = time.time()
+            if current.record is None:
+                async with conn.execute("SELECT COUNT(*) FROM runtime_session_checkpoints") as cursor:
+                    count = await cursor.fetchone()
+                if count is None or count[0] >= self._runtime_checkpoint_limits.sessions:
+                    await conn.rollback()
+                    return CheckpointResult(CheckpointStatus.QUOTA)
+                fence = CheckpointFence(session_id, str(uuid4()), 1, attempt_id)
+                await conn.execute("INSERT INTO runtime_session_checkpoints VALUES (?, ?, ?, ?, 'in_progress', ?, '', 0, ?)",
+                                   (session_id, fence.generation, fence.revision, fence.attempt_id, CHECKPOINT_FORMAT_VERSION, now))
+            else:
+                old = current.record.fence
+                if old.attempt_id == attempt_id or old.revision >= 2**63 - 2:
+                    await conn.rollback()
+                    return CheckpointResult(CheckpointStatus.CONFLICT, current.record)
+                fence = CheckpointFence(session_id, old.generation, old.revision + 1, attempt_id)
+                await conn.execute("UPDATE runtime_session_checkpoints SET revision = ?, attempt_id = ?, state = 'in_progress', updated_at = ? WHERE session_id = ?",
+                                   (fence.revision, attempt_id, now, session_id))
+            await conn.commit()
+            return CheckpointResult(CheckpointStatus.APPLIED, CheckpointRecord(fence, CheckpointStatus.IN_PROGRESS, now))
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
+
+    async def runtime_checkpoint_commit(self, fence: CheckpointFence, context: CheckpointContext) -> CheckpointResult:
+        """CAS the exact unfinished writer; rejected commits leave its fence pending."""
+        if not isinstance(context, CheckpointContext) or not isinstance(context.encoded, str):
+            return CheckpointResult(CheckpointStatus.INVALID)
+        try:
+            if context.byte_count > self._runtime_checkpoint_limits.record_bytes:
+                return CheckpointResult(CheckpointStatus.QUOTA)
+            context = decode_context(context.encoded, limits=self._runtime_checkpoint_limits)
+        except CheckpointFutureFormat:
+            return CheckpointResult(CheckpointStatus.UNSUPPORTED)
+        except (CheckpointValidationError, UnicodeError):
+            return CheckpointResult(CheckpointStatus.INVALID)
+        conn = await self._conn()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (fence.session_id,)) as cursor:
+                current = self._runtime_checkpoint_record(await cursor.fetchone())
+            if current.status in {CheckpointStatus.CORRUPT, CheckpointStatus.UNSUPPORTED, CheckpointStatus.DELETED, CheckpointStatus.ABSENT}:
+                await conn.rollback()
+                return current
+            if current.record is None or current.record.fence != fence or current.status != CheckpointStatus.IN_PROGRESS or fence.revision >= 2**63 - 2:
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.CONFLICT, current.record)
+            async with conn.execute("SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) FROM runtime_session_checkpoints WHERE session_id != ?", (fence.session_id,)) as cursor:
+                total = await cursor.fetchone()
+            if total is None or total[0] + context.byte_count > self._runtime_checkpoint_limits.total_bytes:
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.QUOTA, current.record)
+            now = time.time()
+            updated = CheckpointFence(fence.session_id, fence.generation, fence.revision + 1, fence.attempt_id)
+            await conn.execute("UPDATE runtime_session_checkpoints SET revision = ?, state = 'ready', payload_json = ?, payload_bytes = ?, updated_at = ? WHERE session_id = ?",
+                               (updated.revision, context.encoded, context.byte_count, now, fence.session_id))
+            await conn.commit()
+            return CheckpointResult(CheckpointStatus.APPLIED, CheckpointRecord(updated, CheckpointStatus.READY, now, context))
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
+
+    async def runtime_checkpoint_delete(self, fence: CheckpointFence) -> CheckpointResult:
+        """CAS tombstone, clear private context, fence late saves permanently."""
+        conn = await self._conn()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (fence.session_id,)) as cursor:
+                current = self._runtime_checkpoint_record(await cursor.fetchone())
+            if current.status in {CheckpointStatus.CORRUPT, CheckpointStatus.UNSUPPORTED, CheckpointStatus.DELETED, CheckpointStatus.ABSENT}:
+                await conn.rollback()
+                return current
+            if current.record is None or current.record.fence != fence or fence.revision >= 2**63 - 2:
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.CONFLICT, current.record)
+            now = time.time()
+            updated = CheckpointFence(fence.session_id, fence.generation, fence.revision + 1, fence.attempt_id)
+            await conn.execute("UPDATE runtime_session_checkpoints SET revision = ?, state = 'deleted', payload_json = '', payload_bytes = 0, updated_at = ? WHERE session_id = ?",
+                               (updated.revision, now, fence.session_id))
+            await conn.commit()
+            return CheckpointResult(CheckpointStatus.APPLIED, CheckpointRecord(updated, CheckpointStatus.DELETED, now))
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
 
     async def chat_turn_claim(self, *, session_id: str, request_id: str,
                               turn_id: str, input_digest: str, receipt: dict, receipt_limit: int = 100000) -> dict:

@@ -4,12 +4,16 @@ final class WorkflowFixture: URLProtocol {
     static var requests:[URLRequest] = []
     static var flowStatus = "waiting"
     static var routineEnabled = true
+    static var routineExists = true
+    static var automations:[String:[String:Any]] = [:]
+    static var nextAutomationID = 20
     static var done = false
     static var delayPath:String?
     static var delayed = false
     static var handler:(URLRequest) -> (Int,Any) = normal
     static var flow:[String:Any] { ["id":"f1","title":"Existing flow","status":flowStatus,"current_step":0,"context":["future_metadata":["keep":true]],"steps":[["id":1,"step_type":"sleep","status":"waiting","payload":["seconds":10,"future_field":true],"error":NSNull()]],"error":flowStatus == "failed" ? "Provider failed" : NSNull()] }
-    static var routine:[String:Any] { ["id":7,"description":"Existing routine","cron_expr":"every 60m","enabled":routineEnabled,"payload":["prompt":"Read local notes","future_field":true],"disabled_reason":"","future_metadata":["keep":true]] }
+    static var routine:[String:Any] { ["id":7,"description":"Existing routine","cron_expr":"every 60m","job_type":"scheduled","session_id":"thread-a","enabled":routineEnabled,"payload":["prompt":"Read local notes","future_field":true],"disabled_reason":"","future_metadata":["keep":true]] }
+    static func automationInventory(_ row:[String:Any]) -> [String:Any] { ["id":row["id"]!,"description":row["description"]!,"cron":row["cron_expr"]!,"enabled":row["enabled"]!,"next_run":1234567890,"run_count":0] }
     static func normal(_ request:URLRequest) -> (Int,Any) {
         let path = request.url!.path, body = (try? JSONSerialization.jsonObject(with:request.httpBody ?? Data())) as? [String:Any] ?? [:]
         switch path {
@@ -23,9 +27,10 @@ final class WorkflowFixture: URLProtocol {
         case "/api/workflows/packs/pack-a/instantiate": return (200,["success":true,"workflow_id":"pack-a","flow":["id":"pack-flow","status":"queued","title":"Local pack"]])
         case "/api/routines":
             if request.httpMethod == "POST" { return (200,["ok":true,"routine":["id":8,"description":body["description"] ?? "","cron_expr":body["cron_expr"]!,"enabled":true,"payload":body["payload"]!]]) }
-            return (200,["routines":[routine],"scheduler":["running":true,"scheduled":true]])
+            return (200,["routines":routineExists ? [routine] : [],"scheduler":["running":true,"scheduled":true]])
         case "/api/routines/7":
-            if request.httpMethod == "DELETE" { return (200,["ok":true]) };return (200,["routine":routine,"runs":[]])
+            if request.httpMethod == "DELETE" { routineExists = false;return (200,["ok":true]) }
+            if routineExists { return (200,["routine":routine,"runs":[]] as [String:Any]) };return (200,["error":"Routine not found"])
         case "/api/routines/7/pause": routineEnabled = false;return (200,["ok":true])
         case "/api/routines/7/resume": routineEnabled = true;return (200,["ok":true])
         case "/api/intents/list": return (200,["plans":[["plan_id":"p1","intent":"Read a book","status":done ? "completed" : "active","progress":done ? 1.0 : 0.0,"actions_total":1,"actions_done":done ? 1 : 0]]])
@@ -33,7 +38,20 @@ final class WorkflowFixture: URLProtocol {
         case "/api/intents/stats": return (200,["total_plans":1,"active_plans":done ? 0 : 1])
         case "/api/intents/compile": return (200,["success":true,"plan":["plan_id":"new-plan","intent":body["intent"]!,"status":"active","progress":0.0,"actions":[["action_id":"n1","description":"Suggestion only","tool_hint":"manual","completed":false,"future_field":true]]]])
         case "/api/intents/p1/complete/a1": done = true;return (200,["success":true])
-        default: return (404,["detail":"Fixture path not found"])
+        case "/api/automations":
+            if request.httpMethod == "POST" {
+                let text = body["text"] as! String,minutes = Int(text.split(separator:" ")[1])!,id = nextAutomationID;nextAutomationID += 1
+                let row:[String:Any] = ["id":id,"description":text,"cron_expr":"every \(minutes)m","job_type":"custom","session_id":body["session_id"]!,"enabled":true,"payload":["source":"natural_language","original_text":text,"action_text":text],"disabled_reason":""]
+                automations[String(id)] = row
+                return (200,["success":true,"job_id":id,"cron":"every \(minutes)m","description":text])
+            }
+            return (200,["automations":automations.values.map(automationInventory)])
+        default:
+            if path.hasPrefix("/api/routines/"),request.httpMethod == "GET",let id = path.split(separator:"/").last.map(String.init),Int(id) != nil {
+                if let row = automations[id] { return (200,["routine":row,"runs":[]] as [String:Any]) };return (200,["error":"Routine not found"])
+            }
+            if path.hasPrefix("/api/automations/"),request.httpMethod == "DELETE",let id = path.split(separator:"/").last.map(String.init) { automations[id] = nil;return (200,["success":true]) }
+            return (404,["detail":"Fixture path not found"])
         }
     }
     static func data(_ request:URLRequest) -> Data {
@@ -45,7 +63,9 @@ final class WorkflowFixture: URLProtocol {
     override class func canonicalRequest(for request:URLRequest) -> URLRequest { request }
     override func startLoading() {
         var captured = request;if request.httpMethod == "POST" { captured.httpBody = Self.data(request) };Self.requests.append(captured)
-        let (status,value) = Self.handler(captured), response = HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:nil,headerFields:nil)!
+        let (status,value) = Self.handler(captured)
+        if status == -1 { client?.urlProtocol(self,didFailWithError:URLError(.networkConnectionLost));return }
+        let response = HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:nil,headerFields:nil)!
         let data = try! JSONSerialization.data(withJSONObject:value)
         let deliver = { self.client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed);self.client?.urlProtocol(self,didLoad:data);self.client?.urlProtocolDidFinishLoading(self) }
         if Self.delayPath == request.url!.path { Self.delayPath = nil;Self.delayed = true;DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) } else { deliver() }
@@ -56,13 +76,114 @@ final class WorkflowFixture: URLProtocol {
     static var count = 0
     @MainActor static func check(_ valid:Bool,_ name:String) { if !valid { fatalError("FAIL: \(name)") };count += 1 }
     @MainActor static func delay() async throws { for _ in 0..<1000 { if WorkflowFixture.delayed { return };try await Task.sleep(nanoseconds:1_000_000) };fatalError("Fixture delay not reached") }
+    @MainActor static func parityTests(session:URLSession,base:URL) async throws {
+        WorkflowFixture.handler = WorkflowFixture.normal;WorkflowFixture.automations = [:];WorkflowFixture.routineExists = true;WorkflowFixture.routineEnabled = true
+        var instant = Date(timeIntervalSince1970:1000)
+        let model = NativeWorkflowModel(session:session,now:{ instant })
+        await model.configure(baseURL:base,sessionID:"thread-a")
+        check(model.rows("automations").isEmpty && model.errors["automations"] == nil,"new scheduled-automation section uses existing passive inventory")
+        let normal = WorkflowFixture.normal
+        let attempted = WorkflowFixture.requests.count
+        for action in ["Read notes every morning","Read daily tasks","weekly review",String(repeating:"x",count:8001),"bad\u{0000}action"] {
+            do { _ = try model.review(.createAutomation(minutes:60,action:action));fatalError("schedule override action accepted") } catch {}
+        }
+        for minutes in [0,10081] { do { _ = try model.review(.createAutomation(minutes:minutes,action:"Read notes"));fatalError("unbounded schedule accepted") } catch {} }
+        check(WorkflowFixture.requests.count == attempted,"invalid/ambiguous automation input refuses before any request")
+        let reviewed = try model.review(.createAutomation(minutes:60,action:"Read local notes"))
+        check(reviewed.explanation.contains("scheduled prompt, not an event trigger") && WorkflowFixture.requests.count == attempted,"scheduled automation review inert and truthful")
+        check(await model.perform(reviewed) && model.receipt?.contains("No completed run") == true,"CUSTOM creation requires persisted schedule receipt, not effect success")
+        let createRequest = WorkflowFixture.requests.last { $0.url!.path == "/api/automations" && $0.httpMethod == "POST" }!
+        let body = try JSONSerialization.jsonObject(with:createRequest.httpBody!) as! [String:Any]
+        check(body.count == 2 && body["text"] as? String == "every 60 minutes, Read local notes" && body["session_id"] as? String == "thread-a","existing text/session contract exact with no bypass fields")
+        let usedCount = WorkflowFixture.requests.count
+        check(!(await model.perform(reviewed)) && WorkflowFixture.requests.count == usedCount,"creation review consumed once, no duplicate write")
+        let id = model.rows("automations")[0].id
+        let deletion = try await model.prepareAutomationDeletion(id)
+        check(deletion.explanation.contains("Read local notes"),"delete review captures exact stored action and schedule")
+        WorkflowFixture.automations[id]!["payload"] = ["action_text":"changed"]
+        let mutations = WorkflowFixture.requests.filter { $0.httpMethod != "GET" }.count
+        check(!(await model.perform(deletion)) && WorkflowFixture.requests.filter { $0.httpMethod != "GET" }.count == mutations,"changed action blocked by fresh terms before deletion")
+        WorkflowFixture.automations[id]!["session_id"] = "thread-b"
+        do { _ = try await model.prepareAutomationDeletion(id);fatalError("foreign automation owned") } catch {}
+        check(WorkflowFixture.automations[id] != nil,"foreign conversation schedule preserved")
+        WorkflowFixture.automations[id]!["session_id"] = "thread-a";WorkflowFixture.automations[id]!["job_type"] = "scheduled"
+        do { _ = try await model.prepareAutomationDeletion(id);fatalError("noncustom automation accepted") } catch {}
+        WorkflowFixture.automations[id]!["job_type"] = "custom"
+        await model.refresh()
+        let lying = try await model.prepareAutomationDeletion(id)
+        WorkflowFixture.handler = { request in request.httpMethod == "DELETE" && request.url!.path == "/api/automations/" + id ? (200,["success":true]) : normal(request) }
+        check(!(await model.perform(lying)) && model.receipt == nil && model.actionError?.contains("unknown or unverified") == true,"lying delete acknowledgement never establishes absence")
+        WorkflowFixture.handler = normal
+        check(await model.perform(try await model.prepareAutomationDeletion(id)) && model.rows("automations").isEmpty && WorkflowFixture.automations[id] == nil,"exact automation inventory and safe detail prove deletion")
+        let expired = try model.review(.createAutomation(minutes:60,action:"Read notes")),beforeExpiry = WorkflowFixture.requests.count
+        instant = instant.addingTimeInterval(121)
+        check(!(await model.perform(expired)) && WorkflowFixture.requests.count == beforeExpiry,"expired review cannot dispatch")
+        WorkflowFixture.handler = { request in
+            if request.url!.path == "/api/automations",request.httpMethod == "GET" { return (200,["error":"Scheduler unavailable","automations":[]]) };return normal(request)
+        }
+        await model.refresh()
+        check(model.payloads["automations"] == nil && model.errors["automations"] != nil,"HTTP200 error is unavailable rather than false empty inventory")
+        WorkflowFixture.handler = { request in request.url!.path == "/api/automations" ? (200,["automations":[["id":1],["id":1]]]) : normal(request) }
+        await model.refresh();check(model.errors["automations"] != nil,"duplicate inventory identifiers fail closed")
+        WorkflowFixture.handler = normal;await model.refresh()
+        let failed = try model.review(.createAutomation(minutes:90,action:"Read local notes"))
+        WorkflowFixture.handler = { request in
+            let response = normal(request)
+            if request.url!.path == "/api/automations",request.httpMethod == "POST" { return (-1,[:]) };return response
+        }
+        let beforeLost = WorkflowFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/automations" }.count
+        check(!(await model.perform(failed)) && model.receipt == nil && model.actionError?.contains("unknown or unverified") == true && WorkflowFixture.automations.count == 1,"lost reply after fixture commit preserves unknown state")
+        check(!(await model.perform(failed)) && WorkflowFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/automations" }.count == beforeLost + 1,"uncertain creation cannot replay its consumed review")
+        WorkflowFixture.handler = normal
+        for field in ["enabled","job_type","session_id","cron_expr","payload","unexpected_policy"] {
+            WorkflowFixture.handler = { request in
+                let response = normal(request)
+                if request.httpMethod == "GET",request.url!.path.hasPrefix("/api/routines/"),let raw = response.1 as? [String:Any],var row = raw["routine"] as? [String:Any] {
+                    let replacement:[String:Any] = ["enabled":false,"job_type":"scheduled","session_id":"thread-b","cron_expr":"every 1h","payload":["action_text":"another action"]]
+                    if field == "unexpected_policy" { var payload = row["payload"] as! [String:Any];payload["auto_confirm"] = true;row["payload"] = payload } else { row[field] = replacement[field] };return (200,["routine":row,"runs":[]])
+                };return response
+            }
+            check(!(await model.perform(try model.review(.createAutomation(minutes:120,action:"Read notes")))) && model.receipt == nil,"persisted mismatched \(field) cannot confirm creation")
+        }
+        WorkflowFixture.handler = normal;await model.configure(baseURL:base,sessionID:nil)
+        let noSessionCount = WorkflowFixture.requests.count
+        do { _ = try model.review(.createAutomation(minutes:60,action:"Read notes"));fatalError("unbound creation accepted") } catch {}
+        check(WorkflowFixture.requests.count == noSessionCount,"scheduled creation requires selected conversation")
+        await model.configure(baseURL:base,sessionID:"thread-a")
+        check(await model.perform(try model.review(.loadRoutines)),"routine inventory remains explicitly reviewed")
+        let pause = try model.review(.routine(id:"7",verb:"pause"))
+        check(pause.explanation.contains("Read local notes") && pause.explanation.contains("thread-a") && pause.explanation.contains("every 60m"),"routine review displays captured action, conversation and schedule")
+        WorkflowFixture.handler = { request in
+            if request.url!.path == "/api/routines/7",request.httpMethod == "GET" { var row = WorkflowFixture.routine;row["payload"] = ["prompt":"changed"];return (200,["routine":row,"runs":[]]) };return normal(request)
+        }
+        let beforePause = WorkflowFixture.requests.filter { $0.httpMethod == "POST" }.count
+        check(!(await model.perform(pause)) && WorkflowFixture.requests.filter { $0.httpMethod == "POST" }.count == beforePause,"routine changed payload refuses before pause")
+        WorkflowFixture.handler = normal
+        WorkflowFixture.delayPath = "/api/routines/7";WorkflowFixture.delayed = false
+        let deferredPause = try model.review(.routine(id:"7",verb:"pause"))
+        let beforeDeferred = WorkflowFixture.requests.filter { $0.httpMethod == "POST" }.count
+        let deferred = Task { await model.perform(deferredPause) }
+        try await delay();await model.configure(baseURL:base,sessionID:"thread-b")
+        check(!(await deferred.value) && WorkflowFixture.requests.filter { $0.httpMethod == "POST" }.count == beforeDeferred,"connection change during fresh preflight prevents later mutation")
+        await model.configure(baseURL:base,sessionID:"thread-a")
+        check(await model.perform(try model.review(.loadRoutines)),"new connection explicitly reloads routine inventory")
+        let delete = try model.review(.routine(id:"7",verb:"delete"))
+        WorkflowFixture.handler = { request in request.url!.path == "/api/routines/7" && request.httpMethod == "DELETE" ? (200,["ok":true]) : normal(request) }
+        check(!(await model.perform(delete)) && model.rows("routines").count == 1 && model.actionError?.contains("still present") == true,"routine delete acknowledgement without absence retains row")
+        WorkflowFixture.handler = normal
+        let stale = try await model.prepareAutomationDeletion(String(WorkflowFixture.nextAutomationID - 1))
+        await model.configure(baseURL:base,sessionID:"thread-b")
+        let connectionCount = WorkflowFixture.requests.count
+        check(!(await model.perform(stale)) && WorkflowFixture.requests.count == connectionCount,"changed conversation cannot use earlier schedule review")
+        check(!WorkflowFixture.requests.contains { $0.url!.path.contains("run_now") || $0.url!.path.hasSuffix("/run") },"no invented Run Now route or direct execution request")
+    }
     @MainActor static func main() async throws {
         let config = URLSessionConfiguration.ephemeral;config.protocolClasses = [WorkflowFixture.self]
         let session = URLSession(configuration:config), base = URL(string:"http://127.0.0.1:9464")!,model = NativeWorkflowModel(session:session)
         await model.configure(baseURL:nil,sessionID:nil)
         check(!model.available && WorkflowFixture.requests.isEmpty,"nil readiness no requests")
         await model.configure(baseURL:base,sessionID:"thread-a")
-        check(model.errors.isEmpty && model.rows("packs").count == 1 && model.rows("flows").count == 1 && model.rows("today").count == 1,"five genuine passive read resources")
+        check(model.errors.isEmpty && model.rows("packs").count == 1 && model.rows("flows").count == 1 && model.rows("today").count == 1,"six genuine passive read resources")
         check(WorkflowFixture.requests.allSatisfy { $0.httpMethod == "GET" && $0.url!.path != "/api/routines" },"passive refresh never starts jobs or routine-list scheduler self-heal")
         model.selectedFlow = "f1";await model.inspectFlow()
         check((model.detail?["context"] as? [String:Any])?["future_metadata"] != nil && NativeWorkflowWire.json(model.detail!).contains("future_field"),"inspect preserves original flow context and step metadata")
@@ -140,6 +261,7 @@ final class WorkflowFixture: URLProtocol {
         var forwarded = true
         delegate.urlSession(session,task:task,willPerformHTTPRedirection:response,newRequest:URLRequest(url:URL(string:"https://example.com")!)) { forwarded = $0 != nil }
         check(!forwarded,"redirect cannot forward reviewed action")
+        try await parityTests(session:session,base:base)
         await model.configure(baseURL:nil,sessionID:nil)
         check(model.payloads.isEmpty && model.compiledPlan == nil && model.detail == nil,"disconnect clears private workflow/plan records")
         task.cancel();session.invalidateAndCancel()

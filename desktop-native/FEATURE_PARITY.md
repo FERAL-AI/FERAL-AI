@@ -2,21 +2,23 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
-**Current artifact checkpoint:2026.9.27, twenty-one native destinations.** Its
-frozen runtime source34a43e640 matches478 packaged production Python files.
-Actual local-model reply, reviewed file Deny/Allow and chat copy/link passed.
-**New conversation caused another confirmed accessibility recursion SIGSEGV**;
-growing context blocks later ordinary turns. [Exact candidate evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_27_ACCEPTANCE.md).
-Source4e19f07f required CI/native passed; its full backend suite is separate
+**Current artifact checkpoint:2026.9.28, twenty-one native destinations.** Its
+frozen runtime source66c7cd500 matches479 packaged production Python files.
+Actual retained-error New conversation/AX transition and a local-model reply
+passed. **A distinct SIGTRAP during Permissions and Cost navigation remains
+under investigation**, alongside an unexplained normal exit and early timeout.
+[Current candidate evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_28_ACCEPTANCE.md).
+Source66c7cd500 required CI/native passed; its full backend suite is separate
 from GUI acceptance. Historical9.26 onboarding/quit/relaunch and earlier imports,
 coding/synthetic hardware remain bounded earlier results. Hardware evidence is
 synthetic; real encrypted-profile/OS Keychain and full parity remain open.
 No row is release-certified.
 
-Next candidate9.28 is not yet assembled. Current source adds local request
-context fitting and systematically replaces remaining SwiftUI selectable text
-with AppKit views after a minimal New conversation crash reproduction. Source
-checks and a minimal A/B probe do not establish packaged-app recovery. Live SDK
+Candidate9.28 contains local request context fitting and systematically replaces
+remaining SwiftUI selectable text with AppKit views. Its old New conversation
+crash path passed actual testing; that does not certify other pages or recovery.
+The prior9.27 SIGSEGV and context failures remain in
+[their immutable report](../docs/roadmap/theora-personal-agent/NATIVE_9_27_ACCEPTANCE.md). Live SDK
 thread continuity is repaired; native exact-turn receipt/context adoption and
 durable model context after restart remain separate cards.
 

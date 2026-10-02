@@ -15,6 +15,22 @@ enum NativeWorkflowWire {
     }
     static func segment(_ value: String) -> String { value.addingPercentEncoding(withAllowedCharacters:CharacterSet(charactersIn:"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~")) ?? "" }
     static func json(_ value: Any) -> String { guard let data = try? JSONSerialization.data(withJSONObject:value,options:[.prettyPrinted,.sortedKeys]),let text = String(data:data,encoding:.utf8) else { return String(describing:value) }; return text }
+    static func routineID(_ value:Any?) -> String? {
+        guard let id = id(value),let number = Int(id),number > 0,String(number) == id else { return nil };return id
+    }
+    static func terms(_ row:[String:Any]) throws -> Data {
+        let stable = row.filter { !["last_run","next_run","run_count"].contains($0.key) }
+        let data = try JSONSerialization.data(withJSONObject:stable,options:[.sortedKeys])
+        guard data.count <= 32_000 else { throw NativeWorkflowFailure("This schedule is too large to review safely.") };return data
+    }
+    static func automationText(minutes:Int,action:String) throws -> String {
+        guard (1...10_080).contains(minutes),!action.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,action.utf8.count <= 8_000,
+              !action.unicodeScalars.contains(where:{CharacterSet.controlCharacters.contains($0) && $0 != "\n" && $0 != "\t"}),
+              action.range(of:"\\b(every|daily|weekly)\\b",options:[.regularExpression,.caseInsensitive]) == nil else {
+            throw NativeWorkflowFailure("Choose 1–10080 minutes and an action without every, daily or weekly. Keep scheduling in the interval control so the backend cannot reinterpret it.")
+        }
+        return "every \(minutes) minutes, " + action
+    }
     static func steps(_ body: [String: Any]) throws -> [[String: Any]] {
         guard let title = body["title"] as? String, !title.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,
               let steps = body["steps"] as? [[String:Any]], !steps.isEmpty, steps.count <= 50 else { throw NativeWorkflowFailure("Enter a title and 1–50 steps.") }
@@ -34,7 +50,7 @@ final class NativeWorkflowRedirectGuard: NSObject, URLSessionTaskDelegate {
 struct NativeWorkflowClient {
     let baseURL: URL
     let session: URLSession
-    func request(_ path:String,method:String = "GET",body:[String:Any]? = nil) async throws -> [String:Any] {
+    func request(_ path:String,method:String = "GET",body:[String:Any]? = nil,missingRoutineOK:Bool = false) async throws -> [String:Any] {
         guard baseURL.scheme == "http", ["127.0.0.1","::1","[::1]"].contains(baseURL.host ?? ""),baseURL.user == nil,baseURL.password == nil,var components = URLComponents(url:baseURL,resolvingAgainstBaseURL:false) else { throw NativeWorkflowFailure("Workflows are available only from the app’s local service.") }
         components.percentEncodedPath = path; components.query = nil; components.fragment = nil
         guard let url = components.url else { throw NativeWorkflowFailure("Invalid workflow request.") }
@@ -44,7 +60,10 @@ struct NativeWorkflowClient {
         let value = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any]
         guard let http = response as? HTTPURLResponse,(200..<300).contains(http.statusCode) else { throw NativeWorkflowFailure("Workflow request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0)): \(value?["error"] ?? value?["detail"] ?? "No valid response")") }
         guard let value = value else { throw NativeWorkflowFailure("The workflow service returned invalid JSON.") }
-        if let error = value["error"] as? String, !error.isEmpty, !(value["id"] is String && value["status"] is String) { throw NativeWorkflowFailure(error) }
+        if let error = value["error"] as? String, !error.isEmpty, !(value["id"] is String && value["status"] is String) {
+            if missingRoutineOK,method == "GET",path == "/api/routines/" + (NativeWorkflowWire.routineID(String(path.split(separator:"/").last ?? "")) ?? ""),error == "Routine not found" { return value }
+            throw NativeWorkflowFailure(error)
+        }
         if NativeWorkflowWire.bool(value["ok"]) == false || NativeWorkflowWire.bool(value["success"]) == false { throw NativeWorkflowFailure("The workflow service did not confirm the action.") }
         return value
     }
@@ -58,6 +77,7 @@ enum NativeWorkflowAction {
     case pack(id:String,context:[String:Any])
     case createFlow([String:Any]), flow(id:String,verb:String)
     case loadRoutines, createRoutine([String:Any]), routine(id:String,verb:String)
+    case createAutomation(minutes:Int,action:String), deleteAutomation(String)
     case compile(String), complete(plan:String,action:String,result:String)
 }
 struct NativeWorkflowReview: Identifiable {
@@ -66,6 +86,8 @@ struct NativeWorkflowReview: Identifiable {
     let action: NativeWorkflowAction
     let title: String
     let explanation: String
+    let expiresAt:Date
+    let expected:[String:Any]?
 }
 @MainActor final class NativeWorkflowModel: ObservableObject {
     @Published private(set) var payloads:[String:[String:Any]] = [:]
@@ -83,13 +105,16 @@ struct NativeWorkflowReview: Identifiable {
     private let session:URLSession
     private var generation = UUID(), readGeneration = UUID(), detailGeneration = UUID(), operation = UUID()
     private var sessionID:String?
-    static let paths = ["packs":"/api/workflows/packs","flows":"/api/taskflows","plans":"/api/intents/list","today":"/api/intents/today","stats":"/api/intents/stats"]
-    init(session:URLSession? = nil) { self.session = session ?? NativeWorkflowRedirectGuard.session() }
+    private var issued:[UUID:Date] = [:]
+    private var automationDetails:[String:[String:Any]] = [:]
+    private let now:() -> Date
+    static let paths = ["packs":"/api/workflows/packs","flows":"/api/taskflows","plans":"/api/intents/list","today":"/api/intents/today","stats":"/api/intents/stats","automations":"/api/automations"]
+    init(session:URLSession? = nil,now:@escaping() -> Date = Date.init) { self.session = session ?? NativeWorkflowRedirectGuard.session();self.now = now }
     var available:Bool { client != nil }
     func configure(baseURL:URL?,sessionID:String?) async {
         generation = UUID(); readGeneration = UUID(); detailGeneration = UUID(); operation = UUID()
         client = baseURL.map { NativeWorkflowClient(baseURL:$0,session:session) }; self.sessionID = sessionID
-        payloads = [:]; errors = [:]; loading = false; acting = false; actionError = nil; receipt = nil; compiledPlan = nil; detail = nil; detailError = nil; selectedFlow = ""; inspecting = false
+        payloads = [:]; errors = [:]; loading = false; acting = false; actionError = nil; receipt = nil; compiledPlan = nil; detail = nil; detailError = nil; selectedFlow = ""; inspecting = false;issued = [:];automationDetails = [:]
         if available { await refresh() }
     }
     func refresh() async {
@@ -113,6 +138,9 @@ struct NativeWorkflowReview: Identifiable {
         guard let rows = value[key] as? [[String:Any]] else { throw NativeWorkflowFailure("This section returned an unreadable list.") }
         let idKey = resource == "packs" ? "workflow_id" : resource == "plans" ? "plan_id" : resource == "today" ? "action_id" : "id"
         guard rows.allSatisfy({ NativeWorkflowWire.id($0[idKey]) != nil }) else { throw NativeWorkflowFailure("This section contains an unreadable identifier.") }
+        if ["routines","automations"].contains(resource) {
+            guard rows.count <= 500,rows.allSatisfy({ NativeWorkflowWire.routineID($0["id"]) != nil }),Set(rows.compactMap { NativeWorkflowWire.routineID($0["id"]) }).count == rows.count else { throw NativeWorkflowFailure("This schedule inventory is unreadable or too large.") }
+        }
     }
     func rows(_ resource:String) -> [NativeWorkflowRow] {
         let key = resource == "today" ? "actions" : resource
@@ -130,9 +158,35 @@ struct NativeWorkflowReview: Identifiable {
             guard request == detailGeneration && connection == generation && selectedFlow == id else { return }; detail = value
         } catch { if request == detailGeneration && connection == generation && selectedFlow == id { detailError = error.localizedDescription } }
     }
+    func prepareAutomationDeletion(_ id:String) async throws -> NativeWorkflowReview {
+        guard let client,!loading,!acting,NativeWorkflowWire.routineID(id) != nil,let row = rows("automations").first(where:{$0.id == id}) else { throw NativeWorkflowFailure("Refresh this scheduled automation before reviewing deletion.") }
+        let connection = generation
+        let value = try await client.request("/api/routines/" + id)
+        guard connection == generation,!loading,!acting else { throw NativeWorkflowFailure("The connection changed. Review again.") }
+        let detail = try checkedRoutine(value,id:id)
+        try validateAutomation(detail,inventory:row.raw)
+        automationDetails[id] = detail
+        return try review(.deleteAutomation(id))
+    }
+    private func checkedRoutine(_ value:[String:Any],id:String) throws -> [String:Any] {
+        guard let row = value["routine"] as? [String:Any],NativeWorkflowWire.routineID(row["id"]) == id,row["session_id"] is String,row["job_type"] is String,row["cron_expr"] is String,row["payload"] is [String:Any],NativeWorkflowWire.bool(row["enabled"]) != nil else { throw NativeWorkflowFailure("The exact schedule and action could not be read back.") };return row
+    }
+    private func validateAutomation(_ row:[String:Any],inventory:[String:Any]? = nil) throws {
+        guard let sessionID,!sessionID.isEmpty,row["session_id"] as? String == sessionID,row["job_type"] as? String == "custom" else { throw NativeWorkflowFailure("This automation is not a CUSTOM schedule owned by the selected conversation.") }
+        if let inventory {
+            guard NativeWorkflowWire.routineID(row["id"]) == NativeWorkflowWire.routineID(inventory["id"]),row["cron_expr"] as? String == inventory["cron"] as? String,row["description"] as? String == inventory["description"] as? String,NativeWorkflowWire.bool(row["enabled"]) == NativeWorkflowWire.bool(inventory["enabled"]) else { throw NativeWorkflowFailure("The automation changed since its inventory was loaded. Refresh and review again.") }
+        }
+    }
     func review(_ action:NativeWorkflowAction) throws -> NativeWorkflowReview {
+        let reviewed = try makeReview(action)
+        issued = issued.filter { $0.value >= now() }
+        guard issued.count < 100 else { throw NativeWorkflowFailure("Too many outstanding reviews. Reconnect before reviewing more actions.") }
+        issued[reviewed.id] = reviewed.expiresAt;return reviewed
+    }
+    private func makeReview(_ action:NativeWorkflowAction) throws -> NativeWorkflowReview {
         guard available,!loading,!acting else { throw NativeWorkflowFailure("Wait for the local workflow service to finish loading.") }
         let title:String, explanation:String
+        var expected:[String:Any]?
         switch action {
         case .pack(let id,let context):
             guard let row = rows("packs").first(where:{$0.id == id}),let steps = row.raw["steps"] as? [[String:Any]],!steps.isEmpty else { throw NativeWorkflowFailure("Refresh this workflow pack before running it.") }
@@ -155,8 +209,21 @@ struct NativeWorkflowReview: Identifiable {
             if body["job_type"] as? String == "skill", (payload["skill"] as? String)?.isEmpty != false { throw NativeWorkflowFailure("Enter an installed skill ID.") }
             title = "Create an enabled routine?"; explanation = "Arms schedule “\(schedule)” in \(tz). \(NativeWorkflowWire.bool(body["recurring"]) == false ? "Runs once." : "Runs repeatedly.") It may use provider budget and execute tools/integrations without this window open, subject to core policy. Payload: \(NativeWorkflowWire.json(payload)). Schedule validity is checked by the server, not assumed here."
         case .routine(let id,let verb):
-            guard Int(id) != nil,rows("routines").contains(where:{$0.id == id}),["pause","resume","delete"].contains(verb) else { throw NativeWorkflowFailure("Load and review the routine before changing it.") }
-            title = "\(verb.capitalized) this routine?"; explanation = verb == "resume" ? "Re-enables future scheduled execution, including provider/tool actions under existing policy." : verb == "delete" ? "Permanently deletes the schedule. It does not undo run history or guarantee that an in-flight run stops. There is no one-click undo." : "Disables future scheduled runs. An already running operation may continue."
+            guard NativeWorkflowWire.routineID(id) != nil,let row = rows("routines").first(where:{$0.id == id}),["pause","resume","delete"].contains(verb) else { throw NativeWorkflowFailure("Load and review the routine before changing it.") }
+            expected = try checkedRoutine(["routine":row.raw],id:id);_ = try NativeWorkflowWire.terms(row.raw)
+            title = "\(verb.capitalized) this routine?"
+            let effect = verb == "resume" ? "Re-enables future scheduled execution, including provider/tool actions under existing policy." : verb == "delete" ? "Permanently deletes the schedule. It does not undo run history or guarantee that an in-flight run stops. There is no one-click undo." : "Disables future scheduled runs. An already running operation may continue."
+            explanation = effect + " Exact routine \(id): \(row.title). Schedule: \(row.raw["cron_expr"] as? String ?? ""). Conversation: \(row.raw["session_id"] as? String ?? ""). Action: \(NativeWorkflowWire.json(row.raw["payload"] ?? [:]))."
+        case .createAutomation(let minutes,let action):
+            let text = try NativeWorkflowWire.automationText(minutes:minutes,action:action)
+            guard let sessionID,!sessionID.isEmpty,sessionID.utf8.count <= 1024,!sessionID.unicodeScalars.contains(where:{CharacterSet.controlCharacters.contains($0)}) else { throw NativeWorkflowFailure("Select a conversation before creating a scheduled automation.") }
+            title = "Arm this scheduled automation?"
+            explanation = "Repeats every \(minutes) minutes in conversation \(sessionID). The exact instruction sent to the existing scheduler is: \(text). It may consume provider budget and perform actions under core policy while this window is closed. This is a scheduled prompt, not an event trigger. Creation does not establish a completed run."
+        case .deleteAutomation(let id):
+            guard NativeWorkflowWire.routineID(id) != nil,let row = rows("automations").first(where:{$0.id == id}),let detail = automationDetails[id] else { throw NativeWorkflowFailure("Read this exact automation before reviewing deletion.") }
+            try validateAutomation(detail,inventory:row.raw);expected = detail;_ = try NativeWorkflowWire.terms(detail)
+            title = "Delete this scheduled automation?"
+            explanation = "Permanently removes schedule \(id): \(detail["description"] as? String ?? id), \(detail["cron_expr"] as? String ?? ""). Conversation: \(detail["session_id"] as? String ?? ""). Exact action: \(NativeWorkflowWire.json(detail["payload"] ?? [:])). Already running work may continue; deletion does not undo effects."
         case .compile(let intent):
             guard !intent.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty else { throw NativeWorkflowFailure("Enter a goal before compiling a plan.") }
             title = "Compile this intent into a plan?"; explanation = "May send this goal to your configured AI provider and consume its budget: \(intent). It records a plan and suggestions; it does not execute its suggested tools."
@@ -164,13 +231,15 @@ struct NativeWorkflowReview: Identifiable {
             guard rows("today").contains(where:{$0.id == id && $0.raw["plan_id"] as? String == plan}) else { throw NativeWorkflowFailure("Refresh today’s exact action before marking it done.") }
             title = "Record this action as completed?"; explanation = "Marks action \(id) in plan \(plan) completed, with result “\(result)”. This button does not execute the suggested tool or verify the work happened. No completion-undo endpoint exists."
         }
-        return NativeWorkflowReview(generation:generation,action:action,title:title,explanation:explanation)
+        return NativeWorkflowReview(generation:generation,action:action,title:title,explanation:explanation,expiresAt:now().addingTimeInterval(120),expected:expected)
     }
     func perform(_ reviewed:NativeWorkflowReview) async -> Bool {
         guard reviewed.generation == generation,let client = client else { actionError = "The agent connection changed. Review again."; return false }
-        do { _ = try review(reviewed.action) } catch { actionError = error.localizedDescription; return false }
+        guard !loading,!acting,issued.removeValue(forKey:reviewed.id) == reviewed.expiresAt,now() <= reviewed.expiresAt else { actionError = "This review is expired, already used or no longer available. Review again.";return false }
+        do { _ = try makeReview(reviewed.action) } catch { actionError = error.localizedDescription; return false }
         let connection = generation; operation = UUID();let op = operation
         acting = true; actionError = nil; receipt = nil
+        var mutationAttempted = false
         defer { if connection == generation && operation == op { acting = false } }
         do {
             let response:[String:Any], text:String
@@ -188,16 +257,48 @@ struct NativeWorkflowReview: Identifiable {
             case .loadRoutines:
                 response = try await client.request("/api/routines");try validateList("routines",response);text = "Routine inventory loaded; review scheduler state before assuming execution is healthy."
             case .createRoutine(let body):
+                mutationAttempted = true
                 response = try await client.request("/api/routines",method:"POST",body:body)
                 guard NativeWorkflowWire.bool(response["ok"]) == true,let routine = response["routine"] as? [String:Any],let id = NativeWorkflowWire.id(routine["id"]),NativeWorkflowWire.bool(routine["enabled"]) == true,routine["cron_expr"] as? String == body["cron_expr"] as? String else { throw NativeWorkflowFailure("An enabled routine with that schedule was not confirmed.") };text = "Enabled routine \(id) created. No completed run is established by this receipt."
             case .routine(let id,let verb):
+                let fresh = try checkedRoutine(try await client.request("/api/routines/" + id),id:id)
+                guard connection == generation,op == operation,now() <= reviewed.expiresAt,let expected = reviewed.expected,try NativeWorkflowWire.terms(fresh) == NativeWorkflowWire.terms(expected) else { throw NativeWorkflowFailure("This routine changed or its review expired. Refresh and review the exact action again.") }
+                mutationAttempted = true
                 response = try await client.request("/api/routines/" + NativeWorkflowWire.segment(id) + (verb == "delete" ? "" : "/" + verb),method:verb == "delete" ? "DELETE" : "POST")
                 guard NativeWorkflowWire.bool(response["ok"]) == true else { throw NativeWorkflowFailure("The routine change was not confirmed.") }
                 if verb != "delete" {
                     let detail = try await client.request("/api/routines/" + NativeWorkflowWire.segment(id))
-                    guard let row = detail["routine"] as? [String:Any],NativeWorkflowWire.id(row["id"]) == id,NativeWorkflowWire.bool(row["enabled"]) == (verb == "resume") else { throw NativeWorkflowFailure("The routine action was acknowledged but its enabled state was not confirmed.") };confirmedRoutine = row
+                    let row = try checkedRoutine(detail,id:id);var expectedAfter = fresh;expectedAfter["enabled"] = verb == "resume";if verb == "resume" { expectedAfter["disabled_reason"] = "" }
+                    guard NativeWorkflowWire.bool(row["enabled"]) == (verb == "resume"),try NativeWorkflowWire.terms(row) == NativeWorkflowWire.terms(expectedAfter) else { throw NativeWorkflowFailure("The routine action was acknowledged but its exact enabled state and terms were not confirmed.") };confirmedRoutine = row
+                } else {
+                    let absent = try await client.request("/api/routines/" + id,missingRoutineOK:true)
+                    guard absent["error"] as? String == "Routine not found",absent["routine"] == nil else { throw NativeWorkflowFailure("Deletion was acknowledged, but the exact routine is still present. Its absence is not confirmed.") }
                 }
-                text = "Backend acknowledged routine \(verb). Already running effects may remain."
+                text = "Routine \(verb) verified by readback. Already running effects may remain."
+            case .createAutomation(let minutes,let action):
+                let composed = try NativeWorkflowWire.automationText(minutes:minutes,action:action),sid = sessionID!
+                mutationAttempted = true
+                let acknowledgement = try await client.request("/api/automations",method:"POST",body:["text":composed,"session_id":sid])
+                guard connection == generation,op == operation,NativeWorkflowWire.bool(acknowledgement["success"]) == true,let id = NativeWorkflowWire.routineID(acknowledgement["job_id"]),acknowledgement["cron"] as? String == "every \(minutes)m",acknowledgement["description"] as? String == composed else { throw NativeWorkflowFailure("The requested automation was not acknowledged with its exact schedule.") }
+                let row = try checkedRoutine(try await client.request("/api/routines/" + id),id:id)
+                try validateAutomation(row)
+                guard NativeWorkflowWire.bool(row["enabled"]) == true,row["cron_expr"] as? String == "every \(minutes)m",row["description"] as? String == composed,let payload = row["payload"] as? [String:Any],payload.count == 3,payload["source"] as? String == "natural_language",payload["action_text"] as? String == composed,payload["original_text"] as? String == composed else { throw NativeWorkflowFailure("The exact enabled CUSTOM action and schedule were not found in persisted storage.") }
+                response = try await client.request("/api/automations");try validateList("automations",response)
+                guard let saved = (response["automations"] as? [[String:Any]])?.first(where:{NativeWorkflowWire.routineID($0["id"]) == id}) else { throw NativeWorkflowFailure("The new schedule is not confirmed in the automation inventory.") }
+                try validateAutomation(row,inventory:saved)
+                text = "Enabled scheduled automation \(id) saved: every \(minutes) minutes. No completed run is established by this receipt."
+            case .deleteAutomation(let id):
+                let fresh = try checkedRoutine(try await client.request("/api/routines/" + id),id:id)
+                try validateAutomation(fresh)
+                guard connection == generation,op == operation,now() <= reviewed.expiresAt,let expected = reviewed.expected,try NativeWorkflowWire.terms(fresh) == NativeWorkflowWire.terms(expected) else { throw NativeWorkflowFailure("This automation changed or its review expired. Refresh and review again.") }
+                mutationAttempted = true
+                let acknowledgement = try await client.request("/api/automations/" + id,method:"DELETE")
+                guard NativeWorkflowWire.bool(acknowledgement["success"]) == true else { throw NativeWorkflowFailure("Automation deletion was not acknowledged.") }
+                response = try await client.request("/api/automations");try validateList("automations",response)
+                guard !(response["automations"] as! [[String:Any]]).contains(where:{NativeWorkflowWire.routineID($0["id"]) == id}) else { throw NativeWorkflowFailure("Deletion was acknowledged but this automation is still listed.") }
+                let absent = try await client.request("/api/routines/" + id,missingRoutineOK:true)
+                guard absent["error"] as? String == "Routine not found",absent["routine"] == nil else { throw NativeWorkflowFailure("The exact automation schedule is still present. Absence is not confirmed.") }
+                text = "Scheduled automation \(id) deletion verified by readback. Already running work may continue."
             case .compile(let intent):
                 response = try await client.request("/api/intents/compile",method:"POST",body:["intent":intent.trimmingCharacters(in:.whitespacesAndNewlines)])
                 guard NativeWorkflowWire.bool(response["success"]) == true,let plan = response["plan"] as? [String:Any],let id = NativeWorkflowWire.id(plan["plan_id"]),plan["intent"] as? String == intent.trimmingCharacters(in:.whitespacesAndNewlines),plan["actions"] is [[String:Any]] else { throw NativeWorkflowFailure("The service did not confirm the compiled intent.") };text = "Plan \(id) recorded. Suggested tools have not been executed by this action."
@@ -211,10 +312,11 @@ struct NativeWorkflowReview: Identifiable {
             if case .loadRoutines = reviewed.action { payloads["routines"] = response; errors["routines"] = nil }
             if case .createRoutine = reviewed.action,let row = response["routine"] as? [String:Any] { var list = payloads["routines"]?["routines"] as? [[String:Any]] ?? [];list.append(row);payloads["routines"] = ["routines":list] }
             if case .routine(let id,let verb) = reviewed.action { var list = payloads["routines"]?["routines"] as? [[String:Any]] ?? [];if verb == "delete" { list.removeAll { NativeWorkflowWire.id($0["id"]) == id } } else if let index = list.firstIndex(where:{ NativeWorkflowWire.id($0["id"]) == id }) { if let confirmed = confirmedRoutine { list[index] = confirmed } };var data = payloads["routines"] ?? [:];data["routines"] = list;payloads["routines"] = data }
+            switch reviewed.action { case .createAutomation,.deleteAutomation:payloads["automations"] = response;errors["automations"] = nil;automationDetails = [:];default:break }
             if case .compile = reviewed.action { compiledPlan = response["plan"] as? [String:Any] }
             await refresh()
             guard connection == generation && op == operation else { return false };receipt = text;return true
-        } catch { if connection == generation && op == operation { actionError = error.localizedDescription };return false }
+        } catch { if connection == generation && op == operation { actionError = mutationAttempted ? "Schedule outcome is unknown or unverified. Inspect its stored state before any new attempt; no automatic retry was made. " + error.localizedDescription : error.localizedDescription };return false }
     }
 }
 
@@ -240,6 +342,7 @@ struct NativeWorkflowFeatureView: View {
     @State private var recurring = true
     @State private var routineKind = "prompt"
     @State private var routinePrompt = ""
+    @State private var automationMinutes = 60
     @State private var skill = ""
     @State private var endpoint = ""
     @State private var intent = ""
@@ -250,13 +353,13 @@ struct NativeWorkflowFeatureView: View {
     var body:some View {
         VStack(alignment:.leading,spacing:16) {
             HStack { VStack(alignment:.leading,spacing:4) { Text("Workflows").font(.largeTitle.bold());Text("Review background work, scheduled routines and intent plans.").foregroundStyle(.secondary) };Spacer();Button("Refresh") { Task { await model.refresh() } }.disabled(busy || baseURL == nil) }
-            Picker("Workflow section",selection:$tab) { ForEach(["Packs","TaskFlows","Routines","Intents"],id:\.self) { Text($0).tag($0) } }.pickerStyle(.segmented).disabled(model.acting)
+            Picker("Workflow section",selection:$tab) { ForEach(["Packs","TaskFlows","Routines","Automations","Intents"],id:\.self) { Text($0).tag($0) } }.pickerStyle(.segmented).disabled(model.acting)
             if baseURL == nil { Text("The local workflow service is not ready.").foregroundStyle(.secondary);Spacer() }
             else {
                 if let error = localError ?? model.actionError { NativeSelectableText(error).foregroundStyle(.red) }
                 if let receipt = model.receipt { NativeSelectableText(receipt).foregroundStyle(.secondary) }
                 if model.loading { ProgressView("Refreshing safe workflow reads…") }
-                ScrollView { VStack(alignment:.leading,spacing:16) { if tab == "Packs" { packs };if tab == "TaskFlows" { flows };if tab == "Routines" { routines };if tab == "Intents" { intents } }.frame(maxWidth:.infinity,alignment:.leading) }
+                ScrollView { VStack(alignment:.leading,spacing:16) { if tab == "Packs" { packs };if tab == "TaskFlows" { flows };if tab == "Routines" { routines };if tab == "Automations" { automations };if tab == "Intents" { intents } }.frame(maxWidth:.infinity,alignment:.leading) }
             }
         }.padding(24)
         .task(id:(baseURL?.absoluteString ?? "") + "|" + (sessionID ?? "")) { review = nil;draft = "";selectedPack = nil; await model.configure(baseURL:baseURL,sessionID:sessionID) }
@@ -304,6 +407,21 @@ struct NativeWorkflowFeatureView: View {
         ForEach(model.rows("plans")) { plan in intentPlanCard(plan) }
         if let plan = model.compiledPlan { compiledIntentCard(plan) }
     }
+    @ViewBuilder private var automations:some View {
+        Text("Scheduled automations repeat an AI instruction. Webhooks and geofences have separate controls in Automation.").font(.caption).foregroundStyle(.secondary)
+        Button("Create scheduled automation…") { automationMinutes = 60;routinePrompt = "";draft = "automation" }.disabled(busy)
+        state("automations")
+        ForEach(model.rows("automations")) { row in automationCard(row) }
+    }
+    private func automationCard(_ row:NativeWorkflowRow) -> some View {
+        card(row.title) {
+            Text("Schedule: \(row.raw["cron"] as? String ?? "Unavailable")").foregroundStyle(.secondary)
+            Text(NativeWorkflowWire.bool(row.raw["enabled"]).map { $0 ? "Enabled schedule" : "Disabled schedule" } ?? "Schedule state unavailable").font(.caption)
+            Button("Review deletion…",role:.destructive) {
+                Task { do { localError = nil;review = try await model.prepareAutomationDeletion(row.id) } catch { localError = error.localizedDescription } }
+            }.disabled(busy)
+        }
+    }
     private var intentCompilationCard:some View {
         card("Compile a goal") {
             TextEditor(text:$intent).frame(height:90).accessibilityLabel("Intent goal")
@@ -345,13 +463,14 @@ struct NativeWorkflowFeatureView: View {
     }
     private var draftSheet:some View {
         VStack(alignment:.leading,spacing:16) {
-            Text(draft == "flow" ? "Create background workflow" : "Create enabled routine").font(.title2.bold())
-            TextField("Title / description",text:$title).textFieldStyle(.roundedBorder)
+            Text(draft == "flow" ? "Create background workflow" : draft == "automation" ? "Create scheduled automation" : "Create enabled routine").font(.title2.bold())
+            if draft != "automation" { TextField("Title / description",text:$title).textFieldStyle(.roundedBorder) }
             ScrollView {
                 if draft == "flow" { ForEach($steps) { $step in VStack(alignment:.leading) { Picker("Step",selection:$step.type) { Text("AI prompt").tag("llm.chat");Text("Save note").tag("note.save");Text("Wait").tag("sleep") };if step.type == "sleep" { Stepper("Wait \(step.seconds) seconds",value:$step.seconds,in:1...86400) } else { TextField(step.type == "note.save" ? "Note content" : "Prompt",text:$step.text).textFieldStyle(.roundedBorder) };Button("Remove step",role:.destructive) { steps.removeAll { $0.id == step.id } } }.padding(.vertical,8) };Button("Add step") { steps.append(NativeWorkflowStepDraft()) }.disabled(steps.count >= 50) }
+                else if draft == "automation" { VStack(alignment:.leading,spacing:12) { Stepper("Repeat every \(automationMinutes) minutes",value:$automationMinutes,in:1...10_080);TextEditor(text:$routinePrompt).frame(height:120).accessibilityLabel("Scheduled automation action");Text("Enter only the action. Keep every, daily and weekly in the schedule control. This immediately creates an enabled recurring prompt, subject to core policy.").font(.caption).foregroundStyle(.secondary) } }
                 else { VStack(alignment:.leading,spacing:12) { TextField("Cron or supported schedule",text:$schedule).textFieldStyle(.roundedBorder);TextField("IANA timezone",text:$timezone).textFieldStyle(.roundedBorder);Toggle("Repeat",isOn:$recurring);Picker("Routine action",selection:$routineKind) { Text("AI prompt").tag("prompt");Text("Installed skill").tag("skill") };if routineKind == "prompt" { TextEditor(text:$routinePrompt).frame(height:100).accessibilityLabel("Routine prompt") } else { TextField("Installed skill ID",text:$skill).textFieldStyle(.roundedBorder);TextField("Endpoint",text:$endpoint).textFieldStyle(.roundedBorder);Text("This form does not verify the installed skill’s availability or external account permissions.").font(.caption).foregroundStyle(.secondary) } } }
             }.frame(maxHeight:340)
-            HStack { Spacer();Button("Cancel") { draft = "" };Button("Review execution…") { let action:NativeWorkflowAction;if draft == "flow" { action = .createFlow(["title":title.trimmingCharacters(in:.whitespacesAndNewlines),"steps":steps.map(\.value),"session_id":"","context":[:]]) } else { let payload:[String:Any] = routineKind == "prompt" ? ["prompt":routinePrompt] : ["skill":skill,"endpoint":endpoint];action = .createRoutine(["description":title,"cron_expr":schedule,"tz_name":timezone,"recurring":recurring,"job_type":routineKind,"payload":payload,"session_id":""]) };do { let prepared = try model.review(action);draft = "";DispatchQueue.main.async { review = prepared } } catch { localError = error.localizedDescription } } }
+            HStack { Spacer();Button("Cancel") { draft = "" };Button("Review execution…") { let action:NativeWorkflowAction;if draft == "flow" { action = .createFlow(["title":title.trimmingCharacters(in:.whitespacesAndNewlines),"steps":steps.map(\.value),"session_id":"","context":[:]]) } else if draft == "automation" { action = .createAutomation(minutes:automationMinutes,action:routinePrompt) } else { let payload:[String:Any] = routineKind == "prompt" ? ["prompt":routinePrompt] : ["skill":skill,"endpoint":endpoint];action = .createRoutine(["description":title,"cron_expr":schedule,"tz_name":timezone,"recurring":recurring,"job_type":routineKind,"payload":payload,"session_id":""]) };do { let prepared = try model.review(action);draft = "";DispatchQueue.main.async { review = prepared } } catch { localError = error.localizedDescription } } }
         }.padding(24).frame(width:560)
     }
     private func packSheet(_ pack:NativeWorkflowRow) -> some View {

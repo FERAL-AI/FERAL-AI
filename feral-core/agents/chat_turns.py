@@ -11,10 +11,13 @@ from dataclasses import dataclass, field
 import hashlib
 import json
 import os
-from typing import Callable
+from typing import TYPE_CHECKING, Callable
 from uuid import UUID, uuid4
 
 from security.agent_turn_lease import spawn_agent_turn
+
+if TYPE_CHECKING:
+    from models.protocol import FeralMessage
 
 
 class ChatTurnError(Exception):
@@ -38,6 +41,7 @@ def exact_uuid(value) -> str:
 class TurnAudit:
     session_id: str
     turn_id: str
+    request_id: str = ""
     began: bool = False
     cancel_requested: bool = False
     closed: bool = False
@@ -54,6 +58,17 @@ _audit: ContextVar[TurnAudit | None] = ContextVar("feral_tracked_chat_turn", def
 def turn_audit(session_id: str) -> TurnAudit | None:
     audit = _audit.get()
     return audit if audit is not None and audit.session_id == session_id and not audit.closed else None
+
+
+def correlate_progress(session_id: str, message: FeralMessage) -> FeralMessage:
+    """Attach trusted turn identity without rewriting skill/permission identifiers."""
+    audit = turn_audit(session_id)
+    if audit is None or not audit.request_id:
+        return message
+    return message.model_copy(update={"payload": {
+        **message.payload,
+        "chat_turn": {"contract_version": 1, "request_id": audit.request_id, "turn_id": audit.turn_id},
+    }})
 
 
 def observe_tool_result(session_id: str, result: dict):
@@ -150,7 +165,7 @@ class ChatTurnManager:
                             active.terminal_notified.add(id(owner))
                         await emit("chat_turn_terminal", {**latest, "replayed": True})
                 return ack
-            audit = TurnAudit(session_id, turn_id)
+            audit = TurnAudit(session_id, turn_id, request_id=request_id)
             live = LiveTurn(owner, audit, request_id)
             live.subscribers[id(owner)] = (owner, emit)
             self._live[(session_id, turn_id)] = live

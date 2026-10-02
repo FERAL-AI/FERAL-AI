@@ -3726,6 +3726,8 @@ class BrainState:
         confirmations) can now branch on the result instead of assuming
         success.
         """
+        from agents.chat_turns import correlate_progress
+        msg = correlate_progress(session_id, msg)
         ws = self.sessions.get(session_id)
         if ws:
             await ws.send_json(msg.model_dump())
