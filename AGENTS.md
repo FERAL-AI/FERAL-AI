@@ -2,6 +2,11 @@
 
 ## Scope and sources of truth
 
+For continuing FERAL completion, read `codex.md`, then
+`docs/roadmap/theora-personal-agent/WORK_STATE.md`, `RESUME_WORK.md` and
+`EXECUTION_PLAN.md` before assigning work. Compare the checkpoint to actual Git,
+CI and candidate identity; do not assume chat history or previous workers survived.
+
 Work in this repository, not the enclosing home-directory Git repository. Confirm
 `git rev-parse --show-toplevel` before Git operations. Read `CLAUDE.md` for the
 existing runtime, interpreter and development conventions. Nested instructions
@@ -31,6 +36,11 @@ deployment, accounts, saved data or autonomy settings.
 
 - Inspect real interfaces before editing. Preserve concurrent work. Give parallel
   workers distinct file ownership and integrate their changes sequentially.
+- The user requested parallel workers for the FERAL completion effort. Use a
+  parent integrator and up to three workers for independent ready cards when
+  available. The parent owns shared contracts, checkpoint and Git publication;
+  workers receive exclusive files and concrete acceptance commands. Reconcile
+  stale claims after interruption before reassigning those files.
 - Keep blocking work out of async handlers and retain background task references.
   Use typed errors and contextual, redacted diagnostics instead of silent failure.
 - Test the failure and cancellation paths as well as success. Use isolated profiles
@@ -47,6 +57,10 @@ deployment, accounts, saved data or autonomy settings.
   device tests separately. Never claim unperformed tests or production readiness.
 - Update public documentation and the release-readiness evidence with behavior
   changes. An unfinished feature needs an explicit limitation and acceptance gate.
+- Update WORK_STATE at task integration, before publication and deliberate pause.
+  Record tested source/candidate, result, remaining acceptance and next action.
+  Keep implemented, verified and published states separate; persist coherent
+  commits rather than relying on chat memory or a shutdown hook.
 
 ## Git and releases
 

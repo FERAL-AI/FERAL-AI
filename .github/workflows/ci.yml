@@ -632,6 +632,10 @@ jobs:
           fi
           find "${FIND_ARGS[@]}" -print0 | xargs -0 python -m py_compile
 
+      - name: Read-only work recovery helper checks
+        working-directory: .
+        run: python -m unittest discover -s scripts/tests -p test_feral_work_status.py -v
+
   boundary-check:
     name: Architecture boundaries
     runs-on: ubuntu-latest
