@@ -14,49 +14,57 @@ Or install from source during development:
 pip install -e sdk/python
 ```
 
-## Quick start
+## Author a Python tool package
+
+`feral-sdk` imports independently of the Brain. The runtime interpreter must
+also have `feral-sdk` installed before loading a Python SDK plugin; the package
+installer does not install dependencies. Availability inside a shipped native
+bundle is a separate packaging gate.
 
 ```python
+# impl.py in your own authored skill package
+from __future__ import annotations
 from feral_sdk import FeralPlugin, feral_tool
 
-class WeatherPlugin(FeralPlugin):
-    name = "weather"
-    description = "Real-time weather data"
+class Calculator(FeralPlugin):
+    name = "my_calculator"
+    description = "Local integer arithmetic"
 
-    @feral_tool(description="Get current weather for a city")
-    async def current(self, city: str) -> dict:
-        import httpx
-        async with httpx.AsyncClient() as client:
-            resp = await client.get(
-                "https://api.weatherapi.com/v1/current.json",
-                params={"key": "YOUR_KEY", "q": city},
-            )
-            return resp.json()
+    @feral_tool(description="Add two integers")
+    async def add(self, a: int, b: int) -> dict:
+        return {"sum": a + b}
+
+# Explicit module-level export discovered by the existing BaseSkill loader.
+CalculatorSkill = Calculator.runtime_skill()
 ```
 
-### Generating a manifest
+Write `Calculator().to_manifest()` as JSON to `manifest.json` beside `impl.py`.
+The generated endpoints use method `PYTHON` and an empty URL; they require review
+by default. No `internal://` transport or automatic plugin registration exists.
+`runtime_skill()` imports the runtime lazily and gives an explicit error when
+`skills.base` is absent. SDK import and manifest generation do not require it.
 
-```python
-plugin = WeatherPlugin()
-manifest = plugin.to_manifest()   # dict ready for manifest.json
-```
+Type hints, including postponed annotations, infer scalar/list/dict parameter
+kinds. Unsupported or unresolved hints require explicit `parameters=`. Defaults
+are copied into the manifest. Tools must be asynchronous, with distinct bounded
+identifiers; malformed parameter definitions fail before installation. This
+validation is not a sandbox for arbitrary plugin code. Trust the author and keep
+blocking operations off the event loop. `on_load`/`on_unload` are not called by
+the current dynamic loader.
 
-The manifest uses `internal://` URLs with method `PYTHON`, which tells the
-Brain's SkillExecutor to resolve the call through the registered Python
-implementation rather than making an HTTP request.
+Install the package using the existing runtime's package contract, then request
+`POST /api/skills/reload?skill_id=my_calculator` with the deployment's
+credentials. Review and invoke through FERAL's existing tool path. Do not use a
+direct Python handler call as proof of FERAL authorization.
 
-### Registering with the Brain
-
-Place your plugin module as `impl.py` inside the skill directory
-(`~/.feral/skills/<skill_id>/`) alongside `manifest.json`, or call
-`register_instance()` at startup:
-
-```python
-from skills.impl import register_instance
-
-plugin = WeatherPlugin()
-register_instance(plugin.name, plugin)
-```
+**Current loader limitation:** a reload acknowledgement can succeed even when
+`impl.py` fails or exports no BaseSkill adapter. Verify the backing implementation
+and actual authorized invocation separately. A bare FeralPlugin subclass in
+`impl.py` is insufficient. Reload also is not an atomic replacement guarantee.
+The executable [SDK authoring walkthrough](../../examples/sdk-authoring/README.md)
+checks installation, the actual registered reload route, actual SkillExecutor,
+Deny, foreign/reused reviews and uninstall in a disposable fresh process. Its
+negative probe preserves the current false-acknowledgement behavior visibly.
 
 ## Key modules
 

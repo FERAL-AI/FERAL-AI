@@ -15,6 +15,10 @@ but the full teardown leak remains under investigation. A primary legacy fixture
 now binds the real checkpoint guard; exact approval-owner malformed inputs are
 refused. That follow-up passed 46 tests. Full local mypy is 845, above baseline812.
 Exact-source remote CI and the next packaged native journey remain required.
+Core90b75587a is committed with these repairs and evidence; its SDK follow-up
+passed112 Python/82 Node tests plus wheel/tarball runtime checks. Neither source
+checkpoint is yet represented in the immutable9.29 packaged payload. The new
+publication's remote checks must be reconciled before any release claim.
 
 Updated October 2, 2026. This is an implementation and acceptance roadmap, not a declaration of readiness. Start with the [source-backed execution plan](EXECUTION_PLAN.md), then the [architecture contracts](ARCHITECTURE_AND_CONTRACTS.md), [original execution plan](EXECUTION_AND_RELEASE_GATES.md), [iOS handoff](IOS_AGENT_HANDOFF.md) and [native feature inventory](../../../desktop-native/FEATURE_PARITY.md).
 

@@ -30,7 +30,7 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent publication | `634595c7194aedaf6eb9b8c91cbacb87fedea4bd` (native exact turns, selectable layout repair, Forge/automation controls, inactive context lifecycle) |
+| Current checkpoint | Core commit `90b75587a`, plus this checkpoint's SDK authoring follow-up; read actual HEAD and remote tracking before claiming publication/CI |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
 | Disk observation | Native worker observed2.3GiB during9.29 inference; parent subsequent df reports4.3GiB. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
@@ -41,6 +41,15 @@ every historic source identifier to HEAD or regenerate a baseline to make a gate
 appear green.
 
 ## Latest checked source and active candidate
+
+Core commit **90b75587a** contains the following working core wave and its fixture
+repairs. Its SDK authoring follow-up adds verified Python runtime adapters and
+Node loopback plugin hosting: **112 Python tests and 82 Node tests passed**, plus
+isolated wheel import and actual central-runtime invocation using an installed
+Node tarball. [SDK authoring evidence](SDK_PLUGIN_AUTHORING_EVIDENCE.md) states
+the dependency/bundling and loader-acknowledgement limits. Both commits are being
+published to the existing draft PR. Exact latest HEAD/remote CI must be checked;
+no new-source full CI result or new packaged app is asserted here.
 
 Source **634595c7194aedaf6eb9b8c91cbacb87fedea4bd** is committed/pushed.
 [CI37071282138](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37071282138)
@@ -65,7 +74,7 @@ The worker froze [9.29 acceptance](NATIVE_9_29_ACCEPTANCE.md). These bounded
 results do not establish unrestricted daily use or account/device/distribution
 acceptance. The candidate contains no later working activation/Forge fixes.
 
-Current uncommitted core wave implements:
+The new committed core wave implements:
 DATA01C exact attachments/readiness/writer cleanup, parent authenticated WS/HUP
 preludes and mandatory boot installation, primary snapshot guards, create-only
 Forge drafts, actual executor review admission and executable extension example.
@@ -247,9 +256,9 @@ as containing every later source commit or completing the populated-profile matr
 
 | Worker | Exclusive scope | Active work |
 |---|---|---|
-| Parent | WS/HUP/cleanup/boot integration, shared docs/CI/Git and next assembly | Combined597 and owner follow-up46 passed; failed full run disclosed; coherent core publication next |
-| coding_session_isolation | Core Forge/DEV01D transferred; SDK authoring adapters/examples/tests/evidence | Python112 and Node82 passed; final package verification pending; no core edits |
-| python_sdk_contracts | Type/full-run triage plus four explicitly assigned fixture-isolation repairs | Config37 and integration24 passed; voice fixture/reconciliation check next; no production edits |
+| Parent | Shared docs/CI/Git and next assembly | Core90b75587a committed; SDK follow-up publication/CI next; failed full run disclosed |
+| coding_session_isolation | SDK authoring adapters/examples/tests/evidence frozen and transferred | Python112/Node82 plus wheel/tarball checks passed; next loader card needs separate ownership |
+| python_sdk_contracts | Type/full-run triage and four fixture-isolation repairs frozen and transferred | Config37/integration24/voice-attribution-activation86 passed; further harness/doctor work is separate |
 | native_populated_acceptance | Immutable9.29 report; saved-context source transferred; four feature-model task gates | Agents/Workflow/Automation/Connections, their tests and scoped shared native policy wiring; no assembly or GUI until integrated freeze |
 
 Original immutable bundle evidence is frozen in [NATIVE_POPULATED_ACCEPTANCE.md](NATIVE_POPULATED_ACCEPTANCE.md): actual rich persistence/search/rename/pin/relaunch and one local-model reply passed. **SIGSEGV with excessive SwiftUI accessibility recursion is confirmed by macOS report and watched exit**. Context truncation, guessed Weather fallback, missing result success key and pending-review false-completion text are also reproduced. Do not call this app release-ready.

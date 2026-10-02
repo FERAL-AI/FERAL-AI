@@ -4,6 +4,62 @@ Requires Node 22 or later for built-in Fetch, WebSocket, AbortController and
 crypto. This `sdk/node` package is the generic Brain/plugin client; the hardware
 SDK at `feral-nodes/ts-node-sdk` is a separate package with separate checks.
 
+## Author and host a Node plugin
+
+```ts
+import {definePlugin, startPluginHost} from '@feral/sdk';
+
+const plugin = definePlugin({name: 'my_calculator', tools: [{
+  name: 'add', description: 'Add two integers',
+  parameters: {
+    a: {type: 'integer', description: 'First integer'},
+    b: {type: 'integer', description: 'Second integer'},
+  },
+  handler: async ({a, b}) => {
+    if (!Number.isSafeInteger(a) || !Number.isSafeInteger(b)) throw new Error('Integers required');
+    return {sum: Number(a) + Number(b)};
+  },
+}]});
+const host = await startPluginHost(plugin);
+// host.manifest contains real POST URLs on a literal loopback listener.
+// Store host.bearerToken privately in FERAL's existing skill credential vault.
+// Never print the token or embed it in the manifest.
+// Install/reload the manifest using the existing runtime, then review/invoke.
+// Keep the process/host alive while FERAL invokes it.
+// Later, at explicit shutdown: await host.close();
+```
+
+`definePlugin().toManifest({baseUrl})` requires an explicit bare loopback HTTP
+origin (`127.0.0.1` or `[::1]`). Calling it without a transport fails clearly,
+replacing the former non-routable `plugin://` manifest. `startPluginHost()` binds
+literal loopback only and creates a random bearer credential unless a caller
+supplies one. The manifest declares bearer auth and conservative review-required
+endpoints. The host has JSON body/result bounds, bounded concurrency, timeouts,
+redacted errors and an explicit idempotent close. It never installs a package,
+connects a Brain, approves an action, retries or starts a replacement listener.
+
+The host credential authorizes direct service access; it is **not** a FERAL
+review. FERAL-originated calls still go through its central tool review and
+domain allowlist. The operator must explicitly allow the loopback destination
+under the deployment policy and privately configure the skill's bearer key.
+Do not loosen that policy automatically. Handler code is trusted local code,
+not a sandbox. A timeout/closed connection does not prove handler cancellation or
+rollback; failure after dispatch is uncertain and must not be replayed blindly.
+A timed-out handler continues occupying a capacity slot until it settles.
+
+Keep your host process alive while invoking its installed manifest. Restarting
+with a new port/token requires an explicit manifest/credential update and reload;
+no automatic activation or crash recovery is provided. Raw JSON handler output
+is returned as the existing HTTP executor's `data`, without a fabricated nested
+tool-success envelope. Duplicate/malformed tool definitions fail before hosting.
+
+See the [executable authoring examples](../../examples/sdk-authoring/README.md).
+The current runtime reload ACK is not readiness proof, especially for Python
+backing classes. Node tests separately verify the actual HTTP host and existing
+central review/executor gates; they do not start a production Brain lifespan.
+
+## Brain client
+
 ```ts
 import { FeralClient } from '@feral/sdk';
 
