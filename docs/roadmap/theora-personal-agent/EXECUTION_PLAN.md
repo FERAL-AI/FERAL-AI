@@ -14,7 +14,13 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Source: `6b368ccf79c8b581bf2f705ed23e97095899f49d`, published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). New implementation below has targeted local evidence; its subsequent full CI is separate.
+Latest published source: `739a20c0b56d2a2aa9956cde395a79b6dd5e0935`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,252 backend tests,83 skipped,74% rounded coverage; non-blocking mypy852 versus812 baseline. [WORK_STATE](WORK_STATE.md) names exact runs. The following table retains prior evidence. New CORE04/DEV01B working-wave integration passed309 tests/1 skipped, plus53 locked Node tests; full remote acceptance belongs to its subsequent commit.
+
+Actual immutable9.27 passed exact reviewed Deny/Allow, local reply and copy/link,
+but New conversation caused another accessibility recursion SIGSEGV and context
+growth blocked later tasks. [Candidate evidence](NATIVE_9_27_ACCEPTANCE.md).
+Next ready cards are native crash repair, MODEL01B context-growth repair and
+DEV01C durable thread continuity. These take precedence over cosmetic expansion.
 
 | Evidence | Observed result | Boundary |
 |---|---|---|
@@ -53,6 +59,7 @@ Milestone 1 exits when the complete enabled existing capability matrix is usable
 | CORE-01 / conversation worker | Existing conversations/sessions/store/snapshots: native concurrent-session binding | Two active chats: independent replies/cancel/reviews, shared deliberately stored long-lived fact, private working transcripts; rich persistence across relaunch | NATIVE-01 / medium |
 | CORE-02 / conversation worker | Extend `FeralMessage` IDs, transcript ordering and existing SQLite store with durable message/receipt events and cursor/revision semantics | Lost ACK/resend runs once; delivered/seen require respective acknowledgements; two clients catch up in stable order; stale autosave cannot erase turns; deletion survives reconnect | CORE-01; IOS-03 contract agreement / large |
 | CORE-03 / runtime worker | Harden existing `agents/taskflow.py` and ToolRunner: central dispatch, session authority, persisted attempt/outcome and recovery reconciliation | Confirm-class workflow requires approval; denied/expired/paused dispatch refused; restart after possible commit does not repeat effect; safe reads resume; unknown remains unknown | Existing policy/workflow storage / large |
+| CORE-04 / runtime worker | Existing session gateway/SQLite store: opt-in durable turn acceptance, whole-turn terminal, deduplication and exact cancellation | Implemented:226 tests/1 skipped; combined309/1 skipped. Capability negotiation occurs before prompt; processing completion is distinct from effect success/read/seen. Full remote check remains next | Existing policy/agent runner; [evidence](CHAT_TURN_RECEIPTS_EVIDENCE.md) / bounded first slice |
 | CODE-01 / coding worker | Propagate verified conversation/session identity through `api/routes/coding.py`, tool context and `external_agent`; reuse ACP continuity/index/activity | Chats A/B in same repo never resume one another; real disposable edit/test with exact approval; deny/cancel/death/reattach and remembered digest work | CORE-01 / medium |
 | CODE-02 / coding worker | Expose supported installed OpenCode/Codex/Claude adapters; opt-in CLI wrappers/hooks feeding existing activity episodes | Managed and opted-in standalone runs appear with repo/session/source; opt-out records nothing; secret sentinels absent; test success needs actual result evidence | CODE-01; adapter-specific access / medium–large |
 | MEM-01 / memory worker | Existing store/retriever/wiki/episodes/CRDT: provenance/corrections, owner-scoped same-user device continuity, tombstones and full backup | Two-device conflict/correction/delete/restore; original/summary/vector/upload inventory; offline reconciliation; corrupt backup/model migration rollback | CORE-02, DATA-01 / large |
@@ -61,9 +68,19 @@ Milestone 1 exits when the complete enabled existing capability matrix is usable
 | UX-01 / native UI worker | Existing avatar/name/logo/identity and navigation; consistent activity/action inbox, receipts, rich artifacts, accessible layout | First-use choice persists; task/review/result visible from owning chat; keyboard/VoiceOver/reduced motion; no raw infrastructure details in ordinary conversation | CORE-02; existing Operations/Oversight / medium |
 | MODEL-01 / provider worker | Existing provider/router/catalog/login paths; capability-specific activation and evals | Supported login/expiry/disconnect; real configured inference and voice; truthful unavailable capabilities; local download/storage preflight; context/cost/fallback checks | Account/model availability; NATIVE-02 as applicable / medium |
 
-Observed code gaps, not guesses: TaskFlow `skill.invoke` currently calls `skill.execute(...,{})` after an explicit-deny check, bypassing the full ToolRunner review/session route. Its running-flow recovery requeues work. Coding continuity accepts `conversation_id`, but current callers omit it and fall back to engine/workspace. Conversation full-document saves can overwrite concurrent turns. These warrant narrow hardening of existing modules, not replacement runtimes.
+The observed TaskFlow bypass/unsafe recovery and coding identity gaps have
+bounded fixes in [workflow evidence](TASKFLOW_DISPATCH_EVIDENCE.md) and
+[coding evidence](CODING_SESSION_EVIDENCE.md). Conversation full-document saves
+can still overwrite concurrent turns. General memory/recovery acceptance remains
+open; the fixes reuse existing modules.
 
-Developer source inspection also found contract drift to resolve in DEV-01: both generic SDK clients request `/api/health`, while the registered dashboard health route is `/health`; their constructors expose no credential option and chat handling assumes an older greeting/stream shape. The developer journey must be checked against the actual authenticated server, not only a generated manifest. Device SDK CI success does not certify these separate generic SDKs.
+DEV01A/B repair generic SDK HTTP routes/auth and greeting/stream drift, with
+capability-before-prompt negotiation and exact whole-turn receipts. Both generic
+SDKs now have explicit CI suites; Node requires22 and its compiler is locked.
+[SDK evidence](SDK_WEBSOCKET_EVIDENCE.md) includes actual registered ASGI/SQLite
+fixtures. Socket-close still clears isolated thread history: DEV01C must restore
+continuity without replaying requests. Clean-clone extension installation and
+full developer journey remain open; device SDK CI is separate.
 
 ## Milestone 3: phone/glasses, iMessage, accounts and commerce
 

@@ -217,3 +217,33 @@ Backend PDF/repository bounds passed 21 focused tests, and app delivery/ownershi
 9.17 backend follow-up: authoritative app confirmation is carried in payload-level `SDUIPayload.confirmation`, contract_version 1, with full UUID request, owning session/app/surface/original action, canonical confirmation screen, exact handler/target/event/value and finite five-minute expiry. Root-generated screen metadata alone is not authority. Decisions return a structured `confirmation_decision` receipt; `dispatch_accepted` is distinct from `tool_outcome_verified` (currently false). Enforce owner before consuming a one-use request, expiration, manifest/action drift and exact receipt binding. Backend regressions passed 66 tests. Native 9.17 genuinely rejected and confirmed disposable close actions, verified matching receipts, and dismissed only the original accepted-close mount. This does not establish arbitrary tool or purchase execution.
 
 9.18 recovery guidance: `/api/sessions/primary` returns the stable canonical runtime ID. The transcript endpoints expose live user/assistant projections; `ts_ms` is a history position, and snapshot-restored rows are deliberately omitted. Do not replace rich saved UI records with this projection or claim complete historical restoration. Bind canonical saved conversation and runtime scope explicitly, retain exact isolated thread IDs, scope remembered selection to verified installation, and preserve duplicate turns by occurrence counts. Legacy conversation creation upserts; canonical create-if-missing is being made atomic before desktop acceptance. Genuine 9.17 routing writes also revealed persisted-vs-live route drift; 9.18 refreshes the full live LLM routing config after provider swap. Test runtime resolution separately from saved readback and model connectivity.
+
+## October 2: opt-in desktop turn receipts
+
+CORE-04 adds a whole-turn contract to `/v1/session`; it does **not** add it to
+the phone `/v1/node` HUP `chat_request` path. See [wire and cancellation evidence](CHAT_TURN_RECEIPTS_EVIDENCE.md)
+and [Python/Node client examples](SDK_WEBSOCKET_EVIDENCE.md).
+
+Authenticate first. Probe the typed gateway `chat.capabilities` with an exact
+request ID **before sending the user's prompt**. Require version1, durable
+receipts, whole-turn terminal support and the exact bound conversation. Old
+servers can ignore new payload fields and execute a prompt without a receipt;
+missing negotiation must stop submission rather than fall back silently.
+
+On the negotiated desktop path, opt in with canonical UUID `msg_id` and
+`payload.turn_contract_version:1`. Correlate `chat_turn_accepted` and
+`chat_turn_terminal` by request, server-minted turn and session. Provider
+`stream_delta.is_final`, prose and tool notifications remain progress.
+`awaiting_approval` requires the authoritative action inbox; `completed` means
+processing finished, with `action_outcome:not_asserted`. Interrupted/cancelled
+effects can remain unknown. These are neither delivered/read/seen receipts nor
+verified external outcomes. A notification cannot approve the action.
+
+Gateway `chat.status` reads the exact session-bound receipt; `chat.abort` needs
+exact request/turn and the original socket owner. Reconnection does not acquire
+abort authority or permission to replay. The SDK does not auto-retry a task.
+Stable SDK thread identity currently preserves receipts, while disconnect can
+clear non-primary runtime history; continuity is a separate repair card.
+Keep the existing iOS outbox/ACK and rich transcript semantics until an explicitly
+tested node adapter supplies equivalent guarantees. No iOS or physical-device
+acceptance is established by this desktop source wave.

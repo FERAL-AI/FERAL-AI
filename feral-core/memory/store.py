@@ -1454,6 +1454,14 @@ class MemoryStore:
                 )
             """)
             conn.execute("CREATE INDEX IF NOT EXISTS idx_conversations_updated ON conversations(updated_at DESC)")
+            conn.execute("""CREATE TABLE IF NOT EXISTS chat_turn_receipts (
+                turn_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+                request_id TEXT NOT NULL, input_digest TEXT NOT NULL,
+                status TEXT NOT NULL, receipt_json TEXT NOT NULL,
+                created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                UNIQUE(session_id, request_id)
+            )""")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_turn_session ON chat_turn_receipts(session_id, updated_at)")
 
             # W3: thread management columns.
             #
@@ -1743,6 +1751,89 @@ class MemoryStore:
     # ``messages[-500:]`` in one place; named because the atomic append
     # path has to enforce the same ceiling from SQL.
     CONVERSATION_MESSAGE_CAP = 500
+
+    async def chat_turn_claim(self, *, session_id: str, request_id: str,
+                              turn_id: str, input_digest: str, receipt: dict, receipt_limit: int = 100000) -> dict:
+        """Atomic receipt acceptance and exact-term deduplication, never execution."""
+        conn = await self._conn()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            async with conn.execute("SELECT input_digest, receipt_json FROM chat_turn_receipts WHERE session_id = ? AND request_id = ?",
+                                    (session_id, request_id)) as cursor:
+                existing = await cursor.fetchone()
+            if existing:
+                await conn.commit()
+                return {"created": False, "conflict": existing[0] != input_digest,
+                        "receipt": json.loads(existing[1])}
+            async with conn.execute("SELECT COUNT(*), SUM(CASE WHEN status != 'terminal' THEN 1 ELSE 0 END), SUM(CASE WHEN session_id = ? AND status != 'terminal' THEN 1 ELSE 0 END) FROM chat_turn_receipts",
+                                    (session_id,)) as cursor:
+                counts = await cursor.fetchone()
+            if counts[0] >= receipt_limit or (counts[1] or 0) >= 128 or (counts[2] or 0) >= 8:
+                await conn.rollback()
+                return {"created": False, "quota": True}
+            now = time.time()
+            await conn.execute("INSERT INTO chat_turn_receipts VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?)",
+                               (turn_id, session_id, request_id, input_digest, json.dumps(receipt), now, now))
+            await conn.commit()
+            return {"created": True, "receipt": receipt}
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
+
+    async def chat_turn_update(self, *, session_id: str, turn_id: str, status: str, receipt: dict) -> bool:
+        """Compare-and-set a nonterminal receipt; terminal outcomes are immutable."""
+        if status not in {"running", "terminal"}:
+            raise ValueError("Invalid chat turn lifecycle status")
+        conn = await self._conn()
+        try:
+            cursor = await conn.execute("UPDATE chat_turn_receipts SET status = ?, receipt_json = ?, updated_at = ? WHERE session_id = ? AND turn_id = ? AND status != 'terminal'",
+                                        (status, json.dumps(receipt), time.time(), session_id, turn_id))
+            changed = cursor.rowcount == 1
+            await cursor.close()
+            await conn.commit()
+            return changed
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
+
+    async def chat_turn_get(self, *, session_id: str, request_id: str = "", turn_id: str = "") -> Optional[dict]:
+        """Read only the exact bound session's receipt, with no cross-session fallback."""
+        if not session_id or not (request_id or turn_id):
+            return None
+        conn = await self._conn()
+        try:
+            async with conn.execute("SELECT receipt_json FROM chat_turn_receipts WHERE session_id = ? AND (? = '' OR request_id = ?) AND (? = '' OR turn_id = ?)",
+                                    (session_id, request_id, request_id, turn_id, turn_id)) as cursor:
+                row = await cursor.fetchone()
+            return json.loads(row[0]) if row else None
+        finally:
+            await self._release(conn)
+
+    async def chat_turn_recover(self) -> int:
+        """Fence interrupted accepted/running work without replaying its input."""
+        conn = await self._conn()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            async with conn.execute("SELECT session_id, turn_id, receipt_json FROM chat_turn_receipts WHERE status != 'terminal'") as cursor:
+                rows = await cursor.fetchall()
+            for session_id, turn_id, payload in rows:
+                receipt = json.loads(payload)
+                receipt.update(processing_outcome="outcome_unknown", final_text="", action_outcome="unknown",
+                               approval_request_ids=[], durable=True, replayed=False)
+                receipt.pop("status", None)
+                await conn.execute("UPDATE chat_turn_receipts SET status = 'terminal', receipt_json = ?, updated_at = ? WHERE session_id = ? AND turn_id = ? AND status != 'terminal'",
+                                   (json.dumps(receipt), time.time(), session_id, turn_id))
+            await conn.commit()
+            return len(rows)
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
 
     async def conversation_create_if_missing(self, conversation_id: str, title: str = "") -> dict:
         """Insert an empty thread without ever updating an existing row.

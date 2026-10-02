@@ -497,6 +497,7 @@ class BrainState:
         self.activity_log: deque = deque(maxlen=100)
         self.gemini_proxy: Optional[GeminiRealtimeProxy] = None
         self.gateway_registry: Optional[MethodRegistry] = None
+        self.chat_turns = None
         self.hardware_mesh: Optional[HardwareMesh] = None
         self.hardware_orchestrator = None
         self.identity_workspace: Optional[IdentityWorkspace] = None
@@ -2077,6 +2078,8 @@ class BrainState:
             )
 
         with boot_subsystem(self._boot_report, "MethodRegistry"):
+            from agents.chat_turns import get_chat_turn_manager
+            await get_chat_turn_manager(self).start()
             self.gateway_registry = MethodRegistry()
             register_core_methods(self.gateway_registry, self)
 

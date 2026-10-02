@@ -6,6 +6,22 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
+- Latest source739a20c0b required CI/native passed: **12,252 backend tests,
+  83 skipped, coverage74% rounded**. Non-blocking mypy remains failed at852
+  versus812 baseline. Live-brain and main Linux matrix skipped.
+- [Actual9.27](NATIVE_9_27_ACCEPTANCE.md) passed local reply, exact native
+  reviewed Deny/Allow and copy/link. New conversation caused a confirmed
+  accessibility recursion crash; context growth blocks later turns. Neither
+  daily-use gate is closed.
+- New [receipt](CHAT_TURN_RECEIPTS_EVIDENCE.md) and
+  [generic SDK](SDK_WEBSOCKET_EVIDENCE.md) source slices passed integrated309
+  tests/1 skipped and locked Node53 tests. They add durable processing status,
+  exact cancellation and compatibility negotiation before tasks; no read/seen
+  or external-effect success claim. SDK thread continuity remains a repair card.
+
+The following bullets retain earlier evidence; their counts and artifacts do
+not describe this new source wave.
+
 - Native macOS 2026.9.26 actually launched to avatar onboarding, quit normally and relaunched after both preferences initialization traps were removed. Earlier 9.23/9.24 launch failures and the second 9.25 trap remain recorded. This establishes bounded startup, not all existing-profile or feature behavior.
 - Earlier bounded real Mac checks established a local reply, avatar/name/conversation persistence, selected import/read workflows and one exact reviewed OpenCode command. They do not establish arbitrary coding, external accounts, physical glasses or live purchasing.
 - Source `6b368ccf7` required CI and native checks passed remotely: **12,127 backend tests / 83 skipped / 73.94% coverage**, corrected web build/coverage and API-stubbed Playwright. The Linux main-branch matrix and live-brain check were skipped. Non-blocking mypy failed at **859 errors versus baseline 812**; precise vault/bootstrap repairs are locally verified, with full Ubuntu ratchet acceptance pending.

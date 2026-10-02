@@ -30,7 +30,7 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent publication | `3ecb95bbea0f3bea9b67b331341928e673a6acbe` (coding/SDK/type/evidence checkpoint) |
+| Most recent publication | `739a20c0b56d2a2aa9956cde395a79b6dd5e0935` (scoped coding fixture correction; prior runtime repair34a43e640) |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
 | Disk observation | 8.1 GiB available when checked; recheck before parallel compilation/packaging |
@@ -40,7 +40,31 @@ Git/helper; evidence below explicitly names the source it tested. Do not update
 every historic source identifier to HEAD or regenerate a baseline to make a gate
 appear green.
 
-## Evidence at the last checked source
+## Latest checked source and active candidate
+
+Source **739a20c0b56d2a2aa9956cde395a79b6dd5e0935**:
+[CI37033165436](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37033165436)
+and [native37033165446](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37033165446)
+**passed**. Parent fetched completed job logs: Ubuntu/Python3.11 PR backend
+**12,252 passed / 83 skipped / 567 warnings in923.32s**, coverage74% rounded.
+Web coverage/build, API-stubbed Playwright, syntax, Ruff, architecture, assets,
+device SDKs, generic Python HTTP SDK and registry passed. Docs/naming/version
+passed. Live-brain and push-main Linux matrix skipped. Non-blocking mypy remains
+**failed:852 errors in241 files,1,245 checked**, baseline812.
+
+Immutable native **2026.9.27 /2026100201**, executable SHA256
+`1071d7b679730a7d2cdca09c422aba4b65a6ef94ada6b8357a10ad8fcc4556d0`,
+stages runtime source **34a43e640597ca721fb915149f29c9b73b51394a**. Parent compared
+all478 bundled production Python files against that Git source: no missing files
+or mismatches. Bounded bundle audit passed13,052 files/265 Mach-O/9 internal links,
+Python3.11.15/SQLite3.53.1/FTS5/OpenCode1.18.10. Ad-hoc signing passes;
+Developer ID/notarization remain open. Current CORE04/SDK edits are absent from
+this candidate. [Actual9.27 results](NATIVE_9_27_ACCEPTANCE.md) remain separately
+owned and frozen by the native worker: reviewed Deny/Allow and exact file readback
+passed, but New conversation caused another confirmed SIGSEGV. Conversation
+growth also triggers a byte guard after a few turns; neither gate is closed.
+
+## Historical checked source
 
 Source **6b368ccf7**, [CI run 37024016126](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37024016126):
 
@@ -68,7 +92,7 @@ Historical 9.26 avatar-onboarding/quit/relaunch passed. Earlier actual reply/imp
 coding outcomes belong to their earlier candidates. This artifact is not certified
 as containing every later source commit or completing the populated-profile matrix.
 
-## Completed source slices awaiting this wave's publication
+## Published earlier source slices
 
 - **CODE-01A/B:** trusted caller-bound external-agent continuity plus exact-scope REST list/poll/permission/cancel. Parent combined check **162 passed / 6 warnings**; final API-only fixture-import check **27 passed / 6 warnings**. Real ACP fixture pipes, not general actual-engine acceptance. [Evidence](CODING_SESSION_EVIDENCE.md).
 - **DEV-01A:** registered generic Python SDK HTTP routes, caller credentials, explicit approval/session fields, truthful HTTP/application errors. **25 passed / 5 warnings**. Existing brain PR/main jobs now include this suite; WebSocket and Node remain separate. [Evidence](PYTHON_SDK_EVIDENCE.md).
@@ -79,16 +103,19 @@ as containing every later source commit or completing the populated-profile matr
 
 | Worker | Exclusive scope | Active work |
 |---|---|---|
-| Parent | direct_execution.py/new contract tests, shared docs/CI/publication | Prevent unrelated guessed fallback and result-shape crash; integrate sequentially |
-| coding_session_isolation | TaskFlow, state/orchestrator wiring, ToolRunner exact internal approval, dedicated tests/evidence | CORE-03A: durable review binding before notification, current policy rechecks, no standing workflow grant, safe interrupted-effect handling; deterministic pending-action response |
-| python_sdk_contracts | llm_provider/context_manager/ollama_provider, context contract tests, local-budget fixture, evidence | MODEL-01A: verify selected local model's actual context and full request budget without silently allocating larger models |
-| native_populated_acceptance | NativeViews/NativeRichText, dedicated AX probe/test and acceptance evidence | Reproduce/fix SwiftUI selectable-text accessibility recursion, then actual new-candidate populated acceptance |
+| Parent | three precise core type repairs, CI, shared docs/publication | Integrate frozen CORE04/SDK contracts, locked Node compiler and exact-source evidence |
+| coding_session_isolation | chat_turns/server/gateway/store/orchestrator/ToolRunner/tests | CORE04 source frozen:226 passed/1 skipped; next context-growth investigation read-only |
+| python_sdk_contracts | generic Python/Node clients/public types/tests/docs | DEV01B source frozen:72 Python/53 Node passed; next thread continuity investigation read-only |
+| native_populated_acceptance | immutable9.27 GUI, acceptance probe/report | Finalize new-conversation crash IPS, persistence and exact reviewed-action outcomes before native repair |
 
 Original immutable bundle evidence is frozen in [NATIVE_POPULATED_ACCEPTANCE.md](NATIVE_POPULATED_ACCEPTANCE.md): actual rich persistence/search/rename/pin/relaunch and one local-model reply passed. **SIGSEGV with excessive SwiftUI accessibility recursion is confirmed by macOS report and watched exit**. Context truncation, guessed Weather fallback, missing result success key and pending-review false-completion text are also reproduced. Do not call this app release-ready.
 
 Source can change in these exclusive areas during targeted checks; freeze all workers before full integration suites and candidate assembly. Recheck free disk before packaging. Preserve unrelated `AUDIT-FIXES.md`. No real external accounts/messages/purchases or personal data changes occurred.
 
-After this wave: durable receipts, SDK WS/Node contracts, memory/migration, native parity and voice coordination, exact-device/iOS handoff, then messaging/browser/Link adapters; social/Linux/distribution remain explicit cards in the execution plan. The user authorized continued repository implementation after the research report; live external effects require their own explicit scope.
+Next wave: native New conversation crash, conversation-growth byte guard and SDK
+thread continuity, then memory/migration/native parity/voice and exact-device/iOS
+contracts. Messaging/browser/Link, social/Linux/distribution remain explicit
+cards. Durable processing receipts do not implement read/seen or prove effects.
 
 ## External acceptance and decision dependencies
 
@@ -162,3 +189,32 @@ Staging first failed when sandbox blocked OpenCode's normal cache initialization
 properly escalated staging passed pinned Python3.11.15/SQLite3.53.1/FTS5/loadable
 extensions/module imports/webUIv2 and OpenCode version checks. Initial production
 build was blocked by Swift macro sandbox; the escalated build is separate.
+
+## October 2 CORE04 / DEV01B integration
+
+- Frozen production runtime/SDK source passed parent combined **309 tests,
+  one pre-existing skip,79 warnings in12.25s**. Command uses explicit disposable
+  home/data before collection and includes receipt/abort/WS/gateway/workflow/
+  exact approval/coding REST/type-behavior suites. Local log:
+  `/private/tmp/feral-turn-sdk-integrated-20261002.log`. Initial command named a
+  nonexistent test file and collected nothing; corrected inventory was used.
+- Worker receipt suite:226 passed/1 skipped; SDK72 Python/53 Node passed.
+  Parent installed locked TypeScript5.9.3 locally, ran exact `npm test`:53 passed.
+  Registry access first failed under network sandbox; properly escalated install
+  succeeded. New generic Node22 job is distinct from device SDK job; Python job
+  now includes HTTP/WS suites.
+- Parent focused mypy found one new SDK enum-input type error. Explicit string
+  validation repaired it; final SDK72 passed/7 warnings in3.05s and focused
+  chat_turns/client mypy passed, noting unchecked untyped function bodies. No
+  baseline/ignore changes. Three core files separately passed37 tests and mypy.
+- CORE04 persists identity/term digest and processing terminal, not full
+  transcript/read/seen or effect success. SDK is authenticated/session-bound
+  and negotiates before prompt; neither retry nor approval is automatic.
+- Actual9.27 accepted the exact reviewed synthetic write21bytes; denied file
+  stayed absent. Latest crash IPS confirms accessibility recursion at New
+  conversation. Quit/relaunch preserved rich metadata, reply and approved file.
+  Next source repair must be assembled as a new candidate;9.27 is immutable.
+- Next owned cards: native accessibility/New conversation repair; MODEL01B
+  whole-request context fitting and typed byte refusal; DEV01C bounded live SDK
+  thread sockets. Durable context after process shutdown remains a separate
+  backend checkpoint gate. All22 product areas remain in REQUEST_COVERAGE.

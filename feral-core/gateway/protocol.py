@@ -157,6 +157,8 @@ class GatewaySession:
             return
 
         try:
+            if method == "chat.send":
+                params = {**params, "_gateway_request_id": req_id}
             result = await handler(self.session_id, params, self)
             await self.send_response(req_id, result)
         except GatewayError as e:
@@ -192,12 +194,39 @@ class GatewaySession:
 def register_core_methods(registry: MethodRegistry, state):
     """Register all core gateway RPC methods."""
 
+    @registry.method("chat.capabilities")
+    async def chat_capabilities(session_id: str, params: dict, session: GatewaySession):
+        supported = callable(session.metadata.get("tracked_chat_send")) and callable(
+            getattr(getattr(state, "memory", None), "chat_turn_claim", None)
+        )
+        return {"turn_contract_versions": [1] if supported else [], "durable_receipts": supported,
+                "whole_turn_terminal": supported, "session_id": session_id}
+
     @registry.method("chat.send")
     async def chat_send(session_id: str, params: dict, session: GatewaySession):
         text = params.get("text", "")
         context = params.get("context", {})
         if not text:
             raise GatewayError("INVALID_PARAMS", "text is required")
+
+        if params.get("turn_contract_version") is not None:
+            from agents.chat_turns import ChatTurnError
+            if type(params["turn_contract_version"]) is not int or params["turn_contract_version"] != 1:
+                raise GatewayError("INVALID_PARAMS", "Unsupported tracked turn contract")
+            submit = session.metadata.get("tracked_chat_send")
+            if not callable(submit):
+                raise GatewayError("UNAVAILABLE", "Tracked chat transport is unavailable")
+
+            async def emit(kind, payload):
+                if kind == "chat_turn_terminal":
+                    await session.emit("chat.turn_terminal", payload)
+                elif kind == "error":
+                    await session.emit("chat.turn_error", payload)
+
+            try:
+                return await submit(params, params.get("_gateway_request_id"), emit)
+            except ChatTurnError as exc:
+                raise GatewayError(exc.code, "Tracked chat request was not accepted") from None
 
         if state.memory:
             state.memory.working_push(session_id, {"role": "user", "text": text})
@@ -212,7 +241,22 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("chat.abort")
     async def chat_abort(session_id: str, params: dict, session: GatewaySession):
-        return {"status": "aborted"}
+        from agents.chat_turns import ChatTurnError, get_chat_turn_manager
+        try:
+            return await get_chat_turn_manager(state).abort(owner=session._ws, session_id=session_id,
+                                                            turn_id=params.get("turn_id"), request_id=params.get("request_id"))
+        except ChatTurnError as exc:
+            raise GatewayError(exc.code, "Exact tracked turn identity is required") from None
+
+    @registry.method("chat.status")
+    async def chat_status(session_id: str, params: dict, session: GatewaySession):
+        from agents.chat_turns import ChatTurnError, get_chat_turn_manager
+        try:
+            receipt = await get_chat_turn_manager(state).status(session_id=session_id,
+                                                               turn_id=params.get("turn_id", ""), request_id=params.get("request_id", ""))
+            return {"receipt": receipt, "found": receipt is not None}
+        except ChatTurnError as exc:
+            raise GatewayError(exc.code, "Exact tracked turn identity is required") from None
 
     @registry.method("session.reset")
     async def session_reset(session_id: str, params: dict, session: GatewaySession):

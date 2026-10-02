@@ -1507,8 +1507,10 @@ class EmbeddingProvider:
             return False
         try:
             from fastembed import TextEmbedding
-            kwargs = {"local_files_only": True} if os.environ.get("FERAL_EMBED_MODEL_CACHE_ONLY") == "1" else {}
-            self._fastembed_model = TextEmbedding(model_name=FASTEMBED_MODEL, **kwargs)
+            if os.environ.get("FERAL_EMBED_MODEL_CACHE_ONLY") == "1":
+                self._fastembed_model = TextEmbedding(model_name=FASTEMBED_MODEL, local_files_only=True)
+            else:
+                self._fastembed_model = TextEmbedding(model_name=FASTEMBED_MODEL)
             return True
         except Exception as exc:  # noqa: BLE001 — degrade to hash, never crash
             self._fastembed_unavailable = True

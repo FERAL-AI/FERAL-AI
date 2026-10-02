@@ -2,7 +2,29 @@
 
 Updated October 2, 2026. This is an implementation and acceptance roadmap, not a declaration of readiness. Start with the [source-backed execution plan](EXECUTION_PLAN.md), then the [architecture contracts](ARCHITECTURE_AND_CONTRACTS.md), [original execution plan](EXECUTION_AND_RELEASE_GATES.md), [iOS handoff](IOS_AGENT_HANDOFF.md) and [native feature inventory](../../../desktop-native/FEATURE_PARITY.md).
 
-## Current boundary
+## Latest October 2 checkpoint
+
+Published source739a20c0b passed required CI/native checks. Full Ubuntu/Python3.11
+PR backend: **12,252 passed,83 skipped,567 warnings**, coverage74% rounded.
+Live-brain and main Linux matrix were skipped. Non-blocking mypy remains failed
+at852 errors versus812 baseline; this is not a clean type gate.
+
+The assembled **9.27** candidate stages source34a43e640, independently matched
+against all478 production Python files. Actual local model response, reviewed
+file Deny/Allow and chat copy/link passed. **New conversation caused another
+confirmed SIGSEGV**, and growing context blocks ordinary later turns. See
+[the immutable acceptance report](NATIVE_9_27_ACCEPTANCE.md); this candidate
+cannot satisfy release readiness. Its backend excludes the new receipt/SDK wave.
+
+CORE04/DEV01B add durable processing receipts, capability-before-prompt
+negotiation, exact cancellation and corrected generic developer clients. Parent
+integration:309 passed/1 skipped/79 warnings; locked Node build/test:53 passed.
+[Receipt evidence](CHAT_TURN_RECEIPTS_EVIDENCE.md) and [SDK evidence](SDK_WEBSOCKET_EVIDENCE.md)
+state their limits. Shared lifetime memory, task effects, user read/seen and
+phone HUP receipts are separate gates. The SDK socket-close/history-clear
+continuity limitation needs a follow-up repair.
+
+## Earlier boundary and retained evidence
 
 The latest bounded local Mac checkpoint is **2026.9.26**, a SwiftUI/AppKit application with a bundled Python brain and OpenCode engine. Subsequent actual launches of 9.23 and 9.24 crashed during preferences initialization; their previous passing checks do not establish reliable launch. Actual 9.25 launch exposed the same second trap in the desktop settings controller. The 9.26 correction to both controllers passed actual avatar-onboarding launch, normal quit and relaunch. It remains `FERAL Native Preview`, uses an isolated preview profile, and has partial native coverage. It is not an Electron shell; changing the shell does not establish completeness, safe autonomy or production distribution. The complete existing web client and legacy desktop shell remain separate surfaces. No feature-inventory row is release-certified.
 

@@ -2,7 +2,16 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
-**Current source/artifact checkpoint: 2026.9.26, twenty-one native destinations.** Both preferences initialization traps are corrected; actual avatar onboarding, normal quit and relaunch passed. Native CI at source `7397eb627` passed production typecheck and feature/linked/lifecycle/audit checks. **Historical 9.23** local chat, review-sheet accessibility and transient-probe recovery checks passed on that candidate: isolated avatar/name/conversation persisted and 31 + 11 delivered 42. Those checks are not fresh acceptance of every 9.26 action. Historical corrected 9.20 setup/file-edit/relocation and 9.22 exact-command results remain bounded checks. Hardware evidence uses a synthetic node, never a physical sensor. Reviewed encrypted-memory continuation is implemented and fixture-tested; real encrypted-profile/OS Keychain acceptance remains open. No row is release-certified.
+**Current artifact checkpoint:2026.9.27, twenty-one native destinations.** Its
+frozen runtime source34a43e640 matches478 packaged production Python files.
+Actual local-model reply, reviewed file Deny/Allow and chat copy/link passed.
+**New conversation caused another confirmed accessibility recursion SIGSEGV**;
+growing context blocks later ordinary turns. [Exact candidate evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_27_ACCEPTANCE.md).
+Source739a20c0b required CI/native passed; its full backend suite is separate
+from GUI acceptance. Historical9.26 onboarding/quit/relaunch and earlier imports,
+coding/synthetic hardware remain bounded earlier results. Hardware evidence is
+synthetic; real encrypted-profile/OS Keychain and full parity remain open.
+No row is release-certified.
 
 Current integration additions: native passive device reads use the new server-bound review/command ledger, with exact socket-generation correlation and explicit readback; physical outcomes and per-browser authority remain unverified. Native Vault exposes separate reviewed startup after unlocking existing encrypted memory; fresh vault initialization stays gated and unwired. Real OS Keychain and actual encrypted-profile continuation remain unverified. Local schema retrieval limits definition count and UTF-8 bytes, without claiming tokenizer fit. Native first-use embeddings default to cached models; absent models degrade under the existing search fallback rather than silently downloading. Cloud credentials, full context handling, safe embedding-space transitions, speech, glasses, commerce, migration, signed distribution and Linux remain open.
 

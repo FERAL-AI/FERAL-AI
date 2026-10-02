@@ -140,12 +140,74 @@ Failure semantics:
   return type. To inspect tier-degradation metadata, consume the full
   `/api/memory/search` envelope directly; this convenience method does not expose it.
 
-`bearer_token` is caller supplied and used for HTTP only. The SDK does not log
-it. Avoid logging request headers or exception request objects in your own code.
-WebSocket `chat()` authentication/session/stream handling remains an unverified
-legacy interface in this slice; this HTTP work does not certify it for remote
-chat. Device credential scopes may differ from the operator's API key; supplying
-a credential does not expand server permissions.
+`bearer_token` is caller supplied. HTTP sends it in the Authorization header;
+WebSocket chat sends it in the first authentication frame. Chat does not put
+credentials in URLs or log frames; its transport debug logger is disabled.
+Avoid logging HTTP request headers or exception request objects in your own code.
+Device credential scopes may differ from the operator's API key; supplying a
+credential does not expand server permissions. Session WebSocket authentication
+accepts the server's operator API key or valid session credential; an HTTP-only
+device credential is not automatically a chat credential.
+
+## Tracked chat turns
+
+```python
+from feral_sdk import FeralClient, TurnProcessingOutcome
+
+async def chat():
+    async with FeralClient(session_id="my-project-thread", chat_timeout=60) as client:
+        receipt = await client.chat_turn("Inspect the project and summarize your findings")
+        if receipt.processing_outcome == TurnProcessingOutcome.AWAITING_APPROVAL:
+            print("Review required:", receipt.approval_request_ids)
+        print(receipt.processing_outcome, receipt.final_text)
+        # Processing completed does not prove every requested external effect.
+        print(receipt.action_outcome)  # not_asserted or unknown
+```
+
+The client creates an isolated UUID thread identity by default and keeps that ID
+across calls on that client. Supply `session_id` on the constructor or method to choose an
+existing thread. Independent clients have independent default threads. Concurrent
+calls for the same thread on one client raise `ChatTurnError(code="session_busy")`;
+separate explicit threads can run independently. Sharing the same explicit thread
+across other surfaces remains subject to the server's attachment/delivery rules.
+Each invocation currently opens and closes its own socket. The server clears
+volatile conversation history when the last attachment to a nonprimary thread
+leaves. Stable IDs and durable turn receipts therefore do not guarantee
+continuous in-memory chat history across SDK calls. Keeping a negotiated socket
+open or restoring durable conversation threads remains a follow-up contract.
+
+Chat authenticates first, then sends a read-only `chat.capabilities` request.
+Only a correlated response confirming version 1, durable receipts, whole-turn
+terminals and the selected session permits sending the user command. An older or
+unsupported server therefore receives no task prompt. There is no greeting
+dependency or automatic response-only downgrade.
+
+`chat_turn()` requires `chat_turn_accepted` followed by the exact correlated
+`chat_turn_terminal` request/session/server-turn IDs. An approval notification,
+`text_response`, or model-round `stream_delta.is_final` never resolves the call.
+It returns a frozen `ChatTurnReceipt` for completed, awaiting_approval, failed,
+cancelled, outcome_unknown, unavailable, refused or budget_exceeded processing.
+Inspect that outcome and approval IDs; the SDK never confirms a review for you.
+
+`chat()` is a string convenience method. It returns nonempty final prose only
+after a `completed` processing receipt. Other terminal outcomes raise
+`ChatTurnError`, carrying the receipt. This describes response processing, not
+verified purchase, delivery or other task effects. Use the application's actual
+effect receipt when those outcomes matter.
+
+The total deadline includes connection, authentication, capability negotiation
+and execution. Set `chat_timeout` on the client or `timeout=` on a chat call.
+It raises `ChatTurnTimeout`; partial prose is never successful output. Invalid
+frames, rejected negotiation, authentication denial or an early connection close
+raise bounded `ChatTurnError` diagnostics without server bodies or credentials.
+Correlated server error frames are failures, not fabricated assistant replies.
+
+Cancelling the Python coroutine or calling `close()` closes only SDK-owned
+transports. This does not assert that server work or prior external effects were
+cancelled. The SDK does not send an abort, reconnect, replay a task or retry an
+uncertain result. Reconcile through the server's turn/effect receipts before
+another effectful invocation. A default UUID thread is not a multi-user identity
+or a new permission grant.
 
 ## HTTP contract checks
 
@@ -160,6 +222,10 @@ tool policy/context binding through an in-process ASGI transport, with disposabl
 state and a recording executor. It also checks transport/schema failures. It
 does not start the real Brain lifespan, use personal profiles or test a network
 deployment. See [dated evidence](../../docs/roadmap/theora-personal-agent/PYTHON_SDK_EVIDENCE.md).
+Tracked-chat tests additionally bridge to the actual registered session handler,
+real SQLite turn receipts and a controlled real orchestrator, with disposable
+homes and in-memory OS-vault wrappers. No real model or account is used. See
+[tracked SDK evidence](../../docs/roadmap/theora-personal-agent/SDK_WEBSOCKET_EVIDENCE.md).
 
 ## Requirements
 

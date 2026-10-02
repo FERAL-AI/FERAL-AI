@@ -1720,6 +1720,8 @@ class Orchestrator:
         latency_ms: float,
     ) -> None:
         """Notify the UI a tool call has finished (clears the chip)."""
+        from agents.chat_turns import observe_tool_result
+        observe_tool_result(session_id, result_data)
         try:
             success = bool(
                 (isinstance(result_data, dict) and (result_data.get("success") or result_data.get("status") == "command_sent_to_hardware_daemon"))
@@ -2206,6 +2208,11 @@ class Orchestrator:
             "delegated": False,
         }
         self._active_turns.setdefault(session_id, []).append(turn)
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.began = True
+            turn["_feral_turn_id"] = audit.turn_id
         return turn
 
     def _note_outbound_text(self, session_id: str, text: str) -> None:
@@ -2740,6 +2747,10 @@ class Orchestrator:
         special-case the new frame type still see a sensible reply
         instead of silence.
         """
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.budget_exceeded = True
         try:
             from models.protocol import BudgetExceededPayload
         except Exception:
@@ -2994,13 +3005,16 @@ class Orchestrator:
         or interleave tool_call ordering. Different sessions proceed
         fully in parallel.
         """
+        owned_lock = False
         try:
             async with self._get_session_lock(session_id):
+                owned_lock = True
                 return await self._handle_command_impl(session_id, text, context)
         finally:
             # : tear down subagents tied to this parent session.
             # Lock release stays synchronous; cancellation is fire-and-forget.
-            self._w17_cancel_subsessions_nowait(session_id)
+            if owned_lock:
+                self._w17_cancel_subsessions_nowait(session_id)
 
     # ─────────────────────────────────────────────
     # Plan mode
@@ -3997,12 +4011,15 @@ class Orchestrator:
 
     async def handle_command_stream(self, session_id: str, text: str, context: Optional[dict] = None):
         """Streaming variant of handle_command with a per-session lock."""
+        owned_lock = False
         try:
             async with self._get_session_lock(session_id):
+                owned_lock = True
                 return await self._handle_command_stream_impl(session_id, text, context)
         finally:
             # : tear down subagents tied to this parent session.
-            self._w17_cancel_subsessions_nowait(session_id)
+            if owned_lock:
+                self._w17_cancel_subsessions_nowait(session_id)
 
     async def _handle_command_stream_impl(self, session_id: str, text: str, context: Optional[dict] = None):
         """Streaming variant of handle_command. Guarded by the session
@@ -6225,6 +6242,10 @@ class Orchestrator:
         # Record first: every path that sends text must record what it
         # sent, including the ones that return before the tool loop.
         self._note_outbound_text(session_id, text)
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.final_text = text
         # ``model``/``usage`` are supplied only by the main tool loop,
         # which is the only caller that knows what the turn actually cost.
         # The many status/error/ack sends keep the empty default, so the
@@ -6247,6 +6268,10 @@ class Orchestrator:
         or ``_finalize_turn`` commits the failure to the transcript as
         an assistant row and the next turn feeds it back to the model.
         """
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.error = True
         await helper_send_error(
             self, session_id, message, code=code, recoverable=recoverable,
         )

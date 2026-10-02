@@ -471,6 +471,10 @@ class ToolRunner:
 
     def _guard_agent_lease(self):
         guard_agent_dispatch(getattr(self, "_native_agent_dispatch_lease", None))
+        from agents.chat_turns import _audit
+        tracked = _audit.get()
+        if tracked is not None and tracked.cancel_requested:
+            raise asyncio.CancelledError("Tracked chat turn was cancelled")
         exact = _exact_approval.get()
         if exact is not None and exact.issuer is self and exact.pending is not None:
             taskflows = getattr(self._orch, "taskflows", None)

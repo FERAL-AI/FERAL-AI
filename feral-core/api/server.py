@@ -2285,6 +2285,7 @@ def _build_chat_turn_runner(
     session_id: str,
     refined_text: str,
     ctx: dict,
+    tracked: bool = False,
 ) -> "Awaitable[None]":
     """Construct the coroutine that drives ``handle_command_stream``
     plus the optional skill-gen detection. Identical between WebUI
@@ -2293,7 +2294,9 @@ def _build_chat_turn_runner(
 
     async def _run() -> None:
         try:
-            await state.orchestrator.handle_command_stream(
+            if state.orchestrator is None:
+                return None
+            result = await state.orchestrator.handle_command_stream(
                 session_id=session_id,
                 text=refined_text,
                 context=ctx,
@@ -2318,6 +2321,7 @@ def _build_chat_turn_runner(
                                 },
                             ).model_dump()
                         )
+            return result
         except asyncio.CancelledError:
             raise
         except Exception as turn_err:
@@ -2342,8 +2346,31 @@ def _build_chat_turn_runner(
                 )
             except Exception:
                 pass
+            if tracked:
+                raise
 
     return _run()
+
+
+async def _submit_tracked_chat_turn(*, ws, session_id: str, request_id: str,
+                                    text: str, raw_context=None, attachments=None, emit=None):
+    """Reuse the existing preparation/runner under a committed receipt."""
+    from agents.chat_turns import get_chat_turn_manager
+    if emit is None:
+        async def emit(kind, payload):
+            await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type=kind, payload=payload).model_dump())
+
+    async def run():
+        refined_text, ctx, _ = await _prepare_chat_turn_context(
+            session_id=session_id, text=text, raw_context=raw_context, attachments=attachments or [],
+        )
+        return await _build_chat_turn_runner(ws=ws, session_id=session_id,
+                                             refined_text=refined_text, ctx=ctx, tracked=True)
+
+    return await get_chat_turn_manager(state).submit(
+        owner=ws, session_id=session_id, request_id=request_id,
+        terms={"text": text, "context": raw_context, "attachments": attachments or []}, run=run, emit=emit,
+    )
 
 
 # ─────────────────────────────────────────────
@@ -2418,6 +2445,14 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     logger.info(f"Client connected: {session_id}")
 
     gw_session = GatewaySession(session_id, ws, state.gateway_registry)
+
+    async def gateway_submit(params, request_id, emit):
+        command = TextCommandPayload.model_validate(params)
+        return await _submit_tracked_chat_turn(ws=ws, session_id=session_id, request_id=request_id,
+                                               text=command.text, raw_context=command.context,
+                                               attachments=[a.model_dump() for a in command.attachments or []], emit=emit)
+
+    gw_session.metadata["tracked_chat_send"] = gateway_submit
 
     # Lane 08 WS9 — track in-flight orchestrator tasks per WS so the
     # message loop doesn't block on long-running turns (AUDIT-r13
@@ -2510,6 +2545,21 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                             a.model_dump() if hasattr(a, "model_dump") else dict(a)
                             for a in payload.attachments
                         ]
+
+                    if payload.turn_contract_version == 1:
+                        from agents.chat_turns import ChatTurnError
+                        try:
+                            await _submit_tracked_chat_turn(ws=ws, session_id=session_id, request_id=msg.msg_id,
+                                                           text=payload.text, raw_context=payload.context, attachments=attachments)
+                        except ChatTurnError as exc:
+                            await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="error",
+                                                          payload={"code": exc.code, "message": "The tracked turn was not accepted; inspect its receipt before retrying.",
+                                                                   "request_id": msg.msg_id, "recoverable": True}).model_dump())
+                        except Exception:
+                            await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="error",
+                                                          payload={"code": "chat_turn_receipt_unavailable", "message": "The turn receipt could not be confirmed.",
+                                                                   "request_id": msg.msg_id, "recoverable": True}).model_dump())
+                        continue
 
                     refined_text_web, ctx, _ = await _prepare_chat_turn_context(
                         session_id=session_id,
@@ -2784,6 +2834,8 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
 
     except WebSocketDisconnect:
         logger.info(f"Client disconnected: {session_id}")
+        from agents.chat_turns import get_chat_turn_manager
+        await get_chat_turn_manager(state).detach(ws)
         # Lane 08 WS9 — let in-flight orchestrator turns drain
         # briefly before we cancel them. Disconnect is usually a
         # tab close: the user expects the turn that they sent
@@ -2911,6 +2963,8 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         logger.error(
             f"Unexpected error in session {session_id[:8]}: {exc}", exc_info=True
         )
+        from agents.chat_turns import get_chat_turn_manager
+        await get_chat_turn_manager(state).detach(ws)
         # Same identity check as the WebSocketDisconnect path above, for the
         # same reason. This sibling handler was missed when that one was
         # fixed, so the original bug survived here in a narrower window: an

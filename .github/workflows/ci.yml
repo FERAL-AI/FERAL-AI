@@ -279,7 +279,7 @@ jobs:
           pip-audit --strict
         continue-on-error: true
 
-      - name: Generic Python SDK HTTP contracts
+      - name: Generic Python SDK HTTP and WebSocket contracts
         working-directory: .
         run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
 
@@ -367,7 +367,7 @@ jobs:
         # needs to be listed on the command line.
         run: pip install --constraint requirements.lock -e ".[all,dev]"
 
-      - name: Generic Python SDK HTTP contracts
+      - name: Generic Python SDK HTTP and WebSocket contracts
         working-directory: .
         run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
 
@@ -547,6 +547,26 @@ jobs:
         run: npm run build
 
       - name: Run tests
+        run: npm test
+
+  generic-node-sdk:
+    # This application SDK is separate from the device SDK above.
+    name: SDK — generic Node HTTP and WebSocket contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sdk/node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+      - name: Install locked compiler
+        run: npm ci --ignore-scripts
+      - name: Compile and test SDK contracts
         run: npm test
 
   webui-v2-coherence:

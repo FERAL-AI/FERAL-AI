@@ -258,6 +258,14 @@ class TextCommandPayload(BaseModel):
     ceiling here would be a guess that silently truncates real work.
     """
     text: str
+    turn_contract_version: Optional[Literal[1]] = None
+
+    @field_validator("turn_contract_version", mode="before")
+    @classmethod
+    def exact_turn_contract(cls, value):
+        if value is not None and (type(value) is not int or value != 1):
+            raise ValueError("Unsupported tracked turn contract")
+        return value
     context: Optional[dict] = None
     attachments: Optional[list[AttachmentRef]] = Field(
         default=None, max_length=MAX_LIST_ITEMS
@@ -1010,6 +1018,29 @@ class TTSChunkPayload(BaseModel):
     encoding: str = Field(default="mp3", max_length=32)
     data_b64: str = ""
     is_final: bool = False
+
+
+class ChatTurnAcceptedPayload(BaseModel):
+    contract_version: Literal[1] = 1
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    turn_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    session_id: str = Field(..., min_length=1, max_length=MAX_SESSION_ID_LEN)
+    status: Literal["accepted"] = "accepted"
+    durable: Literal[True] = True
+    replayed: bool = False
+
+
+class ChatTurnTerminalPayload(BaseModel):
+    contract_version: Literal[1] = 1
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    turn_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    session_id: str = Field(..., min_length=1, max_length=MAX_SESSION_ID_LEN)
+    processing_outcome: Literal["completed", "awaiting_approval", "failed", "cancelled", "outcome_unknown", "unavailable", "refused", "budget_exceeded"]
+    final_text: str = ""
+    action_outcome: Literal["not_asserted", "unknown"] = "not_asserted"
+    approval_request_ids: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    durable: Literal[True] = True
+    replayed: bool = False
 
 
 class TextResponsePayload(BaseModel):
@@ -1832,6 +1863,8 @@ MESSAGE_TYPES = {
     "sdui_patch": SDUIPatchPayload,
     "tts_chunk": TTSChunkPayload,
     "text_response": TextResponsePayload,
+    "chat_turn_accepted": ChatTurnAcceptedPayload,
+    "chat_turn_terminal": ChatTurnTerminalPayload,
     "stream_delta": StreamDeltaPayload,
     "tool_start": ToolStartPayload,
     "tool_result": ToolResultPayload,

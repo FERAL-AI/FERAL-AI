@@ -169,9 +169,9 @@ def configure_brain_logging(
     the top of ``api/server.py``. Kept as a function so a test can run it
     against a fresh logging tree without importing the FastAPI app.
     """
-    kwargs = {"level": level, "format": fmt}
-    if force is not None:
-        kwargs["force"] = force
-    logging.basicConfig(**kwargs)
+    if force is None:
+        logging.basicConfig(level=level, format=fmt)
+    else:
+        logging.basicConfig(level=level, format=fmt, force=force)
     quiet_noisy_http_loggers()
     install_log_redaction()

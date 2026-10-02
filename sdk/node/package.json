@@ -5,9 +5,11 @@
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "files": ["dist"],
+  "engines": { "node": ">=22" },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "npm run build && node --test tests/*.test.cjs",
     "prepublishOnly": "npm run build"
   },
   "keywords": ["feral", "agent", "sdk", "plugin", "hardware", "genui"],

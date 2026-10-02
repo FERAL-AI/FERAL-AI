@@ -39,7 +39,7 @@ def attachment_model_context(store, references: list[dict], *, authorized: bool)
         return ""
     if authorized is not True:
         return "[Attachment contents were not authorized for model access. Do not claim to have read them.]"
-    blocks = []
+    blocks: list[dict[str, str | int]] = []
     budget = MAX_TEXT_BYTES
     for ref in references[:MAX_ATTACHMENTS]:
         upload_id = ref.get("upload_id", "")
@@ -50,7 +50,7 @@ def attachment_model_context(store, references: list[dict], *, authorized: bool)
         if record is None:
             blocks.append({"upload_id": upload_id, "status": "upload_not_found"})
             continue
-        entry = {"upload_id": upload_id, "filename": record.filename}
+        entry: dict[str, str | int] = {"upload_id": upload_id, "filename": record.filename}
         mime = record.content_type.split(";", 1)[0].strip().lower()
         if not (mime.startswith("text/") or mime in TEXT_TYPES):
             entry["status"] = "unsupported_format_no_content_read"
