@@ -279,6 +279,10 @@ jobs:
           pip-audit --strict
         continue-on-error: true
 
+      - name: Generic Python SDK HTTP contracts
+        working-directory: .
+        run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
+
       - name: Run tests with coverage (50% threshold)
         # Raised from 46 → 50 alongside the pyproject.toml change.
         # Addopts there enables --cov by default, but we still pass the
@@ -362,6 +366,10 @@ jobs:
         # base dev dep (feral-core/pyproject.toml), so it no longer
         # needs to be listed on the command line.
         run: pip install --constraint requirements.lock -e ".[all,dev]"
+
+      - name: Generic Python SDK HTTP contracts
+        working-directory: .
+        run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
 
       - name: Run tests with coverage (50% threshold)
         # --timeout=60 per-test ceiling: surfaces any single hanging test as a

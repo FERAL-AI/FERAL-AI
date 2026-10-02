@@ -18,7 +18,8 @@ Separate source inspection, isolated fixtures, actual app interaction, actual ex
 
 | Evidence | Established boundary | Still unverified |
 |---|---|---|
-| Remote source `7397eb627`: backend PR fast lane 12,127 passed / 83 skipped, coverage passed; native check success | Exact-source Ubuntu/Python 3.11 PR regression lane and Mac typecheck/fixtures/lifeline/auditor | Full performance/matrix scope, cleanup/type hygiene, actual app/accounts/hardware/signing; overall CI has one web timing failure corrected locally, remote rerun required |
+| Remote source `6b368ccf7`: required CI/native success; backend 12,127 passed / 83 skipped / 73.94% coverage; corrected web coverage passed | Ubuntu/Python 3.11 PR regression lane and Mac typecheck/fixtures/lifeline/auditor; API-stubbed Playwright | Mypy 859 versus baseline 812; full Linux/performance/account/device/signing acceptance remains open |
+| Actual immutable 9.26 populated acceptance | Rich persistence, search/rename/pin, local reply, review cancellation and relaunch | Confirmed AX recursion SIGSEGV; context truncation, guessed fallback and pending-review false completion require source fixes and a new assembled candidate |
 | Actual 9.26 avatar-onboarding launch, normal quit and relaunch; strict ad-hoc build and bounded audit passed, 39 desktop fixture assertions | Bounded real startup and safe unavailable-suite behavior | Full screens, existing-profile migration, backend task outcomes |
 | Actual 9.23/9.24 crash reports and compiled instruction inspection: nil application-domain UserDefaults suite force-unwrapped in NativeModel.init | Confirmed native startup failure before backend work; 9.26 removes both traps without resetting settings | Both startup traps corrected; supported populated-profile acceptance remains |
 | Historical full isolated October 1 backend run: 12,150 passed, 9 failed, 50 skipped | Broad executed regression coverage; failures retained | Second local run: 12,146 passed, 1 failed, 49 skipped, 14 setup errors; targeted corrections 59 / 1 skipped. Newer remote PR lane passed as above; scopes are different and full local post-correction/performance matrix remains unrun |
@@ -143,13 +144,12 @@ No full release claim until all enabled gates pass. A smaller release requires e
   execution exposed an oversized Workflow view expression on the CI compiler;
   decomposition passed both the focused local compile and remote native checks.
   Global backend Ruff failures have been corrected and the exact command passes
-  locally and remotely; newest source `7397eb627` backend PR coverage lane passed
-  12,127 tests with 83 skipped. SDKs, asset coherence, docs, naming and version
-  checks passed remotely. Latest web coverage failed one stale-reading timing
-  assertion; a test-only wait correction passed the full local coverage command,
-  and corrected-source remote acceptance remains pending. Updated browser
-  end-to-end checks passed locally (31 tests) and remotely. Non-blocking mypy
-  still fails. Required branch-protection status remains to be verified. This is
+  locally and remotely; source `6b368ccf7` backend PR coverage lane passed
+  12,127 tests with 83 skipped and 73.94% coverage. Corrected web build/coverage,
+  API-stubbed browser end-to-end, assets, docs, naming and version checks passed
+  remotely. Non-blocking mypy failed at 859 errors versus baseline 812; reviewed
+  local type repairs still need exact-source Ubuntu acceptance. Required
+  branch-protection status remains to be verified. This is
   not yet exact-source packaged-app, physical-device or signing acceptance.
 - `.github/workflows/desktop.yml` is manual experimental debug Tauri CI, not native Mac acceptance or a Linux product release.
 - `publish.yml`, `install-smoke.yml` and wheel tooling cover Python distribution. `scripts/release.py` can commit/push/open a PR; it was not executed here. Skip flags cannot satisfy release evidence.

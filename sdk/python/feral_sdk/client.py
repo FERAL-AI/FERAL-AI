@@ -26,10 +26,25 @@ logger = logging.getLogger("feral.sdk.client")
 class FeralClient:
     """HTTP + WebSocket client for the FERAL Brain API."""
 
-    def __init__(self, base_url: str = "http://localhost:9090"):
+    def __init__(
+        self,
+        base_url: str = "http://localhost:9090",
+        *,
+        bearer_token: str | None = None,
+        timeout: float | httpx.Timeout = 30,
+        transport: httpx.AsyncBaseTransport | None = None,
+    ):
         self.base_url = base_url.rstrip("/")
         self.ws_url = self.base_url.replace("http://", "ws://").replace("https://", "wss://") + "/v1/session"
-        self._http = httpx.AsyncClient(base_url=self.base_url, timeout=30)
+        headers = {"Accept": "application/json"}
+        if bearer_token is not None:
+            if not bearer_token.strip() or any(c in bearer_token for c in "\r\n"):
+                raise ValueError("bearer_token must be a nonempty, single-line credential")
+            headers["Authorization"] = f"Bearer {bearer_token}"
+        self._http = httpx.AsyncClient(
+            base_url=self.base_url, timeout=timeout, headers=headers, transport=transport,
+            follow_redirects=False,
+        )
         self._ws = None
         self._session_id: str | None = None
 
@@ -46,18 +61,36 @@ class FeralClient:
 
     async def health(self) -> dict:
         """Check brain health."""
-        r = await self._http.get("/api/health")
-        return r.json()
+        return await self._request_object("GET", "/health")
+
+    async def _request_json(self, method: str, path: str, **kwargs) -> Any:
+        response = await self._http.request(method, path, **kwargs)
+        response.raise_for_status()
+        try:
+            return response.json()
+        except ValueError:
+            # Do not include a response body or credential in diagnostics.
+            raise ValueError("Brain returned invalid JSON") from None
+
+    async def _request_object(self, method: str, path: str, **kwargs) -> dict:
+        data = await self._request_json(method, path, **kwargs)
+        if not isinstance(data, dict):
+            raise ValueError("Brain returned a JSON value where an object was required")
+        return data
+
+    @staticmethod
+    def _rows(data: Any) -> list[dict]:
+        if not isinstance(data, list) or any(not isinstance(row, dict) for row in data):
+            raise ValueError("Brain returned an invalid record list")
+        return data
 
     async def get_dashboard(self) -> dict:
         """Get aggregated dashboard data."""
-        r = await self._http.get("/api/dashboard")
-        return r.json()
+        return await self._request_object("GET", "/api/dashboard")
 
     async def get_system_info(self) -> dict:
         """Get system info (version, memory stats, etc.)."""
-        r = await self._http.get("/api/system/info")
-        return r.json()
+        return await self._request_object("GET", "/api/system/info")
 
     async def chat(self, message: str, session_id: str | None = None) -> str:
         """Send a text message and wait for the full response."""
@@ -90,26 +123,44 @@ class FeralClient:
 
     async def list_skills(self) -> list[dict]:
         """List all registered skills."""
-        r = await self._http.get("/api/skills")
-        data = r.json()
-        return data.get("skills", data) if isinstance(data, dict) else data
+        data = await self._request_json("GET", "/skills")
+        return self._rows(data.get("skills") if isinstance(data, dict) else data)
 
     async def search_memory(self, query: str, limit: int = 10) -> list[dict]:
         """Search the agent's memory."""
-        r = await self._http.get("/api/memory/search", params={"q": query, "limit": limit})
-        return r.json().get("results", [])
+        data = await self._request_object("GET", "/api/memory/search", params={"q": query, "limit": limit})
+        return self._rows(data.get("results"))
 
-    async def create_note(self, content: str, tags: list[str] | None = None) -> dict:
-        """Create a memory note."""
-        r = await self._http.post("/api/notes", json={"content": content, "tags": tags or []})
-        return r.json()
+    async def create_note(
+        self, content: str, tags: list[str] | None = None, *,
+        session_id: str | None = None, confirm: bool = False,
+    ) -> dict:
+        """Save a note through policy gates; return the tool result envelope."""
+        return await self.invoke_skill(
+            "notes_memory", "save_note", {"content": content, "tags": tags or []},
+            session_id=session_id, confirm=confirm,
+        )
 
     async def list_conversations(self, limit: int = 20) -> list[dict]:
         """List conversation threads."""
-        r = await self._http.get("/api/conversations", params={"limit": limit})
-        return r.json().get("conversations", [])
+        data = await self._request_object("GET", "/api/conversations", params={"limit": limit})
+        return self._rows(data.get("conversations"))
 
-    async def invoke_skill(self, skill_id: str, endpoint: str, args: dict | None = None) -> dict:
-        """Directly invoke a skill endpoint."""
-        r = await self._http.post(f"/api/skills/{skill_id}/{endpoint}", json=args or {})
-        return r.json()
+    async def invoke_skill(
+        self, skill_id: str, endpoint: str, args: dict | None = None, *,
+        session_id: str | None = None, confirm: bool = False,
+    ) -> dict:
+        """Invoke through REST policy gates, without confirming or retrying implicitly.
+
+        HTTP failures raise httpx.HTTPStatusError. An HTTP-200 tool rejection is
+        returned unchanged; inspect success/status_code/error before reporting an
+        action as executed. confirm=True is an explicit caller assertion of review.
+        """
+        if type(confirm) is not bool:
+            raise ValueError("confirm must be a Boolean")
+        if args is not None and not isinstance(args, dict):
+            raise ValueError("args must be an object")
+        body = {"skill_id": skill_id, "endpoint": endpoint, "args": args or {}, "confirm": confirm}
+        if session_id is not None:
+            body["session_id"] = session_id
+        return await self._request_object("POST", "/api/tools/execute", json=body)

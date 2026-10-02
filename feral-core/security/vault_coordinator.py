@@ -142,12 +142,12 @@ class VaultCoordinator:
         self._unlock_reviews: dict[str, tuple[int, float, str, str]] = {}
         self._hydrate = credential_hydrator or (lambda vault: None)
         self._disable = disable_dependents or (lambda: None)
-        self._vault = None
+        self._vault: object | None = None
         self._state = "locked"
         self._code = "unlock_required"
         self._operation: asyncio.Task | None = None
         self._generation = 0
-        self._loop = None
+        self._loop: asyncio.AbstractEventLoop | None = None
 
     def status(self) -> dict:
         # No filesystem, keychain, factory or credential callbacks here.
@@ -299,7 +299,7 @@ class VaultCoordinator:
         return self.status()
 
     async def _run(self, generation: int, factory: Callable[[], Any] | None = None):
-        result = Future()
+        result: Future[object] = Future()
 
         def worker():
             try:

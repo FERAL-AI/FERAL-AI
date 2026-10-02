@@ -25,6 +25,7 @@ from bridges.continuity import SessionIndex  # noqa: E402
 from bridges.sessions import SessionRegistry  # noqa: E402
 from config.loader import DEFAULT_SETTINGS  # noqa: E402
 from skills.impl.external_agent import ExternalAgentSkill  # noqa: E402
+from skills.call_context import bind_context  # noqa: E402
 
 from tests.test_bridges_acp_client import FAKE_AGENT  # noqa: E402
 
@@ -37,7 +38,7 @@ def skill():
 
 
 @pytest.fixture
-def isolated_registry(monkeypatch, tmp_path):
+async def isolated_registry(monkeypatch, tmp_path):
     """A registry per test, so no session leaks between them.
 
     The continuity index is pointed at ``tmp_path``. Without that, merely
@@ -58,6 +59,7 @@ def isolated_registry(monkeypatch, tmp_path):
         "skills.impl.external_agent._memory", lambda: None
     )
     yield registry
+    await registry.close_all()
 
 
 @pytest.fixture
@@ -420,6 +422,95 @@ class TestSkillDispatch:
             "close_session", {"session_handle": "ext-nope"}, {}
         )
         assert result["status_code"] == 404
+
+
+class TestCallerIdentity:
+    @pytest.mark.parametrize("endpoint", [
+        "run_task", "respond_permission", "close_session", "list_agents",
+        "recall_activity",
+    ])
+    async def test_supplied_identity_cannot_override_bound_caller(
+        self, skill, monkeypatch, endpoint
+    ):
+        def no_registry():
+            raise AssertionError("identity refusal must precede registry access")
+
+        monkeypatch.setattr("skills.impl.external_agent._registry", no_registry)
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        with bind_context(session_id="chat-a"):
+            result = await skill.execute(endpoint, {"conversation_id": "chat-b"}, {})
+        assert result["success"] is False
+        assert result["status_code"] == 409
+
+    async def test_unbound_model_argument_cannot_select_a_scoped_session(self, skill):
+        result = await skill.execute("run_task", {"conversation_id": "chat-a"}, {})
+        assert result["success"] is False
+        assert result["status_code"] == 400
+
+    async def test_matching_argument_uses_bound_identity(
+        self, skill, isolated_registry, fake_agent, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        try:
+            with bind_context(session_id="chat-a"):
+                result = await skill.execute("run_task", {
+                    "conversation_id": "chat-a", "prompt": "write hello.txt",
+                    "workspace_dir": str(tmp_path), "wait_seconds": 30,
+                }, {})
+            assert result["success"] is True
+            managed = isolated_registry.get(result["data"]["session_handle"])
+            assert managed.conversation_id == "chat-a"
+            assert managed.to_record().conversation_id == "chat-a"
+        finally:
+            await isolated_registry.close_all()
+
+    async def test_foreign_permission_cannot_be_answered_or_cancelled(
+        self, skill, isolated_registry, fake_agent, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        try:
+            with bind_context(session_id="chat-a"):
+                started = await skill.execute("run_task", {
+                    "prompt": "write hello.txt", "workspace_dir": str(tmp_path),
+                    "wait_seconds": 30,
+                }, {})
+            payload = started["data"]
+            handle = payload["session_handle"]
+            pending = payload["pending_permissions"][0]
+            managed = isolated_registry.get(handle)
+            for caller in ("chat-b", ""):
+                # An unbound local caller is also not the owner of chat-a.
+                if caller:
+                    with bind_context(session_id=caller):
+                        denied = await skill.execute("respond_permission", {
+                            "request_id": pending["request_id"],
+                            "decision": "allow_once",
+                        }, {})
+                        closed = await skill.execute("close_session", {
+                            "session_handle": handle, "cancel_first": True,
+                        }, {})
+                else:
+                    denied = await skill.execute("respond_permission", {
+                        "request_id": pending["request_id"], "decision": "allow_once",
+                    }, {})
+                    closed = await skill.execute("close_session", {
+                        "session_handle": handle, "cancel_first": True,
+                    }, {})
+                assert denied["status_code"] == 403
+                assert closed["status_code"] == 403
+                assert managed.turn_running
+                assert managed.pending_permissions()[0].request_id == pending["request_id"]
+                assert managed.answered_permissions == []
+                assert isolated_registry.index.get(handle) is not None
+            with bind_context(session_id="chat-a"):
+                answered = await skill.execute("respond_permission", {
+                    "request_id": pending["request_id"], "decision": "reject_once",
+                    "wait_seconds": 30,
+                }, {})
+            assert answered["data"]["status"] == "completed"
+            assert answered["data"]["answered"]["decision"] == "reject_once"
+        finally:
+            await isolated_registry.close_all()
 
 
 class TestFullTurnAgainstARealSubprocess:

@@ -21,6 +21,9 @@ The candidate advantage is the complete loop from real-world context to grounded
 | Document | Purpose |
 |---|---|
 | [Current work checkpoint](WORK_STATE.md) | Tested source/candidate, current evidence, worker ownership, next ready cards and external dependencies |
+| [Coding session evidence](CODING_SESSION_EVIDENCE.md) | Trusted caller continuity, exact handle ownership, local REST propagation and actual ACP-pipe regression results |
+| [Python SDK HTTP evidence](PYTHON_SDK_EVIDENCE.md) | Registered routes/authentication/policy tests, transport failures and developer-facing failure contracts |
+| [Type-ratchet evidence](TYPE_RATCHET_EVIDENCE.md) | Eight source-attributed security annotations, focused checks and remaining Ubuntu ratchet acceptance |
 | [Automatic-review and resume procedure](RESUME_WORK.md) | Verified permission controls, CLI commands, interruption reconciliation and persistent execution cadence |
 | [Executable app completion plan](EXECUTION_PLAN.md) | Source-backed task cards, existing-system reuse, dependencies, acceptance, developer platform, parallel worker waves and publication |
 | [Instinct-style integration research](INSTINCT_RESEARCH.md) | Five requested verdicts: iMessage, per-user Link wallet, browser executor, selected glasses capture and exact integration map; docs versus tests distinguished |

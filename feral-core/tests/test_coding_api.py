@@ -8,7 +8,11 @@ from fastapi import FastAPI
 
 from api.routes import coding
 from bridges import coding_setup
-pytest_plugins = ["tests.test_external_agent_skill"]
+from tests import test_external_agent_skill as acp_fixtures
+
+# Expose the existing fixture objects explicitly, independent of collection order.
+fake_agent = acp_fixtures.fake_agent
+isolated_registry = acp_fixtures.isolated_registry
 
 
 @pytest.fixture
@@ -179,3 +183,108 @@ def test_protocol_exposes_semantic_action_kind_for_review():
     from bridges.acp import parse_session_update
     event = parse_session_update("session", {"sessionUpdate": "tool_call", "toolCallId": "run", "kind": "execute", "status": "pending"})
     assert event.to_dict()["action_kind"] == "execute"
+
+
+async def test_scoped_rest_sessions_do_not_mix_and_foreign_actions_are_refused(
+    app, tmp_path, fake_agent, isolated_registry,
+):
+    """Exercise real ACP pipes; wrong scope cannot poll, approve or cancel."""
+    async with client(app) as c:
+        await c.post("/api/coding/provider", json={"model": "test", "prepare": True})
+        await c.post("/api/coding/workspaces", json={"path": str(tmp_path)})
+        turns = {}
+        for identity in ("chat-A", "chat-B", ""):
+            response = await c.post("/api/coding/tasks", json={
+                "prompt": "make change", "workspace_dir": str(tmp_path),
+                "conversation_id": identity,
+            })
+            assert response.status_code == 200, response.text
+            turns[identity] = response.json()
+        handles = {identity: turn["session_handle"] for identity, turn in turns.items()}
+        assert len(set(handles.values())) == 3
+        for identity, handle in handles.items():
+            assert isolated_registry.get(handle).conversation_id == identity
+            listed = (await c.get("/api/coding", params={"conversation_id": identity})).json()
+            assert [s["handle"] for s in listed["live_sessions"]] == [handle]
+
+        handle = handles["chat-A"]
+        permission = turns["chat-A"]["pending_permissions"][0]["request_id"]
+        for wrong in ("chat-B", ""):
+            assert (await c.get(f"/api/coding/sessions/{handle}",
+                                params={"conversation_id": wrong})).status_code == 403
+            for decision in ("allow_once", "reject_once"):
+                assert (await c.post(f"/api/coding/permissions/{permission}", json={
+                    "decision": decision, "conversation_id": wrong,
+                })).status_code == 403
+            assert (await c.post(f"/api/coding/sessions/{handle}/cancel", json={
+                "conversation_id": wrong,
+            })).status_code == 403
+            assert (await c.post("/api/coding/tasks", json={
+                "prompt": "continue", "session_handle": handle, "conversation_id": wrong,
+            })).status_code == 403
+        assert isolated_registry.get(handle).pending_permissions(), "foreign decision consumed approval"
+        assert isolated_registry.get(handle).alive, "foreign cancellation terminated owner"
+        assert (await c.post(f"/api/coding/permissions/{permission}", json={
+            "decision": "reject_once", "conversation_id": "chat-A",
+        })).status_code == 200
+        assert (await c.get(f"/api/coding/sessions/{handle}",
+                            params={"conversation_id": "chat-A"})).status_code == 200
+        continued = await c.post("/api/coding/tasks", json={
+            "prompt": "continue", "session_handle": handle, "conversation_id": "chat-A",
+        })
+        assert continued.status_code == 200, continued.text
+        assert continued.json()["session_handle"] == handle
+        for identity, owned in handles.items():
+            assert (await c.post(f"/api/coding/sessions/{owned}/cancel", json={
+                "conversation_id": identity,
+            })).status_code == 200
+    await isolated_registry.close_all()
+
+
+async def test_persisted_scoped_handle_cannot_be_reopened_or_forgotten_by_other_chat(
+    app, tmp_path, fake_agent, isolated_registry,
+):
+    async with client(app) as c:
+        await c.post("/api/coding/provider", json={"model": "test", "prepare": True})
+        await c.post("/api/coding/workspaces", json={"path": str(tmp_path)})
+        started = await c.post("/api/coding/tasks", json={
+            "prompt": "edit", "workspace_dir": str(tmp_path), "conversation_id": "owner",
+        })
+        assert started.status_code == 200, started.text
+        handle = started.json()["session_handle"]
+        await isolated_registry.close(handle, forget=False)
+        pointer = isolated_registry.index.get(handle)
+        assert pointer is not None and pointer.conversation_id == "owner"
+        for wrong in ("other", ""):
+            response = await c.post("/api/coding/tasks", json={
+                "prompt": "continue", "session_handle": handle, "conversation_id": wrong,
+            })
+            assert response.status_code == 403
+            assert (await c.post(f"/api/coding/sessions/{handle}/cancel", json={
+                "conversation_id": wrong,
+            })).status_code == 403
+        assert isolated_registry.index.get(handle) is not None
+        assert not isolated_registry.list(), "foreign request spawned a replacement engine"
+        assert (await c.post(f"/api/coding/sessions/{handle}/cancel", json={
+            "conversation_id": "owner",
+        })).status_code == 200
+        assert isolated_registry.index.get(handle) is None
+
+
+@pytest.mark.parametrize("identity", [123, ["A"], {"id": "A"}, "A\nB", "A" * 257])
+async def test_invalid_conversation_scope_fails_before_dispatch(app, identity):
+    async with client(app) as c:
+        response = await c.post("/api/coding/tasks", json={
+            "prompt": "edit", "conversation_id": identity,
+        })
+        assert response.status_code == 400
+
+
+async def test_disabled_call_context_refuses_scoped_rest_without_legacy_fallback(app, monkeypatch):
+    monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "off")
+    async with client(app) as c:
+        assert (await c.post("/api/coding/tasks", json={
+            "prompt": "edit", "conversation_id": "chat-A",
+        })).status_code == 409
+        assert (await c.get("/api/coding", params={"conversation_id": "chat-A"})).status_code == 409
+        assert (await c.get("/api/coding")).status_code == 200

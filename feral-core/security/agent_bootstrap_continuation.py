@@ -72,7 +72,7 @@ class AgentBootstrapContinuation:
         self.state = state
         self.coordinator = coordinator
         self.adapter = adapter
-        self._reviews = {}
+        self._reviews: dict[str, tuple[float, _Binding]] = {}
         self._operation = None
         self._phase = "pending"
         self._restart_required = False

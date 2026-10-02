@@ -14,18 +14,17 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Source: `7397eb627038c196113f5f82ef54d9514c7ab063`, published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
+Source: `6b368ccf79c8b581bf2f705ed23e97095899f49d`, published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). New implementation below has targeted local evidence; its subsequent full CI is separate.
 
 | Evidence | Observed result | Boundary |
 |---|---|---|
-| [Backend PR fast lane, run 36977000540](https://github.com/FERAL-AI/FERAL-AI/actions/runs/36977000540) | **12,127 passed, 83 skipped**, coverage gate passed | Ubuntu/Python 3.11 PR lane, excludes performance directory; warnings include asynchronous cleanup and environment/network-test hygiene. Not physical/account/native acceptance. |
-| [Native checks, run 36977000549](https://github.com/FERAL-AI/FERAL-AI/actions/runs/36977000549) | **Success** | Production typecheck, feature/linked-model checks, process-lifeline and bundle-auditor fixtures. Does not assemble, install or exercise the GUI. |
-| Web Playwright, SDK/extension, Ruff, architecture, syntax and bundled assets in CI | **Success** | Per-job boundaries apply; Playwright job uses stubbed API specs. |
-| Web coverage job in that run | **1 failed, 1,357 passed** | Stale-heart-rate test observed the somatic value before the dashboard metadata mirror. Assertions now wait for metadata; full local coverage command exits 0 after that test-only correction. Remote corrected-source rerun required. |
-| Backend mypy | **Failure, non-blocking** | Existing type baseline remains technical debt; do not describe all checks as green. |
-| Actual packaged Mac 2026.9.26 | Avatar onboarding, normal quit and relaunch passed after two startup traps were fixed | Latest complete populated-profile and action matrix remains open. Earlier successful local reply/import/coding checks belong to their earlier candidates. |
+| [Backend and web CI, run 37024016126](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37024016126) | Required CI **success**; backend **12,127 passed, 83 skipped, 73.94% coverage** | Ubuntu/Python 3.11 PR lane excludes performance; Linux main-branch matrix and live-brain checks skipped. Web build/coverage/Playwright passed; browser APIs stubbed. |
+| [Native checks, run 37024015923](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37024015923) | **Success** | Production typecheck, feature/linked/desktop checks, child lifeline and bundle-auditor fixtures; no GUI acceptance. |
+| Non-blocking mypy | **859 errors in 244 files, 1,240 checked** versus baseline 812 | TYPE-01A fixes eight attributable vault/bootstrap diagnostics with precise annotations; three-file local success is not a full Ubuntu ratchet pass. |
+| [Actual packaged Mac 2026.9.26 acceptance](NATIVE_POPULATED_ACCEPTANCE.md) | Populated conversation search/rename/pin/rich preservation, local reply and profile relaunch passed; **accessibility crash and task defects reproduced** | Immutable old bundle, disposable profile. Connection disclosure/AX triggers confirmed SIGSEGV excessive recursion. Context truncation, guessed direct fallback and false completion after pending approval are release defects. New source must be assembled and retested. |
+| CODE-01A/B and DEV-01A | **162 coding/context tests**, **25 Python SDK HTTP tests** passed locally | Real fixture ACP pipes and registered ASGI routes; no new actual-engine GUI certification or external account actions. |
 
-Older local full-suite failures remain historical evidence. The newer remote backend success closes that specific PR fast-lane gap; it does not erase warnings, expand platform coverage or certify every new feature.
+Historical web timing failure at `7397eb627` remains in the earlier records; its corrected-source remote coverage passed. Older local full-suite failures remain historical evidence. Required CI success does not erase warnings or certify a product release.
 
 ## Milestone 1: dependable, extensible app for the existing system
 
@@ -79,7 +78,7 @@ The iOS app remains the other agent's implementation responsibility. This team s
 | PAY-01 / commerce worker | Existing commerce policy + per-user Link CLI/device login adapter; quote-bound approval and action/attempt/receipt reconciliation | Disposable/supported test flow: exact total/merchant, approval denial/expiry, changed quote, duplicate/late result, uncertain charge and cancellation; no card secrets in transcripts/logs | CORE-03, WEB-01; verified Link eligibility / large |
 | PAY-02 / commerce worker | Named merchant checkout, receipt/status/refund support and glasses→same-task phone/iMessage continuation | Physical selected-glasses request, exact checkout approval, merchant receipt and reconciliation; named supported merchants documented | PAY-01, DEVICE-01, MSG-01; authorized live tests / large |
 
-Research does not authorize account login, external messages or spending. Follow the user's requested research-before-code boundary for the new Instinct integration. The cafe scenario in that report is a real end-to-end acceptance test; it is not a substitute for the product.
+Research does not authorize account login, external messages or spending. The research report is complete and the user subsequently authorized repository implementation. Keep live account/login, external messaging and spending outside that engineering authorization. The cafe scenario in that report is a real end-to-end acceptance test; it is not a substitute for the product.
 
 ## Milestone 4: collaboration, Linux distribution and operations
 

@@ -16,6 +16,7 @@ from pathlib import Path
 from security.vault_coordinator import (
     VaultCoordinator,
     VaultInitializationRefusal,
+    VaultInitializationReview,
     initialization_factory,
 )
 
@@ -76,7 +77,7 @@ class VaultInitializationAPI:
         self.signed_release_accepted = signed_release_accepted is True
         self.platform = platform if platform is not None else sys.platform
         self.atomic_platform_verified = atomic_platform_verified is True
-        self._reviews: dict[str, tuple[object, _StorageSnapshot, float, object]] = {}
+        self._reviews: dict[str, tuple[VaultInitializationReview, _StorageSnapshot, float, object]] = {}
 
     def _storage_snapshot(self):
         target = self.vault_path

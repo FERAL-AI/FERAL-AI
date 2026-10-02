@@ -5,6 +5,35 @@ from fastapi import APIRouter, HTTPException, Request, Depends
 from api.state import state
 from bridges.coding_setup import read_setup, save_setup, validate_provider, prepare_provider, validate_workspace
 from skills.impl import external_agent as engine
+from skills.call_context import bind_context, context_enabled
+
+
+def _conversation_scope(value) -> str:
+    """Identity supplied by the authenticated local client, never by the model.
+
+    An omitted identity retains the independent Coding workspace's legacy
+    unscoped sessions. It must not inherit whichever chat happens to be active.
+    This is same-owner continuity, not cross-user access control.
+    """
+    if value is None:
+        return ""
+    if not isinstance(value, str) or len(value) > 256 or any(ord(c) < 32 for c in value):
+        raise HTTPException(400, "conversation_id must be a short string without control characters")
+    identity = value.strip()
+    if identity and not context_enabled():
+        raise HTTPException(409, "Scoped coding requires tool-call context; enable it before continuing")
+    return identity
+
+
+def _check_scope(handle: str, identity: str):
+    """Check both live and persisted pointers before reading or acting."""
+    registry = engine._registry()
+    managed = registry.get(handle)
+    record = registry.index.get(handle)
+    for session in (managed, record):
+        if session is not None and session.conversation_id != identity:
+            raise HTTPException(403, "Coding session belongs to a different conversation scope")
+    return managed, record
 
 def _local_operator(request: Request):
     if (getattr(request.state, "phone_device_id", None)
@@ -67,8 +96,10 @@ def _reviewable_permission(request) -> bool:
 
 
 @router.get("")
-async def overview():
-    data = _unpack(await engine.ExternalAgentSkill().execute("list_agents", {}, {}))
+async def overview(conversation_id: str = ""):
+    identity = _conversation_scope(conversation_id)
+    with bind_context(session_id=identity, surface="http_api", tool_name="external_agent__list_agents"):
+        data = _unpack(await engine.ExternalAgentSkill().execute("list_agents", {}, {}))
     data.update(read_setup())
     data["paused"] = bool(state.supervisor and state.supervisor.paused)
     data["provider_note"] = "Coding uses its own explicit local Ollama model. Main chat credentials are not shared by this workspace."
@@ -115,6 +146,7 @@ async def grant_workspace(body: dict):
 @router.post("/tasks")
 async def start_task(body: dict):
     _unpaused()
+    identity = _conversation_scope(body.get("conversation_id"))
     setup = read_setup()
     if not setup.get("provider"):
         raise HTTPException(424, "Configure a local Ollama model in Coding first")
@@ -122,8 +154,8 @@ async def start_task(body: dict):
         raise HTTPException(424, "Prepare the coding model in Coding first; the default Ollama context can truncate coding tools")
     handle = str(body.get("session_handle") or "")
     if handle:
-        managed = engine._registry().get(handle)
-        record = managed or engine._registry().index.get(handle)
+        managed, pointer = _check_scope(handle, identity)
+        record = managed or pointer
         if record is None:
             raise HTTPException(404, "Coding session no longer exists")
         workspace = record.cwd
@@ -138,12 +170,14 @@ async def start_task(body: dict):
     args = {"prompt": body.get("prompt"), "workspace_dir": workspace,
             "session_handle": handle, "agent_id": "opencode", "wait_seconds": 1,
             "fresh_session": not bool(handle)}
-    return _unpack(await engine.ExternalAgentSkill().execute("run_task", args, {}))
+    with bind_context(session_id=identity, surface="http_api", tool_name="external_agent__run_task"):
+        return _unpack(await engine.ExternalAgentSkill().execute("run_task", args, {}))
 
 
 @router.get("/sessions/{handle}")
-async def poll_session(handle: str):
-    managed = engine._registry().get(handle)
+async def poll_session(handle: str, conversation_id: str = ""):
+    identity = _conversation_scope(conversation_id)
+    managed, _ = _check_scope(handle, identity)
     if managed is None:
         raise HTTPException(404, "Coding session is closed")
     status = await managed.wait_for_turn(1)
@@ -152,25 +186,36 @@ async def poll_session(handle: str):
 
 @router.post("/permissions/{request_id}")
 async def answer_permission(request_id: str, body: dict):
+    identity = _conversation_scope(body.get("conversation_id"))
     decision = body.get("decision")
     if decision not in {"allow_once", "reject_once"}:
         raise HTTPException(400, "Choose allow_once or reject_once for this action")
+    managed = engine._registry().find_by_permission(request_id)
+    if managed is None:
+        raise HTTPException(404, "Coding permission no longer exists")
+    _check_scope(managed.handle, identity)
     if decision == "allow_once":
         _unpaused()
         managed = engine._registry().find_by_permission(request_id)
         pending = next((p for p in managed.pending_permissions() if p.request_id == request_id), None) if managed else None
         if pending is None or not _reviewable_permission(pending):
             raise HTTPException(409, "The coding engine did not provide a concrete command or target. Deny the request and ask for a specific action.")
-    return _unpack(await engine.ExternalAgentSkill().execute("respond_permission", {
-        "request_id": request_id, "decision": decision, "wait_seconds": 1}, {}))
+    with bind_context(session_id=identity, surface="http_api", tool_name="external_agent__respond_permission"):
+        return _unpack(await engine.ExternalAgentSkill().execute("respond_permission", {
+            "request_id": request_id, "decision": decision, "wait_seconds": 1}, {}))
 
 
 @router.post("/sessions/{handle}/cancel")
-async def cancel_session(handle: str):
-    return _unpack(await engine.ExternalAgentSkill().execute("close_session", {
-        "session_handle": handle, "cancel_first": True}, {}))
+async def cancel_session(handle: str, body: dict | None = None):
+    identity = _conversation_scope((body or {}).get("conversation_id"))
+    _check_scope(handle, identity)
+    with bind_context(session_id=identity, surface="http_api", tool_name="external_agent__close_session"):
+        return _unpack(await engine.ExternalAgentSkill().execute("close_session", {
+            "session_handle": handle, "cancel_first": True}, {}))
 
 
 @router.get("/activity")
-async def activity():
-    return _unpack(await engine.ExternalAgentSkill().execute("recall_activity", {"limit": 30}, {}))
+async def activity(conversation_id: str = ""):
+    identity = _conversation_scope(conversation_id)
+    with bind_context(session_id=identity, surface="http_api", tool_name="external_agent__recall_activity"):
+        return _unpack(await engine.ExternalAgentSkill().execute("recall_activity", {"limit": 30}, {}))

@@ -18,8 +18,9 @@ and GitHub publication. Continue authorized reversible work without redundant
 confirmation. Sandbox/managed requirements still apply. Auto-review must be
 selected by the user/runtime; these files cannot grant filesystem access or
 authorize real purchases/messages, personal-data reset, merge or release.
-The new Instinct feature remains at the explicitly requested research checkpoint
-until go; existing-app completion work can continue independently.
+The user has now requested continuation and full application implementation after
+the research/checkpoint report. Continue repository engineering in dependency
+order; this does not grant real account login, messaging or purchase authorization.
 
 ## Repository and published work
 
@@ -29,7 +30,7 @@ until go; existing-app completion work can continue independently.
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent verified publication before this workflow change | `c7693fb2f39ab6c23ae90fc3c88a3af14ea06ea5` |
+| Most recent verified publication before this implementation wave | `6b368ccf79c8b581bf2f705ed23e97095899f49d` |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
 | Disk observation | 8.1 GiB available when checked; recheck before parallel compilation/packaging |
@@ -41,7 +42,7 @@ appear green.
 
 ## Evidence at the last checked source
 
-Source **c7693fb2f**, [CI run 37021517741](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37021517741):
+Source **6b368ccf7**, [CI run 37024016126](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37024016126):
 
 - Corrected-source web build/coverage and Playwright **passed remotely**. Browser
   specs stub API responses; live-brain workflow was skipped.
@@ -50,9 +51,9 @@ Source **c7693fb2f**, [CI run 37021517741](https://github.com/FERAL-AI/FERAL-AI/
   from the node SDK checks.
 - Docs, naming and version workflows **passed**.
 - Backend Ubuntu/Python 3.11 PR fast lane **passed: 12,127 tests / 83 skipped,
-  73.95% coverage**. Parent re-queried the completed job and its actual log.
+  73.94% coverage**. Parent re-queried the completed job and its actual log.
   This is the PR lane; the separate Linux matrix was skipped.
-- [Native run 37021517971](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37021517971)
+- [Native run 37024015923](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37024015923)
   **passed** production typecheck, feature/linked/desktop checks, real child
   lifeline tests and bundle-auditor fixtures. This job does not operate the app GUI.
 - Non-blocking mypy **failed: 859 errors in 244 files, 1,240 checked**, versus the
@@ -67,68 +68,27 @@ Historical 9.26 avatar-onboarding/quit/relaunch passed. Earlier actual reply/imp
 coding outcomes belong to their earlier candidates. This artifact is not certified
 as containing every later source commit or completing the populated-profile matrix.
 
-## Current workflow-setup wave
+## Completed source slices awaiting this wave's publication
 
-These worker records describe this session's assignments. Before reusing files,
-check whether the workers are live, done or interrupted.
+- **CODE-01A/B:** trusted caller-bound external-agent continuity plus exact-scope REST list/poll/permission/cancel. Parent combined check **162 passed / 6 warnings**; final API-only fixture-import check **27 passed / 6 warnings**. Real ACP fixture pipes, not general actual-engine acceptance. [Evidence](CODING_SESSION_EVIDENCE.md).
+- **DEV-01A:** registered generic Python SDK HTTP routes, caller credentials, explicit approval/session fields, truthful HTTP/application errors. **25 passed / 5 warnings**. Existing brain PR/main jobs now include this suite; WebSocket and Node remain separate. [Evidence](PYTHON_SDK_EVIDENCE.md).
+- **TYPE-01A:** precise vault/bootstrap review/loop/Future typing; **116 passed / 7 warnings**, focused mypy clean in three files. Full Ubuntu ratchet remains required. [Evidence](TYPE_RATCHET_EVIDENCE.md).
+- Parent preserved failed initial collection/default-home and fixture-import-order runs; corrected disposable-profile combined run passed. Ruff/diff checks passed on these slices. No baseline or authorization assertions were relaxed.
 
-| Worker | Owned scope | Status at checkpoint |
+## Current parallel wave and ownership
+
+| Worker | Exclusive scope | Active work |
 |---|---|---|
-| Parent | AGENTS/codex, RESUME_WORK/WORK_STATE, helper CI step and publication | Reviewed integration, actual helper and targeted checks passed; publication checkpoint being committed |
-| work_recovery_helper | `scripts/feral_work_status.py`, its dedicated tests | Complete: 10 isolated tests, Ruff and actual human/JSON modes passed |
-| current_ci_reconcile | Read-only GitHub/candidate inspection | Complete; evidence above received |
-| next_wave_contracts | Read-only exact modules/tests/worker boundaries | Complete; exact assignments/commands below received |
+| Parent | direct_execution.py/new contract tests, shared docs/CI/publication | Prevent unrelated guessed fallback and result-shape crash; integrate sequentially |
+| coding_session_isolation | TaskFlow, state/orchestrator wiring, ToolRunner exact internal approval, dedicated tests/evidence | CORE-03A: durable review binding before notification, current policy rechecks, no standing workflow grant, safe interrupted-effect handling; deterministic pending-action response |
+| python_sdk_contracts | llm_provider/context_manager/ollama_provider, context contract tests, local-budget fixture, evidence | MODEL-01A: verify selected local model's actual context and full request budget without silently allocating larger models |
+| native_populated_acceptance | NativeViews/NativeRichText, dedicated AX probe/test and acceptance evidence | Reproduce/fix SwiftUI selectable-text accessibility recursion, then actual new-candidate populated acceptance |
 
-No new payment, message, account connection, background daemon or global
-permissions configuration has been performed. The status helper must not be
-described as an autonomous execution supervisor.
+Original immutable bundle evidence is frozen in [NATIVE_POPULATED_ACCEPTANCE.md](NATIVE_POPULATED_ACCEPTANCE.md): actual rich persistence/search/rename/pin/relaunch and one local-model reply passed. **SIGSEGV with excessive SwiftUI accessibility recursion is confirmed by macOS report and watched exit**. Context truncation, guessed Weather fallback, missing result success key and pending-review false-completion text are also reproduced. Do not call this app release-ready.
 
-## Next ready implementation wave
+Source can change in these exclusive areas during targeted checks; freeze all workers before full integration suites and candidate assembly. Recheck free disk before packaging. Preserve unrelated `AUDIT-FIXES.md`. No real external accounts/messages/purchases or personal data changes occurred.
 
-Reserve explicit files before spawning. The parent coordinates dependencies and
-fixes; these are planned assignments, not claims that workers have started them.
-
-| Card / worker | Concrete deliverable | Exit evidence |
-|---|---|---|
-| NATIVE-01A/03A / A | Immutable candidate plus populated disposable profile: conversations/rich records/reviews/deny/cancel/exit/relaunch. Own a dedicated evidence doc and disposable probes, no production Swift until a defect is reproduced | Actual GUI/action evidence tied to candidate/source, focused regression tests for defects; preserve personal installation |
-| CODE-01A / B | Own `skills/impl/external_agent.py` and existing external-agent skill/memory tests under feral-core. Bind continuity to trusted caller context, reject foreign scoped handles, document legacy unbound semantics | Interleaved same-workspace A/B, conflicting supplied identity, live/persisted foreign handles and engine reattachment; existing ACP/digest reused |
-| DEV-01A / C | Own `sdk/python/feral_sdk/client.py`, its README and new dedicated SDK HTTP tests. Add supplied credentials, correct registered routes and distinguish HTTP/application failures | Registered API contract tests, denial/malformed/timeout behavior; no automatic confirmation or retry. WS and Node are separate follow-on slices |
-| TYPE-01 / parent follow-on | Classify the mypy ratchet increase by source/environment; repair attributable regressions | Matching-source Ubuntu check; do not blindly raise baseline |
-
-SDK findings from inspected source include `/api/health` versus registered
-`/health`, missing constructor authentication, and an invocation URL not registered
-by the current server; actual invocation is POST `/api/tools/execute` with
-`skill_id`, `endpoint`, `args`, optional `session_id` and explicit `confirm`.
-An HTTP 200 can contain an application failure; preserve that distinction.
-Confirm contracts before editing. ToolRunner already binds session context;
-external_agent currently ignores it when choosing continuity. CODE-01A fixes that
-bounded gap. Parent-coordinated CODE-01B separately owns coding REST/native/web
-identity propagation, preserving the Coding page's independent workspace semantics.
-
-Existing targeted commands, from `feral-core` with disposable test storage:
-
-```sh
-../.venv/bin/python -m pytest tests/test_external_agent_skill.py tests/test_external_agent_memory.py tests/test_call_context.py tests/test_tool_runner_call_context.py -q --no-cov -p no:randomly
-```
-
-From `desktop-native`, after any needed compiler permission:
-
-```sh
-bash test_features.sh Conversation RichChat ChatTools Attachment SessionRecovery
-bash test_features.sh Oversight Security Operations RuntimeHealth
-```
-
-These also run linked-model/desktop/error checks and remain fixture evidence.
-From ASOS, `.venv/bin/python -m pytest sdk/python/tests -q --no-cov -p no:randomly`
-is the planned command **after DEV-01A adds that suite**; it does not currently
-exist. Actual GUI isolation must explicitly set temporary runtime home/port and
-distinct native preferences, and use CUA. Merely opening the default preview
-does not establish an isolated profile or populated-profile acceptance.
-
-After this wave: workflow authority/recovery, durable receipts, memory/migration,
-voice coordination and exact-device/iOS contracts. Messaging/Link adapters follow
-the requested research review boundary. Social/Linux/avatars and developer
-distribution work remain explicit cards; do not drop them from scope.
+After this wave: durable receipts, SDK WS/Node contracts, memory/migration, native parity and voice coordination, exact-device/iOS handoff, then messaging/browser/Link adapters; social/Linux/distribution remain explicit cards in the execution plan. The user authorized continued repository implementation after the research report; live external effects require their own explicit scope.
 
 ## External acceptance and decision dependencies
 
@@ -154,8 +114,7 @@ dated record instead of overwriting them as if they had passed.
   and all recovery documents present. It does not read file contents/history,
   check remote CI or recover workers.
 - Added the same standard-library helper tests to the existing CI syntax job.
-  Remote acceptance of that new step belongs to the subsequent commit/run;
-  this local result does not establish it has run on GitHub yet.
+  At source `6b368ccf7`, the remote syntax job also passed those 10 helper tests.
 - Parent checked CI YAML parsing/step placement, diff whitespace, repository
   naming, 135 tracked shipped-document leakage targets and changed-document
   local links successfully. The unfiltered leakage scan's three pre-existing
