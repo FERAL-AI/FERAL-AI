@@ -37,6 +37,12 @@ deployment, accounts, saved data or autonomy settings.
   and disposable workspaces; never point mutating tests at a personal deployment.
 - Run relevant backend/native/web checks and the applicable CI commands in
   `CLAUDE.md`. Build and inspect the actual app when changing native layout.
+- Freeze the sources under test during full-suite and candidate verification.
+  Edits or formatting during a run invalidate affected results and can break
+  source-inspection fixtures. Integrate workers before starting those checks.
+- Check available disk space before packaging or large parallel compilations.
+  Reuse build caches and bound retained generated app copies. Cleanup needs exact
+  inspected paths; preserve profiles, models, source, Git history and test evidence.
 - Report source inspection, fixture tests, real integration checks and physical
   device tests separately. Never claim unperformed tests or production readiness.
 - Update public documentation and the release-readiness evidence with behavior
