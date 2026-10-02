@@ -73,7 +73,10 @@ from agents.multimodal_blocks import (
 from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
 from agents.local_tool_budget import retrieve_local_tools, validate_local_request
 from agents.token_estimate import estimate_message_tokens
-from agents.context_manager import configured_context_window_tokens
+from agents.context_manager import (
+    configured_context_window_tokens, declared_ollama_context_tokens,
+    verify_ollama_request_context, OllamaContextRefusal,
+)
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
 # public chat entry points — see ``_budget_check`` /
@@ -627,6 +630,7 @@ class LLMProvider:
         self._config: dict = {}
         self._cooldown = ProviderCooldownTracker(storage_path=_cooldown_state_path())
         self._last_budget_routing: dict[str, Any] = {}
+        self._ollama_context_observation: tuple[str, str, int, float] | None = None
         # Per-call cross-provider failover record. ``None`` means the
         # primary answered on its first hop (steady state). Populated
         # by ``chat_with_failover`` and read by ``health_snapshot`` /
@@ -985,7 +989,22 @@ class LLMProvider:
             engine_window = 0
         if engine_window > 0:
             return engine_window
+        if getattr(self, "provider", "") == "ollama":
+            observed = getattr(self, "_ollama_context_observation", None)
+            if (observed is not None and observed[:2] == (str(getattr(self, "base_url", "")).rstrip("/"), self.model)
+                    and time.monotonic() - observed[3] < 30):
+                declared = declared_ollama_context_tokens()
+                return min(observed[2], declared) if declared is not None else observed[2]
+            # Planning fallback only; every actual request rechecks capacity.
+            return declared_ollama_context_tokens() or 4096
         return configured_context_window_tokens()
+
+    async def _verify_ollama_context(self, client: httpx.AsyncClient, body: dict, provider: str) -> None:
+        if provider != "ollama":
+            return
+        self._ollama_context_observation = None
+        window = await verify_ollama_request_context(client, body)
+        self._ollama_context_observation = (str(client.base_url).rstrip("/"), body["model"], window, time.monotonic())
 
     def _init_hybrid_cloud(self):
         """In hybrid mode, cloud is used for complex reasoning."""
@@ -1266,6 +1285,10 @@ class LLMProvider:
         # terminal log (§A5 of docs/WAVE5_HARDENING_PROMPT.md).
         apply_reasoning_fork(self.provider, self.model, body)
         validate_local_request(body, self.provider)
+        try:
+            await self._verify_ollama_context(self.client, body, self.provider)
+        except OllamaContextRefusal as exc:
+            return {"error": str(exc), "error_code": exc.code, "choices": []}
 
         from observability.metrics import increment, measure
         increment("feral.llm.calls_total", attributes={"provider": self.provider, "model": self.model})
@@ -2991,6 +3014,19 @@ class LLMProvider:
 
         apply_reasoning_fork(self.provider, self.model, body)
         validate_local_request(body, self.provider)
+        try:
+            await self._verify_ollama_context(self.client, body, self.provider)
+        except OllamaContextRefusal as exc:
+            if exc.code == "local_context_unverified":
+                events = await self._stream_via_nonstream_failover(
+                    messages, tools, temperature, max_tokens, primary_error=exc, force_tool=force_tool,
+                )
+                if events:
+                    for event in events:
+                        yield event
+                    return
+            yield {"type": "error", "content": str(exc), "error_code": exc.code}
+            return
 
         # Ask for the usage chunk. On chat-completions this is opt-in:
         # without ``stream_options.include_usage`` the provider closes
@@ -5193,6 +5229,7 @@ class LLMProvider:
 
             apply_reasoning_fork(self.provider, selected_model, body)
             validate_local_request(body, provider_name)
+            await self._verify_ollama_context(self.client, body, provider_name)
 
             async def _do_primary():
                 resp = await self.client.post("/chat/completions", json=body)
@@ -5270,6 +5307,7 @@ class LLMProvider:
 
             apply_reasoning_fork(provider_name, model, body)
             validate_local_request(body, provider_name)
+            await self._verify_ollama_context(tmp, body, provider_name)
 
             async def _do_fb():
                 resp = await tmp.post("/chat/completions", json=body)
@@ -5529,6 +5567,15 @@ class LLMProvider:
                         exc,
                     )
                 return result
+            except OllamaContextRefusal as exc:
+                # Preserve the existing no-failover-on-overflow policy.
+                # Unavailable metadata may use the operator's existing
+                # configured candidate chain, never an invented provider.
+                if exc.code != "local_context_unverified" or len(candidates) == 1:
+                    return {"error": str(exc), "error_code": exc.code, "choices": []}
+                last_error = exc
+                failed_candidates.append({"provider": provider_name, "reason": exc.code})
+                continue
             except Exception as e:
                 increment("feral.llm.errors_total", attributes={"provider": provider_name})
                 reason = classify_error(e)
@@ -5602,6 +5649,8 @@ class LLMProvider:
                 "reason": "exhausted",
                 "candidates_tried": list(failed_candidates),
             }
+        if isinstance(last_error, OllamaContextRefusal):
+            return {"error": str(last_error), "error_code": last_error.code, "choices": []}
         if last_error:
             raise last_error
         raise RuntimeError("All LLM providers exhausted")

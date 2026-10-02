@@ -11,6 +11,10 @@ import json
 import logging
 import os
 
+import httpx
+
+from agents.token_estimate import estimate_tokens
+
 logger = logging.getLogger("feral.orchestrator.context")
 
 # Rough chars→tokens ratio for English prose plus JSON tool payloads.
@@ -24,15 +28,140 @@ _DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 _HISTORY_SHARE = 0.5
 
 
+class OllamaContextRefusal(ValueError):
+    """A local capacity/configuration failure; never an implicit failover request."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        super().__init__(message)
+
+
+def declared_ollama_context_tokens() -> int | None:
+    raw = os.environ.get("FERAL_CONTEXT_WINDOW_TOKENS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if not 0 < value <= 1_048_576:
+        raise OllamaContextRefusal(
+            "local_context_configuration",
+            "FERAL_CONTEXT_WINDOW_TOKENS must be an integer from 1 to 1048576. "
+            "No model inference was sent; configure a context your local runtime can actually serve.",
+        )
+    return value
+
+
+def _ollama_positive_capacity(value: object) -> int | None:
+    if type(value) is int and 0 < value <= 1_048_576:
+        return value
+    return None
+
+
+def _ollama_model_name(name: str) -> str:
+    return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
+
+
+async def verify_ollama_request_context(client: httpx.AsyncClient, body: dict) -> int:
+    """Refuse unverified/oversized input before inference without changing allocation.
+
+    Runtime allocation is preferred. An unloaded model must declare num_ctx;
+    trained model metadata is not an allocation. This checks a heuristic full
+    request estimate plus reserved output, not an exact model tokenizer count.
+    """
+    declared = declared_ollama_context_tokens()
+    model = body.get("model")
+    if not isinstance(model, str) or not model:
+        raise OllamaContextRefusal("local_context_unverified", "Choose a local model before checking its context capacity.")
+    path = client.base_url.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    native = client.base_url.copy_with(path=path + "/api/", query=None, fragment=None)
+    capacity = None
+    try:
+        response = await client.get(native.join("ps"), timeout=5.0)
+        response.raise_for_status()
+        running = response.json()
+        rows = running.get("models") if isinstance(running, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Invalid capacity response")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            names = [row.get("name"), row.get("model")]
+            if any(isinstance(name, str) and _ollama_model_name(name) == _ollama_model_name(model) for name in names):
+                observed = _ollama_positive_capacity(row.get("context_length"))
+                if observed is not None:
+                    capacity = observed if capacity is None else min(capacity, observed)
+        if capacity is None:
+            response = await client.post(native.join("show"), json={"model": model}, timeout=5.0)
+            response.raise_for_status()
+            details = response.json()
+            parameters = details.get("parameters") if isinstance(details, dict) else None
+            if isinstance(parameters, str):
+                for line in parameters.splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and fields[0] == "num_ctx":
+                        try:
+                            observed = _ollama_positive_capacity(int(fields[1]))
+                        except ValueError:
+                            observed = None
+                        if observed is not None:
+                            capacity = observed if capacity is None else min(capacity, observed)
+    except (httpx.HTTPError, ValueError, TypeError):
+        # Neither private server bodies nor credential-bearing URLs are shown.
+        raise OllamaContextRefusal(
+            "local_context_unverified",
+            "Local model context capacity could not be checked. Ensure this Ollama endpoint exposes "
+            "/api/ps and /api/show, then retry. No inference was sent to this local model.",
+        ) from None
+    if capacity is None:
+        raise OllamaContextRefusal(
+            "local_context_unverified",
+            "Local model context capacity is not verified. Configure the selected Ollama model with "
+            "an explicit Modelfile PARAMETER num_ctx that fits this Mac, or load it and verify its "
+            "allocated context. FERAL will not enlarge memory allocation or send this prompt for silent truncation.",
+        )
+    if declared is not None and declared > capacity:
+        raise OllamaContextRefusal(
+            "local_context_mismatch",
+            f"FERAL declares {declared} context tokens but the selected Ollama model exposes {capacity}. "
+            "Lower FERAL_CONTEXT_WINDOW_TOKENS or explicitly configure sufficient Ollama context within "
+            "your memory budget. No model inference or fallback was sent.",
+        )
+    window = min(capacity, declared) if declared is not None else capacity
+    output = body.get("max_tokens", 1024)
+    if type(output) is not int or output <= 0:
+        raise OllamaContextRefusal("local_context_configuration", "Local max_tokens must be a positive integer; no model inference was sent.")
+    serialized = json.dumps({"messages": body.get("messages", []), "tools": body.get("tools", [])},
+                            ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+    estimated = estimate_tokens(serialized)
+    # Reserve template overhead explicitly; the estimate is not the model tokenizer.
+    template_reserve = 256
+    required = estimated + output + template_reserve
+    logger.info("Ollama context preflight: input_estimate=%d output_reserve=%d template_reserve=%d capacity=%d tokenizer_verified=false",
+                estimated, output, template_reserve, window)
+    if required > window:
+        raise OllamaContextRefusal(
+            "local_context_overflow",
+            f"Local request needs an estimated {required} tokens including output and template reserve; "
+            f"the checked Ollama context budget is {window}. Shorten attached context or explicitly configure "
+            "a larger local context within your memory budget. No prompt was truncated, inference sent or fallback used. "
+            "This estimate is heuristic, not an exact model tokenizer count.",
+        )
+    return window
+
+
 def configured_context_window_tokens() -> int:
     """Usable context window the operator has declared, in tokens.
 
-    Public because this is the only context size the process can
-    actually discover: it is read fresh from the environment on every
-    call, so a test or a relaunch that changes
+    This generic planning declaration is read fresh from the environment
+    on every call, so a test or a relaunch that changes
     ``FERAL_CONTEXT_WINDOW_TOKENS`` is honoured without a restart.
     ``memory/knowledge_graph.py`` sizes its extraction prompt against it
-    rather than hard-coding a character cap.
+    rather than hard-coding a character cap. Ollama inference additionally
+    verifies the selected runtime's capacity before sending a request.
     """
     raw = os.environ.get("FERAL_CONTEXT_WINDOW_TOKENS", "")
     if not raw.strip():

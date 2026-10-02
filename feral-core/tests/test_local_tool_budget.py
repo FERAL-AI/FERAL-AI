@@ -121,6 +121,8 @@ async def test_real_provider_body_uses_retrieval_on_every_local_http_path(path):
     sent = []
 
     def respond(request):
+        if request.url.path == "/api/ps":
+            return httpx.Response(200, json={"models": [{"name": "fixture-local-model", "context_length": 16384}]})
         body = json.loads(request.content)
         sent.append(body)
         if body.get("stream"):

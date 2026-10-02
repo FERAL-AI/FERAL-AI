@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 test_cache=/private/tmp/theora-native-feature-tests-cache
-all_features=(Health Memory Oversight Configuration Providers Conversation Attachment Operations Security Connections Voice Identity Capabilities Workflow ChatTools VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery SurfaceUpdate HealthHistory RuntimeHealth Vault Hardware OnboardingSetup ReviewSummary)
+all_features=(Health Memory Oversight Configuration Providers Conversation Attachment Operations Security Connections Voice Identity Capabilities Workflow ChatTools VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery SurfaceUpdate HealthHistory RuntimeHealth Vault Hardware OnboardingSetup ReviewSummary SelectableText)
 features=("${all_features[@]}")
 if [[ $# -gt 0 ]]; then
   features=("$@")
@@ -18,12 +18,14 @@ for feature in "${features[@]}"; do
   main_source="Native${feature}Feature.swift"
   test_source="tests/Native${feature}FeatureTests.swift"
   if [[ "$feature" == "ReviewSummary" ]]; then feature_sources=(NativeRichText.swift NativePlainTextEditor.swift); main_source=NativeReviewSummary.swift; test_source=tests/NativeReviewSummaryTests.swift; fi
+  if [[ "$feature" == "SelectableText" ]]; then feature_sources=(); main_source=NativeRichText.swift; test_source=tests/NativeSelectableTextTests.swift; fi
   if [[ "$feature" == "AppSurface" ]]; then feature_sources+=(NativeRichChatFeature.swift NativeAppConfirmationFeature.swift NativeSurfaceUpdateFeature.swift); fi
   if [[ "$feature" == "SurfaceUpdate" ]]; then feature_sources+=(NativeRichChatFeature.swift NativeAppConfirmationFeature.swift NativeAppSurfaceFeature.swift); fi
   if [[ "$feature" == "Providers" ]]; then feature_sources+=(NativeProviderRoutingFeature.swift); fi
+  feature_sources+=("$main_source" "$test_source")
   xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
     -module-cache-path "$test_cache" -parse-as-library \
-    "${feature_sources[@]}" "$main_source" "$test_source" \
+    "${feature_sources[@]}" \
     -o "$test_binary"
   "$test_binary"
 done

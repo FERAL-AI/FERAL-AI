@@ -24,6 +24,12 @@ The candidate advantage is the complete loop from real-world context to grounded
 | [Coding session evidence](CODING_SESSION_EVIDENCE.md) | Trusted caller continuity, exact handle ownership, local REST propagation and actual ACP-pipe regression results |
 | [Python SDK HTTP evidence](PYTHON_SDK_EVIDENCE.md) | Registered routes/authentication/policy tests, transport failures and developer-facing failure contracts |
 | [Type-ratchet evidence](TYPE_RATCHET_EVIDENCE.md) | Eight source-attributed security annotations, focused checks and remaining Ubuntu ratchet acceptance |
+| [Populated native acceptance](NATIVE_POPULATED_ACCEPTANCE.md) | Immutable old-candidate GUI results, confirmed accessibility crash and task defects requiring repair |
+| [Native accessibility evidence](NATIVE_ACCESSIBILITY_EVIDENCE.md) | AppKit replacement reproducer, actual copy/link checks and remaining app-wide selectable-text coverage |
+| [Ubuntu type follow-up](TYPE_RATCHET_FOLLOWUP.md) | Measured851-error remaining ratchet and source-attributed next repairs |
+| [Local model capacity](LOCAL_MODEL_CONTEXT_EVIDENCE.md) | Selected-runtime context preflight, full request estimates, configured-only fallback and focused evidence |
+| [Workflow dispatch evidence](TASKFLOW_DISPATCH_EVIDENCE.md) | One-call exact workflow reviews, conservative interrupted-effect recovery and truthful pending text |
+| [Direct fallback evidence](DIRECT_FALLBACK_EVIDENCE.md) | Refuse guessed actions after model failure, preserve ToolRunner authority and handle pending results truthfully |
 | [Automatic-review and resume procedure](RESUME_WORK.md) | Verified permission controls, CLI commands, interruption reconciliation and persistent execution cadence |
 | [Executable app completion plan](EXECUTION_PLAN.md) | Source-backed task cards, existing-system reuse, dependencies, acceptance, developer platform, parallel worker waves and publication |
 | [Instinct-style integration research](INSTINCT_RESEARCH.md) | Five requested verdicts: iMessage, per-user Link wallet, browser executor, selected glasses capture and exact integration map; docs versus tests distinguished |

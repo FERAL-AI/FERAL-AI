@@ -8,6 +8,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from agents.context_manager import verify_ollama_request_context
 
 logger = logging.getLogger("feral.providers.ollama")
 
@@ -46,17 +47,20 @@ class OllamaProvider(BaseProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": False,
         }
-        if max_tokens is not None or temperature is not None:
-            options: dict[str, Any] = {}
-            if max_tokens is not None:
-                options["num_predict"] = max_tokens
-            if temperature is not None:
-                options["temperature"] = temperature
-            payload["options"] = options
+        # An omitted output limit must not defeat the reserved-output check.
+        output_limit = max_tokens if max_tokens is not None else 1024
+        options: dict[str, Any] = {"num_predict": output_limit}
+        if temperature is not None:
+            options["temperature"] = temperature
+        payload["options"] = options
         if tools:
             payload["tools"] = tools
 
-        async with httpx.AsyncClient(timeout=120.0) as c:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=120.0) as c:
+            await verify_ollama_request_context(c, {
+                "model": model, "messages": payload["messages"],
+                "tools": tools or [], "max_tokens": output_limit,
+            })
             r = await c.post(f"{self._base_url}/api/chat", json=payload)
             r.raise_for_status()
             data = r.json()

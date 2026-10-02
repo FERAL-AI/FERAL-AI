@@ -1956,6 +1956,8 @@ class BrainState:
 
             self.supervisor = _Supervisor(broadcaster=_broadcast_supervisor_event)
             self.supervisor.wrap(self.orchestrator)
+            if self.taskflows is not None:
+                self.taskflows._supervisor = self.supervisor
 
         with boot_subsystem(self._boot_report, "TwinPolicyEngine"):
             # Digital-twin policy + approval queue. The twin's execute()

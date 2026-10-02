@@ -30,7 +30,7 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent verified publication before this implementation wave | `6b368ccf79c8b581bf2f705ed23e97095899f49d` |
+| Most recent publication | `3ecb95bbea0f3bea9b67b331341928e673a6acbe` (coding/SDK/type/evidence checkpoint) |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
 | Disk observation | 8.1 GiB available when checked; recheck before parallel compilation/packaging |
@@ -122,3 +122,23 @@ dated record instead of overwriting them as if they had passed.
 - Resume/approval flags were checked against installed CLI help and official
   fetched OpenAI docs. No second session, goal, daemon, hook or global config
   change was started. The current managed permission profile remains unchanged.
+
+## October 2 integrated core repair wave
+
+- Parent frozen-backend integration: **320 passed, 7 warnings in 24.48 seconds**, exit 0, using explicit disposable home/data storage. Exact command covers direct fallback, coding/ACP/context/REST, TaskFlow/exact approvals, deterministic pending response, Ollama metadata/budget, approvals, orchestration and streaming. Log: `/private/tmp/feral-integrated-contracts-20261002.log` (local artifact, not shipped).
+- CORE-03A worker: **299 passed / 7 warnings**, current deny/plan/lease and exact-once internal approval checks; interrupted effects remain unknown and cannot auto-replay. [Evidence](TASKFLOW_DISPATCH_EVIDENCE.md).
+- MODEL-01A worker: **202 passed / 7 warnings**, final dedicated **30 passed**; actual selected context checked without downloads/allocation changes. [Evidence](LOCAL_MODEL_CONTEXT_EVIDENCE.md).
+- Parent direct fallback: refuse ambiguous/untrusted/mutating fallback, use central ToolRunner, handle pending/error envelopes; **26 passed** with context suite. [Evidence](DIRECT_FALLBACK_EVIDENCE.md).
+- Exact-source Ubuntu type result at `3ecb95bbe`: CI run **37030468541**, mypy job **110915704575**, **851 errors / 241 files / 1,240 checked**, baseline812. The three repaired vault/bootstrap files have no diagnostics; reduction859→851 is measured, not inferred. This is still a failing non-blocking ratchet. Native CI **37030468564 passed**; required overall/backend workflow still in progress when queried. Generic Python SDK HTTP step passed remotely.
+- New native candidate will be **2026.9.27 / 2026100201**, after committing frozen source and restaging its exact backend. A/B accessibility probe identified another explicit-label SIGSEGV; AppKit selectable text passed actual AX/copy. This remains narrow chat/recovery/rich scope, not app-wide172 remaining selectable expressions in28 feature files. New full-bundle acceptance has not yet run.
+- Next read-only audits: CORE-04 whole-turn WebSocket terminal/cancel contract and DEV-01B Python/Node session/auth/deadline parity. Existing SDKs mis-handle greeting/session identity and per-round finality; gateway abort reports success without cancelling. Do not implement consumer success against a fabricated task-terminal marker. Coordinate protocol before the next source wave.
+
+- Native source is frozen. Production typecheck and actual AppKit probe copy,
+  Markdown/link/code behavior passed. Parent registered SelectableText in the
+  default native CI fixture inventory; initial Bash empty-array failure was
+  corrected, final component+linked20/desktop39/error5 checks passed. [Evidence](NATIVE_ACCESSIBILITY_EVIDENCE.md).
+- CORE04 audit reproduced queued-turn cancellation tearing down an active
+  same-session turn's children. Next wave must fix lock ownership before
+  claiming exact-turn abort, persist receipts before durable claims and dedupe
+  identical requests without replay. SDK must wait for the correlated whole-turn
+  terminal, not greetings/intermediate prose/provider-round finality.

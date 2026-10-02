@@ -8,6 +8,9 @@ daemon command forwarding, and subagent parallel execution.
 from __future__ import annotations
 
 import asyncio
+import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -48,6 +51,30 @@ if TYPE_CHECKING:
 logger = logging.getLogger("feral.orchestrator.tool_runner")
 
 VALID_AUTONOMY_MODES = ("strict", "hybrid", "loose")
+
+
+class _ExactApproval:
+    """Internal one-call review receipt; never a JSON/model argument."""
+    def __init__(self, issuer, pending):
+        self.issuer = issuer
+        self.session_id = pending["session_id"]
+        self.tool_name = pending["tool_name"]
+        self.args = copy.deepcopy(pending["args"])
+        self.pending = copy.deepcopy(pending) if pending.get("taskflow") else None
+        self.used = False
+        self.safety_used = False
+
+
+_exact_approval: ContextVar[Optional[_ExactApproval]] = ContextVar("feral_exact_tool_approval", default=None)
+
+
+@contextmanager
+def _bind_exact_approval(approval):
+    token = _exact_approval.set(approval)
+    try:
+        yield
+    finally:
+        _exact_approval.reset(token)
 
 # ----------------------------------------------------------------------
 # Which tool results count as external content
@@ -444,6 +471,11 @@ class ToolRunner:
 
     def _guard_agent_lease(self):
         guard_agent_dispatch(getattr(self, "_native_agent_dispatch_lease", None))
+        exact = _exact_approval.get()
+        if exact is not None and exact.issuer is self and exact.pending is not None:
+            taskflows = getattr(self._orch, "taskflows", None)
+            if taskflows is None or not taskflows.approved_dispatch_allowed(exact.pending):
+                raise RuntimeError("Workflow approval dispatch is no longer active")
 
     def enforce_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket") -> Optional[dict]:
         """
@@ -520,6 +552,12 @@ class ToolRunner:
         if not needs_approval:
             if self._autonomy_mode == "loose" and level == SafetyLevel.CONFIRM:
                 logger.info(f"Safety CONFIRM (loose mode auto-exec): {tool_name}")
+            return None
+
+        exact = _exact_approval.get()
+        if (exact is not None and exact.issuer is self and exact.used and not exact.safety_used
+                and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args):
+            exact.safety_used = True
             return None
 
         approved, reason = self._approval_mgr.check_approval(tool_name, session_id)
@@ -668,7 +706,8 @@ class ToolRunner:
         """Persist a per-session approval used to execute a confirmed call."""
         self._approval_mgr.grant_approval(tool_name, session_id, scope="session")
 
-    def approve_pending(self, request_id: str, *, session_id: Optional[str] = None) -> Optional[dict]:
+    def approve_pending(self, request_id: str, *, session_id: Optional[str] = None,
+                        exact_once: bool = False) -> Optional[dict]:
         """Approve a pending request; returns tool_name + args for re-execution."""
         pending = self._pending_approvals.get(request_id)
         if pending is None:
@@ -677,7 +716,10 @@ class ToolRunner:
             return None
         self._pending_approvals.pop(request_id, None)
         logger.info(f"Approved pending request {request_id} for {pending['tool_name']}")
-        return {"tool_name": pending["tool_name"], "args": pending["args"]}
+        result = {"tool_name": pending["tool_name"], "args": pending["args"]}
+        if exact_once:
+            result["approval"] = _ExactApproval(self, pending)
+        return result
 
     def deny_pending(self, request_id: str, *, session_id: Optional[str] = None) -> Optional[dict]:
         """Deny and remove a pending request."""
@@ -1298,6 +1340,7 @@ class ToolRunner:
         available_skills,
         *,
         surface: Optional[str] = None,
+        approval: Optional[_ExactApproval] = None,
     ) -> dict:
         """Bind tool-call identity, then run the call.
 
@@ -1307,6 +1350,13 @@ class ToolRunner:
         publishes the identity on a contextvar so implementations can read
         it without a signature change. See ``skills/call_context.py``.
         """
+        if approval is not None:
+            if not isinstance(approval, _ExactApproval) or approval.issuer is not self or approval.used:
+                return make_tool_error_envelope(error_code="invalid_approval", reason="Exact approval is unavailable or already consumed", tool_call_id=tool_call.get("id", ""))
+            approval.used = True
+            if (approval.session_id != session_id or approval.tool_name != tool_call.get("name")
+                    or approval.args != tool_call.get("args")):
+                return make_tool_error_envelope(error_code="invalid_approval", reason="Exact approval does not match this action", tool_call_id=tool_call.get("id", ""))
         self._guard_agent_lease()
         effective_surface = surface or self._resolve_surface_for_session(session_id)
         # Wave 1's per-tool instrumentation. It lived at the top of the
@@ -1315,7 +1365,7 @@ class ToolRunner:
         self._record_tool_invocation(
             str(tool_call.get("name") or ""), session_id, effective_surface,
         )
-        with bind_context(
+        with _bind_exact_approval(approval), bind_context(
             session_id=session_id,
             surface=effective_surface,
             tool_name=str(tool_call.get("name") or ""),

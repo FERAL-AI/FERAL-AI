@@ -1289,17 +1289,37 @@ class Orchestrator:
         request_id: str,
         tool_name: str,
         args: dict,
+        taskflow_pending: Optional[dict] = None,
+        exact_approval=None,
     ) -> dict:
         """Execute a previously-approved pending tool call."""
-        self.tool_runner.grant_session_approval(tool_name, session_id)
+        if taskflow_pending is None:
+            self.tool_runner.grant_session_approval(tool_name, session_id)
         tool_call = {
             "name": tool_name,
             "args": args or {},
             "id": request_id,
         }
-        await self._emit_tool_start(session_id, tool_call)
-        t_start = time.time()
-        result_data = await self._execute_tool_call_for_llm(session_id, tool_call, [])
+        taskflows = self.taskflows if taskflow_pending else None
+        try:
+            await self._emit_tool_start(session_id, tool_call)
+            t_start = time.time()
+            if taskflows is not None:
+                if not taskflows.approved_dispatch_allowed(taskflow_pending):
+                    result_data = {"success": False, "error": "Workflow dispatch was cancelled or paused before execution"}
+                else:
+                    binding = taskflow_pending["taskflow"]
+                    tool_call["id"] = f"taskflow:{binding['flow_id']}:{binding['step_id']}"
+                    result_data = await self.tool_runner.execute_tool_call_for_llm(
+                        session_id, tool_call, [], surface="taskflow", approval=exact_approval
+                    )
+                await taskflows.finish_approved_dispatch(taskflow_pending, result_data)
+            else:
+                result_data = await self._execute_tool_call_for_llm(session_id, tool_call, [])
+        except (Exception, asyncio.CancelledError):
+            if taskflows is not None:
+                await taskflows.finish_approved_dispatch(taskflow_pending, uncertain=True)
+            raise
         latency_ms = (time.time() - t_start) * 1000
         await self._emit_tool_result(session_id, tool_call, result_data, latency_ms)
         await self._try_genui_for_result(session_id, tool_call, result_data)
@@ -1389,6 +1409,8 @@ class Orchestrator:
             denied = self.tool_runner.deny_pending(request_id, session_id=effective_session)
             if denied is None:
                 return {"status": "not_found", "request_id": request_id}
+            if pending.get("taskflow") and self.taskflows is not None:
+                await self.taskflows.finish_approved_dispatch(pending, rejected=True)
             await self._send_text(effective_session, f"Cancelled `{tool_name}`.")
             await self._push_approval_resolved(
                 effective_session, request_id, "rejected", tool_name, actor,
@@ -1401,21 +1423,41 @@ class Orchestrator:
                 "resolved_by": actor,
             }
 
+        taskflow_pending = pending if pending.get("taskflow") else None
+        if taskflow_pending is not None and (
+            self.taskflows is None or not self.taskflows.prepare_approved_dispatch(pending)
+        ):
+            self.tool_runner.deny_pending(request_id, session_id=effective_session)
+            if self.taskflows is not None:
+                await self.taskflows.finish_approved_dispatch(pending, rejected=True)
+            return {"status": "rejected", "request_id": request_id,
+                    "reason": "Workflow approval is stale, cancelled, paused or does not match the action"}
+
         accepted = self.tool_runner.approve_pending(
             request_id,
             session_id=effective_session,
+            exact_once=taskflow_pending is not None,
         )
         if accepted is None:
+            if taskflow_pending is not None:
+                await self.taskflows.finish_approved_dispatch(taskflow_pending, rejected=True)
             return {"status": "not_found", "request_id": request_id}
-        await self._push_approval_resolved(
-            effective_session, request_id, "approved", tool_name, actor,
-        )
-        return await self._execute_approved_pending_tool(
-            effective_session,
-            request_id=request_id,
-            tool_name=tool_name,
-            args=args,
-        )
+        try:
+            await self._push_approval_resolved(
+                effective_session, request_id, "approved", tool_name, actor,
+            )
+            return await self._execute_approved_pending_tool(
+                effective_session,
+                request_id=request_id,
+                tool_name=tool_name,
+                args=args,
+                taskflow_pending=taskflow_pending,
+                exact_approval=accepted.get("approval"),
+            )
+        except (Exception, asyncio.CancelledError):
+            if taskflow_pending is not None:
+                await self.taskflows.finish_approved_dispatch(taskflow_pending, uncertain=True)
+            raise
 
     async def _maybe_handle_pending_tool_approval_text(
         self,
@@ -1626,6 +1668,19 @@ class Orchestrator:
             default=str,
         )[:2000]
         return summary, detail
+
+    @staticmethod
+    def _pending_review_response(outputs: list[dict]) -> str:
+        """Report gated actions without guessing their concurrent review outcome."""
+        count = sum(
+            audit_status_of(output.get("result") or {}) == "pending_approval"
+            for output in outputs
+        )
+        if count == 1:
+            return "That action was sent for your approval. Review the approval card for its current status."
+        if count:
+            return "Those actions were sent for your approval. Review the approval cards for their current status."
+        return ""
 
     @staticmethod
     def _refusal_code(result_data: dict) -> str:
@@ -3895,6 +3950,18 @@ class Orchestrator:
                     tools_used = [tc["name"] for tc in tool_calls]
                     self._mitosis_engine.observe_interaction(session_id, text, tools_used)
 
+                pending_response = self._pending_review_response(tool_outputs)
+                if pending_response:
+                    # A further free-text provider round can claim that a
+                    # gated action ran. The approval result owns its outcome.
+                    history.append({"role": "assistant", "content": pending_response})
+                    if self.memory:
+                        self.memory.working_push(session_id, {"role": "assistant", "text": pending_response})
+                    await self._send_text(session_id, pending_response, model=turn_model, usage=turn_usage)
+                    sent_response = True
+                    final_response_text = pending_response
+                    break
+
                 if final_answer_only:
                     # No-progress guard: withdraw tools and steer the model
                     # to one final honest answer instead of a third
@@ -4571,6 +4638,16 @@ class Orchestrator:
                 if self._mitosis_engine:
                     tools_used = [tc["name"] for tc in normalized_tool_calls]
                     self._mitosis_engine.observe_interaction(session_id, text, tools_used)
+
+                pending_response = self._pending_review_response(outputs)
+                if pending_response:
+                    history.append({"role": "assistant", "content": pending_response})
+                    if self.memory:
+                        self.memory.working_push(session_id, {"role": "assistant", "text": pending_response})
+                    await self._send_text(session_id, pending_response)
+                    accumulated_text = pending_response
+                    got_final_text = True
+                    break
 
                 if final_answer_only:
                     # No-progress guard: withdraw tools, steer to one final

@@ -21,6 +21,7 @@ from uuid import uuid4
 import httpx
 
 from config.loader import feral_data_home
+from skills.call_context import bind_context
 
 logger = logging.getLogger("feral.taskflow")
 
@@ -45,10 +46,14 @@ class TaskFlowRuntime:
         self._memory = memory_store
         self._skill_registry = skill_registry
         self._orchestrator = orchestrator
+        self._supervisor = None
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._runner_task: Optional[asyncio.Task] = None
+        self._step_task: Optional[asyncio.Task] = None
+        self._active_flow_id = ""
+        self._approved_tasks: dict[str, asyncio.Task] = {}
         self._stop_event = asyncio.Event()
         self._http = httpx.AsyncClient(timeout=20.0)
         self._init_db()
@@ -106,6 +111,12 @@ class TaskFlowRuntime:
 
     async def stop(self):
         self._stop_event.set()
+        active = [task for task in self._approved_tasks.values()
+                  if task is not asyncio.current_task() and not task.done()]
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
         if self._runner_task:
             self._runner_task.cancel()
             try:
@@ -116,13 +127,27 @@ class TaskFlowRuntime:
         await self._http.aclose()
 
     def _recover_after_restart(self):
+        # A persisted running step may have committed before the process
+        # disappeared. Only proven read-only work may be replayed.
+        with self._lock:
+            identifiers = [r[0] for r in self._conn.execute("SELECT id FROM taskflows").fetchall()]
+        for flow_id in identifiers:
+            full = self.get_flow(flow_id)
+            if not full:
+                continue
+            for step in full["steps"]:
+                if step["status"] == "running":
+                    if self._restart_safe(step):
+                        with self._lock:
+                            self._conn.execute("UPDATE taskflow_steps SET status = 'pending' WHERE id = ?", (step["id"],))
+                            self._conn.commit()
+                    else:
+                        self._mark_unknown(full, step, "Process stopped during a potentially effectful step")
         now = time.time()
         with self._lock:
             conn = self._conn
-            conn.execute(
-                "UPDATE taskflows SET status = ?, updated_at = ? WHERE status = ?",
-                (TaskFlowStatus.QUEUED.value, now, TaskFlowStatus.RUNNING.value),
-            )
+            conn.execute("UPDATE taskflows SET status = ?, updated_at = ? WHERE status = ?",
+                         (TaskFlowStatus.QUEUED.value, now, TaskFlowStatus.RUNNING.value))
             conn.execute(
                 """
                 UPDATE taskflows
@@ -249,13 +274,26 @@ class TaskFlowRuntime:
 
     def resume_flow(self, flow_id: str) -> Optional[dict]:
         now = time.time()
+        flow = self.get_flow(flow_id)
+        if not flow:
+            return None
+        # Review completion belongs to the existing approval dispatcher.
+        # Manual resume is never a reconciliation of an uncertain effect.
+        if flow["status"] in (TaskFlowStatus.COMPLETED.value, TaskFlowStatus.CANCELLED.value):
+            return flow
+        if any(s["status"] == "outcome_unknown" or
+               (s.get("result") or {}).get("reason") == "approval_required"
+               for s in flow["steps"]):
+            return flow
+        if any(s["status"] == "failed" and
+               (s.get("result") or {}).get("dispatch_started") is not False
+               and not self._restart_safe(s) for s in flow["steps"]):
+            return flow
         with self._lock:
             conn = self._conn
             row = conn.execute("SELECT status FROM taskflows WHERE id = ?", (flow_id,)).fetchone()
             if not row:
                 return None
-            if row["status"] in (TaskFlowStatus.COMPLETED.value, TaskFlowStatus.CANCELLED.value):
-                return self.get_flow(flow_id)
             conn.execute(
                 "UPDATE taskflows SET status = ?, error = NULL, wait_until = NULL, updated_at = ? WHERE id = ?",
                 (TaskFlowStatus.QUEUED.value, now, flow_id),
@@ -283,7 +321,123 @@ class TaskFlowRuntime:
                 (TaskFlowStatus.CANCELLED.value, now, flow_id),
             )
             conn.commit()
+        if self._active_flow_id == flow_id and self._step_task and not self._step_task.done():
+            self._step_task.cancel()
+        approved_task = self._approved_tasks.get(flow_id)
+        if approved_task and approved_task is not asyncio.current_task() and not approved_task.done():
+            approved_task.cancel()
+        flow = self.get_flow(flow_id)
+        if flow:
+            for step in flow["steps"]:
+                approval = (step.get("result") or {}).get("approval") or {}
+                runner = getattr(self._orchestrator, "tool_runner", None)
+                if approval.get("request_id") and runner is not None:
+                    runner.deny_pending(approval["request_id"], session_id=approval["session_id"])
         return self.get_flow(flow_id)
+
+    def _restart_safe(self, step: dict) -> bool:
+        if step["step_type"] in {"noop", "condition", "sleep", "memory.search"}:
+            return True
+        if step["step_type"] != "skill.invoke":
+            return False
+        from security.safety_resolver import is_read_only
+        raw = step.get("payload") or {}
+        payload = raw.get("config", raw)
+        try:
+            manifest = self._skill_registry.skills.get(payload.get("skill_id", "")) if self._skill_registry else None
+            endpoint = next((ep for ep in manifest.endpoints if ep.id == payload.get("endpoint")), None) if manifest else None
+            return bool(endpoint and endpoint.read_only_hint is True and
+                        is_read_only(f"{payload.get('skill_id', '')}__{payload.get('endpoint', '')}",
+                                     registry=self._skill_registry, strict=True))
+        except Exception:
+            logger.warning("Could not classify interrupted workflow step; requiring reconciliation")
+            return False
+
+    def _mark_unknown(self, flow: dict, step: dict, reason: str):
+        outcome = {"status": "outcome_unknown", "error": reason,
+                   "tool_outcome_verified": False, "replay_safe": False}
+        with self._lock:
+            self._conn.execute("UPDATE taskflow_steps SET status = 'outcome_unknown', error = ?, result_json = ?, finished_at = ? WHERE id = ?",
+                               (reason, json.dumps(outcome), time.time(), step["id"]))
+            self._conn.execute("UPDATE taskflows SET status = CASE WHEN status = 'cancelled' THEN status ELSE 'waiting' END, error = ?, wait_until = NULL, updated_at = ? WHERE id = ?",
+                               (reason, time.time(), flow["id"]))
+            self._conn.commit()
+
+    def _approval_step(self, pending: dict):
+        binding = pending.get("taskflow") or {}
+        flow = self.get_flow(binding.get("flow_id", ""))
+        if not flow:
+            return None, None
+        step = next((s for s in flow["steps"] if s["id"] == binding.get("step_id")), None)
+        approval = (step.get("result") or {}).get("approval") if step else None
+        exact = {key: pending.get(key) for key in ("request_id", "session_id", "tool_name", "args")}
+        if not approval or approval != exact:
+            return None, None
+        return flow, step
+
+    def prepare_approved_dispatch(self, pending: dict) -> bool:
+        """Claim the existing review once, before its central execution."""
+        flow, step = self._approval_step(pending)
+        if (not flow or flow["status"] != "waiting" or step["status"] != "waiting"
+                or (self._supervisor is not None and self._supervisor.paused)):
+            return False
+        runner = getattr(self._orchestrator, "tool_runner", None)
+        if runner is None or runner.enforce_plan_mode(pending["tool_name"], pending["session_id"]):
+            return False
+        with self._lock:
+            changed = self._conn.execute("UPDATE taskflow_steps SET status = 'running', started_at = ?, finished_at = NULL WHERE id = ? AND status = 'waiting'",
+                                         (time.time(), step["id"])).rowcount
+            if not changed:
+                return False
+            self._conn.execute("UPDATE taskflows SET status = 'running', updated_at = ? WHERE id = ? AND status = 'waiting'",
+                               (time.time(), flow["id"]))
+            self._conn.commit()
+        task = asyncio.current_task()
+        if task is not None:
+            self._approved_tasks[flow["id"]] = task
+        return True
+
+    def approved_dispatch_allowed(self, pending: dict) -> bool:
+        flow, step = self._approval_step(pending)
+        return bool(flow and flow["status"] == "running" and step["status"] == "running"
+                    and not (self._supervisor is not None and self._supervisor.paused))
+
+    async def finish_approved_dispatch(self, pending: dict, result: Optional[dict] = None,
+                                       *, rejected: bool = False, uncertain: bool = False):
+        """Persist the actual dispatcher response, never dispatch again."""
+        flow, step = self._approval_step(pending)
+        binding = pending.get("taskflow") or {}
+        self._approved_tasks.pop(binding.get("flow_id", ""), None)
+        if not flow or step["status"] not in {"waiting", "running"}:
+            return False
+        if uncertain or flow["status"] == "cancelled":
+            self._mark_unknown(flow, step, "Approval dispatch interrupted; external effect outcome is unknown")
+            return True
+        result = result or {}
+        success = not rejected and result.get("success") is True
+        error = None if success else ("Approval rejected" if rejected else str(result.get("error") or result.get("note") or "Dispatcher refused the workflow action"))
+        outcome = {"status": "completed" if success else "failed", "result": result,
+                   "error": error, "dispatch_started": not rejected,
+                   "tool_outcome_verified": result.get("tool_outcome_verified", False)}
+        context = dict(flow.get("context") or {})
+        if success:
+            output = self._step_output_text(outcome)
+            records = dict(context.get("step_results") or {})
+            records[str(step["step_index"])] = {"type": step["step_type"], "status": "completed", "output": output}
+            context["step_results"] = records
+            if output is not None:
+                context["previous_output"] = output
+        now = time.time()
+        with self._lock:
+            changed = self._conn.execute("UPDATE taskflow_steps SET status = ?, result_json = ?, error = ?, finished_at = ? WHERE id = ? AND status IN ('waiting', 'running')",
+                                         (outcome["status"], json.dumps(outcome, default=str), error, now, step["id"])).rowcount
+            if not changed:
+                return False
+            self._conn.execute("UPDATE taskflows SET status = ?, current_step = ?, context_json = ?, error = ?, wait_until = NULL, updated_at = ? WHERE id = ? AND status != 'cancelled'",
+                               ("queued" if success else "failed", step["step_index"] + int(success),
+                                json.dumps(context, default=str), error, now, flow["id"]))
+            self._conn.commit()
+        return True
 
     def stats(self) -> dict:
         with self._lock:
@@ -330,6 +484,10 @@ class TaskFlowRuntime:
         if not flow:
             return
         if flow["status"] == TaskFlowStatus.CANCELLED.value:
+            return
+        if any(s["status"] == "outcome_unknown" or
+               (s.get("result") or {}).get("reason") == "approval_required"
+               for s in flow["steps"]):
             return
 
         now = time.time()
@@ -382,7 +540,42 @@ class TaskFlowRuntime:
                 )
                 conn.commit()
 
-            outcome = await self._execute_step(flow, step)
+            self._active_flow_id = flow_id
+            self._step_task = asyncio.create_task(self._execute_step(flow, step))
+            try:
+                outcome = await self._step_task
+            except asyncio.CancelledError:
+                latest = self.get_flow(flow_id)
+                finished = next((s for s in latest["steps"] if s["id"] == step_id), None) if latest else None
+                if not finished or finished["status"] != "completed":
+                    self._mark_unknown(flow, step, "Step cancelled; already-started effects may have an unknown outcome")
+                if self._stop_event.is_set():
+                    raise
+                return
+            except Exception as exc:
+                logger.error("Workflow step dispatch interrupted (%s); no automatic replay", type(exc).__name__)
+                latest = self.get_flow(flow_id)
+                finished = next((s for s in latest["steps"] if s["id"] == step_id), None) if latest else None
+                if not finished or finished["status"] != "completed":
+                    self._mark_unknown(flow, step, "Step interrupted by an execution error; reconcile before continuing")
+                return
+            finally:
+                self._step_task = None
+                self._active_flow_id = ""
+            if outcome.get("status") == "deferred":
+                return  # The persisted review/callback owns its state.
+            latest = self.get_flow(flow_id)
+            if latest and latest["status"] == TaskFlowStatus.CANCELLED.value:
+                if outcome.get("status") == "completed" and self._restart_safe(step):
+                    # Cancellation stops the flow, but cannot make an
+                    # already returned read result uncertain.
+                    with self._lock:
+                        self._conn.execute("UPDATE taskflow_steps SET status = 'completed', result_json = ?, error = NULL, finished_at = ? WHERE id = ?",
+                                           (json.dumps(outcome, default=str), time.time(), step_id))
+                        self._conn.commit()
+                else:
+                    self._mark_unknown(flow, step, "Flow cancelled during dispatch; result requires reconciliation")
+                return
             status = outcome.get("status", "failed")
             if status == "waiting":
                 wait_until = float(outcome.get("wait_until", time.time() + 1))
@@ -560,35 +753,58 @@ class TaskFlowRuntime:
                 return {"status": "failed", "error": "skill.invoke requires skill_id and endpoint"}
             if not self._skill_registry:
                 return {"status": "failed", "error": "No skill registry available"}
-            skill = self._skill_registry.get_skill(skill_id)
+            skill = self._skill_registry.skills.get(skill_id)
             if not skill:
                 return {"status": "failed", "error": f"Skill '{skill_id}' not found"}
             args = payload.get("args", {})
-            # Smart-loops S2 — TaskFlow's skill.invoke also bypasses the
-            # orchestrator safety resolver. Pre-flight on surface="taskflow"
-            # and fail the step (rather than silently running) on DENY.
-            try:
+            if not isinstance(args, dict):
+                return {"status": "failed", "error": "skill.invoke args must be an object", "dispatch_started": False}
+            runner = getattr(self._orchestrator, "tool_runner", None)
+            tool_name = f"{skill_id}__{endpoint}"
+            if runner is None:
+                # Explain an explicit deny for legacy headless callers, but
+                # never substitute direct skill execution for full authority.
                 from security.safety_resolver import resolve_policy, LEVEL_DENY
-                decision = resolve_policy(
-                    f"{skill_id}__{endpoint}",
-                    args,
-                    surface="taskflow",
-                    registry=self._skill_registry,
+                policy = resolve_policy(tool_name, args, surface="taskflow", registry=self._skill_registry)
+                error = (f"denied by safety policy: {policy.deny_reason}" if policy.level == LEVEL_DENY
+                         else "Full policy dispatcher unavailable; no skill executed")
+                return {"status": "failed", "error": error, "dispatch_started": False}
+            if self._supervisor is not None and self._supervisor.paused:
+                return {"status": "failed", "error": "Agent supervisor is paused", "dispatch_started": False}
+            session_id = flow.get("session_id") or f"taskflow-{flow['id']}"
+            call_id = f"taskflow:{flow['id']}:{step['id']}"
+            with bind_context(session_id=session_id, surface="taskflow", call_id=call_id):
+                refusal = runner.enforce_plan_mode(tool_name, session_id)
+                if refusal is None:
+                    refusal = runner.enforce_safety(tool_name, args, session_id=session_id, surface="taskflow")
+                if refusal is not None:
+                    if refusal.get("status") != "pending_approval":
+                        return {"status": "failed", "error": str(refusal.get("note") or refusal.get("reason") or refusal.get("error") or "Policy refused workflow action"),
+                                "result": refusal, "dispatch_started": False}
+                    binding = {"flow_id": flow["id"], "step_id": step["id"]}
+                    if refusal.get("taskflow") not in (None, binding):
+                        return {"status": "failed", "error": "Approval is owned by another workflow step", "dispatch_started": False}
+                    refusal["taskflow"] = binding
+                    approval = json.loads(json.dumps({key: refusal[key] for key in
+                                                      ("request_id", "session_id", "tool_name", "args")}))
+                    review = {"status": "waiting", "reason": "approval_required", "approval": approval}
+                    with self._lock:
+                        self._conn.execute("UPDATE taskflow_steps SET status = 'waiting', result_json = ?, finished_at = NULL WHERE id = ?", (json.dumps(review), step["id"]))
+                        self._conn.execute("UPDATE taskflows SET status = 'waiting', wait_until = NULL, updated_at = ? WHERE id = ? AND status != 'cancelled'", (time.time(), flow["id"]))
+                        self._conn.commit()
+                    # Persist identity/action binding before publishing the
+                    # existing review, including an immediate user response.
+                    await runner._notify_user_of_pending_approval(session_id, tool_name, refusal)
+                    return {"status": "deferred"}
+                result = await runner.execute_tool_call_for_llm(
+                    session_id, {"id": call_id, "name": tool_name, "args": args}, [], surface="taskflow"
                 )
-            except Exception:
-                decision = None
-            if decision is not None and decision.level == LEVEL_DENY:
-                return {
-                    "status": "failed",
-                    "error": f"denied by safety policy: {decision.deny_reason}",
-                    "policy": decision.to_dict(),
-                }
-            result = await skill.execute(endpoint, args, {})
             ok = result.get("success", False)
             return {
                 "status": "completed" if ok else "failed",
                 "result": result,
                 "error": result.get("error") if not ok else None,
+                "dispatch_started": True,
             }
 
         if step_type == "llm.chat":

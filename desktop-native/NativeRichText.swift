@@ -1,6 +1,100 @@
 import SwiftUI
 import AppKit
 
+/// AppKit owns selection and accessibility for read-only text. SwiftUI selectable
+/// Text can recursively resolve its AX label on macOS 27 (see acceptance evidence).
+struct NativeSelectableText: View {
+    let text: String
+    var font: NSFont = .systemFont(ofSize: NSFont.systemFontSize)
+    var color: NSColor = .labelColor
+    var attributed: NSAttributedString? = nil
+    var wraps = true
+
+    var body: some View {
+        NativeSelectableTextField(text: text, font: font, color: color, attributed: attributed, wraps: wraps)
+            .contextMenu {
+                Button("Copy text") {
+                    NSPasteboard.general.clearContents()
+                    NSPasteboard.general.setString(text, forType: .string)
+                }
+            }
+    }
+}
+
+struct NativeSelectableTextField: NSViewRepresentable {
+    let text: String
+    let font: NSFont
+    let color: NSColor
+    let attributed: NSAttributedString?
+    let wraps: Bool
+
+    func makeNSView(context: Context) -> NSTextField {
+        Self.makeField(text: text)
+    }
+
+    static func makeField(text: String) -> NSTextField {
+        let field = NSTextField(wrappingLabelWithString: text)
+        field.isSelectable = true
+        field.isEditable = false
+        field.allowsEditingTextAttributes = true
+        field.isBordered = false
+        field.drawsBackground = false
+        field.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        return field
+    }
+
+    func updateNSView(_ field: NSTextField, context: Context) {
+        configure(field)
+    }
+
+    func configure(_ field: NSTextField) {
+        field.font = font
+        field.textColor = color
+        field.maximumNumberOfLines = 0
+        field.lineBreakMode = wraps ? .byWordWrapping : .byClipping
+        field.cell?.wraps = wraps
+        field.cell?.isScrollable = false
+        if let attributed {
+            let styled = NSMutableAttributedString(attributedString: attributed)
+            let full = NSRange(location: 0, length: styled.length)
+            styled.addAttribute(.foregroundColor, value: color, range: full)
+            styled.enumerateAttribute(.font, in: full) { existing, range, _ in
+                if existing == nil { styled.addAttribute(.font, value: font, range: range) }
+            }
+            field.attributedStringValue = styled
+        } else { field.stringValue = text }
+        field.setAccessibilityLabel(field.stringValue)
+        field.invalidateIntrinsicContentSize()
+    }
+
+    func sizeThatFits(_ proposal: ProposedViewSize, nsView field: NSTextField, context: Context) -> CGSize? {
+        fittingSize(width: proposal.width, field: field)
+    }
+
+    func fittingSize(width proposedWidth: CGFloat?, field: NSTextField) -> CGSize {
+        let width = max(1, wraps ? (proposedWidth ?? 600) : max(proposedWidth ?? 0, field.cell?.cellSize.width ?? 1))
+        field.preferredMaxLayoutWidth = wraps ? width : 0
+        let size = field.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)) ?? .zero
+        return CGSize(width: width, height: max(1, ceil(size.height)))
+    }
+}
+
+func nativeMarkdownAttributedText(_ text: String, font: NSFont = .systemFont(ofSize: NSFont.systemFontSize)) -> NSAttributedString {
+    guard let parsed = try? AttributedString(markdown: text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace)) else { return NSAttributedString(string: text, attributes: [.font: font]) }
+    let result = NSMutableAttributedString()
+    for run in parsed.runs {
+        var styledFont = font
+        let intent = run.inlinePresentationIntent ?? []
+        if intent.contains(.code) { styledFont = .monospacedSystemFont(ofSize: font.pointSize, weight: .regular) }
+        if intent.contains(.stronglyEmphasized) { styledFont = NSFontManager.shared.convert(styledFont, toHaveTrait: .boldFontMask) }
+        if intent.contains(.emphasized) { styledFont = NSFontManager.shared.convert(styledFont, toHaveTrait: .italicFontMask) }
+        var attributes: [NSAttributedString.Key: Any] = [.font: styledFont]
+        if let link = run.link { attributes[.link] = link }
+        result.append(NSAttributedString(string: String(parsed[run.range].characters), attributes: attributes))
+    }
+    return result
+}
+
 struct NativeRichText: View {
     let text: String
     private struct Block {
@@ -33,11 +127,11 @@ struct NativeRichText: View {
                             Spacer()
                             Button("Copy code") { NSPasteboard.general.clearContents(); NSPasteboard.general.setString(block.text, forType: .string) }.font(.caption)
                         }
-                        ScrollView(.horizontal) { Text(block.text).font(.system(.body, design: .monospaced)).textSelection(.enabled) }
+                        ScrollView(.horizontal) { NativeSelectableText(text: block.text, font: .monospacedSystemFont(ofSize: NSFont.systemFontSize, weight: .regular), wraps: false) }
                     }.padding(14).background(Color.secondary.opacity(0.07)).clipShape(RoundedRectangle(cornerRadius: 10))
                 } else {
-                    Text((try? AttributedString(markdown: block.text, options: .init(interpretedSyntax: .inlineOnlyPreservingWhitespace))) ?? AttributedString(block.text))
-                        .font(.body).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                    NativeSelectableText(text: block.text, attributed: nativeMarkdownAttributedText(block.text))
+                        .frame(maxWidth: .infinity, alignment: .leading)
                 }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)

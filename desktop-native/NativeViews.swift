@@ -490,7 +490,7 @@ private struct NativeChatView: View {
                 Button("Conversation tools…") { chatToolsPresented = true }.disabled(!model.ready).padding(.trailing, 28)
             }
             DisclosureGroup("Conversation connection") {
-                Text(model.recoveryStatus).font(.caption).foregroundStyle(.secondary).textSelection(.enabled).frame(maxWidth: .infinity, alignment: .leading)
+                NativeSelectableText(text: model.recoveryStatus, font: .systemFont(ofSize: NSFont.smallSystemFontSize), color: .secondaryLabelColor).frame(maxWidth: .infinity, alignment: .leading)
             }.font(.caption).padding(.horizontal, 28).padding(.bottom, 10)
             if let error = model.chatError, !error.isEmpty { NativeErrorBanner(text: error) }
             if let error = model.attachmentError, !error.isEmpty { NativeErrorBanner(text: error) }
@@ -525,13 +525,14 @@ private struct NativeChatView: View {
                                         if message.text.isEmpty && !message.metadata.isEmpty { Text("Structured message").foregroundStyle(.secondary) }
                                         if message.metadata["attachments"] != nil || !(message.metadata["content"] == nil || message.metadata["content"] is String) || (message.role != "user" && message.role != "assistant") {
                                             DisclosureGroup("Message details") {
-                                                Text(NativeMemoryWire.json(message.metadata)).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                                                NativeSelectableText(text: NativeMemoryWire.json(message.metadata), font: .monospacedSystemFont(ofSize: NSFont.smallSystemFontSize, weight: .regular))
                                             }
                                         }
                                         if let failure = message.metadata["deliveryError"] as? String, !failure.isEmpty {
-                                            Label(message.role == "assistant" ? "Incomplete response: " + failure : failure, systemImage: "exclamationmark.circle")
-                                                .font(.callout).foregroundStyle(Color.red).textSelection(.enabled)
-                                                .accessibilityLabel("Message delivery failed: \(failure)")
+                                            HStack(alignment: .top) {
+                                                Image(systemName: "exclamationmark.circle").foregroundStyle(Color.red)
+                                                NativeSelectableText(text: message.role == "assistant" ? "Incomplete response: " + failure : failure, color: .systemRed)
+                                            }.accessibilityLabel("Message delivery failed: \(failure)")
                                         }
                                     }
                                 }.id(message.id)

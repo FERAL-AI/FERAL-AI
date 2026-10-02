@@ -1,5 +1,6 @@
 import Foundation
 import SwiftUI
+import AppKit
 import CoreFoundation
 
 private func richJSON(_ value:Any)->String { if let text = value as? String { return text }; guard JSONSerialization.isValidJSONObject(value),let data = try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.prettyPrinted]) else { return String(describing:value) }; return String(decoding:data,as:UTF8.self) }
@@ -148,16 +149,16 @@ struct NativeRichMessageView:View {
  init(text:String,role:String,metadata:[String:Any]=[:]) {self.text=text;self.role=role;self.metadata=metadata}
  var body:some View {
   VStack(alignment:.leading,spacing:10) {
-   if let reasoning=metadata["reasoning"] as? String,!reasoning.isEmpty {DisclosureGroup("Model reasoning") {Text(reasoning).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)}}
+   if let reasoning=metadata["reasoning"] as? String,!reasoning.isEmpty {DisclosureGroup("Model reasoning") {NativeSelectableText(text:reasoning,color:.secondaryLabelColor)}}
    if let tools=metadata["tools"] as? [[String:Any]] {ForEach(Array(tools.enumerated()),id:\.offset){_,tool in NativeRichEventCard(title:tool["label"] as? String ?? tool["tool"] as? String ?? "Tool",subtitle:tool["status"] as? String ?? "Recorded outcome",text:(tool["result_preview"] as? String ?? "")+"\n"+richCorrelation(tool["correlation"] as? String ?? ""),raw:tool)}}
-   if role=="assistant" {NativeRichText(text:text)} else if !text.isEmpty {Text(text).textSelection(.enabled)}
+   if role=="assistant" {NativeRichText(text:text)} else if !text.isEmpty {NativeSelectableText(text:text)}
    if metadata["model"] != nil || metadata["usage"] != nil || metadata["sdui"] != nil || metadata["content"] is [Any] {
     DisclosureGroup("Response details") {
      VStack(alignment:.leading,spacing:8) {
       if let model=metadata["model"] as? String,!model.isEmpty {Text("Model: "+model)}
-      if let usage=metadata["usage"] as? [String:Any],!usage.isEmpty {Text("Reported usage").fontWeight(.medium);Text(richJSON(usage)).font(.system(.caption,design:.monospaced))}
-      if metadata["sdui"] != nil || metadata["content"] is [Any] {Text("Structured content · inspection only").fontWeight(.medium);Text(richJSON(metadata)).font(.system(.caption,design:.monospaced))}
-     }.textSelection(.enabled)
+      if let usage=metadata["usage"] as? [String:Any],!usage.isEmpty {Text("Reported usage").fontWeight(.medium);NativeSelectableText(text:richJSON(usage),font:.monospacedSystemFont(ofSize:NSFont.smallSystemFontSize,weight:.regular),color:.secondaryLabelColor)}
+      if metadata["sdui"] != nil || metadata["content"] is [Any] {Text("Structured content · inspection only").fontWeight(.medium);NativeSelectableText(text:richJSON(metadata),font:.monospacedSystemFont(ofSize:NSFont.smallSystemFontSize,weight:.regular),color:.secondaryLabelColor)}
+     }
     }.font(.caption).foregroundStyle(.secondary)
    }
   }.frame(maxWidth:.infinity,alignment:.leading)
@@ -166,7 +167,7 @@ struct NativeRichMessageView:View {
 struct NativeRichEventCard:View {
  let title:String,subtitle:String,text:String
  let raw:[String:Any]
- var body:some View {VStack(alignment:.leading,spacing:8){Text(title).font(.headline);if !subtitle.isEmpty{Text(subtitle).font(.caption).foregroundStyle(.secondary)};if !text.isEmpty{Text(text).textSelection(.enabled)};DisclosureGroup("Inspect exact metadata"){Text(richJSON(raw)).font(.system(.caption,design:.monospaced)).textSelection(.enabled)}}.padding(14).frame(maxWidth:.infinity,alignment:.leading).background(RoundedRectangle(cornerRadius:10).fill(Color.secondary.opacity(0.06)))}
+ var body:some View {VStack(alignment:.leading,spacing:8){Text(title).font(.headline);if !subtitle.isEmpty{Text(subtitle).font(.caption).foregroundStyle(.secondary)};if !text.isEmpty{NativeSelectableText(text:text)};DisclosureGroup("Inspect exact metadata"){NativeSelectableText(text:richJSON(raw),font:.monospacedSystemFont(ofSize:NSFont.smallSystemFontSize,weight:.regular))}}.padding(14).frame(maxWidth:.infinity,alignment:.leading).background(RoundedRectangle(cornerRadius:10).fill(Color.secondary.opacity(0.06)))}
 }
 struct NativeRichChatEventsView:View {
  @ObservedObject var model:NativeRichChatModel
@@ -175,10 +176,10 @@ struct NativeRichChatEventsView:View {
  init(model:NativeRichChatModel,onPermissionResponse:((NativeRichPermissionResponse) async throws -> Void)?=nil){self.model=model;self.onPermissionResponse=onPermissionResponse}
  var body:some View {
   VStack(alignment:.leading,spacing:12){
-   if let error=model.error{Text(error).foregroundStyle(.red).textSelection(.enabled)}
-   if !model.reasoning.isEmpty{DisclosureGroup("Model reasoning (live)"){Text(model.reasoning).font(.callout).textSelection(.enabled)}}
+   if let error=model.error{NativeSelectableText(text:error,color:.systemRed)}
+   if !model.reasoning.isEmpty{DisclosureGroup("Model reasoning (live)"){NativeSelectableText(text:model.reasoning)}}
    ForEach(model.tools){tool in NativeRichEventCard(title:tool.label,subtitle:tool.status.replacingOccurrences(of:"_",with:" ")+" · backend-reported status, not independent verification",text:(tool.error.isEmpty ? "" : tool.error+"\n")+(tool.result.isEmpty ? "No result preview offered." : tool.result)+(tool.truncated ? "\nResult preview is truncated." : "")+"\n"+richCorrelation(tool.correlation),raw:["arguments":tool.arguments,"error":tool.error,"error_code":tool.errorCode,"preview_truncated":tool.truncated,"correlation":tool.correlation,"frames":tool.raw])}
-   ForEach(model.permissions){p in VStack(alignment:.leading,spacing:8){Text("Folder access request").font(.headline);Text("Requested folder: "+p.path).textSelection(.enabled);Text("Canonical folder: "+(p.canonicalPath ?? "Unresolved — inspection only")).textSelection(.enabled);Text("Operation: "+p.operation+" · "+p.state).font(.caption);Text(p.reason).textSelection(.enabled);Text(p.scope).font(.callout);if p.supported,!p.expired,p.state=="pending",onPermissionResponse != nil{HStack{Button("Review persistent grant…"){prepare(p.id,allow:true)};Button("Review deny…"){prepare(p.id,allow:false)}}}else{Text("No live approval controls. Sent responses remain unconfirmed until the backend reports the actual policy state.").font(.caption).foregroundStyle(.secondary)};DisclosureGroup("Exact request"){Text(richJSON(p.raw)).font(.system(.caption,design:.monospaced)).textSelection(.enabled)}}.padding(14).background(RoundedRectangle(cornerRadius:10).fill(Color.orange.opacity(0.06)))}
+   ForEach(model.permissions){p in VStack(alignment:.leading,spacing:8){Text("Folder access request").font(.headline);NativeSelectableText(text:"Requested folder: "+p.path);NativeSelectableText(text:"Canonical folder: "+(p.canonicalPath ?? "Unresolved — inspection only"));Text("Operation: "+p.operation+" · "+p.state).font(.caption);NativeSelectableText(text:p.reason);Text(p.scope).font(.callout);if p.supported,!p.expired,p.state=="pending",onPermissionResponse != nil{HStack{Button("Review persistent grant…"){prepare(p.id,allow:true)};Button("Review deny…"){prepare(p.id,allow:false)}}}else{Text("No live approval controls. Sent responses remain unconfirmed until the backend reports the actual policy state.").font(.caption).foregroundStyle(.secondary)};DisclosureGroup("Exact request"){NativeSelectableText(text:richJSON(p.raw),font:.monospacedSystemFont(ofSize:NSFont.smallSystemFontSize,weight:.regular))}}.padding(14).background(RoundedRectangle(cornerRadius:10).fill(Color.orange.opacity(0.06)))}
    ForEach(model.budgets.keys.sorted(),id:\.self){site in let b=model.budgets[site] ?? [:];NativeRichEventCard(title:"Budget limit hit",subtitle:site,text:"Current $\(richJSON(b["current_dollars"] ?? "unknown")) / cap $\(richJSON(b["cap_dollars"] ?? "unknown")); reset at \(richResetDate(b["reset_at"])). A reset is not a billing repair or permission to retry automatically.",raw:b)}
    if let plan=model.plan{NativeRichEventCard(title:richBool(plan["plan_mode"])==true ? "Plan mode on" : "Plan mode off",subtitle:"Plan approval never grants tool permissions",text:plan["reason"] as? String ?? "",raw:plan)}
    ForEach(model.visibleEvents){event in NativeRichEventCard(title:event.title,subtitle:event.kind,text:event.text,raw:event.raw)}
@@ -190,7 +191,7 @@ struct NativeRichChatEventsView:View {
     }.font(.caption).foregroundStyle(.secondary).accessibilityIdentifier("native-chat-diagnostics")
    }
   }.frame(maxWidth:.infinity,alignment:.leading)
-  .sheet(item:Binding(get:{review.map(RichPermissionSheet.init)},set:{if $0==nil{review=nil}})){item in VStack(alignment:.leading,spacing:16){Text(item.review.allow ? "Grant persistent folder access?" : "Deny this request?").font(.title2);Text("Requested folder: "+item.review.permission.path).textSelection(.enabled);Text("Canonical folder reviewed: "+(item.review.permission.canonicalPath ?? "Unresolved")).textSelection(.enabled);Text(item.review.permission.scope);Text("The canonical path is rechecked before sending. The backend has no atomic path-revision guard; an unexpected receipt requires inspecting Security before retrying.").font(.caption);Text("Request: \(item.review.permission.id) · Session: \(item.review.permission.session)").font(.caption).textSelection(.enabled);HStack{Button("Cancel"){review=nil};Spacer();Button(item.review.allow ? "Send persistent grant response" : "Send denial"){review=nil;Task{if let callback=onPermissionResponse{await model.respond(item.review,send:callback)}}}.disabled(!model.canRespond(item.review))}}.padding(24).frame(width:600,height:450)}
+  .sheet(item:Binding(get:{review.map(RichPermissionSheet.init)},set:{if $0==nil{review=nil}})){item in VStack(alignment:.leading,spacing:16){Text(item.review.allow ? "Grant persistent folder access?" : "Deny this request?").font(.title2);NativeSelectableText(text:"Requested folder: "+item.review.permission.path);NativeSelectableText(text:"Canonical folder reviewed: "+(item.review.permission.canonicalPath ?? "Unresolved"));Text(item.review.permission.scope);Text("The canonical path is rechecked before sending. The backend has no atomic path-revision guard; an unexpected receipt requires inspecting Security before retrying.").font(.caption);NativeSelectableText(text:"Request: \(item.review.permission.id) · Session: \(item.review.permission.session)",font:.systemFont(ofSize:NSFont.smallSystemFontSize));HStack{Button("Cancel"){review=nil};Spacer();Button(item.review.allow ? "Send persistent grant response" : "Send denial"){review=nil;Task{if let callback=onPermissionResponse{await model.respond(item.review,send:callback)}}}.disabled(!model.canRespond(item.review))}}.padding(24).frame(width:600,height:450)}
  }
  private func prepare(_ id:String,allow:Bool){do{review=try model.reviewPermission(id,allow:allow)}catch{model.report(error.localizedDescription)}}
 }
