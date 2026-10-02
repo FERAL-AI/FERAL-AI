@@ -18,7 +18,7 @@ Separate source inspection, isolated fixtures, actual app interaction, actual ex
 |---|---|---|
 | Actual 9.26 avatar-onboarding launch, normal quit and relaunch; strict ad-hoc build and bounded audit passed, 39 desktop fixture assertions | Bounded real startup and safe unavailable-suite behavior | Full screens, existing-profile migration, backend task outcomes |
 | Actual 9.23/9.24 crash reports and compiled instruction inspection: nil application-domain UserDefaults suite force-unwrapped in NativeModel.init | Confirmed native startup failure before backend work; 9.26 removes both traps without resetting settings | Both startup traps corrected; supported populated-profile acceptance remains |
-| Full isolated October 1 backend run: 12,150 passed, 9 failed, 50 skipped | Broad executed regression coverage; failures retained for investigation | Corrected complete rerun and remote CI; no universal pass claim |
+| Full isolated October 1 backend run: 12,150 passed, 9 failed, 50 skipped | Broad executed regression coverage; failures retained for investigation | Second run: 12,146 passed, 1 failed, 49 skipped, 14 setup errors. Final sensor/route test corrections passed 59 / 1 skipped in preceding-WebSocket order; complete post-correction suite remains unrun |
 | Actual 9.23 build, strict ad-hoc signature verification; bounded audit of 13,036 files, 265 Mach-O objects, 9 internal links; bundled SQLite FTS5 verified | Inspected local artifact assembled and passed these checks | Developer ID, notarization, clean Gatekeeper install, updater, Intel Mac, Linux, iOS |
 | Actual 9.23 isolated profile retained avatar/name/conversation; local `31 + 11` delivered `42`, 6,579 prompt tokens, `task_truncated=0`, no input-truncation warning | One delivered local reply and bounded persistence | General model quality, arbitrary context lengths, fallback, real-user retention |
 | Actual 9.23 hardware-review accessibility exposed labels/buttons and expanded original details; Cancel caused no hardware POST | Bounded review accessibility and cancellation | All screens, complete VoiceOver journeys, physical hardware |
@@ -138,11 +138,11 @@ No full release claim until all enabled gates pass. A smaller release requires e
   `native-checks.yml` automatically runs native features/linked models, real child
   lifeline tests and bundle-audit tests on relevant PRs and main pushes. Remote
   execution exposed an oversized Workflow view expression on the CI compiler;
-  decomposition passed a focused local compile and is awaiting remote rerun.
+  decomposition passed both the focused local compile and remote native checks.
   Global backend Ruff failures have been corrected and the exact command passes
-  locally; backend CI was skipped behind that initial failed lint gate. Web unit
+  locally and remotely; backend CI was skipped behind the initial failed lint gate and the rerun is in progress. Web unit
   coverage, SDKs, asset coherence, docs, naming and version checks passed remotely.
-  Browser end-to-end failures remain under investigation. Required branch-protection status remains to be verified. This is
+  Updated browser end-to-end checks passed locally (31 tests) and remotely. Required branch-protection status remains to be verified. This is
   not yet exact-source packaged-app, physical-device or signing acceptance.
 - `.github/workflows/desktop.yml` is manual experimental debug Tauri CI, not native Mac acceptance or a Linux product release.
 - `publish.yml`, `install-smoke.yml` and wheel tooling cover Python distribution. `scripts/release.py` can commit/push/open a PR; it was not executed here. Skip flags cannot satisfy release evidence.
