@@ -58,68 +58,26 @@ test('every dock tile paints a visible icon inside itself', async ({ page }) => 
   expect(bad, `dock tiles with an unusable icon:\n${bad.join('\n')}`).toEqual([]);
 });
 
-test('the hover label stays a floating tooltip, not a flex sibling', async ({ page }) => {
+test('persistent labels sit below visible icons inside their tiles', async ({ page }) => {
   await page.goto('/console');
-  const info = await page.evaluate(() => {
-    const label = document.querySelector('.v2-dock-label') as HTMLElement;
-    const tile = label.closest('.v2-dock-btn') as HTMLElement;
-    const l = label.getBoundingClientRect();
-    const t = tile.getBoundingClientRect();
-    return {
-      position: getComputedStyle(label).position,
-      // A tooltip sits ABOVE its tile; a flex sibling sits inside it.
-      aboveTile: l.bottom <= t.top + 1,
-    };
-  });
-  expect(info.position).toBe('absolute');
-  expect(info.aboveTile).toBe(true);
+  await expect(page.locator('.v2-dock-label')).toHaveCount(7);
+  const bad = await page.locator('.v2-dock-btn').evaluateAll((tiles) => tiles.flatMap((tile) => {
+    const label = tile.querySelector('.v2-dock-label') as HTMLElement;
+    const icon = tile.querySelector('svg')!;
+    const l = label.getBoundingClientRect(), i = icon.getBoundingClientRect(), t = tile.getBoundingClientRect();
+    return getComputedStyle(label).opacity !== '1' || l.width < 8 || l.height < 8
+      || l.top < i.bottom || l.bottom > t.bottom + 1 || l.left < t.left - 1 || l.right > t.right + 1
+      || !label.textContent?.trim() ? [label.textContent || 'unnamed'] : [];
+  }));
+  expect(bad, 'labels must remain readable without hovering or shrinking the icon').toEqual([]);
 });
 
-test('hovering a tile names it', async ({ page }) => {
-  // The tooltip is the only thing that tells you what an icon-only dock
-  // tile is. It lives OUTSIDE the tile box (bottom: calc(100% + 8px)),
-  // so an overflow: hidden on the tile clips it and hovering tells you
-  // nothing. That shipped.
+test('keyboard focus reaches a named dock destination', async ({ page }) => {
   await page.goto('/console');
-  const tile = page.locator('.v2-dock-btn').nth(2);
-  const label = tile.locator('.v2-dock-label');
-
-  await expect(label).toHaveCSS('opacity', '0');
-  await tile.hover();
-  await expect(label).toHaveCSS('opacity', '1');
-  await expect(label).toBeVisible();
-  await expect(label).not.toHaveText('');
-
-  // Painted, not merely opaque behind a clip. An elementFromPoint hit
-  // test is the wrong instrument here: a tooltip sets
-  // pointer-events: none, so the point resolves to whatever is behind
-  // it and the check fails on a perfectly visible label. What actually
-  // matters is that it has real size, sits on screen, and that no
-  // ancestor clips it away.
-  const seen = await page.evaluate(() => {
-    const l = document.querySelectorAll('.v2-dock-btn')[2].querySelector('.v2-dock-label') as HTMLElement;
-    const b = l.getBoundingClientRect();
-    let clippedBy = '';
-    for (let n = l.parentElement; n; n = n.parentElement) {
-      const o = getComputedStyle(n).overflow;
-      if (o === 'hidden' || o === 'clip') {
-        const nb = n.getBoundingClientRect();
-        if (b.top < nb.top || b.bottom > nb.bottom || b.left < nb.left || b.right > nb.right) {
-          clippedBy = n.className || n.tagName;
-          break;
-        }
-      }
-    }
-    return {
-      w: b.width, h: b.height,
-      onScreen: b.top >= 0 && b.left >= 0 && b.bottom <= innerHeight && b.right <= innerWidth,
-      clippedBy,
-    };
-  });
-  expect(seen.w).toBeGreaterThan(20);
-  expect(seen.h).toBeGreaterThan(8);
-  expect(seen.onScreen).toBe(true);
-  expect(seen.clippedBy, `the hover label is clipped by .${seen.clippedBy}`).toBe('');
+  const memory = page.locator('.v2-dock-btn[href="/memory"]');
+  await expect(memory.locator('.v2-dock-label')).toHaveText('Memory');
+  await memory.focus(); await expect(memory).toBeFocused();
+  await memory.press('Enter'); await expect(page).toHaveURL(/\/memory$/);
 });
 
 test('the busy ring is not clipped away', async ({ page }) => {
