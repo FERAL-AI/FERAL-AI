@@ -1,6 +1,6 @@
 # Theora / FERAL full-product release readiness
 
-Updated October 1, 2026. This is an implementation and acceptance roadmap, not a declaration of readiness. Read it alongside the [architecture contracts](ARCHITECTURE_AND_CONTRACTS.md), [original execution plan](EXECUTION_AND_RELEASE_GATES.md), [iOS handoff](IOS_AGENT_HANDOFF.md) and [native feature inventory](../../../desktop-native/FEATURE_PARITY.md).
+Updated October 2, 2026. This is an implementation and acceptance roadmap, not a declaration of readiness. Start with the [source-backed execution plan](EXECUTION_PLAN.md), then the [architecture contracts](ARCHITECTURE_AND_CONTRACTS.md), [original execution plan](EXECUTION_AND_RELEASE_GATES.md), [iOS handoff](IOS_AGENT_HANDOFF.md) and [native feature inventory](../../../desktop-native/FEATURE_PARITY.md).
 
 ## Current boundary
 
@@ -10,15 +10,18 @@ A full product lets a person set up their chosen agent, understand its model/dat
 
 Desktop/core implementation is ongoing; the Theora iOS agent owns iOS implementation and device acceptance. Work packages below are proposed tickets, not externally created issues. Hosting, launch markets, hardware, health claims, pricing and merchant choices remain unresolved. This document does not authorize recording, sharing, model downloads, external messages or purchases.
 
+The native app already implements 21 destinations and many existing actions, including searchable navigation, status menu, login-registration adapter and bounded app confirmation/patch handling. Preserve the working single-user system; finish parity and distribution rather than rebuilding it. New multi-account/social/commerce requirements have separate dependency gates. The concrete source-backed cards and worker waves in [EXECUTION_PLAN.md](EXECUTION_PLAN.md) govern current execution where older broad work-package dependencies would unnecessarily delay local-app completion.
+
 ## Evidence ledger
 
 Separate source inspection, isolated fixtures, actual app interaction, actual external outcome and signed-platform acceptance. Passing one class does not establish the next. Counts below have different units and overlap historical runs; do not add them.
 
 | Evidence | Established boundary | Still unverified |
 |---|---|---|
+| Remote source `7397eb627`: backend PR fast lane 12,127 passed / 83 skipped, coverage passed; native check success | Exact-source Ubuntu/Python 3.11 PR regression lane and Mac typecheck/fixtures/lifeline/auditor | Full performance/matrix scope, cleanup/type hygiene, actual app/accounts/hardware/signing; overall CI has one web timing failure corrected locally, remote rerun required |
 | Actual 9.26 avatar-onboarding launch, normal quit and relaunch; strict ad-hoc build and bounded audit passed, 39 desktop fixture assertions | Bounded real startup and safe unavailable-suite behavior | Full screens, existing-profile migration, backend task outcomes |
 | Actual 9.23/9.24 crash reports and compiled instruction inspection: nil application-domain UserDefaults suite force-unwrapped in NativeModel.init | Confirmed native startup failure before backend work; 9.26 removes both traps without resetting settings | Both startup traps corrected; supported populated-profile acceptance remains |
-| Full isolated October 1 backend run: 12,150 passed, 9 failed, 50 skipped | Broad executed regression coverage; failures retained for investigation | Second run: 12,146 passed, 1 failed, 49 skipped, 14 setup errors. Final sensor/route test corrections passed 59 / 1 skipped in preceding-WebSocket order; complete post-correction suite remains unrun |
+| Historical full isolated October 1 backend run: 12,150 passed, 9 failed, 50 skipped | Broad executed regression coverage; failures retained | Second local run: 12,146 passed, 1 failed, 49 skipped, 14 setup errors; targeted corrections 59 / 1 skipped. Newer remote PR lane passed as above; scopes are different and full local post-correction/performance matrix remains unrun |
 | Actual 9.23 build, strict ad-hoc signature verification; bounded audit of 13,036 files, 265 Mach-O objects, 9 internal links; bundled SQLite FTS5 verified | Inspected local artifact assembled and passed these checks | Developer ID, notarization, clean Gatekeeper install, updater, Intel Mac, Linux, iOS |
 | Actual 9.23 isolated profile retained avatar/name/conversation; local `31 + 11` delivered `42`, 6,579 prompt tokens, `task_truncated=0`, no input-truncation warning | One delivered local reply and bounded persistence | General model quality, arbitrary context lengths, fallback, real-user retention |
 | Actual 9.23 hardware-review accessibility exposed labels/buttons and expanded original details; Cancel caused no hardware POST | Bounded review accessibility and cancellation | All screens, complete VoiceOver journeys, physical hardware |
@@ -111,7 +114,7 @@ OpenCode is reused execution infrastructure, not product authority. Reviews requ
 | REL-10 Distribution | Reproducible builds/provenance, signing, updates/rollback, supported Linux package | OS/license decisions | Candidate hashes; clean-machine install/update/rollback; negative CI proof |
 | REL-11 Product/operations | Cohort validation, privacy/deletion/support, costs/incidents | All enabled gates | Retained benefit/payment willingness, recovery drills and published boundaries |
 
-Critical path: supported owner/deployment/platform contract → executable build gates → identity/action/memory boundaries → unified iOS/glasses journeys → signed lifecycle/security → explicitly enabled integrations. Commerce/social contracts can progress in parallel but cannot bypass authority gates. Avatars/branding can proceed independently with asset rights, bounded import, accessibility and persistent choice; they cannot hide setup failures.
+Critical path for the existing local app: native per-action parity/acceptance → explicit data preservation/migration and fresh credentials → clean signed installation/update plus tested developer interfaces. Reuse existing identity/session/memory/workflow primitives. For new features: harden action/session recovery → durable message receipts and exact-device contracts → unified voice/glasses/channels → separately accepted commerce/social integrations. These tracks can progress in parallel; multi-account hosting and street matching are not prerequisites for packaging existing local functionality. See [the task-card plan](EXECUTION_PLAN.md).
 
 ## Acceptance matrix
 
@@ -140,9 +143,13 @@ No full release claim until all enabled gates pass. A smaller release requires e
   execution exposed an oversized Workflow view expression on the CI compiler;
   decomposition passed both the focused local compile and remote native checks.
   Global backend Ruff failures have been corrected and the exact command passes
-  locally and remotely; backend CI was skipped behind the initial failed lint gate and the rerun is in progress. Web unit
-  coverage, SDKs, asset coherence, docs, naming and version checks passed remotely.
-  Updated browser end-to-end checks passed locally (31 tests) and remotely. Required branch-protection status remains to be verified. This is
+  locally and remotely; newest source `7397eb627` backend PR coverage lane passed
+  12,127 tests with 83 skipped. SDKs, asset coherence, docs, naming and version
+  checks passed remotely. Latest web coverage failed one stale-reading timing
+  assertion; a test-only wait correction passed the full local coverage command,
+  and corrected-source remote acceptance remains pending. Updated browser
+  end-to-end checks passed locally (31 tests) and remotely. Non-blocking mypy
+  still fails. Required branch-protection status remains to be verified. This is
   not yet exact-source packaged-app, physical-device or signing acceptance.
 - `.github/workflows/desktop.yml` is manual experimental debug Tauri CI, not native Mac acceptance or a Linux product release.
 - `publish.yml`, `install-smoke.yml` and wheel tooling cover Python distribution. `scripts/release.py` can commit/push/open a PR; it was not executed here. Skip flags cannot satisfy release evidence.
@@ -169,4 +176,4 @@ Decisions: countries/health claims; Mac CPU/minimum OS; Linux strategy; iOS avai
 
 ## Definition of done
 
-Implementation, platform UX, adversarial fixtures, actual supported-system acceptance, reproducible evidence and operational support must agree. Reviews bind exact authority, outcomes name evidence, and recovery cannot invent success or replay irreversible effects. The 9.23 artifact is an accepted bounded engineering checkpoint; this roadmap defines the remaining work for a full supported product.
+Implementation, platform UX, adversarial fixtures, actual supported-system acceptance, reproducible evidence and operational support must agree. Reviews bind exact authority, outcomes name evidence, and recovery cannot invent success or replay irreversible effects. The 9.26 artifact has bounded startup acceptance; earlier 9.23 task evidence remains historical. This roadmap and the executable plan define remaining full-product work without discarding existing functionality.

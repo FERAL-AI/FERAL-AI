@@ -1,6 +1,6 @@
 # Theora personal agent: product and engineering plan
 
-**Current implementation checkpoint: October 2, 2026 / native macOS 2026.9.26.** Both preferences startup traps are corrected; actual avatar-onboarding launch, normal quit and relaunch passed. Earlier 9.23 bounded local chat, review accessibility/cancel and transient-probe recovery evidence remains separate. This is still a partial native app: signed distribution, real encrypted-profile/Keychain acceptance, physical glasses, comprehensive cross-owner continuity, live commerce, iOS and Linux remain open. Start with [request coverage](REQUEST_COVERAGE.md) for every user requirement, [release readiness](RELEASE_READINESS.md) for contracts and evidence gates, and the [native inventory](../../../desktop-native/FEATURE_PARITY.md) for omissions.
+**Current implementation checkpoint: October 2, 2026 / native macOS 2026.9.26.** Both preferences startup traps are corrected; actual avatar-onboarding launch, normal quit and relaunch passed. The native app exposes 21 destinations backed by the existing runtime, not a replacement brain. Earlier 9.23 bounded local chat, review accessibility/cancel and transient-probe recovery evidence remains separate. Signed distribution, fresh cloud-key setup, real encrypted-profile/Keychain acceptance, physical glasses, live commerce, iOS and Linux remain open. Start with the [executable completion plan](EXECUTION_PLAN.md), which separates existing-app parity from the new features, then [request coverage](REQUEST_COVERAGE.md), [release readiness](RELEASE_READINESS.md) and the [native inventory](../../../desktop-native/FEATURE_PARITY.md).
 
 Prepared September 30, 2026 from FERAL and Theora source inspection, focused verification, and primary-source research. This is a proposed product plan, not a claim that the described capabilities are shipping. No application implementation, publishing, payments, deployments or external messages were performed for this plan.
 
@@ -20,7 +20,9 @@ The candidate advantage is the complete loop from real-world context to grounded
 
 | Document | Purpose |
 |---|---|
-| [User request coverage](REQUEST_COVERAGE.md) | Full conversation checklist, current status, missing explicit research and next three implementation priorities |
+| [Executable app completion plan](EXECUTION_PLAN.md) | Source-backed task cards, existing-system reuse, dependencies, acceptance, developer platform, parallel worker waves and publication |
+| [Instinct-style integration research](INSTINCT_RESEARCH.md) | Five requested verdicts: iMessage, per-user Link wallet, browser executor, selected glasses capture and exact integration map; docs versus tests distinguished |
+| [User request coverage](REQUEST_COVERAGE.md) | Full conversation checklist, current status, completed research boundary and next three implementation priorities |
 | [Current release readiness](RELEASE_READINESS.md) | Full-product work packages, source gaps, actual evidence, task/memory/social/voice/payment/messaging contracts and CI/distribution gates |
 | [Product research](PRODUCT_RESEARCH.md) | Current competition, initial customer hypothesis, interviews, paid pilot and sensor-value experiments |
 | [Architecture and contracts](ARCHITECTURE_AND_CONTRACTS.md) | Agent ownership, deployment, durable memory, device sync, actions, voice, health and integrations |
@@ -42,7 +44,7 @@ Hardware must remain accurately described: current Theora health-temple glasses,
 
 ## Recommended sequence
 
-1. Establish clean builds, owner/account isolation and shared event/action contracts. Reproduce the source-level interoperability concerns before fixing them.
+1. Complete native parity and actual acceptance for the existing single-user local runtime, preserve data through migration, and close clean installation/developer extension gates. Do not rebuild existing sessions, memory or coding infrastructure. The detailed dependency order is in [the execution plan](EXECUTION_PLAN.md).
 2. Deliver one agent across phone and desktop: grounded conversation memory, glasses voice, durable offline capture, tasks and a reviewable action inbox.
 3. Run a narrow paid pilot around conversation commitments and follow-through. Evaluate whether glasses and health context add value beyond phone-only memory.
 4. Add shopping search and trustworthy phone checkout handoff. Build and test the transaction engine with a merchant simulator and approved provider sandboxes.
@@ -55,7 +57,7 @@ Avatar choice can ship during the consumer pilot with a small licensed catalog. 
 
 The planning default is an adult, US-first pilot among iPhone/Mac glasses wearers with frequent conversations and commitments. Linux support is an explicit engineering cohort, not assumed to have identical customer demand. An optional isolated hosted brain plus supported self-hosting is the recommended availability design; choosing the operator, business model and permitted data flows remains a product decision. Pending user answers may change these defaults.
 
-Other decisions: exact launch countries and intended health claims; supported OS/CPU/device matrix; whether Theora is the product name and FERAL the engine; the first integrations and merchant; hardware redistribution rights; retention defaults; price; account requirements; hosting budget. The user identified the Instinct reference as [instinct.com](https://instinct.com); its commercial capabilities and FERAL's eligibility for the requested Link for Agents flow still require the specific research in [request coverage](REQUEST_COVERAGE.md). The historical Dot product and the later requested ChatGPT dots are separate references; the former closure notice does not establish the latter feature status. Current ChatGPT dots and the exact Meta reference remain experience-research tasks.
+Other decisions: exact launch countries and intended health claims; supported OS/CPU/device matrix; whether Theora is the product name and FERAL the engine; the first integrations and merchant; hardware redistribution rights; retention defaults; price; account requirements; hosting budget. The user identified the Instinct reference as [instinct.com](https://instinct.com); the requested five-part local integration investigation is now in [the research report](INSTINCT_RESEARCH.md), with documentation eligibility distinct from live acceptance. The historical Dot product and the later requested ChatGPT dots are separate references; the former closure notice does not establish the latter feature status. Current ChatGPT dots and the exact Meta reference remain experience-research tasks.
 
 These are design questions, not permission to enable cloud processing, recording, research training or spending for a user. The actual product must collect those permissions at the relevant moment.
 
