@@ -5,6 +5,8 @@ from __future__ import annotations
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
+from agents.runtime_context_checkpoint import RuntimeContextError
+from memory.runtime_session_checkpoint import CheckpointValidationError, validate_session_id
 
 router = APIRouter(tags=["approvals"])
 
@@ -59,13 +61,24 @@ async def list_pending_approvals(session_id: str = "", limit: int = 100):
 async def _resolve_request(request_id: str, *, approved: bool, body: dict | None = None) -> dict:
     orch = _require_orchestrator()
     payload = body or {}
-    session_id = str(payload.get("session_id", "") or "").strip() or None
-    outcome = await orch.resolve_tool_approval_request(
-        request_id,
-        approved=approved,
-        session_id=session_id,
-        actor="api",
-    )
+    session_id = payload.get("session_id")
+    if session_id is not None:
+        try:
+            validate_session_id(session_id)
+        except CheckpointValidationError:
+            raise HTTPException(status_code=422, detail={"code": "context_invalid_session"}) from None
+    try:
+        outcome = await orch.resolve_tool_approval_request(
+            request_id, approved=approved, session_id=session_id, actor="api",
+        )
+    except RuntimeContextError as exc:
+        raise HTTPException(status_code=503 if exc.effects_may_have_occurred else 409, detail={
+            "code": exc.code, "request_id": request_id,
+            "processing_outcome": "outcome_unknown" if exc.effects_may_have_occurred else "unavailable",
+            "action_outcome": "unknown" if exc.effects_may_have_occurred else "not_asserted",
+            "effects_may_have_occurred": exc.effects_may_have_occurred, "retry_safe": False,
+            "message": "Inspect the exact approval and earlier actions before continuing.",
+        }) from None
     status = str(outcome.get("status", "") or "")
     if status == "not_found":
         raise HTTPException(status_code=404, detail="unknown approval request")

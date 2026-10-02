@@ -387,6 +387,7 @@ class BrainState:
         # brain chat"). The primary session also persists across
         # zero-count detaches (see `SessionSnapshotStore` below).
         self.session_attach_count: dict[str, int] = {}
+        self._runtime_context_primary_managed = False
         # Phase 3 — primary thread snapshot store. Persists the last
         # ~50 turns to disk so a brain restart rehydrates them
         # automatically. Loaded later in `init()` after `orchestrator`
@@ -1785,6 +1786,10 @@ class BrainState:
 
             attach_agent_dispatch_lease(self)
             self.orchestrator.set_llm(_shared_llm)
+            # Install before channels, gateway methods or legacy snapshots can
+            # hydrate/write a thread. Unknown legacy identities remain legacy;
+            # known ledger identities cannot bypass their checkpoint fence.
+            await self._checked_bootstrap_await(self.prepare_runtime_context_checkpoints())
             # Live-voice "different event loop" fix: pin the
             # orchestrator's owning loop to the brain's main loop the
             # moment the orchestrator is constructed inside ``BrainState.init``,
@@ -2212,6 +2217,7 @@ class BrainState:
                 daemons=self.daemons,
                 memory=self.memory,
                 send_to_session=self.send_to_session,
+                orchestrator=self.orchestrator,
             )
 
         with boot_subsystem(self._boot_report, "GenUIEngine"):
@@ -2700,6 +2706,29 @@ class BrainState:
             return False
         return self.session_attach_count.get(session_id, 0) == 0
 
+    async def prepare_runtime_context_checkpoints(self) -> None:
+        """Internal boot activation after all ingress and writers are fenced.
+
+        Known primary rows, including pending/refused ones, prohibit legacy
+        plaintext hydration/saves. Database failure cannot select legacy boot.
+        Existing legacy artifacts remain for an explicit migration/retirement.
+        """
+        if self.orchestrator is None or self.memory is None:
+            raise RuntimeError("Runtime context storage and orchestrator are required")
+        # A failed ledger lookup must never enable plaintext snapshot fallback,
+        # even if a caller catches the mandatory boot failure for diagnostics.
+        self._runtime_context_primary_managed = True
+        coordinator = self.orchestrator.install_runtime_context_checkpoints(
+            self.memory, legacy_passthrough=True,
+        )
+        self._runtime_context_primary_managed = await coordinator.is_managed(self.primary_session_id)
+
+    def _primary_context_uses_checkpoints(self) -> bool:
+        from api.runtime_context import coordinator_for
+        coordinator = coordinator_for(self)
+        return (getattr(self, "_runtime_context_primary_managed", False) is True
+                or coordinator is not None and coordinator.known_managed(self.primary_session_id))
+
     def snapshot_primary_thread(self, *, force: bool = False) -> bool:
         """Save the current primary `conversation_history` +
         `working_memory` to disk so the next boot rehydrates.
@@ -2709,6 +2738,8 @@ class BrainState:
         chat loop isn't IO-bound. ``force=True`` bypasses debounce —
         used on shutdown to guarantee the last turn lands.
         """
+        if self._primary_context_uses_checkpoints():
+            return False
         if self.session_snapshot is None or not self.primary_session_id:
             return False
         sid = self.primary_session_id
@@ -2738,13 +2769,15 @@ class BrainState:
         constructed. Never raises — if anything goes wrong the brain
         boots with an empty primary thread (today's behaviour).
         """
+        if self._primary_context_uses_checkpoints():
+            return
         if self.session_snapshot is None or self.orchestrator is None:
             return
         snapshot = self.session_snapshot.load()
         if not snapshot:
             return
         sid = snapshot.get("session_id") or self.primary_session_id
-        if not sid:
+        if not sid or sid != self.primary_session_id:
             return
         # Orchestrator conversation_history (LLM tool-call format).
         ch_rows = snapshot.get("conversation_history") or []

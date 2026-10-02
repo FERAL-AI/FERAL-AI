@@ -249,6 +249,9 @@ def test_boot_hydration_records_what_it_restored():
         primary_session_id="primary-test",
         restored_history_rows={},
     )
+    # Bind the real new guard rather than bypassing checkpoint ownership in
+    # this deliberately minimal legacy-hydration fixture.
+    fake._primary_context_uses_checkpoints = BrainState._primary_context_uses_checkpoints.__get__(fake)
     BrainState._hydrate_primary_thread_from_snapshot(fake)
     restored = fake.orchestrator.conversation_history["primary-test"]
     assert len(restored) == 2

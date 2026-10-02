@@ -6,6 +6,7 @@ Same pattern as OpenAI Realtime: audio in/out, function calling, transcriptions.
 """
 
 from __future__ import annotations
+from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
 import asyncio
 import json
 import logging
@@ -361,6 +362,21 @@ class GeminiRealtimeProxy:
         on_speech_started: Callable | None = None,
         on_error: Callable | None = None,
     ) -> GeminiRealtimeSession:
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            return await self._checkpoint_legacy_start_session(session_id=session_id, node_id=node_id, model=model, system_prompt=system_prompt, on_audio_delta=on_audio_delta, on_transcript=on_transcript, on_tool_call=on_tool_call, on_speech_started=on_speech_started, on_error=on_error)
+
+    async def _checkpoint_legacy_start_session(
+        self,
+        session_id: str,
+        node_id: str,
+        model: str = "",
+        system_prompt: str = "",
+        on_audio_delta: Callable | None = None,
+        on_transcript: Callable | None = None,
+        on_tool_call: Callable | None = None,
+        on_speech_started: Callable | None = None,
+        on_error: Callable | None = None,
+    ) -> GeminiRealtimeSession:
         _sys_prompt = system_prompt or await self._build_system_prompt(session_id)
         _model = model or os.getenv("FERAL_GEMINI_LIVE_MODEL", DEFAULT_MODEL)
         tools = self._get_tools()
@@ -554,6 +570,10 @@ class GeminiRealtimeProxy:
             await self._send_to_node(gs.node_id, {"type": "audio_response", "payload": payload})
 
     async def _handle_transcript(self, session_id: str, text: str, is_partial: bool):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            return await self._checkpoint_legacy_handle_transcript(session_id=session_id, text=text, is_partial=is_partial)
+
+    async def _checkpoint_legacy_handle_transcript(self, session_id: str, text: str, is_partial: bool):
         if not is_partial and text and self._memory:
             self._memory.working_push(session_id, {
                 "role": "assistant", "text": text[:300], "source": "gemini_realtime",
@@ -591,6 +611,10 @@ class GeminiRealtimeProxy:
                 )
 
     async def _handle_input_transcript(self, session_id: str, text: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            return await self._checkpoint_legacy_handle_input_transcript(session_id=session_id, text=text)
+
+    async def _checkpoint_legacy_handle_input_transcript(self, session_id: str, text: str):
         """Handle user-speech transcription returned by Gemini."""
         # Bug 3 (phantom commit gate): same blocklist the OpenAI
         # Realtime path applies — Gemini Live ALSO commits hallucinated
@@ -728,6 +752,13 @@ class GeminiRealtimeProxy:
             return None
 
     async def _handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
+        try:
+            async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+                return await self._checkpoint_legacy_handle_tool_call(session_id=session_id, call_id=call_id, name=name, arguments=arguments)
+        except RuntimeContextError as exc:
+            return json.dumps({"success": False, "error": "Managed realtime tools are unavailable", "code": exc.code})
+
+    async def _checkpoint_legacy_handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
         if not self._skill_executor or not self._skill_registry:
             return json.dumps({"error": "No skill executor"})
         try:

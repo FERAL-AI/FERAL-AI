@@ -41,7 +41,7 @@ from agents.tool_dispatch_validator import (
     make_tool_error_envelope,
 )
 from hardware.action_frames import build_action_request
-from skills.call_context import bind_context, new_turn_id
+from skills.call_context import bind_context, current_context, new_turn_id
 
 MAX_LLM_TOOLS = 64
 
@@ -66,6 +66,43 @@ class _ExactApproval:
 
 
 _exact_approval: ContextVar[Optional[_ExactApproval]] = ContextVar("feral_exact_tool_approval", default=None)
+
+
+class _ExecutorAdmission:
+    """Trusted one-entry handoff, bound to the dispatching asyncio task."""
+    def __init__(self, issuer, exact, session_id, tool_name, args):
+        self.issuer = issuer
+        self.exact = exact
+        self.session_id = session_id
+        self.tool_name = tool_name
+        self.args = copy.deepcopy(args)
+        self.surface = current_context().surface
+        self.owner_task = asyncio.current_task()
+        self.used = False
+
+    def matches(self, issuer, exact, session_id, tool_name, args):
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            return False
+        return (self.issuer is issuer and self.exact is exact and self.owner_task is not None
+                and self.owner_task is current_task and self.session_id == session_id
+                and self.tool_name == tool_name and self.args == args
+                and self.surface == current_context().surface
+                and exact is not None and exact.issuer is issuer and exact.used and exact.safety_used
+                and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args)
+
+
+_executor_admission: ContextVar[Optional[_ExecutorAdmission]] = ContextVar("feral_executor_admission", default=None)
+
+
+@contextmanager
+def _bind_executor_admission(admission):
+    token = _executor_admission.set(admission)
+    try:
+        yield
+    finally:
+        _executor_admission.reset(token)
 
 
 @contextmanager
@@ -481,7 +518,21 @@ class ToolRunner:
             if taskflows is None or not taskflows.approved_dispatch_allowed(exact.pending):
                 raise RuntimeError("Workflow approval dispatch is no longer active")
 
-    def enforce_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket") -> Optional[dict]:
+    def enforce_executor_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket") -> Optional[dict]:
+        """Recheck policy at executor entry using one trusted admission, if issued."""
+        surface = current_context().surface or surface
+        admission = _executor_admission.get()
+        exact = _exact_approval.get()
+        if admission is None:
+            return self.enforce_safety(tool_name, args, session_id, surface)
+        if (not isinstance(admission, _ExecutorAdmission) or admission.used
+                or not admission.matches(self, exact, session_id, tool_name, args)):
+            return make_tool_error_envelope(tool_call_id=current_context().call_id, error_code="invalid_approval", reason="Executor admission does not match this task and action")
+        admission.used = True
+        return self.enforce_safety(tool_name, args, session_id, surface, _admission=admission)
+
+    def enforce_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket",
+                       *, _admission=None) -> Optional[dict]:
         """
         Returns a denial dict if the action should be blocked, a pending-approval
         dict if the user must confirm, or None if the action is allowed.
@@ -559,7 +610,9 @@ class ToolRunner:
             return None
 
         exact = _exact_approval.get()
-        if (exact is not None and exact.issuer is self and exact.used and not exact.safety_used
+        admitted = (isinstance(_admission, _ExecutorAdmission) and _admission is _executor_admission.get()
+                    and _admission.used and _admission.matches(self, exact, session_id, tool_name, args))
+        if (exact is not None and exact.issuer is self and exact.used and (not exact.safety_used or admitted)
                 and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args):
             exact.safety_used = True
             return None
@@ -1647,9 +1700,14 @@ class ToolRunner:
             args = validation.fixed_args
 
         self._guard_agent_lease()
-        result = await self._orch.executor.execute(
-            tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
-        )
+        exact = _exact_approval.get()
+        admission = None
+        if exact is not None and exact.issuer is self and exact.used and exact.safety_used:
+            admission = _ExecutorAdmission(self, exact, session_id, tool_name, args)
+        with _bind_executor_admission(admission):
+            result = await self._orch.executor.execute(
+                tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
+            )
 
         result = await self._attach_permission_remediation(session_id, tool_name, result)
 

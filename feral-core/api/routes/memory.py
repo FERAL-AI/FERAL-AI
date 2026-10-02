@@ -335,17 +335,30 @@ async def memory_compact(session_id: str | None = None):
     else:
         sessions = list(state.orchestrator.conversation_history.keys())
 
+    from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
+    try:
+        async with legacy_context_mutation(state.orchestrator, state.memory, tuple(sessions), "compact"):
+            return await _memory_compact_legacy(sessions)
+    except RuntimeContextError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": "Managed runtime compaction is unavailable."}) from None
+
+
+async def _memory_compact_legacy(sessions: list[str]):
+    store, orchestrator = state.memory, state.orchestrator
+    if store is None or orchestrator is None:
+        raise HTTPException(status_code=503, detail="memory or orchestrator not initialized")
+
     out: list[dict] = []
     for sid in sessions:
-        history = state.orchestrator.conversation_history.get(sid, [])
+        history = orchestrator.conversation_history.get(sid, [])
         if not history:
             out.append({"session_id": sid, "compacted": False, "reason": "empty"})
             continue
-        result = await state.memory.compact_session(
-            sid, history, llm=state.orchestrator.llm,
+        result = await store.compact_session(
+            sid, history, llm=orchestrator.llm,
         )
         if result.get("compacted") and result.get("history"):
-            state.orchestrator.conversation_history[sid] = result["history"]
+            orchestrator.conversation_history[sid] = result["history"]
         result["session_id"] = sid
         out.append(result)
     return {"results": out, "count": len(out)}

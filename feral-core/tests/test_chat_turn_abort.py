@@ -273,3 +273,45 @@ def test_actual_ws_auth_first_and_replayed_terminal_do_not_execute_again(tracked
         assert replay["payload"]["final_text"] == original["payload"]["final_text"]
         assert replay["payload"]["replayed"] is True
     assert orch._route_prompt.await_count == 1
+
+
+async def test_detach_waits_for_owned_terminal_receipt_before_drained(tracked):
+    manager, _state = tracked
+    entered = asyncio.Event()
+
+    async def run():
+        turn_audit("thread-A").began = True
+        entered.set()
+        await asyncio.Event().wait()
+
+    receipt, owner, _emit, _run = await submitted(manager, run=run)
+    await entered.wait()
+    assert await manager.detach(owner) is True
+    final = await manager.status(session_id="thread-A", request_id=receipt["request_id"], turn_id=receipt["turn_id"])
+    assert final["processing_outcome"] == "cancelled"
+    assert final["action_outcome"] == "unknown"
+
+
+async def test_detach_cannot_report_drained_when_owner_ignores_cancellation(tracked):
+    manager, _state = tracked
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def run():
+        turn_audit("thread-A").began = True
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            await release.wait()
+            return "late fixture result"
+
+    receipt, owner, _emit, _run = await submitted(manager, run=run)
+    await entered.wait()
+    try:
+        assert await manager.detach(owner) is False
+        unresolved = await manager.status(session_id="thread-A", request_id=receipt["request_id"], turn_id=receipt["turn_id"])
+        assert unresolved["status"] == "running" and "processing_outcome" not in unresolved
+    finally:
+        release.set()
+    final = await terminal(manager, receipt)
+    assert final["processing_outcome"] == "cancelled" and final["action_outcome"] == "unknown"

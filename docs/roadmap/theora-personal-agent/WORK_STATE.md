@@ -30,10 +30,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent publication | `cd1571ef94aa2fe244023d56ba468f7ba3266700` (fenced context storage, trusted chat progress, verified automation controls, failed9.28 evidence) |
+| Most recent publication | `634595c7194aedaf6eb9b8c91cbacb87fedea4bd` (native exact turns, selectable layout repair, Forge/automation controls, inactive context lifecycle) |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | About4.0 GiB available during9.28 acceptance; macOS reported6,967MiB swap used. Stagger heavy model/compiler checks; no personal/cache cleanup performed |
+| Disk observation | Native worker observed2.3GiB during9.29 inference; parent subsequent df reports4.3GiB. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update
@@ -41,6 +41,77 @@ every historic source identifier to HEAD or regenerate a baseline to make a gate
 appear green.
 
 ## Latest checked source and active candidate
+
+Source **634595c7194aedaf6eb9b8c91cbacb87fedea4bd** is committed/pushed.
+[CI37071282138](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37071282138)
+and [native37071282156](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37071282156),
+docs/naming/version passed. Completed backend job111051144969: **12,426 passed,
+83 skipped,574 warnings in841.38s; coverage74.42%**. Generic Python SDK92 passed;
+web/device/extension/generic Node22 and other required checks passed. Live-brain
+and main-branch Linux matrix skipped. Nonblocking mypy111051062407 **failed:
+848 errors in238 files,1,257 checked** against812 baseline. Two new server
+return/coroutine annotations are being repaired in the working wave; do not
+call848 unchanged debt or claim the type ratchet passed.
+
+Immutable **2026.9.29/build2026100203** was built from that source, executable
+SHA256`013ccc1250f6ed8c58bf80254ff332f93e0957226691f72c6c41f5c388f2f102`.
+All481 production Python files match the commit; bundle audit passed13,060files,
+265Mach-O/9internal links, Python3.11.15/SQLite3.53.1/FTS5/OpenCode1.18.10.
+Ad-hoc signing is separate from Developer-ID/notarization. Actual isolated GUI
+has now passed the previous Security layout crash path, rich/code Copy, three
+real tracked local-model replies, exact Stop, deliberate Quit/backend-child
+absence, same-candidate reopen and exact status reconciliation without replay.
+The worker froze [9.29 acceptance](NATIVE_9_29_ACCEPTANCE.md). These bounded
+results do not establish unrestricted daily use or account/device/distribution
+acceptance. The candidate contains no later working activation/Forge fixes.
+
+Current uncommitted core wave implements:
+DATA01C exact attachments/readiness/writer cleanup, parent authenticated WS/HUP
+preludes and mandatory boot installation, primary snapshot guards, create-only
+Forge drafts, actual executor review admission and executable extension example.
+Whole core manifest1261Python files digest
+`23fed780ce1e9eef2d1a6af6c2fc2470e295e51ac44a5780b7073d0344523b2f`.
+Full run log`/private/tmp/feral-wave4-full-backend-20261002.log` ended exit 1 with
+coverage INTERNALERROR: a patched SQLite connection remained active; pytest
+cleanup also retained patched Path.exists. All 1,261 manifest hashes remained
+unchanged. There is no valid full-suite coverage/summary from that run. Two early
+socket failures reproduced sandbox binding denial, then passed outside the sandbox.
+Fresh patch-only fixtures passed with and without coverage; full teardown leak
+origin remains unresolved. FD soft limit 256 is observed, exhaustion unconfirmed;
+4.8 GiB disk remained free and no ENOSPC was observed.
+
+Parent combined 27-suite regression passed **597 tests, 19 warnings in 19.49s**.
+Afterward the existing primary transcript fixture was updated to bind the real
+new guard, and approval identity validation stopped false/zero/empty container
+values becoming omitted owners. Primary/ingress/approval regression passed
+**46 tests, 18 warnings in 2.20s**. Forge path narrowing passed 43 tests; the first
+targeted invocation omitted --no-cov and failed the global coverage floor despite
+43 passing cases; the corrected targeted command passed. Full local mypy now
+measures **845 errors in 238 files, 1,261 checked**, after removing two new Forge
+errors. This is still above the unchanged 812 baseline; Ubuntu verification pending.
+Additional frozen fixture repairs keep config/vault audit writes in disposable
+profiles (37 config and 24 integration tests passed) and initialize the real
+optional collaborator in a synthetic voice proxy (86 voice/attribution/activation
+tests passed). Original assertions and production behavior were preserved.
+See [full-run investigation](FULL_BACKEND_TRIAGE_20261002.md).
+Mandatory boot now installs the lifecycle, unknown legacy sessions remain legacy,
+and managed voice/handoff/manual context mutations remain explicitly unavailable.
+No native candidate contains this working wave yet.
+
+Native saved-context source and selected linked fixtures/typecheck passed;
+Agents/Workflows/Automation/Connections task gates are a separate follow-up.
+No new native candidate has been assembled. Native worker now implements the
+approved action-specific gate design in four other feature models and tests;
+its new saved-context evidence remains separate from packaged acceptance.
+Developer worker now owns public
+Python adapter/Node loopback HTTP plugin authoring and new SDK examples/tests,
+without core edits. Memory worker now has read-only full mypy triage/new evidence
+and full-backend harness/failure investigation only. Parent owns full verification, shared docs, explicit-path Git publication
+and next candidate identity. Preserved AUDIT-FIXES.md stays excluded; all old failed
+candidate evidence stays intact. Next: finish frozen tests, resolve actual failures,
+publish the coherent core wave with the failed full run disclosed, obtain exact
+remote CI, then integrate native/SDK follow-ups and assemble
+a new exact-source candidate for real acceptance.
 
 Source **cd1571ef94aa2fe244023d56ba468f7ba3266700** is committed/pushed.
 [CI37066669634](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37066669634)
@@ -89,7 +160,7 @@ owner progress and explicit interval automation follow-up. The frozen complete
 native fixture runner passed all36 feature suites, linked25 groups, desktop39
 and error5 assertions. Production typecheck and18 child-lifeline/auditor/source-
 equality regression tests passed. The next assembly is
-9.29/build2026100203, not yet a built candidate. See
+9.29/build2026100203 (subsequently built and tested above). See
 [integration evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md). Production
 checkpoint activation is not enabled: authenticated presave readiness and every
 writer/cleanup/restore boundary must close first.
@@ -176,16 +247,16 @@ as containing every later source commit or completing the populated-profile matr
 
 | Worker | Exclusive scope | Active work |
 |---|---|---|
-| Parent | Shared docs/CI/Git, frozen receipt/layout/Forge/workflow integration, next version/build | Published cd1571 CI passed; next frozen backend235, full native fixtures, production typecheck and18 lifeline/auditor/equality regression tests passed; publication/assembly next |
-| coding_session_isolation | Receipt and Forge source/evidence frozen and transferred; read-only generation recovery plan | Forge86 native assertions and actual local router/engine/SQLite probe passed; backend atomic generation recovery is next proposed card |
-| python_sdk_contracts | First DATA01B lifecycle source frozen; two new activation baseline fixtures/evidence frozen | First lifecycle remains inactive; attachment/readiness interface agreed, production activation edits held until checkpoint publication |
-| native_populated_acceptance | Layout source/evidence frozen; only new9.29 acceptance probe/launcher | Prepare guarded next-candidate journey; no launch until exact source/hash/audit READY |
+| Parent | WS/HUP/cleanup/boot integration, shared docs/CI/Git and next assembly | Combined597 and owner follow-up46 passed; failed full run disclosed; coherent core publication next |
+| coding_session_isolation | Core Forge/DEV01D transferred; SDK authoring adapters/examples/tests/evidence | Python112 and Node82 passed; final package verification pending; no core edits |
+| python_sdk_contracts | Type/full-run triage plus four explicitly assigned fixture-isolation repairs | Config37 and integration24 passed; voice fixture/reconciliation check next; no production edits |
+| native_populated_acceptance | Immutable9.29 report; saved-context source transferred; four feature-model task gates | Agents/Workflow/Automation/Connections, their tests and scoped shared native policy wiring; no assembly or GUI until integrated freeze |
 
 Original immutable bundle evidence is frozen in [NATIVE_POPULATED_ACCEPTANCE.md](NATIVE_POPULATED_ACCEPTANCE.md): actual rich persistence/search/rename/pin/relaunch and one local-model reply passed. **SIGSEGV with excessive SwiftUI accessibility recursion is confirmed by macOS report and watched exit**. Context truncation, guessed Weather fallback, missing result success key and pending-review false-completion text are also reproduced. Do not call this app release-ready.
 
 Source can change in these exclusive areas during targeted checks; freeze all workers before full integration suites and candidate assembly. Recheck free disk before packaging. Preserve unrelated `AUDIT-FIXES.md`. No real external accounts/messages/purchases or personal data changes occurred.
 
-Next: publish the integrated wave and build/audit9.29, then run guarded actual
+Historical next action before634595c: publish the integrated wave and build/audit9.29, then run guarded actual
 acceptance. Activate runtime checkpoints only after every writer/cleanup/restore
 path is fenced. Then memory migration/native parity/voice and exact-device/iOS
 contracts. Messaging/browser/Link, social/Linux/distribution remain explicit

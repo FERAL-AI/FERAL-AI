@@ -963,6 +963,8 @@ class Orchestrator:
 
     def _schedule_compaction(self, session_id: str, reason: str) -> bool:
         """Fire-and-forget one compaction. True when it was scheduled."""
+        if self._context_checkpoints is not None and self._context_checkpoints.known_managed(session_id):
+            return False  # Managed compaction requires a separate fenced mutator.
         if self._compaction_inflight.get(session_id):
             return False
         if not self.memory:
@@ -993,6 +995,8 @@ class Orchestrator:
                 # position: everything past the snapshot length is new,
                 # and is re-appended after the compacted prefix.
                 async with self._get_session_lock(session_id):
+                    if self._context_checkpoints is not None and await self._context_checkpoints.is_managed(session_id):
+                        return
                     history = list(self.conversation_history.get(session_id, []))
                     snapshot_len = len(history)
                 if not history:
@@ -1010,9 +1014,11 @@ class Orchestrator:
                 )
 
                 async with self._get_session_lock(session_id):
+                    if self._context_checkpoints is not None and await self._context_checkpoints.is_managed(session_id):
+                        return
                     if result.get("compacted") and result.get("history"):
                         current = self.conversation_history.get(session_id, [])
-                        if len(current) >= snapshot_len:
+                        if len(current) >= snapshot_len and current[:snapshot_len] == history:
                             # Turns that landed mid-compaction. They are
                             # NOT in the summary, so they are carried
                             # over verbatim rather than dropped.
@@ -1381,6 +1387,22 @@ class Orchestrator:
         session_id: str | None = None,
         actor: str = "api",
     ) -> dict:
+        coordinator = self._context_checkpoints
+        if coordinator is None:
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+        pending = self.tool_runner.get_pending(request_id)
+        if not pending:
+            return {"status": "not_found", "request_id": request_id}
+        sid = str(pending.get("session_id", "") or "")
+        if session_id is not None and session_id != sid:
+            return {"status": "session_mismatch", "request_id": request_id, "session_id": session_id, "pending_session_id": sid}
+        if coordinator.owns_writer(sid):
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+        async with coordinator.write_scope(sid):
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+
+    async def _resolve_tool_approval_request_impl(self, request_id: str, *, approved: bool,
+                                                session_id: str | None = None, actor: str = "api") -> dict:
         """Resolve a pending tool approval request by id.
 
         Returns a status payload:
@@ -3005,7 +3027,7 @@ class Orchestrator:
             logger.warning("vision context attach failed", exc_info=True)
             return user_content
 
-    def install_runtime_context_checkpoints(self, store: "MemoryStore") -> RuntimeContextCoordinator:
+    def install_runtime_context_checkpoints(self, store: "MemoryStore", *, legacy_passthrough: bool = False) -> RuntimeContextCoordinator:
         """Internal integration hook; never restore arbitrary UI history here."""
         if self._context_checkpoints is not None or self._active_turns:
             raise RuntimeError("Runtime checkpoint lifecycle is already installed or busy")
@@ -3013,9 +3035,28 @@ class Orchestrator:
             store, history=self.conversation_history, lock_for=self._get_session_lock,
             image_call_ids=lambda sid: frozenset(self._tool_result_images.get(sid, {})),
             clear_images=self._forget_tool_images,
+            clear_session=self._clear_checkpoint_session_locked,
+            finalize_legacy=self._learn_checkpoint_legacy_disconnect_locked,
+            legacy_passthrough=legacy_passthrough,
         )
         self._context_checkpoints = coordinator
         return coordinator
+
+    async def _learn_checkpoint_legacy_disconnect_locked(self, session_id: str) -> None:
+        if session_id in self._session_finalized:
+            return
+        self._session_finalized.add(session_id)
+        if self.learner:
+            await self.learner.extract_knowledge(session_id)
+            await self.learner.summarize_session(session_id)
+
+    def _clear_checkpoint_session_locked(self, session_id: str) -> None:
+        """Coordinator calls under the existing SID lock after attachment recheck."""
+        self._last_proactive_check.pop(session_id, None)
+        self._session_surfaces.pop(session_id, None)
+        self._forget_consolidation_state(session_id)
+        self._forget_session_activity(session_id)
+        self.tool_runner.clear_session(session_id)
 
     async def handle_command(self, session_id: str, text: str, context: Optional[dict] = None):
         """Process a user command through the full agentic pipeline.
@@ -4824,6 +4865,11 @@ class Orchestrator:
         )
         to_remove = len(self.conversation_history) - self._conversation_max_sessions
         for sid in sorted_sids[:to_remove]:
+            if self._context_checkpoints is not None:
+                if (self._context_checkpoints.known_managed(sid) or self._context_checkpoints.has_attachments(sid)
+                        or self._context_checkpoints.has_writers(sid)
+                        or self._get_session_lock(sid).locked()):
+                    continue
             del self.conversation_history[sid]
             # Drop the per-session lock too so long-running brains don't
             # grow the lock dict without bound.
@@ -4843,6 +4889,9 @@ class Orchestrator:
 
     async def on_session_disconnect(self, session_id: str):
         """Called when a client disconnects. Summarize and learn."""
+        if self._context_checkpoints is not None:
+            await self._context_checkpoints.evict_if_unattached(session_id, clear_legacy=True)
+            return
         if session_id in self._session_finalized:
             return
         self._session_finalized.add(session_id)
@@ -5751,7 +5800,9 @@ class Orchestrator:
         turn had already snapshotted, and the turn's write-back then
         overwrote it.
         """
-        async with self._get_session_lock(session_id):
+        scope = (self._context_checkpoints.legacy_mutation_scope((session_id,), "voice")
+                 if self._context_checkpoints is not None else self._get_session_lock(session_id))
+        async with scope:
             history = self.conversation_history.setdefault(session_id, [])
             # B7: a live-voice session never runs ``_finalize_turn``, so
             # without a stamp here it looks permanently idle to the
@@ -6214,6 +6265,16 @@ class Orchestrator:
     # ─────────────────────────────────────────────
 
     async def handle_ui_event(self, session_id: str, action_id: str, event: str, value=None, app_id: str | None = None, screen_id: str | None = None):
+        coordinator = self._context_checkpoints
+        if coordinator is None or coordinator.owns_writer(session_id):
+            await self._handle_ui_event(session_id, action_id, event, value, app_id, screen_id)
+            return
+        # Confirmation consumption and generic tool/app dispatch can occur before
+        # the helper's command fallback. Fence all of them in the same SID/task.
+        async with coordinator.write_scope(session_id, command_handoff=True):
+            await self._handle_ui_event(session_id, action_id, event, value, app_id, screen_id)
+
+    async def _handle_ui_event(self, session_id: str, action_id: str, event: str, value=None, app_id: str | None = None, screen_id: str | None = None):
         await helper_handle_ui_event(
             self,
             session_id=session_id,

@@ -282,7 +282,7 @@ class ChatTurnManager:
         await self.start()
         return await self._store.chat_turn_get(session_id=session_id, turn_id=turn_id, request_id=request_id)
 
-    async def detach(self, owner):
+    async def detach(self, owner) -> bool:
         for live in self._live.values():
             live.subscribers.pop(id(owner), None)
         tasks = [live.task for live in self._live.values() if live.owner is owner and live.task is not None and not live.task.done()]
@@ -293,6 +293,18 @@ class ChatTurnManager:
                     if live.task is task:
                         live.audit.cancel_requested = True
                 task.cancel()
+            if pending:
+                _, pending = await asyncio.wait(pending, timeout=2)
+            if pending:
+                return False
+        # A task cancelled before its first step schedules a terminal settlement
+        # in its done callback. Let retained settlements commit before cleanup.
+        settlements = {task for task in self._settlements if not task.done()}
+        if settlements:
+            _, pending = await asyncio.wait(settlements, timeout=2)
+            if pending:
+                return False
+        return True
 
 
 def get_chat_turn_manager(state) -> ChatTurnManager:

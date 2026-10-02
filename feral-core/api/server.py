@@ -14,9 +14,19 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Awaitable  # noqa: F401 — used by quoted return annotations in WS9 task spawners
+from collections.abc import Awaitable, Coroutine  # noqa: F401 — quoted coroutine annotations
 from pathlib import Path
 from uuid import uuid4
+
+from api.runtime_context import (
+    attachment_readiness,
+    close_surface,
+    coordinator_for,
+    prepared_scope,
+    require_attachment_ready,
+    session_query,
+)
+from agents.runtime_context_checkpoint import RuntimeContextError
 
 from fastapi import (
     FastAPI,
@@ -2216,13 +2226,19 @@ async def _prepare_chat_turn_context(
     if source_node:
         ctx["source_node"] = source_node
 
-    try:
-        state.memory.working_push(
-            session_id,
-            {"role": "user", "text": user_msg_text},
-        )
-    except Exception:
-        logger.debug("working_push (chat prelude) failed", exc_info=True)
+    coordinator = coordinator_for(state)
+    if coordinator is not None and coordinator.known_managed(session_id):
+        # Failure here must leave the managed turn pending, not silently certify
+        # a context snapshot missing its preparation input.
+        state.memory.working_push(session_id, {"role": "user", "text": user_msg_text})
+    else:
+        try:
+            state.memory.working_push(
+                session_id,
+                {"role": "user", "text": user_msg_text},
+            )
+        except Exception:
+            logger.debug("working_push (chat prelude) failed", exc_info=True)
 
     refined_text = text
     try:
@@ -2286,7 +2302,7 @@ def _build_chat_turn_runner(
     refined_text: str,
     ctx: dict,
     tracked: bool = False,
-) -> "Awaitable[str | None]":
+) -> "Coroutine[object, object, str | None]":
     """Construct the coroutine that drives ``handle_command_stream``
     plus the optional skill-gen detection. Identical between WebUI
     and HUP so the parity test diffs the same execution path.
@@ -2331,6 +2347,9 @@ def _build_chat_turn_runner(
         except asyncio.CancelledError:
             raise
         except Exception as turn_err:
+            coordinator = coordinator_for(state)
+            managed = coordinator is not None and coordinator.known_managed(session_id)
+            unsafe_retry = tracked or managed
             logger.error(
                 "background chat turn failed for %s: %s",
                 session_id[:8] if len(session_id) >= 8 else session_id,
@@ -2345,15 +2364,16 @@ def _build_chat_turn_runner(
                         type="error",
                         payload={
                             "code": "chat_turn_failed",
-                            "message": "The chat turn failed. Inspect its status and earlier actions before another attempt." if tracked else "The chat turn failed. Please try again.",
-                            "recoverable": not tracked,
+                            "message": "The chat turn failed. Inspect its status and earlier actions before another attempt." if unsafe_retry else "The chat turn failed. Please try again.",
+                            "recoverable": not unsafe_retry,
                         },
                     )
                 )
             except Exception:
                 pass
-            if tracked:
+            if unsafe_retry:
                 raise
+            return None
 
     return _run()
 
@@ -2367,16 +2387,40 @@ async def _submit_tracked_chat_turn(*, ws, session_id: str, request_id: str,
             await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type=kind, payload=payload).model_dump())
 
     async def run():
-        refined_text, ctx, _ = await _prepare_chat_turn_context(
-            session_id=session_id, text=text, raw_context=raw_context, attachments=attachments or [],
-        )
-        return await _build_chat_turn_runner(ws=ws, session_id=session_id,
-                                             refined_text=refined_text, ctx=ctx, tracked=True)
+        async with prepared_scope(state, session_id):
+            refined_text, ctx, _ = await _prepare_chat_turn_context(
+                session_id=session_id, text=text, raw_context=raw_context, attachments=attachments or [],
+            )
+            return await _build_chat_turn_runner(ws=ws, session_id=session_id,
+                                                 refined_text=refined_text, ctx=ctx, tracked=True)
 
     return await get_chat_turn_manager(state).submit(
         owner=ws, session_id=session_id, request_id=request_id,
         terms={"text": text, "context": raw_context, "attachments": attachments or []}, run=run, emit=emit,
     )
+
+
+async def _run_prepared_chat_turn(*, ws, session_id: str, text: str,
+                                  raw_context=None, attachments=None, source_node=None) -> str | None:
+    """Legacy clients use the same fenced prelude when their SID is managed."""
+    try:
+        async with prepared_scope(state, session_id):
+            refined_text, context, _ = await _prepare_chat_turn_context(
+                session_id=session_id, text=text, raw_context=raw_context,
+                attachments=attachments or [], source_node=source_node,
+            )
+            return await _build_chat_turn_runner(ws=ws, session_id=session_id,
+                                                 refined_text=refined_text, ctx=context)
+    except RuntimeContextError as error:
+        try:
+            await ws.send_json(FeralMessage(
+                session_id=session_id, hop="brain", type="error",
+                payload={"code": error.code, "message": str(error), "recoverable": False,
+                         "retry_safe": False, "effects_may_have_occurred": error.effects_may_have_occurred},
+            ).model_dump())
+        except Exception:
+            logger.debug("Context refusal could not be delivered to its owned socket")
+        raise
 
 
 # ─────────────────────────────────────────────
@@ -2421,98 +2465,114 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         await ws.close(code=4001, reason="Unauthorized")
         return
 
-    # Audit-r9 fix — operator: "the chat and memory should be the same
-    # for my phone chat and the webui for feral brain". The web socket
-    # used to mint a fresh `uuid4()` per connection, which split
-    # `Orchestrator.conversation_history[session_id]` per WebSocket
-    # AND per surface (phone path uses `chat_request` with its own id
-    # at line 1486). Default to the per-install `primary_session_id`
-    # so a single-user brain shares one conversation thread + working
-    # memory across web tabs AND iOS chat. Multi-thread / "new chat"
-    # is now an explicit client opt-in (pass `?session_id=...` on the
-    # WebSocket query string).
-    requested_sid = (
-        ws.query_params.get("session_id", "").strip()
-        if hasattr(ws, "query_params")
-        else ""
-    )
-    session_id = (
-        requested_sid or getattr(state, "primary_session_id", "") or str(uuid4())
-    )
-    state.sessions[session_id] = ws
-    # Phase 3 (audit-r10) — refcount this attachment so concurrent
-    # tabs sharing the primary session each register; per-session
-    # cleanup only fires when the last surface detaches AND the
-    # session isn't the persistent primary.
     try:
-        state.attach_session(session_id)
-    except Exception:  # best-effort — never block accept on bookkeeping
-        pass
-    logger.info(f"Client connected: {session_id}")
+        query = ws.query_params if hasattr(ws, "query_params") else {}
+        for key in ("session_id", "context_checkpoint_version"):
+            if hasattr(query, "getlist") and len(query.getlist(key)) > 1:
+                raise RuntimeContextError("context_query_ambiguous")
+        primary = getattr(state, "primary_session_id", "") or str(uuid4())
+        session_id, explicit_session, checkpoint_version = session_query(query, primary)
+    except RuntimeContextError:
+        await ws.close(code=4002, reason="Invalid conversation identity or context contract")
+        return
+    await _run_client_surface(ws, session_id, explicit_session, checkpoint_version)
 
-    gw_session = GatewaySession(session_id, ws, state.gateway_registry)
 
-    async def gateway_submit(params, request_id, emit):
-        command = TextCommandPayload.model_validate(params)
-        return await _submit_tracked_chat_turn(ws=ws, session_id=session_id, request_id=request_id,
-                                               text=command.text, raw_context=command.context,
-                                               attachments=[a.model_dump() for a in command.attachments or []], emit=emit)
-
-    gw_session.metadata["tracked_chat_send"] = gateway_submit
-
-    # Lane 08 WS9 — track in-flight orchestrator tasks per WS so the
-    # message loop doesn't block on long-running turns (AUDIT-r13
-    # finding 6.2). When the WS disconnects we cancel everything so
-    # background turns don't keep writing into a dead session.
+async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: bool,
+                              checkpoint_version: int | None) -> None:
+    coordinator = coordinator_for(state)
+    attachment = None
+    legacy_attached = False
     chat_tasks: set[asyncio.Task] = set()
-
-    def _spawn_chat_task(coro: "Awaitable[None]") -> asyncio.Task:
-        from security.agent_turn_lease import spawn_agent_turn
-
-        task = spawn_agent_turn(state, coro)
-        chat_tasks.add(task)
-
-        def _on_done(t: asyncio.Task) -> None:
-            chat_tasks.discard(t)
-            if t.cancelled():
-                return
-            exc = t.exception()
-            if exc is not None:
-                logger.warning(
-                    "background chat turn failed for session %s: %s",
-                    session_id[:8] if len(session_id) >= 8 else session_id,
-                    exc,
-                )
-
-        task.add_done_callback(_on_done)
-        return task
-
-    for node_id in state.daemons:
-        state.bind_session_to_daemon(session_id, node_id)
-        state.perception.update_connected_nodes(session_id, list(state.daemons.keys()))
-
-    # Greeting policy (RC fix for chat thread switching): only greet on
-    # the DEFAULT connection (no explicit ``?session_id=``). The WebUI
-    # reconnects this socket with an explicit session id every time the
-    # user switches to a non-primary thread; emitting a greeting on each
-    # of those reconnects injected a stray "How can I help?" bubble into
-    # the thread. Explicit-session connects skip the greeting entirely.
-    greeting = _build_greeting() if not requested_sid else ""
-
-    if greeting:
-        await ws.send_json(
-            FeralMessage(
-                session_id=session_id,
-                hop="brain",
-                type="text_response",
-                payload=TextResponsePayload(text=greeting).model_dump(),
-            ).model_dump()
-        )
-        state.memory.working_push(
-            session_id, {"role": "assistant", "content": greeting}
-        )
-
     try:
+        if coordinator is not None:
+            attachment = await asyncio.wait_for(coordinator.attach(
+                session_id, checkpoint_version=checkpoint_version), timeout=10)
+            if attachment.readiness.managed and session_id == state.primary_session_id:
+                state._runtime_context_primary_managed = True
+        elif checkpoint_version is not None:
+            raise RuntimeContextError("context_unavailable")
+        # Phase 3 (audit-r10) — refcount this attachment so concurrent
+        # tabs sharing the primary session each register; per-session
+        # cleanup only fires when the last surface detaches AND the
+        # session isn't the persistent primary.
+        state.attach_session(session_id)
+        legacy_attached = True
+        state.sessions[session_id] = ws
+        logger.info(f"Client connected: {session_id}")
+
+        gw_session = GatewaySession(session_id, ws, state.gateway_registry)
+
+        async def gateway_submit(params, request_id, emit):
+            await require_attachment_ready(coordinator, attachment, checkpoint_version)
+            command = TextCommandPayload.model_validate(params)
+            return await _submit_tracked_chat_turn(ws=ws, session_id=session_id, request_id=request_id,
+                                                   text=command.text, raw_context=command.context,
+                                                   attachments=[a.model_dump() for a in command.attachments or []], emit=emit)
+
+        gw_session.metadata["tracked_chat_send"] = gateway_submit
+        if coordinator is not None and attachment is not None:
+            async def current_readiness():
+                return await attachment_readiness(coordinator, attachment)
+            gw_session.metadata["runtime_context_readiness"] = current_readiness
+            gw_session.metadata["context_checkpoint_requested"] = checkpoint_version is not None
+
+        # Lane 08 WS9 — track in-flight orchestrator tasks per WS so the
+        # message loop doesn't block on long-running turns (AUDIT-r13
+        # finding 6.2). When the WS disconnects we cancel everything so
+        # background turns don't keep writing into a dead session.
+
+        def _spawn_chat_task(coro: "Coroutine[object, object, str | None]") -> asyncio.Task:
+            from security.agent_turn_lease import spawn_agent_turn
+
+            task = spawn_agent_turn(state, coro)
+            chat_tasks.add(task)
+
+            def _on_done(t: asyncio.Task) -> None:
+                chat_tasks.discard(t)
+                if t.cancelled():
+                    return
+                exc = t.exception()
+                if exc is not None:
+                    logger.warning(
+                        "background chat turn failed for session %s: %s",
+                        session_id[:8] if len(session_id) >= 8 else session_id,
+                        exc,
+                    )
+
+            task.add_done_callback(_on_done)
+            return task
+
+        for node_id in state.daemons:
+            state.bind_session_to_daemon(session_id, node_id)
+            state.perception.update_connected_nodes(session_id, list(state.daemons.keys()))
+
+        # Greeting policy (RC fix for chat thread switching): only greet on
+        # the DEFAULT connection (no explicit ``?session_id=``). The WebUI
+        # reconnects this socket with an explicit session id every time the
+        # user switches to a non-primary thread; emitting a greeting on each
+        # of those reconnects injected a stray "How can I help?" bubble into
+        # the thread. Explicit-session connects skip the greeting entirely.
+        greeting = _build_greeting() if not explicit_session else ""
+
+        if greeting:
+            await ws.send_json(
+                FeralMessage(
+                    session_id=session_id,
+                    hop="brain",
+                    type="text_response",
+                    payload=TextResponsePayload(text=greeting).model_dump(),
+                ).model_dump()
+            )
+            if coordinator is None:
+                state.memory.working_push(session_id, {"role": "assistant", "content": greeting})
+            else:
+                try:
+                    async with coordinator.legacy_mutation_scope((session_id,), "greeting"):
+                        state.memory.working_push(session_id, {"role": "assistant", "content": greeting})
+                except RuntimeContextError:
+                    pass  # Managed greeting is display-only, never trusted model history.
+
         while True:
             try:
                 raw = await ws.receive_json()
@@ -2543,6 +2603,7 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                 if msg.type == "text_command" and isinstance(
                     payload, TextCommandPayload
                 ):
+                    await require_attachment_ready(coordinator, attachment, checkpoint_version)
                     # Lane 08 WS7 + WS9 — single shared helper for
                     # WebUI + HUP so the response shape never drifts.
                     attachments: list[dict] = []
@@ -2567,20 +2628,10 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                                                                    "request_id": msg.msg_id, "recoverable": True}).model_dump())
                         continue
 
-                    refined_text_web, ctx, _ = await _prepare_chat_turn_context(
-                        session_id=session_id,
-                        text=payload.text,
-                        raw_context=payload.context,
-                        attachments=attachments,
-                    )
-                    _spawn_chat_task(
-                        _build_chat_turn_runner(
-                            ws=ws,
-                            session_id=session_id,
-                            refined_text=refined_text_web,
-                            ctx=ctx,
-                        )
-                    )
+                    _spawn_chat_task(_run_prepared_chat_turn(
+                        ws=ws, session_id=session_id, text=payload.text,
+                        raw_context=payload.context, attachments=attachments,
+                    ))
 
                 elif msg.type == "voice_mute":
                     if state.voice_router:
@@ -2594,6 +2645,10 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     vcfg = raw.get("payload", {})
                     mode = vcfg.get("mode", "realtime")
                     provider = vcfg.get("provider", "openai")
+                    if mode != "disabled":
+                        await require_attachment_ready(coordinator, attachment, checkpoint_version)
+                        if attachment is not None and attachment.readiness.managed:
+                            raise RuntimeContextError("managed_voice_unsupported")
                     if state.voice_router:
                         state.voice_router.set_session_voice_mode(session_id, mode)
                         if mode == "disabled":
@@ -2701,6 +2756,9 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                 elif msg.type == "audio_chunk" and isinstance(
                     payload, AudioChunkPayload
                 ):
+                    await require_attachment_ready(coordinator, attachment, checkpoint_version)
+                    if attachment is not None and attachment.readiness.managed:
+                        raise RuntimeContextError("managed_voice_unsupported")
                     if state.gemini_proxy and state.gemini_proxy.has_session(
                         session_id
                     ):
@@ -2718,6 +2776,7 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
 
                 elif msg.type == "ui_event" and isinstance(payload, UIEventPayload):
+                    await require_attachment_ready(coordinator, attachment, checkpoint_version)
                     await _spawn_chat_task(
                         state.orchestrator.handle_ui_event(
                             session_id=session_id,
@@ -2738,6 +2797,7 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     )
 
                 elif msg.type == "vision_query":
+                    await require_attachment_ready(coordinator, attachment, checkpoint_version)
                     payload_dict = raw.get("payload", {})
                     query_text = payload_dict.get("query", "What do you see?")
                     target_node = payload_dict.get("node_id", "")
@@ -2760,6 +2820,7 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
 
                 elif msg.type == "vision_frame":
+                    await require_attachment_ready(coordinator, attachment, checkpoint_version)
                     frame_payload = raw.get("payload", {})
                     # F-03: decoded bytes, not base64 characters, so a
                     # "512 KiB" setting means 512 KiB of image.
@@ -2819,6 +2880,10 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
                     _record_biometrics_to_baseline(bio)
 
+            except RuntimeContextError as context_error:
+                await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="error",
+                    payload={"code": context_error.code, "message": "Conversation context is not ready. Inspect this thread before continuing.",
+                             "request_id": raw.get("msg_id", ""), "recoverable": False}).model_dump())
             except Exception as msg_err:
                 logger.error(
                     f"Error processing message from {session_id[:8]}: {msg_err}",
@@ -2839,161 +2904,20 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     pass
 
     except WebSocketDisconnect:
-        logger.info(f"Client disconnected: {session_id}")
-        from agents.chat_turns import get_chat_turn_manager
-        await get_chat_turn_manager(state).detach(ws)
-        # Lane 08 WS9 — let in-flight orchestrator turns drain
-        # briefly before we cancel them. Disconnect is usually a
-        # tab close: the user expects the turn that they sent
-        # right before closing to still write to memory + finish.
-        # We give it 2 seconds, then force-cancel so the brain
-        # doesn't leak work onto a dead session.
-        if chat_tasks:
-            try:
-                await asyncio.wait_for(
-                    asyncio.gather(*list(chat_tasks), return_exceptions=True),
-                    timeout=2.0,
-                )
-            except asyncio.TimeoutError:
-                for _task in list(chat_tasks):
-                    if not _task.done():
-                        _task.cancel()
-        chat_tasks.clear()
-        # Phase 3 (audit-r10) — decrement refcount; only run cleanup
-        # when the last surface for this session_id has detached AND
-        # the session is not the persistent `primary_session_id`. This
-        # is the residual fix for operator complaint #15 ("app can't
-        # fetch stuff I did on the local brain chat"): web tab close
-        # used to wipe the shared primary thread in RAM even with the
-        # iOS surface still attached. Now the primary thread is
-        # protected at the lifecycle layer AND persisted to disk via
-        # the snapshot store.
+        logger.info("Client disconnected: %s", session_id)
+    except RuntimeContextError as context_error:
+        logger.warning("Client context setup refused (%s)", context_error.code)
+        await ws.close(code=4003, reason="Conversation context is unavailable")
+    except Exception as error:
+        logger.warning("Client surface failed (%s)", type(error).__name__)
         try:
-            remaining_attachments = state.detach_session(session_id)
+            await ws.close(code=1011, reason="Conversation setup or transport failed")
         except Exception:
-            remaining_attachments = 0
-        # Voice teardown BEFORE the session de-registration below.
-        # Pre-fix no disconnect handler touched the voice router at
-        # all: a tab close / network blip / backgrounded app left the
-        # OpenAI Realtime WebSocket open and billing, and left a stale
-        # `_node_to_session` entry so the NEXT voice_session_start
-        # handed the user a dead handle.
-        #
-        # Identity-checked on purpose: when the same session_id has
-        # already reconnected on a NEW socket, `state.sessions` points
-        # at that newer ws and the voice session belongs to it. Tearing
-        # down here would kill the live call the reconnect just
-        # established. Only the socket still registered for this
-        # session may stop its voice.
-        # Phone voice now defaults to the primary session, which a web tab
-        # may also hold. Refreshing that tab must not end the phone's call:
-        # when a node's voice is bound to this session, the phone owns the
-        # teardown and does it on its own disconnect (`stop_node_voice`).
-        bound_nodes: list = []
-        nodes_bound = (
-            getattr(state.voice_router, "nodes_bound_to_session", None)
-            if state.voice_router
-            else None
-        )
-        if callable(nodes_bound):
-            try:
-                bound_nodes = [
-                    n for n in (nodes_bound(session_id) or []) if isinstance(n, str)
-                ]
-            except Exception:
-                bound_nodes = []
-        if (
-            state.voice_router
-            and state.sessions.get(session_id) is ws
-            and not bound_nodes
-        ):
-            try:
-                await state.voice_router.stop_session_voice(session_id)
-            except Exception as voice_exc:
-                logger.warning(f"Voice teardown on disconnect failed: {voice_exc}")
-        should_clear = state.should_clear_on_disconnect(session_id)
-        if remaining_attachments == 0 and should_clear:
-            if state.orchestrator:
-                try:
-                    await state.orchestrator.on_session_disconnect(session_id)
-                except Exception as e:
-                    logger.warning(f"Session summarization failed: {e}")
-            if state.identity_workspace:
-                try:
-                    _llm = state.orchestrator.llm if state.orchestrator else None
-                    await state.identity_workspace.maintenance_cycle(
-                        memory_store=state.memory,
-                        llm=_llm,
-                        session_id=session_id,
-                    )
-                except Exception as e:
-                    logger.debug(f"Identity maintenance skipped: {e}")
-        # Identity-checked de-registration. ``state.sessions`` holds ONE
-        # WebSocket per session_id, and every web tab that connects
-        # without ``?session_id=`` resolves to ``primary_session_id`` —
-        # so a second surface (another browser tab, the iOS app)
-        # overwrites the slot at line 1422 on connect. Popping
-        # unconditionally here meant the *older* handler's disconnect
-        # de-registered the *newer*, still-live socket. After that
-        # ``BrainState.send_to_session`` misses the key and silently
-        # returns, so every stream_delta / text_response for the turn
-        # goes nowhere while the client socket stays open and healthy:
-        # the composer spins on "thinking" forever with no error, no
-        # toast, and no reconnect. Operator report 2026-07 ("say hi,
-        # switch to another tab, it stops replying").
-        #
-        # Only tear down the shared per-session state when the socket in
-        # the slot is still ours; if a newer surface owns it, that
-        # surface owns its audio and perception buffers too.
-        if state.sessions.get(session_id) is ws:
-            state.sessions.pop(session_id, None)
-            state.audio.clear_session(session_id)
-            # Perception buffers are surface-local (one fusion frame per
-            # active socket); clear so a stale frame from a closed tab
-            # doesn't leak into the next session.
-            state.perception.clear(session_id)
-        # Working memory + orchestrator history persist while ANY
-        # surface remains AND for the primary session always. The
-        # snapshot store handles cold-boot durability.
-        if remaining_attachments == 0 and should_clear:
-            state.memory.working_clear(session_id)
-        elif remaining_attachments == 0 and session_id == state.primary_session_id:
-            # Force a snapshot on the way out so a brain restart
-            # immediately after losing all surfaces still has the
-            # latest turn on disk.
-            try:
-                state.snapshot_primary_thread(force=True)
-            except Exception as snap_exc:
-                logger.debug(f"Primary snapshot on disconnect failed: {snap_exc}")
-    except Exception as exc:
-        logger.error(
-            f"Unexpected error in session {session_id[:8]}: {exc}", exc_info=True
-        )
-        from agents.chat_turns import get_chat_turn_manager
-        await get_chat_turn_manager(state).detach(ws)
-        # Same identity check as the WebSocketDisconnect path above, for the
-        # same reason. This sibling handler was missed when that one was
-        # fixed, so the original bug survived here in a narrower window: an
-        # exception raised inside the OLDER socket's own cleanup lands in
-        # this block and de-registers the NEWER, still-live surface, after
-        # which send_to_session silently drops every reply to it.
-        #
-        # It was additionally worse than the disconnect path: working memory
-        # was cleared unconditionally, where that path gates the same call
-        # behind ``remaining_attachments == 0 and should_clear``. On the
-        # shared primary session that wiped state out from under every other
-        # attached surface. Mirror the guard rather than re-deriving it.
-        if state.sessions.get(session_id) is ws:
-            state.sessions.pop(session_id, None)
-            state.audio.clear_session(session_id)
-            state.perception.clear(session_id)
-            try:
-                remaining = state.detach_session(session_id)
-            except Exception:
-                logger.debug("detach_session failed on the error path", exc_info=True)
-                remaining = 0
-            if remaining == 0 and state.should_clear_on_disconnect(session_id):
-                state.memory.working_clear(session_id)
+            logger.debug("Failed client surface was already closed")
+    finally:
+        await close_surface(state, ws=ws, session_id=session_id, chat_tasks=chat_tasks,
+                            coordinator=coordinator, attachment=attachment,
+                            legacy_attached=legacy_attached)
 
 
 # ─────────────────────────────────────────────
@@ -3749,11 +3673,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 #      about web events" bug was caused by the phone
                 #      thread being completely partitioned from web's
                 #      thread.
-                target_sid = (
-                    payload_dict.get("session_id", "").strip()
-                    or getattr(state, "primary_session_id", "")
-                    or f"phone-{node_id or paired_device_id or 'session'}"
-                )
+                try:
+                    target_sid, _, _ = session_query(
+                        payload_dict,
+                        getattr(state, "primary_session_id", "")
+                        or f"phone-{node_id or paired_device_id or 'session'}",
+                    )
+                except RuntimeContextError as exc:
+                    await _send_protocol_error(ws, 4001, exc.code, name=exc.code)
+                    continue
 
                 if not text or not state.orchestrator:
                     _record_phone_envelope(
@@ -3788,173 +3716,178 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             target_sid, state.vision_buffer, node_id
                         )
 
-                if state.memory:
-                    state.memory.working_push(
-                        target_sid, {"role": "user", "text": text}
-                    )
-
-                # Phase 1 (audit-r10 overhaul plan) — `device_target`
-                # tells the brain WHERE the requested action should run.
-                # When the iOS client sends "brain" (e.g. "open my Mac
-                # browser"), `resolve_surface_from_context` swaps the
-                # legacy `phone_surface → http_api` hard-deny for the
-                # `brain_host` surface, unblocking the operator's
-                # "do X on my Mac" complaint. When "phone" or "glasses"
-                # the brain dispatches to `phone_actuator` so the LLM
-                # is steered toward `phone.*` skills (Phase 4).
-                device_target_raw = payload_dict.get("device_target")
-                device_target = (
-                    device_target_raw.strip().lower()
-                    if isinstance(device_target_raw, str)
-                    else None
-                ) or None
-
-                # Phase 2 (audit-r10 overhaul plan) — PromptRefiner runs
-                # BEFORE the orchestrator so the LLM gets a cleaned,
-                # disambiguated rewrite + an inferred device_target
-                # when the iOS client didn't set one. Feature-flagged
-                # via FERAL_PROMPT_REFINER (default off) so this PR
-                # lands the wiring without changing behavior; flip the
-                # flag once shadow metrics show it improves routing.
-                refined_text = text
-                refined_envelope = None
-                try:
-                    from agents.prompt_refiner import refine as _refine_prompt
-
-                    history = []
-                    if state.memory:
-                        try:
-                            history = state.memory.working_get(target_sid) or []
-                        except Exception:
-                            history = []
-                    refined_envelope = await _refine_prompt(
-                        text,
-                        llm=getattr(state.orchestrator, "llm", None),
-                        device_target_hint=device_target,
-                        history=history,
-                    )
-                    if refined_envelope.refined_text:
-                        refined_text = refined_envelope.refined_text
-                    if refined_envelope.device_target and not device_target:
-                        device_target = refined_envelope.device_target
-                except Exception as _refine_exc:
-                    logger.debug("PromptRefiner skipped: %s", _refine_exc)
-
-                # Device routing is decided here, not by the client.
-                # `refine` is behind FERAL_PROMPT_REFINER, which is off
-                # by default and returns an identity envelope, so with
-                # the flag off it infers nothing and a phone saying "on
-                # my Mac" resolved to http_api, where every
-                # desktop_control tool is denied. Clients worked around
-                # that by sending `device_target` themselves, which put
-                # a second copy of a security-routing rule in each SDK.
-                # This inference is deterministic and flag-independent;
-                # an explicit `device_target` from the client still
-                # wins, because the client knows things the text does
-                # not say.
-                if not device_target:
-                    try:
-                        from agents.prompt_refiner import infer_device_target
-
-                        device_target = infer_device_target(text) or None
-                    except Exception:
-                        logger.debug("device_target inference failed", exc_info=True)
-
-                context = {
-                    "source": "phone_surface",
-                    "mode": "phone_surface",
-                    "channel": channel,
-                    "reply_mode": reply_mode,
-                    "source_node": node_id or "",
-                    "paired_device_id": paired_device_id or "",
-                }
-                if device_target in ("brain", "phone", "glasses"):
-                    context["device_target"] = device_target
-                elif (
-                    str(getattr(ws, "_feral_node_type", "") or "").lower()
-                    in _PHONE_NODE_TYPES
-                ):
-                    # A paired phone that names no known device is the
-                    # operator asking the brain. Resolve to brain_host
-                    # rather than letting source "phone_surface" fall
-                    # through to http_api, which denies
-                    # agentic_computer_use__execute_task and the desktop
-                    # shell: "check my computer" failed while "check
-                    # something on my Mac" worked, and the only fix was
-                    # each client sending device_target itself. An
-                    # unrecognised value ("tv", "auto") is dropped rather
-                    # than passed on. This grants nothing new: the same
-                    # authenticated node could already send
-                    # device_target "brain".
-                    context["surface"] = "brain_host"
-                if refined_envelope is not None:
-                    context["refinement"] = refined_envelope.model_dump()
-                if reply_to:
-                    context["reply_to"] = reply_to
-
                 response_text = ""
-                # Audit-r11 fix — Bug 1: iOS double assistant bubble.
-                # The orchestrator's broadcast ``text_response`` AND
-                # the synchronous ``chat_response`` below both reach
-                # the phone WS when the phone is the only client on
-                # this session. Set a per-session suppression flag for
-                # the duration of this turn; ``response_delivery.send_text``
-                # consults it and skips the broadcast frame. The
-                # ``try/finally`` guarantees we always clear the flag
-                # so a desktop client joining the session later still
-                # gets ``text_response`` on its OWN turns.
-                state.orchestrator._text_response_suppressed[target_sid] = True
+                orch_error: str | None = None
                 try:
-                    if reply_mode == "stream":
-                        result = await state.orchestrator.handle_command_stream(
-                            session_id=target_sid,
-                            text=refined_text,
-                            context=context,
-                        )
-                    else:
-                        result = await state.orchestrator.handle_command(
-                            session_id=target_sid,
-                            text=refined_text,
-                            context=context,
-                        )
-                    if isinstance(result, str):
-                        response_text = result
-                    elif isinstance(result, dict):
-                        response_text = str(
-                            result.get("text") or result.get("message") or ""
-                        )
-                    if not response_text and state.memory:
-                        history = state.memory.working_get(target_sid) or []
-                        for item in reversed(history):
-                            if item.get("role") == "assistant" and item.get("text"):
-                                response_text = str(item["text"])
-                                break
-                    _record_phone_envelope(
-                        "allowed",
-                        "chat_request",
-                        detail={
-                            "session_id": target_sid,
+                    async with prepared_scope(state, target_sid):
+                        if state.memory:
+                            state.memory.working_push(
+                                target_sid, {"role": "user", "text": text}
+                            )
+
+                        # Phase 1 (audit-r10 overhaul plan) — `device_target`
+                        # tells the brain WHERE the requested action should run.
+                        # When the iOS client sends "brain" (e.g. "open my Mac
+                        # browser"), `resolve_surface_from_context` swaps the
+                        # legacy `phone_surface → http_api` hard-deny for the
+                        # `brain_host` surface, unblocking the operator's
+                        # "do X on my Mac" complaint. When "phone" or "glasses"
+                        # the brain dispatches to `phone_actuator` so the LLM
+                        # is steered toward `phone.*` skills (Phase 4).
+                        device_target_raw = payload_dict.get("device_target")
+                        device_target = (
+                            device_target_raw.strip().lower()
+                            if isinstance(device_target_raw, str)
+                            else None
+                        ) or None
+
+                        # Phase 2 (audit-r10 overhaul plan) — PromptRefiner runs
+                        # BEFORE the orchestrator so the LLM gets a cleaned,
+                        # disambiguated rewrite + an inferred device_target
+                        # when the iOS client didn't set one. Feature-flagged
+                        # via FERAL_PROMPT_REFINER (default off) so this PR
+                        # lands the wiring without changing behavior; flip the
+                        # flag once shadow metrics show it improves routing.
+                        refined_text = text
+                        refined_envelope = None
+                        try:
+                            from agents.prompt_refiner import refine as _refine_prompt
+
+                            history = []
+                            if state.memory:
+                                try:
+                                    history = state.memory.working_get(target_sid) or []
+                                except Exception:
+                                    history = []
+                            refined_envelope = await _refine_prompt(
+                                text,
+                                llm=getattr(state.orchestrator, "llm", None),
+                                device_target_hint=device_target,
+                                history=history,
+                            )
+                            if refined_envelope.refined_text:
+                                refined_text = refined_envelope.refined_text
+                            if refined_envelope.device_target and not device_target:
+                                device_target = refined_envelope.device_target
+                        except Exception as _refine_exc:
+                            logger.debug("PromptRefiner skipped: %s", _refine_exc)
+
+                        # Device routing is decided here, not by the client.
+                        # `refine` is behind FERAL_PROMPT_REFINER, which is off
+                        # by default and returns an identity envelope, so with
+                        # the flag off it infers nothing and a phone saying "on
+                        # my Mac" resolved to http_api, where every
+                        # desktop_control tool is denied. Clients worked around
+                        # that by sending `device_target` themselves, which put
+                        # a second copy of a security-routing rule in each SDK.
+                        # This inference is deterministic and flag-independent;
+                        # an explicit `device_target` from the client still
+                        # wins, because the client knows things the text does
+                        # not say.
+                        if not device_target:
+                            try:
+                                from agents.prompt_refiner import infer_device_target
+
+                                device_target = infer_device_target(text) or None
+                            except Exception:
+                                logger.debug("device_target inference failed", exc_info=True)
+
+                        context = {
+                            "source": "phone_surface",
+                            "mode": "phone_surface",
                             "channel": channel,
                             "reply_mode": reply_mode,
-                            "text_len": len(text),
-                        },
-                        payload_for_hash=payload_dict,
-                    )
-                    orch_error: str | None = None
-                except Exception as exc:
-                    orch_error = str(exc)[:500] or exc.__class__.__name__
+                            "source_node": node_id or "",
+                            "paired_device_id": paired_device_id or "",
+                        }
+                        if device_target in ("brain", "phone", "glasses"):
+                            context["device_target"] = device_target
+                        elif (
+                            str(getattr(ws, "_feral_node_type", "") or "").lower()
+                            in _PHONE_NODE_TYPES
+                        ):
+                            # A paired phone that names no known device is the
+                            # operator asking the brain. Resolve to brain_host
+                            # rather than letting source "phone_surface" fall
+                            # through to http_api, which denies
+                            # agentic_computer_use__execute_task and the desktop
+                            # shell: "check my computer" failed while "check
+                            # something on my Mac" worked, and the only fix was
+                            # each client sending device_target itself. An
+                            # unrecognised value ("tv", "auto") is dropped rather
+                            # than passed on. This grants nothing new: the same
+                            # authenticated node could already send
+                            # device_target "brain".
+                            context["surface"] = "brain_host"
+                        if refined_envelope is not None:
+                            context["refinement"] = refined_envelope.model_dump()
+                        if reply_to:
+                            context["reply_to"] = reply_to
+
+                        response_text = ""
+                        # Audit-r11 fix — Bug 1: iOS double assistant bubble.
+                        # The orchestrator's broadcast ``text_response`` AND
+                        # the synchronous ``chat_response`` below both reach
+                        # the phone WS when the phone is the only client on
+                        # this session. Set a per-session suppression flag for
+                        # the duration of this turn; ``response_delivery.send_text``
+                        # consults it and skips the broadcast frame. The
+                        # ``try/finally`` guarantees we always clear the flag
+                        # so a desktop client joining the session later still
+                        # gets ``text_response`` on its OWN turns.
+                        state.orchestrator._text_response_suppressed[target_sid] = True
+                        try:
+                            if reply_mode == "stream":
+                                result = await state.orchestrator.handle_command_stream(
+                                    session_id=target_sid,
+                                    text=refined_text,
+                                    context=context,
+                                )
+                            else:
+                                result = await state.orchestrator.handle_command(
+                                    session_id=target_sid,
+                                    text=refined_text,
+                                    context=context,
+                                )
+                            if isinstance(result, str):
+                                response_text = result
+                            elif isinstance(result, dict):
+                                response_text = str(
+                                    result.get("text") or result.get("message") or ""
+                                )
+                            if not response_text and state.memory:
+                                history = state.memory.working_get(target_sid) or []
+                                for item in reversed(history):
+                                    if item.get("role") == "assistant" and item.get("text"):
+                                        response_text = str(item["text"])
+                                        break
+                        finally:
+                            state.orchestrator._text_response_suppressed.pop(target_sid, None)
                     _record_phone_envelope(
-                        "error",
-                        "chat_request",
-                        detail={
-                            "reason": "orchestrator_error",
-                            "error": orch_error[:200],
-                        },
+                        "allowed", "chat_request",
+                        detail={"session_id": target_sid, "channel": channel,
+                                "reply_mode": reply_mode, "text_len": len(text)},
                         payload_for_hash=payload_dict,
                     )
+                except RuntimeContextError as exc:
+                    orch_error = exc.code
                     response_text = ""
-                finally:
-                    state.orchestrator._text_response_suppressed.pop(target_sid, None)
+                    _record_phone_envelope(
+                        "error", "chat_request", detail={"reason": exc.code},
+                        payload_for_hash=payload_dict,
+                    )
+                except Exception as exc:
+                    coordinator = coordinator_for(state)
+                    managed = coordinator is not None and coordinator.known_managed(target_sid)
+                    logger.warning("Phone chat processing failed (%s); managed=%s", type(exc).__name__, managed)
+                    orch_error = ("context_processing_failed; inspect earlier actions before retrying"
+                                  if managed else str(exc)[:500] or exc.__class__.__name__)
+                    response_text = ""
+                    _record_phone_envelope(
+                        "error", "chat_request",
+                        detail={"reason": "orchestrator_error", "error": orch_error[:200]},
+                        payload_for_hash=payload_dict,
+                    )
 
                 # Phase-1 validation pass (Item 2): the brain emits
                 # an explicit HUP `error` frame on the failure branch
@@ -4669,7 +4602,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     )
                 if state.voice_router and audio_b64:
                     sessions = state.get_sessions_for_daemon(node_id)
-                    target_sid = next(iter(sessions), None)
+                    target_sid = next(iter(sessions), "")
                     if not target_sid:
                         if chunk_idx == 0:
                             logger.warning(
@@ -4720,7 +4653,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 context = payload_dict.get("context", {})
                 if text and state.orchestrator and node_id:
                     sessions = state.get_sessions_for_daemon(node_id)
-                    target_sid = next(iter(sessions), None)
+                    target_sid = next(iter(sessions), "")
                     if not target_sid:
                         target_sid = f"daemon-{node_id}"
                         state.sessions[target_sid] = ws
@@ -4734,25 +4667,13 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     # contract for Lane 12). Without this the phone
                     # path bypassed PromptRefiner and the assistant
                     # saw raw text without device_target resolution.
-                    refined_text, refined_ctx, _ = await _prepare_chat_turn_context(
-                        session_id=target_sid,
-                        text=text,
-                        raw_context=context,
-                        source_node=node_id,
-                    )
-
-                    # Lane 08 WS9 — non-blocking; identical task
-                    # lifecycle to WebUI. The /v1/node WS keeps
-                    # receiving daemon frames while the turn runs.
+                    # Preparation is part of the same task-owned context fence
+                    # as execution, including legacy clients of a managed SID.
                     state.register_background_task(
-                        asyncio.create_task(
-                            _build_chat_turn_runner(
-                                ws=ws,
-                                session_id=target_sid,
-                                refined_text=refined_text,
-                                ctx=refined_ctx,
-                            )
-                        )
+                        asyncio.create_task(_run_prepared_chat_turn(
+                            ws=ws, session_id=target_sid, text=text,
+                            raw_context=context, source_node=node_id,
+                        ))
                     )
                     logger.info(f"Text command from daemon {node_id}: {text[:80]}")
 
@@ -5487,7 +5408,7 @@ async def _handle_audio_frame(node_id, frame_payload: dict) -> str | None:
         return None
 
     sessions = state.get_sessions_for_daemon(effective_node)
-    target_sid = next(iter(sessions), None)
+    target_sid = next(iter(sessions), "")
     if not target_sid:
         # The failure a device actually hits. Same precondition the
         # audio_chunk branch documents: audio is only routable once a

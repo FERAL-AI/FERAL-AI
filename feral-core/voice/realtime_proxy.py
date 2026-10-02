@@ -20,6 +20,7 @@ The phone never talks to OpenAI directly — the Brain owns the context.
 """
 
 from __future__ import annotations
+from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
 import asyncio
 import json
 import logging
@@ -979,6 +980,18 @@ class RealtimeProxy:
         input_sample_rate: int = SAMPLE_RATE,
         language_hint: str = "",
     ) -> RealtimeSession:
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            return await self._checkpoint_legacy_start_session(session_id=session_id, node_id=node_id, model=model, voice=voice, input_sample_rate=input_sample_rate, language_hint=language_hint)
+
+    async def _checkpoint_legacy_start_session(
+        self,
+        session_id: str,
+        node_id: str,
+        model: str = DEFAULT_MODEL,
+        voice: str = "",
+        input_sample_rate: int = SAMPLE_RATE,
+        language_hint: str = "",
+    ) -> RealtimeSession:
         """Create and connect a new realtime session for a phone/glasses node."""
         system_prompt = await self._build_system_prompt(session_id)
         # The RAW list, not the capped one. ``configure()`` caps before
@@ -1474,6 +1487,12 @@ class RealtimeProxy:
     async def _store_transcript_row(
         self, session_id: str, role: str, clean_text: str,
     ) -> None:
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            return await self._checkpoint_legacy_store_transcript_row(session_id=session_id, role=role, clean_text=clean_text)
+
+    async def _checkpoint_legacy_store_transcript_row(
+        self, session_id: str, role: str, clean_text: str,
+    ) -> None:
         """Write one final transcript to working memory and the durable thread."""
         if not self._memory:
             return
@@ -1715,6 +1734,15 @@ class RealtimeProxy:
             return None
 
     async def _handle_tool_call(
+        self, session_id: str, call_id: str, name: str, arguments: str,
+    ) -> str:
+        try:
+            async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+                return await self._checkpoint_legacy_handle_tool_call(session_id=session_id, call_id=call_id, name=name, arguments=arguments)
+        except RuntimeContextError as exc:
+            return json.dumps({"success": False, "error": "Managed realtime tools are unavailable", "code": exc.code})
+
+    async def _checkpoint_legacy_handle_tool_call(
         self, session_id: str, call_id: str, name: str, arguments: str,
     ) -> str:
         """Execute a tool call through the local skill executor."""

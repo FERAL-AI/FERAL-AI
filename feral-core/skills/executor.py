@@ -518,9 +518,12 @@ class SkillExecutor:
         except Exception:
             session_id = ""
 
+        # Current ToolRunner carries a one-use, task-bound executor admission
+        # for an already reviewed call. Older embeddings retain their gate.
+        safety_gate = "enforce_executor_safety" if callable(getattr(type(runner), "enforce_executor_safety", None)) else "enforce_safety"
         for gate_name, gate_args in (
             ("enforce_plan_mode", (tool_name, session_id)),
-            ("enforce_safety", (tool_name, args, session_id)),
+            (safety_gate, (tool_name, args, session_id)),
         ):
             gate = getattr(runner, gate_name, None)
             if not callable(gate):
@@ -529,7 +532,9 @@ class SkillExecutor:
                 refusal = gate(*gate_args)
             except Exception:
                 logger.exception("executor %s check failed for %s", gate_name, tool_name)
-                continue
+                # A revoked dispatch lease or failed policy evaluator cannot
+                # become permission to execute. Preserve the failure for callers.
+                raise
             # Must be a real refusal envelope, not merely non-None. A
             # MagicMock runner returns a MagicMock from every call, which
             # is truthy, so a None check alone blocks every tool call in

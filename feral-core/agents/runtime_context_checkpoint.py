@@ -1,20 +1,22 @@
-"""Inactive-until-installed runtime checkpoint lifecycle for trusted writers.
+"""Runtime checkpoint lifecycle installed by mandatory brain bootstrap.
 
-Entry preparation, voice/manual writers and cleanup must adopt this same scope
-before production activation. The coordinator never replays a request or tool.
+Entry preparation and cleanup share this scope. Managed voice and unsupported
+manual writers are refused explicitly. The coordinator never replays a task.
 """
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
+from types import MappingProxyType
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from memory.runtime_session_checkpoint import (
-    CheckpointFence, CheckpointStatus,
+    CheckpointFence, CheckpointStatus, CheckpointValidationError,
     encode_context, validate_session_id,
 )
 
@@ -32,6 +34,54 @@ class RuntimeContextError(RuntimeError):
         super().__init__(f"Runtime context is not ready ({code}); inspect the exact thread and its action receipts before continuing.")
 
 
+class ContextReadinessState(str, Enum):
+    READY = "ready"
+    LEGACY = "legacy"
+    LEGACY_UNAVAILABLE = "legacy_unavailable"
+    IN_PROGRESS = "in_progress"
+    DELETED = "deleted"
+    CORRUPT = "corrupt"
+    UNSUPPORTED = "unsupported"
+    QUOTA = "quota"
+    CONFLICT = "conflict"
+    UNAVAILABLE = "unavailable"
+
+
+@dataclass(frozen=True)
+class RuntimeContextReadiness:
+    session_id: str
+    state: ContextReadinessState
+    managed: bool
+    fence: CheckpointFence | None = None
+    initialized: bool = False
+    omissions: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "omissions", MappingProxyType(dict(self.omissions)))
+
+    @property
+    def ready(self) -> bool:
+        return self.state == ContextReadinessState.READY and self.fence is not None
+
+
+class RuntimeContextAttachmentToken:
+    """Opaque object identity, never a wire credential or SID-only counter."""
+    __slots__ = ("_session_id",)
+
+    def __init__(self, session_id: str):
+        self._session_id = session_id
+
+    @property
+    def session_id(self) -> str:
+        return self._session_id
+
+
+@dataclass(frozen=True)
+class RuntimeContextAttachment:
+    token: RuntimeContextAttachmentToken
+    readiness: RuntimeContextReadiness
+
+
 @dataclass
 class _OwnedScope:
     task: asyncio.Task[object]
@@ -45,20 +95,235 @@ class RuntimeContextCoordinator:
                  history: dict[str, list[dict[str, object]]],
                  lock_for: Callable[[str], asyncio.Lock],
                  image_call_ids: Callable[[str], frozenset[str]],
-                 clear_images: Callable[[str], None]):
+                 clear_images: Callable[[str], None],
+                 clear_session: Callable[[str], None] | None = None,
+                 finalize_legacy: Callable[[str], Awaitable[None]] | None = None,
+                 legacy_passthrough: bool = False):
         self.store = store
         self.history = history
-        self.lock_for = lock_for  # Existing exact-SID orchestration lock only.
+        self._lock_source = lock_for  # Existing exact-SID orchestration lock only.
+        self._retained_sids: set[str] = set()
         self.image_call_ids = image_call_ids
         self.clear_images = clear_images
+        self.clear_session = clear_session
+        self.finalize_legacy = finalize_legacy
+        self.legacy_passthrough = legacy_passthrough
+        self._attachments: dict[RuntimeContextAttachmentToken, bool] = {}
+        self._attachment_managed: set[RuntimeContextAttachmentToken] = set()
+        self._attachment_refusals: dict[RuntimeContextAttachmentToken, RuntimeContextReadiness] = {}
+        self._writers: dict[str, int] = {}
         self._fences: dict[str, CheckpointFence | None] = {}
         self._owner: ContextVar[_OwnedScope | None] = ContextVar("runtime_context_owner", default=None)
+
+    def lock_for(self, session_id: str) -> asyncio.Lock:
+        validate_session_id(session_id)
+        if session_id not in self._retained_sids:
+            if len(self._retained_sids) >= self.store._runtime_checkpoint_limits.sessions:
+                raise RuntimeContextError("context_session_quota")
+            self._retained_sids.add(session_id)
+        return self._lock_source(session_id)
+
+    async def is_managed(self, session_id: str) -> bool:
+        validate_session_id(session_id)
+        if session_id in self._fences:
+            return True
+        try:
+            return (await self.store.runtime_checkpoint_read(session_id)).status != CheckpointStatus.ABSENT
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise RuntimeContextError("checkpoint_unavailable") from None
+
+    def known_managed(self, session_id: str) -> bool:
+        """Positive cached knowledge only; false never proves absence in SQLite."""
+        return session_id in self._fences
+
+    def owns_writer(self, session_id: str) -> bool:
+        owner = self._owner.get()
+        return owner is not None and owner.task is asyncio.current_task() and owner.session_id == session_id
+
+    def has_attachments(self, session_id: str) -> bool:
+        return any(token.session_id == session_id for token in self._attachments)
+
+    def has_writers(self, session_id: str) -> bool:
+        return self._writers.get(session_id, 0) > 0
+
+    @asynccontextmanager
+    async def _writer_registration(self, session_id: str) -> AsyncIterator[None]:
+        self._writers[session_id] = self._writers.get(session_id, 0) + 1
+        try:
+            yield
+        finally:
+            remaining = self._writers[session_id] - 1
+            if remaining:
+                self._writers[session_id] = remaining
+            else:
+                self._writers.pop(session_id)
+
+    def _reserve_managed(self, session_id: str) -> None:
+        if session_id not in self._fences:
+            if len(self._fences) >= self.store._runtime_checkpoint_limits.sessions:
+                raise RuntimeContextError("context_session_quota")
+            self._fences[session_id] = None
+
+    async def attach(self, session_id: str, *, checkpoint_version: int | None = None) -> RuntimeContextAttachment:
+        validate_session_id(session_id)
+        if len(self._attachments) >= 128 or sum(token.session_id == session_id for token in self._attachments) >= 8:
+            raise RuntimeContextError("context_attachment_quota")
+        token = RuntimeContextAttachmentToken(session_id)
+        self._attachments[token] = False  # Reserve before waiting for the SID lock.
+        try:
+            async with self.lock_for(session_id):
+                if checkpoint_version is not None and (type(checkpoint_version) is not int or checkpoint_version != 1):
+                    result = RuntimeContextReadiness(session_id, ContextReadinessState.UNSUPPORTED, await self.is_managed(session_id))
+                elif await self.is_managed(session_id):
+                    result = await self._readiness_locked(session_id, restore=True)
+                elif checkpoint_version == 1:
+                    if self.history.get(session_id) or self.store.working_get(session_id, limit=1):
+                        result = RuntimeContextReadiness(session_id, ContextReadinessState.LEGACY_UNAVAILABLE, False)
+                    else:
+                        # Check capacity before any initialization creates a ledger row.
+                        if len(self._fences) >= self.store._runtime_checkpoint_limits.sessions:
+                            result = RuntimeContextReadiness(session_id, ContextReadinessState.QUOTA, False)
+                        else:
+                            created = await self.store.runtime_checkpoint_initialize_empty(session_id)
+                            initialized = created.status == CheckpointStatus.APPLIED
+                            self._attachments[token] = initialized
+                            if created.status == CheckpointStatus.CONFLICT and created.record is None:
+                                result = RuntimeContextReadiness(session_id, ContextReadinessState.LEGACY_UNAVAILABLE, False)
+                            elif created.status == CheckpointStatus.QUOTA:
+                                result = RuntimeContextReadiness(session_id, ContextReadinessState.QUOTA, False)
+                            else:
+                                result = await self._readiness_locked(session_id, restore=True, initialized=initialized)
+                else:
+                    result = RuntimeContextReadiness(session_id, ContextReadinessState.LEGACY, False)
+                if result.state not in {ContextReadinessState.READY, ContextReadinessState.LEGACY}:
+                    result = RuntimeContextReadiness(session_id, result.state, True)
+                    self._attachment_refusals[token] = result
+                if result.managed:
+                    self._attachment_managed.add(token)
+                return RuntimeContextAttachment(token, result)
+        except asyncio.CancelledError:
+            self._attachments.pop(token, None)
+            self._attachment_managed.discard(token)
+            self._attachment_refusals.pop(token, None)
+            raise
+        except Exception:
+            # An established authenticated attachment can still reconcile receipts.
+            # It has no READY claim and can never select legacy after DB failure.
+            self._attachment_managed.add(token)
+            result = RuntimeContextReadiness(session_id, ContextReadinessState.UNAVAILABLE, True)
+            self._attachment_refusals[token] = result
+            return RuntimeContextAttachment(token, result)
+
+    async def _readiness_locked(self, session_id: str, *, restore: bool = False, initialized: bool = False) -> RuntimeContextReadiness:
+        read = await self.store.runtime_checkpoint_read(session_id)
+        if read.status == CheckpointStatus.ABSENT:
+            return RuntimeContextReadiness(session_id, ContextReadinessState.CONFLICT if session_id in self._fences else ContextReadinessState.LEGACY, session_id in self._fences)
+        self._reserve_managed(session_id)
+        if read.status != CheckpointStatus.READY or read.record is None or read.record.context is None:
+            states = {CheckpointStatus.IN_PROGRESS: ContextReadinessState.IN_PROGRESS,
+                      CheckpointStatus.DELETED: ContextReadinessState.DELETED, CheckpointStatus.CORRUPT: ContextReadinessState.CORRUPT,
+                      CheckpointStatus.UNSUPPORTED: ContextReadinessState.UNSUPPORTED}
+            return RuntimeContextReadiness(session_id, states.get(read.status, ContextReadinessState.UNAVAILABLE), True)
+        cached = self._fences.get(session_id)
+        if cached is not None and cached != read.record.fence:
+            return RuntimeContextReadiness(session_id, ContextReadinessState.CONFLICT, True)
+        if restore:
+            try:
+                await self._restore_locked(session_id)
+            except RuntimeContextError:
+                return RuntimeContextReadiness(session_id, ContextReadinessState.CONFLICT, True)
+        elif cached is None:
+            return RuntimeContextReadiness(session_id, ContextReadinessState.CONFLICT, True)
+        values = read.record.context.omissions()
+        omissions = {key: value for key, value in values.items() if type(value) is int and isinstance(value, int)}
+        return RuntimeContextReadiness(session_id, ContextReadinessState.READY, True, read.record.fence, initialized, omissions)
+
+    async def readiness(self, token: RuntimeContextAttachmentToken) -> RuntimeContextReadiness:
+        if token not in self._attachments:
+            raise RuntimeContextError("context_attachment_invalid")
+        async with self.lock_for(token.session_id):
+            if token not in self._attachments:
+                raise RuntimeContextError("context_attachment_invalid")
+            try:
+                result = await self._readiness_locked(token.session_id, initialized=self._attachments[token])
+                refusal = self._attachment_refusals.get(token)
+                if refusal is not None and result.state in {ContextReadinessState.LEGACY, ContextReadinessState.READY}:
+                    return refusal  # Read-only polling cannot repair a refused attachment.
+                if result.managed:
+                    self._attachment_managed.add(token)
+                elif token in self._attachment_managed:
+                    return RuntimeContextReadiness(token.session_id, ContextReadinessState.UNAVAILABLE, True)
+                return result
+            except asyncio.CancelledError:
+                raise
+            except Exception:
+                return RuntimeContextReadiness(token.session_id, ContextReadinessState.UNAVAILABLE, True)
+
+    async def detach(self, token: RuntimeContextAttachmentToken, *, clear_legacy: bool = False) -> bool:
+        if token not in self._attachments:
+            return False
+        self._attachments.pop(token)
+        self._attachment_managed.discard(token)
+        self._attachment_refusals.pop(token, None)
+        return await self.evict_if_unattached(token.session_id, clear_legacy=clear_legacy)
+
+    async def evict_if_unattached(self, session_id: str, *, clear_legacy: bool = False) -> bool:
+        validate_session_id(session_id)
+        async with self.lock_for(session_id):
+            if self.has_attachments(session_id) or self.has_writers(session_id):
+                return False
+            managed = await self.is_managed(session_id)
+            if not managed and not clear_legacy:
+                return False
+            if not managed and self.finalize_legacy is not None:
+                await self.finalize_legacy(session_id)
+                if self.has_attachments(session_id) or self.has_writers(session_id):
+                    return False
+            self.history.pop(session_id, None)
+            self.store.working_clear(session_id)
+            self.clear_images(session_id)
+            if self.clear_session is not None:
+                self.clear_session(session_id)
+            return True
+
+    @asynccontextmanager
+    async def legacy_mutation_scope(self, session_ids: tuple[str, ...], operation: str,
+                                    *, command_handoff: bool = False) -> AsyncIterator[None]:
+        """Serialize legacy mutation, refuse known managed context before effects."""
+        from contextlib import AsyncExitStack
+        identities = sorted(set(session_ids))
+        for sid in identities:
+            validate_session_id(sid)
+        async with AsyncExitStack() as stack:
+            owner = self._owner.get()
+            if owner is not None and owner.task is asyncio.current_task() and owner.session_id in identities:
+                if await self.is_managed(owner.session_id):
+                    raise RuntimeContextError(f"managed_{operation}_unsupported")
+                if len(identities) > 1:
+                    raise RuntimeContextError("nested_context_mutation")
+            for sid in identities:
+                await stack.enter_async_context(self._writer_registration(sid))
+                if owner is None or owner.task is not asyncio.current_task() or owner.session_id != sid:
+                    await stack.enter_async_context(self.lock_for(sid))
+                if await self.is_managed(sid):
+                    raise RuntimeContextError(f"managed_{operation}_unsupported")
+            token = None
+            task = asyncio.current_task()
+            if task is not None and len(identities) == 1 and (owner is None or owner.task is not task):
+                token = self._owner.set(_OwnedScope(task, identities[0], command_handoff))
+            try:
+                yield
+            finally:
+                if token is not None:
+                    self._owner.reset(token)
 
     async def _restore_locked(self, session_id: str) -> CheckpointFence | None:
         read = await self.store.runtime_checkpoint_read(session_id)
         cached = self._fences.get(session_id)
         if read.status == CheckpointStatus.ABSENT:
-            if cached is not None or self.history.get(session_id):
+            if cached is not None or self.history.get(session_id) or self.store.working_get(session_id, limit=1):
                 raise RuntimeContextError("unmanaged_runtime_context")
             ui = await self.store.conversation_get(session_id)
             if ui is not None and ui.get("messages"):
@@ -98,11 +363,17 @@ class RuntimeContextCoordinator:
             raise RuntimeContextError("nested_context_writer")
         # Bound retained SID locks without evicting a held/queued lock. Failed
         # identities retain their slot for this coordinator's lifetime too.
-        if session_id not in self._fences:
-            if len(self._fences) >= self.store._runtime_checkpoint_limits.sessions:
-                raise RuntimeContextError("context_session_quota")
-            self._fences[session_id] = None
-        async with self.lock_for(session_id):
+        if not self.legacy_passthrough:
+            self._reserve_managed(session_id)
+        async with self._writer_registration(session_id), self.lock_for(session_id):
+            if self.legacy_passthrough and not await self.is_managed(session_id):
+                token = self._owner.set(_OwnedScope(task, session_id, command_handoff))
+                try:
+                    yield
+                finally:
+                    self._owner.reset(token)
+                return
+            self._reserve_managed(session_id)
             expected = await self._restore_locked(session_id)
             started = await self.store.runtime_checkpoint_begin(session_id, attempt_id=str(uuid4()), expected=expected)
             if started.status != CheckpointStatus.APPLIED or started.record is None:
@@ -145,3 +416,40 @@ class RuntimeContextCoordinator:
         else:
             async with self.write_scope(session_id):
                 yield
+
+
+def runtime_coordinator(orchestrator: object) -> RuntimeContextCoordinator | None:
+    value = getattr(orchestrator, "_context_checkpoints", None)
+    return value if isinstance(value, RuntimeContextCoordinator) else None
+
+
+@asynccontextmanager
+async def legacy_context_mutation(orchestrator: object, memory: object,
+                                  session_ids: tuple[str, ...], operation: str,
+                                  *, command_handoff: bool = False) -> AsyncIterator[None]:
+    """No managed legacy mutation, including adapters without an orchestrator."""
+    try:
+        for sid in session_ids:
+            validate_session_id(sid)
+    except CheckpointValidationError:
+        raise RuntimeContextError("context_invalid_session") from None
+    coordinator = runtime_coordinator(orchestrator)
+    if coordinator is not None:
+        async with coordinator.legacy_mutation_scope(session_ids, operation, command_handoff=command_handoff):
+            yield
+        return
+    # Some adapters are constructed before orchestration. They must not treat a
+    # known ledger row as legacy simply because their coordinator is unavailable.
+    from memory.store import MemoryStore
+    if isinstance(memory, MemoryStore):
+        for sid in session_ids:
+            try:
+                if (await memory.runtime_checkpoint_read(sid)).status != CheckpointStatus.ABSENT:
+                    raise RuntimeContextError(f"managed_{operation}_unsupported")
+            except asyncio.CancelledError:
+                raise
+            except RuntimeContextError:
+                raise
+            except Exception:
+                raise RuntimeContextError("checkpoint_unavailable") from None
+    yield

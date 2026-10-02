@@ -1,5 +1,21 @@
 # Theora / FERAL full-product release readiness
 
+Current published source is634595c7194aedaf6eb9b8c91cbacb87fedea4bd, required CI/native
+passed with12,426 backend tests/83skipped/74.42%coverage. Mypy848 versus812 remains
+failed. Immutable9.29 has passed bounded real Security layout, three local-model
+turns, Stop and Quit/relaunch/status reconciliation; see [9.29 evidence](NATIVE_9_29_ACCEPTANCE.md).
+The activation and real-executor approval repair below are working changes,
+not the packaged payload. Signing, installation/migration, account/device and
+remaining capability acceptance gates remain open. [Checkpoint](WORK_STATE.md).
+
+Current core working wave passed 597 combined targeted tests. The required local
+full-suite run ended in a test-harness INTERNALERROR and has no valid coverage
+result; it is not acceptance. Two socket failures passed after sandbox escalation,
+but the full teardown leak remains under investigation. A primary legacy fixture
+now binds the real checkpoint guard; exact approval-owner malformed inputs are
+refused. That follow-up passed 46 tests. Full local mypy is 845, above baseline812.
+Exact-source remote CI and the next packaged native journey remain required.
+
 Updated October 2, 2026. This is an implementation and acceptance roadmap, not a declaration of readiness. Start with the [source-backed execution plan](EXECUTION_PLAN.md), then the [architecture contracts](ARCHITECTURE_AND_CONTRACTS.md), [original execution plan](EXECUTION_AND_RELEASE_GATES.md), [iOS handoff](IOS_AGENT_HANDOFF.md) and [native feature inventory](../../../desktop-native/FEATURE_PARITY.md).
 
 ## Latest October 2 checkpoint
@@ -24,7 +40,7 @@ linked25 groups, desktop39/error5 assertions. It adds exact-turn native status/
 Stop/reconciliation, Forge proposal/statistics/drafting, explicit-interval
 scheduling and an inactive trusted context lifecycle. Production activation and
 legacy migration remain open.9.29/build2026100203 is the next assembly version;
-it is not yet built or accepted. [Wave evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md).
+it was subsequently built and exercised as recorded above. [Wave evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md).
 
 The assembled **9.27** candidate stages source34a43e640, independently matched
 against all478 production Python files. Actual local model response, reviewed

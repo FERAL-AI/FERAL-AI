@@ -18,6 +18,11 @@ import logging
 import time
 from typing import Callable, Awaitable, Optional, Any
 from uuid import uuid4
+from contextlib import asynccontextmanager
+
+from agents.runtime_context_checkpoint import (
+    RuntimeContextError, RuntimeContextReadiness, legacy_context_mutation, runtime_coordinator,
+)
 
 from config.loader import feral_home
 
@@ -194,13 +199,64 @@ class GatewaySession:
 def register_core_methods(registry: MethodRegistry, state):
     """Register all core gateway RPC methods."""
 
+    def context_error(exc: RuntimeContextError) -> GatewayError:
+        return GatewayError(exc.code, "Runtime context could not be confirmed; inspect the exact thread and its earlier actions.",
+                            {"retry_safe": False, "effects_may_have_occurred": exc.effects_may_have_occurred,
+                             "action_outcome": "unknown" if exc.effects_may_have_occurred else "not_asserted"})
+
+    async def attachment_guard(session_id: str, session: GatewaySession, *, unsupported: str | None = None):
+        """Respect the exact authenticated attachment even when its ledger is absent."""
+        lookup = session.metadata.get("runtime_context_readiness")
+        requested = session.metadata.get("context_checkpoint_requested") is True
+        if not callable(lookup):
+            if requested:
+                raise context_error(RuntimeContextError("context_unavailable"))
+            return
+        try:
+            readiness = await asyncio.wait_for(lookup(), timeout=10)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise context_error(RuntimeContextError("context_unavailable")) from None
+        if not isinstance(readiness, RuntimeContextReadiness) or readiness.session_id != session_id:
+            raise context_error(RuntimeContextError("context_unavailable"))
+        if requested or readiness.managed:
+            if not readiness.ready:
+                raise context_error(RuntimeContextError(f"context_{readiness.state.value}"))
+            if unsupported is not None:
+                raise context_error(RuntimeContextError(f"managed_{unsupported}_unsupported"))
+        elif readiness.state.value != "legacy":
+            raise context_error(RuntimeContextError(f"context_{readiness.state.value}"))
+
+    @asynccontextmanager
+    async def legacy_guard(identities: tuple[str, ...], operation: str):
+        try:
+            async with legacy_context_mutation(state.orchestrator, state.memory, identities, operation):
+                yield
+        except RuntimeContextError as exc:
+            raise GatewayError(exc.code, "This path cannot modify managed runtime context; use a new thread or inspect its status.") from None
+
     @registry.method("chat.capabilities")
     async def chat_capabilities(session_id: str, params: dict, session: GatewaySession):
         supported = callable(session.metadata.get("tracked_chat_send")) and callable(
             getattr(getattr(state, "memory", None), "chat_turn_claim", None)
         )
-        return {"turn_contract_versions": [1] if supported else [], "durable_receipts": supported,
-                "whole_turn_terminal": supported, "session_id": session_id}
+        result: dict[str, object] = {"turn_contract_versions": [1] if supported else [], "durable_receipts": supported,
+                  "whole_turn_terminal": supported, "session_id": session_id}
+        lookup = session.metadata.get("runtime_context_readiness")
+        result.update({"context_checkpoint_versions": [], "context_ready": False, "context_state": "unavailable", "context_managed": False})
+        if callable(lookup):
+            readiness = await lookup()
+            if isinstance(readiness, RuntimeContextReadiness) and readiness.session_id == session_id:
+                result.update({"context_checkpoint_versions": [1], "context_ready": readiness.ready,
+                               "context_state": readiness.state.value, "context_managed": readiness.managed,
+                               "managed_unsupported_paths": ["voice", "handoff", "reset", "compact", "snapshot", "branch", "restore", "delete"]})
+                if readiness.ready and readiness.fence is not None:
+                    result["context_checkpoint"] = {"contract_version": 1, "session_id": session_id,
+                                                    "generation": readiness.fence.generation, "revision": readiness.fence.revision,
+                                                    "durable": True, "initialized": readiness.initialized,
+                                                    "omissions": dict(readiness.omissions)}
+        return result
 
     @registry.method("chat.send")
     async def chat_send(session_id: str, params: dict, session: GatewaySession):
@@ -208,6 +264,7 @@ def register_core_methods(registry: MethodRegistry, state):
         context = params.get("context", {})
         if not text:
             raise GatewayError("INVALID_PARAMS", "text is required")
+        await attachment_guard(session_id, session)
 
         if params.get("turn_contract_version") is not None:
             from agents.chat_turns import ChatTurnError
@@ -227,16 +284,26 @@ def register_core_methods(registry: MethodRegistry, state):
                 return await submit(params, params.get("_gateway_request_id"), emit)
             except ChatTurnError as exc:
                 raise GatewayError(exc.code, "Tracked chat request was not accepted") from None
+            except RuntimeContextError as exc:
+                raise GatewayError(exc.code, "Runtime context could not be confirmed; inspect the exact thread and its earlier actions.",
+                                   {"retry_safe": False, "effects_may_have_occurred": exc.effects_may_have_occurred,
+                                    "action_outcome": "unknown" if exc.effects_may_have_occurred else "not_asserted"}) from None
 
-        if state.memory:
-            state.memory.working_push(session_id, {"role": "user", "text": text})
-
-        await session.emit("chat.thinking", {"status": "processing"})
-
-        if state.orchestrator:
-            await state.orchestrator.handle_command_stream(
-                session_id=session_id, text=text, context=context,
-            )
+        async def run():
+            if state.memory:
+                state.memory.working_push(session_id, {"role": "user", "text": text})
+            await session.emit("chat.thinking", {"status": "processing"})
+            if state.orchestrator:
+                await state.orchestrator.handle_command_stream(session_id=session_id, text=text, context=context)
+        coordinator = runtime_coordinator(state.orchestrator)
+        if coordinator is None:
+            await run()
+        else:
+            try:
+                async with coordinator.write_scope(session_id, command_handoff=True):
+                    await run()
+            except RuntimeContextError as exc:
+                raise GatewayError(exc.code, "Runtime context could not be confirmed; inspect the exact thread and its earlier actions.") from None
         return {"status": "delivered"}
 
     @registry.method("chat.abort")
@@ -260,6 +327,11 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.reset")
     async def session_reset(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="reset")
+        async with legacy_guard((session_id,), "reset"):
+            return await _session_reset(session_id, params, session)
+
+    async def _session_reset(session_id: str, params: dict, session: GatewaySession):
         # F2 — end-of-session trigger. Compact whatever history we
         # have before throwing it away; that preserves the session as
         # a real episode row instead of letting it vanish.
@@ -286,6 +358,11 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.compact")
     async def session_compact(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="compact")
+        async with legacy_guard((session_id,), "compact"):
+            return await _session_compact(session_id, params, session)
+
+    async def _session_compact(session_id: str, params: dict, session: GatewaySession):
         if state.orchestrator and state.memory:
             history = state.orchestrator.conversation_history.get(session_id, [])
             result = await state.memory.compact_session(
@@ -298,6 +375,11 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.snapshot")
     async def session_snapshot(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="snapshot")
+        async with legacy_guard((session_id,), "snapshot"):
+            return await _session_snapshot(session_id, params, session)
+
+    async def _session_snapshot(session_id: str, params: dict, session: GatewaySession):
         if not state.memory:
             raise GatewayError("NOT_FOUND", "Memory store not initialized")
         history = state.orchestrator.conversation_history.get(session_id, []) if state.orchestrator else []
@@ -322,6 +404,7 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.branch")
     async def session_branch(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="branch")
         if not state.memory:
             raise GatewayError("NOT_FOUND", "Memory store not initialized")
 
@@ -338,26 +421,28 @@ def register_core_methods(registry: MethodRegistry, state):
         branch_name = params.get("branch_name", f"branch-{int(time.time())}")
         branch_session_id = params.get("target_session_id", f"{session_id}:{branch_name}:{str(uuid4())[:6]}")
 
-        state.memory.working_replace(branch_session_id, source_snapshot.get("working", []))
-        if state.orchestrator:
-            state.orchestrator.conversation_history[branch_session_id] = source_snapshot.get("history", [])
+        async with legacy_guard((source_snapshot["session_id"], branch_session_id), "branch"):
+            state.memory.working_replace(branch_session_id, source_snapshot.get("working", []))
+            if state.orchestrator:
+                state.orchestrator.conversation_history[branch_session_id] = source_snapshot.get("history", [])
 
-        branched_snapshot = await state.memory.snapshot_session(
-            session_id=branch_session_id,
-            history=source_snapshot.get("history", []),
-            label=params.get("label", f"branch from {source_snapshot_id}"),
-            branch_name=branch_name,
-            source_snapshot_id=source_snapshot_id,
-        )
-        return {
-            "status": "branched",
-            "source_snapshot_id": source_snapshot_id,
-            "target_session_id": branch_session_id,
-            "snapshot": branched_snapshot,
-        }
+            branched_snapshot = await state.memory.snapshot_session(
+                session_id=branch_session_id,
+                history=source_snapshot.get("history", []),
+                label=params.get("label", f"branch from {source_snapshot_id}"),
+                branch_name=branch_name,
+                source_snapshot_id=source_snapshot_id,
+            )
+            return {
+                "status": "branched",
+                "source_snapshot_id": source_snapshot_id,
+                "target_session_id": branch_session_id,
+                "snapshot": branched_snapshot,
+            }
 
     @registry.method("session.restore")
     async def session_restore(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="restore")
         if not state.memory:
             raise GatewayError("NOT_FOUND", "Memory store not initialized")
         snapshot_id = params.get("snapshot_id", "")
@@ -372,27 +457,30 @@ def register_core_methods(registry: MethodRegistry, state):
         if not target_session_id:
             target_session_id = f"{session_id}:restore:{str(uuid4())[:6]}" if as_new_session else session_id
 
-        state.memory.working_replace(target_session_id, snapshot.get("working", []))
-        if state.orchestrator:
-            state.orchestrator.conversation_history[target_session_id] = snapshot.get("history", [])
+        async with legacy_guard((snapshot["session_id"], target_session_id), "restore"):
+            state.memory.working_replace(target_session_id, snapshot.get("working", []))
+            if state.orchestrator:
+                state.orchestrator.conversation_history[target_session_id] = snapshot.get("history", [])
 
-        restore_snapshot = await state.memory.snapshot_session(
-            session_id=target_session_id,
-            history=snapshot.get("history", []),
-            label=params.get("label", f"restore {snapshot_id}"),
-            branch_name=snapshot.get("branch_name", "main"),
-            source_snapshot_id=snapshot_id,
-        )
-        return {
-            "status": "restored",
-            "target_session_id": target_session_id,
-            "restored_from_snapshot_id": snapshot_id,
-            "snapshot": restore_snapshot,
-        }
+            restore_snapshot = await state.memory.snapshot_session(
+                session_id=target_session_id,
+                history=snapshot.get("history", []),
+                label=params.get("label", f"restore {snapshot_id}"),
+                branch_name=snapshot.get("branch_name", "main"),
+                source_snapshot_id=snapshot_id,
+            )
+            return {
+                "status": "restored",
+                "target_session_id": target_session_id,
+                "restored_from_snapshot_id": snapshot_id,
+                "snapshot": restore_snapshot,
+            }
 
     @registry.method("voice.config")
     async def voice_config(session_id: str, params: dict, session: GatewaySession):
         mode = params.get("mode", "realtime")
+        if mode != "disabled":
+            await attachment_guard(session_id, session, unsupported="voice")
         if state.voice_router:
             state.voice_router.set_session_voice_mode(session_id, mode)
             if mode == "disabled":
@@ -401,6 +489,7 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("voice.audio")
     async def voice_audio(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="voice")
         audio_b64 = params.get("data_b64", "")
         if state.voice_router and audio_b64:
             await state.voice_router.handle_audio_from_client(
@@ -574,6 +663,7 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("ui.action")
     async def ui_action(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session)
         action_id = params.get("action_id", "")
         event = params.get("event", "tap")
         value = params.get("value")

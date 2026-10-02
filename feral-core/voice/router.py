@@ -8,6 +8,7 @@ Routes audio based on source capabilities and provider config:
 """
 
 from __future__ import annotations
+from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
 import logging
 import os
 import time
@@ -672,6 +673,19 @@ class VoiceRouter:
         encoding: str = "pcm16",
         sample_rate: int = 24000,
     ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_audio_from_node(node_id=node_id, session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final, encoding=encoding, sample_rate=sample_rate)
+
+    async def _checkpoint_legacy_handle_audio_from_node(
+        self,
+        node_id: str,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int = 0,
+        is_final: bool = False,
+        encoding: str = "pcm16",
+        sample_rate: int = 24000,
+    ):
         # Wake-word gate is only appropriate for always-listening
         # desktop/background mics. When a phone user explicitly tapped
         # "Start voice" we already have voice_session_start on record
@@ -781,6 +795,18 @@ class VoiceRouter:
         encoding: str = "pcm16",
         sample_rate: int = 24000,
     ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_audio_from_client(session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final, encoding=encoding, sample_rate=sample_rate)
+
+    async def _checkpoint_legacy_handle_audio_from_client(
+        self,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int = 0,
+        is_final: bool = False,
+        encoding: str = "pcm16",
+        sample_rate: int = 24000,
+    ):
         # Mute gate. Same rule as the node path.
         if self.is_session_muted(session_id):
             return
@@ -833,6 +859,10 @@ class VoiceRouter:
     # ------------------------------------------------------------------
 
     async def _handle_gemini_node(self, node_id: str, session_id: str, audio_b64: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_gemini_node(node_id=node_id, session_id=session_id, audio_b64=audio_b64)
+
+    async def _checkpoint_legacy_handle_gemini_node(self, node_id: str, session_id: str, audio_b64: str):
         gs = self._gemini.get_session(node_id)
         if not gs:
             gs = await self._gemini.start_session(session_id, node_id)
@@ -840,6 +870,10 @@ class VoiceRouter:
             await gs.send_audio(audio_b64)
 
     async def _handle_gemini_client(self, session_id: str, client_node: str, audio_b64: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_gemini_client(session_id=session_id, client_node=client_node, audio_b64=audio_b64)
+
+    async def _checkpoint_legacy_handle_gemini_client(self, session_id: str, client_node: str, audio_b64: str):
         gs = self._gemini.get_session(client_node)
         if not gs:
             gs = await self._gemini.start_session(session_id, client_node)
@@ -847,6 +881,16 @@ class VoiceRouter:
             await gs.send_audio(audio_b64)
 
     async def handle_audio_for_gemini(
+        self,
+        session_id: str,
+        audio_b64: str,
+        *,
+        node_id: str = "",
+    ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_audio_for_gemini(session_id=session_id, audio_b64=audio_b64, node_id=node_id)
+
+    async def _checkpoint_legacy_handle_audio_for_gemini(
         self,
         session_id: str,
         audio_b64: str,
@@ -873,6 +917,19 @@ class VoiceRouter:
     # ------------------------------------------------------------------
 
     async def _handle_whisper_path(
+        self,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int,
+        is_final: bool,
+        encoding: str,
+        sample_rate: int,
+        source_node_id: str = "",
+    ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_whisper_path(session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final, encoding=encoding, sample_rate=sample_rate, source_node_id=source_node_id)
+
+    async def _checkpoint_legacy_handle_whisper_path(
         self,
         session_id: str,
         audio_b64: str,
@@ -979,6 +1036,10 @@ class VoiceRouter:
     # ------------------------------------------------------------------
 
     async def handle_text_from_node(self, node_id: str, session_id: str, text: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_text_from_node(node_id=node_id, session_id=session_id, text=text)
+
+    async def _checkpoint_legacy_handle_text_from_node(self, node_id: str, session_id: str, text: str):
         """Route a text command from a node — if realtime is active, send as text there."""
         provider = self._resolve_provider(node_id)
 
@@ -1002,6 +1063,10 @@ class VoiceRouter:
             )
 
     async def handle_text_from_client_voice(self, session_id: str, text: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_text_from_client_voice(session_id=session_id, text=text)
+
+    async def _checkpoint_legacy_handle_text_from_client_voice(self, session_id: str, text: str):
         """Route a text message into an active realtime voice session."""
         provider = self._resolve_session_provider(session_id)
         client_node = f"webclient_{session_id[:8]}"
@@ -1818,6 +1883,10 @@ class VoiceRouter:
     #   - chained         → ChainedVoicePipeline via open_chained_session
 
     async def open_session(self, session_id: str, mode: str, provider_opts: dict | None = None):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_open_session(session_id=session_id, mode=mode, provider_opts=provider_opts)
+
+    async def _checkpoint_legacy_open_session(self, session_id: str, mode: str, provider_opts: dict | None = None):
         """High-level entry point for opening a voice session by mode.
 
         Dispatches by mode:
@@ -2073,6 +2142,12 @@ class VoiceRouter:
     async def open_chained_session(
         self, session_id: str, provider_opts: dict | None = None
     ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_open_chained_session(session_id=session_id, provider_opts=provider_opts)
+
+    async def _checkpoint_legacy_open_chained_session(
+        self, session_id: str, provider_opts: dict | None = None
+    ):
         """Create a chained STT→LLM→TTS session with configured providers.
 
         Called when ``mode="chained"`` is received in a
@@ -2297,6 +2372,16 @@ class VoiceRouter:
             return False
 
     async def handle_chained_audio(
+        self,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int = 0,
+        is_final: bool = False,
+    ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_chained_audio(session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final)
+
+    async def _checkpoint_legacy_handle_chained_audio(
         self,
         session_id: str,
         audio_b64: str,

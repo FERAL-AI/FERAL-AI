@@ -81,7 +81,7 @@ from memory.runtime_session_checkpoint import (
     FORMAT_VERSION as CHECKPOINT_FORMAT_VERSION,
     CheckpointContext, CheckpointFence, CheckpointFutureFormat, CheckpointLimits,
     CheckpointRecord, CheckpointResult, CheckpointStatus, CheckpointValidationError,
-    decode_context, validate_session_id, validate_uuid,
+    decode_context, encode_context, validate_session_id, validate_uuid,
 )
 from memory.sqlite_features import require_fts5
 from security.sync_scopes import INHERIT as SCOPE_INHERIT
@@ -1806,6 +1806,56 @@ class MemoryStore:
         try:
             async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (session_id,)) as cursor:
                 return self._runtime_checkpoint_record(await cursor.fetchone())
+        finally:
+            await self._release(conn)
+
+    async def runtime_checkpoint_initialize_empty(self, session_id: str) -> CheckpointResult:
+        """Atomically initialize server-owned empty context before UI presave.
+
+        Existing rows are never overwritten. A nonempty or malformed legacy UI
+        blob returns CONFLICT with no record; it is not trusted model context.
+        This method never begins a task, imports a transcript or grants consent.
+        """
+        validate_session_id(session_id)
+        try:
+            context = encode_context([], [], limits=self._runtime_checkpoint_limits)
+        except CheckpointValidationError:
+            return CheckpointResult(CheckpointStatus.QUOTA)
+        conn = await self._conn()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (session_id,)) as cursor:
+                current = self._runtime_checkpoint_record(await cursor.fetchone())
+            if current.status != CheckpointStatus.ABSENT:
+                await conn.rollback()
+                return current
+            async with conn.execute("SELECT messages_json FROM conversations WHERE id = ?", (session_id,)) as cursor:
+                ui = await cursor.fetchone()
+            if ui is not None:
+                try:
+                    messages = json.loads(ui[0])
+                except (TypeError, ValueError):
+                    await conn.rollback()
+                    return CheckpointResult(CheckpointStatus.CONFLICT)
+                if not isinstance(messages, list) or messages:
+                    await conn.rollback()
+                    return CheckpointResult(CheckpointStatus.CONFLICT)
+            async with conn.execute("SELECT COUNT(*), COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) FROM runtime_session_checkpoints") as cursor:
+                totals = await cursor.fetchone()
+            if (totals is None or totals[0] >= self._runtime_checkpoint_limits.sessions
+                    or totals[1] + context.byte_count > self._runtime_checkpoint_limits.total_bytes):
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.QUOTA)
+            now = time.time()
+            fence = CheckpointFence(session_id, str(uuid4()), 1, str(uuid4()))
+            await conn.execute("INSERT INTO runtime_session_checkpoints VALUES (?, ?, ?, ?, 'ready', ?, ?, ?, ?)",
+                               (session_id, fence.generation, fence.revision, fence.attempt_id,
+                                CHECKPOINT_FORMAT_VERSION, context.encoded, context.byte_count, now))
+            await conn.commit()
+            return CheckpointResult(CheckpointStatus.APPLIED, CheckpointRecord(fence, CheckpointStatus.READY, now, context))
+        except BaseException:
+            await conn.rollback()
+            raise
         finally:
             await self._release(conn)
 
