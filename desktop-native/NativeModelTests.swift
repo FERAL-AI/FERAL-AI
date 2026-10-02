@@ -69,6 +69,32 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 
     @MainActor static func main() async {
         do {
+            let prefsSuite = "feral.preferences-startup-fixture." + UUID().uuidString
+            let fixturePrefs = UserDefaults(suiteName: prefsSuite)!
+            defer { fixturePrefs.removePersistentDomain(forName: prefsSuite) }
+            fixturePrefs.set("Existing fixture", forKey: "displayName")
+            fixturePrefs.set(true, forKey: "onboarded")
+            var suiteCalls = 0
+            let sameDomain = NativeModel.resolvePreferences(suiteName: "fixture.bundle", bundleIdentifier: "fixture.bundle", standard: fixturePrefs) { _ in suiteCalls += 1; return nil }
+            try expect(sameDomain === fixturePrefs && suiteCalls == 0 && sameDomain?.string(forKey: "displayName") == "Existing fixture", "bundle-domain startup must use existing standard defaults without recreating suite")
+            let independent = NativeModel.resolvePreferences(suiteName: "explicit.fixture", bundleIdentifier: "fixture.bundle", standard: fixturePrefs) { name in suiteCalls += 1; return name == "explicit.fixture" ? fixturePrefs : nil }
+            try expect(independent === fixturePrefs && suiteCalls == 1, "explicit independent suite bypassed selected profile")
+            let unavailablePreferences = NativeModel.resolvePreferences(suiteName: "unavailable.fixture", bundleIdentifier: "fixture.bundle", standard: fixturePrefs) { _ in nil }
+            try expect(unavailablePreferences == nil, "failed explicit suite fell back to wrong profile")
+            let fixtureConfiguration = URLSessionConfiguration.ephemeral
+            fixtureConfiguration.protocolClasses = [WireProtocol.self]
+            let startup = NativeModel(session: URLSession(configuration: fixtureConfiguration), preferencesResolver: { sameDomain })
+            try expect(startup.onboarded && startup.displayName == "Existing fixture", "real initializer resolution path lost saved profile")
+            WireProtocol.reset()
+            let blocked = NativeModel(session: URLSession(configuration: fixtureConfiguration), preferencesResolver: { nil })
+            try expect(!blocked.onboarded && !blocked.ready && blocked.error?.contains("not been changed") == true, "nil defaults resolution crashed or silently started fresh profile")
+            blocked.displayName = "Must never persist"; blocked.saveProfile(); blocked.completeProfileOnboarding()
+            await blocked.saveSettings(); await blocked.start()
+            blocked.ready = true
+            let blockedSend = await blocked.sendChat("Must not dispatch")
+            try expect(!blockedSend && !blocked.ready && blocked.featureBaseURL == nil && blocked.securityBaseURL == nil && !blocked.onboarded && WireProtocol.captured.isEmpty, "unavailable preferences permitted startup, onboarding or network effects")
+            try expect(fixturePrefs.string(forKey: "displayName") == "Existing fixture" && fixturePrefs.bool(forKey: "onboarded"), "nil resolver reset existing fixture profile")
+            print("PASS app-domain defaults startup preserves settings; nil explicit suites fail closed before profile/runtime/network effects")
             WireProtocol.reset()
             let empty = model(); empty.isSending = true
             await empty.consume(frame("text_response", ["text": ""]))
@@ -396,7 +422,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             dying.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: staleHealthOwner, phase: .limited, reason: "Memory unavailable; use Security.", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false, serviceReachable: true))
             try expect(!dying.ready && dying.serviceReachable && dying.securityBaseURL != nil && dying.featureBaseURL == nil, "limited memory readiness exposes Security only and never full agent features")
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 19 groups; mocked HTTP/wire only, no engine/model execution")
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 20 groups; mocked HTTP/wire only, no engine/model execution")
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)
             exit(1)

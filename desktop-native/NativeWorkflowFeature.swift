@@ -297,12 +297,51 @@ struct NativeWorkflowFeatureView: View {
         } }
     }
     @ViewBuilder private var intents:some View {
-        card("Compile a goal") { TextEditor(text:$intent).frame(height:90).accessibilityLabel("Intent goal");Button("Review plan compilation…") { request(.compile(intent)) }.disabled(busy || intent.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty);Text("Compilation may use the configured AI provider; suggestions are not automatically executed.").font(.caption).foregroundStyle(.secondary) }
+        intentCompilationCard
         state("today")
-        ForEach(model.rows("today")) { action in card(action.title) { Text(action.raw["intent"] as? String ?? "").foregroundStyle(.secondary);Text("Suggestion: \(action.raw["tool_hint"] as? String ?? "Manual")").font(.caption);Button("Mark done…") { request(.complete(plan:action.raw["plan_id"] as? String ?? "",action:action.id,result:"Completed manually")) }.disabled(busy) } }
+        ForEach(model.rows("today")) { action in intentActionCard(action) }
         state("plans")
-        ForEach(model.rows("plans")) { plan in card(plan.title) { Text("State: " + (plan.raw["status"] as? String ?? "Unavailable") + " · " + String(describing:plan.raw["actions_done"] ?? "?") + " / " + String(describing:plan.raw["actions_total"] ?? "?") + " actions recorded done").foregroundStyle(.secondary);if let progress = plan.raw["progress"] as? NSNumber { ProgressView(value:min(1,max(0,progress.doubleValue)));Text(String(format:"%.0f%%",progress.doubleValue * 100)).font(.caption) } } }
-        if let plan = model.compiledPlan { card("Latest compiled suggestions") { ForEach(Array((plan["actions"] as? [[String:Any]] ?? []).enumerated()),id:\.offset) { _,action in Text(action["description"] as? String ?? "No description provided.") } } }
+        ForEach(model.rows("plans")) { plan in intentPlanCard(plan) }
+        if let plan = model.compiledPlan { compiledIntentCard(plan) }
+    }
+    private var intentCompilationCard:some View {
+        card("Compile a goal") {
+            TextEditor(text:$intent).frame(height:90).accessibilityLabel("Intent goal")
+            Button("Review plan compilation…") { request(.compile(intent)) }
+                .disabled(busy || intent.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty)
+            Text("Compilation may use the configured AI provider; suggestions are not automatically executed.")
+                .font(.caption).foregroundStyle(.secondary)
+        }
+    }
+    private func intentActionCard(_ action:NativeWorkflowRow) -> some View {
+        card(action.title) {
+            Text(action.raw["intent"] as? String ?? "").foregroundStyle(.secondary)
+            Text("Suggestion: \(action.raw["tool_hint"] as? String ?? "Manual")").font(.caption)
+            Button("Mark done…") {
+                request(.complete(plan:action.raw["plan_id"] as? String ?? "",action:action.id,result:"Completed manually"))
+            }.disabled(busy)
+        }
+    }
+    private func intentPlanCard(_ plan:NativeWorkflowRow) -> some View {
+        let status = plan.raw["status"] as? String ?? "Unavailable"
+        let done = String(describing:plan.raw["actions_done"] ?? "?")
+        let total = String(describing:plan.raw["actions_total"] ?? "?")
+        let summary = "State: \(status) · \(done) / \(total) actions recorded done"
+        return card(plan.title) {
+            Text(summary).foregroundStyle(.secondary)
+            if let progress = plan.raw["progress"] as? NSNumber {
+                ProgressView(value:min(1,max(0,progress.doubleValue)))
+                Text(String(format:"%.0f%%",progress.doubleValue * 100)).font(.caption)
+            }
+        }
+    }
+    private func compiledIntentCard(_ plan:[String:Any]) -> some View {
+        let actions = plan["actions"] as? [[String:Any]] ?? []
+        return card("Latest compiled suggestions") {
+            ForEach(Array(actions.enumerated()),id:\.offset) { _,action in
+                Text(action["description"] as? String ?? "No description provided.")
+            }
+        }
     }
     private var draftSheet:some View {
         VStack(alignment:.leading,spacing:16) {

@@ -4,6 +4,7 @@ Not an OS/vault accessor. Optional locked vaults on fresh plaintext profiles do
 not require a lease. Revocation prevents new dispatch; already-started external
 operations can remain uncertain and are never described as rolled back.
 """
+
 import asyncio
 from contextlib import contextmanager
 from contextvars import ContextVar
@@ -25,14 +26,19 @@ _lease = ContextVar("feral_reviewed_agent_turn_lease", default=None)
 
 def lease_required(state):
     controller = getattr(state, "agent_bootstrap_controller", None)
-    return (getattr(state, "_native_vault_deferred", False) is True and
-            (getattr(state, "_native_bootstrap_required", False) is True or
-             getattr(controller, "_active_binding", None) is not None or
-             getattr(controller, "_completed", None) is not None))
+    return getattr(state, "_native_vault_deferred", False) is True and (
+        getattr(state, "_native_bootstrap_required", False) is True
+        or getattr(controller, "_active_binding", None) is not None
+        or getattr(controller, "_completed", None) is not None
+    )
 
 
 def capture_agent_lease(state):
-    return AgentTurnLease(state, getattr(state, "_native_agent_turn_generation", 0)) if lease_required(state) else None
+    return (
+        AgentTurnLease(state, getattr(state, "_native_agent_turn_generation", 0))
+        if lease_required(state)
+        else None
+    )
 
 
 def guard_agent_dispatch(attached=None):
@@ -43,12 +49,20 @@ def guard_agent_dispatch(attached=None):
     if not isinstance(lease, AgentTurnLease):
         raise AgentTurnRevoked("Agent authorization lease is unavailable")
     state = lease.state
-    if (lease.generation != getattr(state, "_native_agent_turn_generation", 0) or
-            getattr(state, "_native_bootstrap_required", False) is True or
-            getattr(state, "orchestrator", None) is None or
-            getattr(state, "memory", None) is None):
-        raise AgentTurnRevoked("Agent authorization was revoked; no new tool dispatch is allowed")
-    if attached is not None and (not isinstance(attached, AgentTurnLease) or attached.state is not state or attached.generation != lease.generation):
+    if (
+        lease.generation != getattr(state, "_native_agent_turn_generation", 0)
+        or getattr(state, "_native_bootstrap_required", False) is True
+        or getattr(state, "orchestrator", None) is None
+        or getattr(state, "memory", None) is None
+    ):
+        raise AgentTurnRevoked(
+            "Agent authorization was revoked; no new tool dispatch is allowed"
+        )
+    if attached is not None and (
+        not isinstance(attached, AgentTurnLease)
+        or attached.state is not state
+        or attached.generation != lease.generation
+    ):
         raise AgentTurnRevoked("Tool runner belongs to another agent generation")
 
 
@@ -87,16 +101,20 @@ def spawn_agent_turn(state, coro):
             _lease.reset(token)
             if not started:
                 close = getattr(coro, "close", None)
-                if callable(close): close()
+                if callable(close):
+                    close()
 
     task = asyncio.create_task(run())
     registry.add(task)
     task.add_done_callback(registry.discard)
+
     # If cancelled before run's first instruction, its finally cannot close the
     # supplied coroutine. Keep an idempotent done cleanup to prevent leaked work.
     def close_unstarted(_):
         close = getattr(coro, "close", None)
-        if callable(close): close()
+        if callable(close):
+            close()
+
     task.add_done_callback(close_unstarted)
     return task
 
@@ -104,9 +122,15 @@ def spawn_agent_turn(state, coro):
 def invalidate_agent_turns(state):
     if not lease_required(state):
         return ()
-    state._native_agent_turn_generation = getattr(state, "_native_agent_turn_generation", 0) + 1
+    state._native_agent_turn_generation = (
+        getattr(state, "_native_agent_turn_generation", 0) + 1
+    )
     current = asyncio.current_task()
-    tasks = tuple(task for task in getattr(state, "_native_agent_turn_tasks", ()) if not task.done())
+    tasks = tuple(
+        task
+        for task in getattr(state, "_native_agent_turn_tasks", ())
+        if not task.done()
+    )
     for task in tasks:
         # A turn that calls lock must finish the lock response itself. Keep it
         # in drain handles so its retained memory cannot be closed underneath it.

@@ -1,6 +1,11 @@
 import Foundation
 @MainActor private final class DesktopLoginFake: NativeDesktopLoginService {
-    var status: NativeDesktopLoginStatus = .notRegistered
+    private var storedStatus: NativeDesktopLoginStatus = .notRegistered
+    var statusReads = 0
+    var status: NativeDesktopLoginStatus {
+        get { statusReads += 1; return storedStatus }
+        set { storedStatus = newValue }
+    }
     var registers = 0, unregisters = 0, opens = 0
     var fail = false, approval = false, missing = false
     func register() throws { registers += 1; if fail { throw NSError(domain: "fixture", code: 1, userInfo: [NSLocalizedDescriptionKey: "private-system-sentinel"]) }; status = missing ? .notFound : (approval ? .requiresApproval : .enabled) }
@@ -15,6 +20,24 @@ import Foundation
         let prefs = UserDefaults(suiteName: suite)!; defer { prefs.removePersistentDomain(forName: suite) }
         let login = DesktopLoginFake()
         let allowed = ["Chat", "Memory", "Settings"]
+        var factoryCalls = 0
+        let resolvedStandard = NativeDesktopExperience.resolvePreferences(suiteName: "ai.feral.native.preview", bundleIdentifier: "ai.feral.native.preview", standard: prefs) { _ in factoryCalls += 1; return nil }
+        check(resolvedStandard === prefs && factoryCalls == 0, "matching bundle domain uses existing standard defaults without constructing a suite")
+        prefs.set("Memory", forKey: "desktop.lastDestination")
+        let defaultDomain = NativeDesktopExperience(allowedDestinations: allowed, loginService: DesktopLoginFake(), preferenceSuite: "ai.feral.native.preview", bundleIdentifier: "ai.feral.native.preview", standardPreferences: prefs, preferenceFactory: { _ in factoryCalls += 1; return nil })
+        check(defaultDomain.preferencesAvailable && defaultDomain.initialDestination == "Memory" && factoryCalls == 0, "controller preserves existing default-domain destination without suite failure")
+        prefs.removeObject(forKey: "desktop.lastDestination")
+        let unavailableLogin = DesktopLoginFake()
+        let unavailable = NativeDesktopExperience(allowedDestinations: allowed, loginService: unavailableLogin, bundleURL: URL(fileURLWithPath: "/Applications/FERAL.app"), preferenceSuite: "fixture.custom.unavailable", bundleIdentifier: "ai.feral.native.preview", standardPreferences: prefs, preferenceFactory: { _ in factoryCalls += 1; return nil })
+        check(!unavailable.preferencesAvailable && !unavailable.keepRunningWhenClosed && !unavailable.menuBarEnabled && !unavailable.restoreLastDestination && unavailable.initialDestination == "Chat", "unavailable custom suite fails closed without fallback or crash")
+        check(!unavailable.registrationEligible && unavailable.loginStatus == .unknown && unavailableLogin.statusReads == 0, "unavailable suite cannot query OS login service on construction")
+        check(unavailable.error?.contains("not been reset or changed") == true, "unavailable preferences report truthful preserved-settings error")
+        for action: NativeDesktopPreferenceAction in [.keepRunning(true), .menuBar(true), .rememberDestination(true), .login(true), .login(false)] {
+            check(unavailable.review(action) == nil, "unavailable custom preferences cannot prepare a mutation")
+        }
+        unavailable.rememberDestination("Memory"); unavailable.refreshLoginStatus(); unavailable.openLoginSettings()
+        check(unavailableLogin.statusReads == 0 && unavailableLogin.registers == 0 && unavailableLogin.unregisters == 0 && unavailableLogin.opens == 0, "unavailable suite blocks all login queries and Settings side effects")
+        check(prefs.string(forKey: "desktop.lastDestination") == nil && unavailable.lastDestination == "Chat", "unavailable suite cannot read or write standard fallback destination")
         let controller = NativeDesktopExperience(allowedDestinations: allowed, preferences: prefs, loginService: login, bundleURL: URL(fileURLWithPath: "/private/tmp/FERAL Native Preview.app"))
         check(!controller.keepRunningWhenClosed && controller.menuBarEnabled && controller.initialDestination == "Chat", "fresh defaults preserve opt-in background semantics")
         check(login.registers == 0 && login.opens == 0 && !controller.registrationEligible, "construction cannot register/open Settings; temporary bundle gated")
@@ -22,6 +45,7 @@ import Foundation
         controller.rememberDestination("Memory"); check(controller.lastDestination == "Memory" && prefs.string(forKey: "desktop.lastDestination") == "Memory", "validated destination persisted in isolated suite")
         controller.rememberDestination("private-invalid-sentinel"); check(controller.lastDestination == "Memory", "unknown destination cannot be persisted")
         let keep = controller.review(.keepRunning(true))!
+        check(!unavailable.perform(keep) && unavailableLogin.statusReads == 0 && prefs.object(forKey: "desktop.keepRunningWhenClosed") == nil, "unavailable preferences block supplied review before writes or OS reads")
         check(!controller.keepRunningWhenClosed && keep.scope.contains("scheduled jobs") && keep.proposed.contains("menu bar enabled"), "review alone cannot enable background; scope disclosed")
         check(controller.perform(keep) && controller.keepRunningWhenClosed, "explicit opt-in saves keep-running behavior")
         check(!controller.perform(keep), "preference review single-use")

@@ -5,6 +5,7 @@ not wired into boot yet. Callers must gate dependent services with require_ready
 and supply hydration/disable callbacks which do not start jobs before hydration
 has completed. A timed-out OS operation remains single-flight until it returns.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +31,9 @@ class VaultLockedRefusal(RuntimeError):
 class VaultInitializationRefusal(RuntimeError):
     def __init__(self, code: str):
         self.code = code
-        super().__init__("Fresh initialization needs a current explicit review and no operation in progress.")
+        super().__init__(
+            "Fresh initialization needs a current explicit review and no operation in progress."
+        )
 
 
 @dataclass(frozen=True)
@@ -54,15 +57,18 @@ def readonly_vault_factory(vault_path: str | Path | None = None):
     value. Keychain get runs directly on the coordinator's one daemon worker;
     no nested timeout thread can outlive our single-flight bookkeeping.
     """
+
     def open_existing():
         from security.vault import BlindVault, KEYRING_SERVICE, KEYRING_USERNAME
 
         class ReadOnlyOpenedVault(BlindVault):
             _explicit_deferred_unlock = True
+
             def _master_key(self):
                 if self._cached_master_key is not None:
                     return self._cached_master_key
                 import keyring
+
                 stored = keyring.get_password(KEYRING_SERVICE, KEYRING_USERNAME)
                 if not stored:
                     raise _Unavailable("key_unavailable")
@@ -83,7 +89,9 @@ def readonly_vault_factory(vault_path: str | Path | None = None):
                     self._decrypt_blob(self._enc_path.read_bytes())
                 )
 
-        return ReadOnlyOpenedVault(vault_path=str(vault_path) if vault_path is not None else None)
+        return ReadOnlyOpenedVault(
+            vault_path=str(vault_path) if vault_path is not None else None
+        )
 
     return open_existing
 
@@ -103,6 +111,7 @@ class VaultCoordinator:
     returning False is failure. Disable must remove dependent readiness on
     failure/lock. Do not expose the private vault before require_ready succeeds.
     """
+
     _MESSAGES = {
         "unlock_required": "Stored credentials are locked. Unlock explicitly to continue.",
         "unlock_pending": "The original unlock is still running. Another attempt will not start.",
@@ -119,10 +128,14 @@ class VaultCoordinator:
         "initialization_partial": "The master key was added, but vault persistence failed. Initialization is partial; no key or file was reset or deleted.",
     }
 
-    def __init__(self, *, vault_factory: Callable[[], Any] | None = None,
-                 credential_hydrator: Callable[[Any], Any] | None = None,
-                 disable_dependents: Callable[[], Any] | None = None,
-                 fresh_initializer: Callable[[], Any] | None = None):
+    def __init__(
+        self,
+        *,
+        vault_factory: Callable[[], Any] | None = None,
+        credential_hydrator: Callable[[Any], Any] | None = None,
+        disable_dependents: Callable[[], Any] | None = None,
+        fresh_initializer: Callable[[], Any] | None = None,
+    ):
         self._factory = vault_factory or readonly_vault_factory()
         self._initializer = fresh_initializer
         self._initialization_reviews: dict[str, VaultInitializationReview] = {}
@@ -138,10 +151,13 @@ class VaultCoordinator:
 
     def status(self) -> dict:
         # No filesystem, keychain, factory or credential callbacks here.
-        return {"state": self._state, "code": self._code,
-                "message": self._MESSAGES[self._code],
-                "in_flight": self._operation is not None and not self._operation.done(),
-                "credentials_available": self._state == "ready"}
+        return {
+            "state": self._state,
+            "code": self._code,
+            "message": self._MESSAGES[self._code],
+            "in_flight": self._operation is not None and not self._operation.done(),
+            "credentials_available": self._state == "ready",
+        }
 
     def require_ready(self):
         if self._state != "ready" or self._vault is None:
@@ -161,20 +177,35 @@ class VaultCoordinator:
             self._state, self._code = "unavailable", "hydration_failed"
 
     def review_unlock(self) -> dict:
-        if self._state == "ready" or (self._operation is not None and not self._operation.done()):
+        if self._state == "ready" or (
+            self._operation is not None and not self._operation.done()
+        ):
             raise VaultInitializationRefusal("operation_in_progress")
         token = str(uuid4())
-        self._unlock_reviews[token] = (self._generation, time.monotonic(), self._state, self._code)
-        return {"review_token": token, "expires_in_seconds": 300,
-                "previous_state": self._state,
-                "scope": "Unlock existing encrypted credentials using the existing OS keychain. The OS may ask for access. Successful authentication activates stored credentials locally and may restore the existing encrypted memory database to its plaintext working database. No keychain reset, recovery, fresh initialization, model request or federation startup is performed. Previously blocked full agent bootstrap remains a separate pending action."}
+        self._unlock_reviews[token] = (
+            self._generation,
+            time.monotonic(),
+            self._state,
+            self._code,
+        )
+        return {
+            "review_token": token,
+            "expires_in_seconds": 300,
+            "previous_state": self._state,
+            "scope": "Unlock existing encrypted credentials using the existing OS keychain. The OS may ask for access. Successful authentication activates stored credentials locally and may restore the existing encrypted memory database to its plaintext working database. No keychain reset, recovery, fresh initialization, model request or federation startup is performed. Previously blocked full agent bootstrap remains a separate pending action.",
+        }
 
     def cancel_unlock_review(self, token: str):
         self._unlock_reviews.pop(token, None)
 
     async def confirm_unlock(self, token: str, *, timeout: float = 5.0) -> dict:
         held = self._unlock_reviews.pop(token, None)
-        if held is None or held[0] != self._generation or time.monotonic() - held[1] > 300 or held[2:] != (self._state, self._code):
+        if (
+            held is None
+            or held[0] != self._generation
+            or time.monotonic() - held[1] > 300
+            or held[2:] != (self._state, self._code)
+        ):
             raise VaultInitializationRefusal("review_expired")
         if self._operation is not None and not self._operation.done():
             raise VaultInitializationRefusal("operation_in_progress")
@@ -182,7 +213,13 @@ class VaultCoordinator:
         return await self.unlock(timeout=timeout)
 
     async def unlock(self, *, timeout: float = 5.0) -> dict:
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0 or timeout > 120:
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+            or timeout > 120
+        ):
             raise ValueError("timeout must be finite and between zero and 120 seconds")
         loop = asyncio.get_running_loop()
         if self._loop is not None and self._loop is not loop:
@@ -208,30 +245,53 @@ class VaultCoordinator:
         # after confirmation. Never inspect OS keys while constructing UI.
         if self._initializer is None:
             raise VaultInitializationRefusal("initialization_unsupported")
-        if self._state == "ready" or (self._operation is not None and not self._operation.done()):
+        if self._state == "ready" or (
+            self._operation is not None and not self._operation.done()
+        ):
             raise VaultInitializationRefusal("operation_in_progress")
-        review = VaultInitializationReview(str(uuid4()), self._generation, time.monotonic())
+        review = VaultInitializationReview(
+            str(uuid4()), self._generation, time.monotonic()
+        )
         self._initialization_reviews[review.token] = review
         return review
 
     def cancel_initialization(self, review: VaultInitializationReview):
         self._initialization_reviews.pop(review.token, None)
 
-    async def initialize(self, review: VaultInitializationReview, *, timeout: float = 5.0) -> dict:
-        if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0 or timeout > 120:
+    async def initialize(
+        self, review: VaultInitializationReview, *, timeout: float = 5.0
+    ) -> dict:
+        if (
+            isinstance(timeout, bool)
+            or not isinstance(timeout, (int, float))
+            or not math.isfinite(timeout)
+            or timeout <= 0
+            or timeout > 120
+        ):
             raise ValueError("timeout must be finite and between zero and 120 seconds")
         loop = asyncio.get_running_loop()
         if self._loop is not None and self._loop is not loop:
             raise RuntimeError("VaultCoordinator must stay on its owning event loop")
         self._loop = loop
         held = self._initialization_reviews.pop(review.token, None)
-        if held is None or held != review or held.generation != self._generation or time.monotonic() - held.created_uptime > 300:
+        if (
+            held is None
+            or held != review
+            or held.generation != self._generation
+            or time.monotonic() - held.created_uptime > 300
+        ):
             raise VaultInitializationRefusal("review_expired")
-        if self._initializer is None or self._state == "ready" or (self._operation is not None and not self._operation.done()):
+        if (
+            self._initializer is None
+            or self._state == "ready"
+            or (self._operation is not None and not self._operation.done())
+        ):
             raise VaultInitializationRefusal("operation_in_progress")
         self._initialization_reviews.clear()
         self._state, self._code = "unlocking", "unlock_pending"
-        self._operation = loop.create_task(self._run(self._generation, self._initializer))
+        self._operation = loop.create_task(
+            self._run(self._generation, self._initializer)
+        )
         try:
             await asyncio.wait_for(asyncio.shield(self._operation), timeout)
         except asyncio.TimeoutError:
@@ -250,7 +310,9 @@ class VaultCoordinator:
         # Mark running before publishing the worker. Even event-loop shutdown
         # cannot cancel the concurrent Future while its OS call still runs.
         result.set_running_or_notify_cancel()
-        threading.Thread(target=worker, name="vault-explicit-unlock", daemon=True).start()
+        threading.Thread(
+            target=worker, name="vault-explicit-unlock", daemon=True
+        ).start()
         try:
             vault = await asyncio.wrap_future(result)
             if generation != self._generation:
@@ -274,6 +336,7 @@ class VaultCoordinator:
                 return
             self._vault = None
             from security.vault import VaultTamperedError, VaultFormatError
+
             if isinstance(exc, _Unavailable):
                 code = exc.code
             elif isinstance(exc, (VaultTamperedError, VaultFormatError)):
@@ -295,14 +358,21 @@ def _macos_add_master_key_no_replace(encoded_key: str) -> None:
     """
     import ctypes
     import sys
-    from security.vault import KEYRING_SERVICE, KEYRING_USERNAME, _macos_default_keychain_state
+    from security.vault import (
+        KEYRING_SERVICE,
+        KEYRING_USERNAME,
+        _macos_default_keychain_state,
+    )
+
     if sys.platform != "darwin":
         raise _Unavailable("initialization_unsupported")
     status, exists = _macos_default_keychain_state()
     if status != 0 or not exists:
         raise _Unavailable("key_unavailable")
     security = ctypes.CDLL("/System/Library/Frameworks/Security.framework/Security")
-    core = ctypes.CDLL("/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation")
+    core = ctypes.CDLL(
+        "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation"
+    )
     copy_default = security.SecKeychainCopyDefault
     copy_default.argtypes = [ctypes.POINTER(ctypes.c_void_p)]
     copy_default.restype = ctypes.c_int32
@@ -311,24 +381,57 @@ def _macos_add_master_key_no_replace(encoded_key: str) -> None:
     if status != 0 or not reference.value:
         raise _Unavailable("key_unavailable")
     release = core.CFRelease
-    release.argtypes = [ctypes.c_void_p]; release.restype = None
+    release.argtypes = [ctypes.c_void_p]
+    release.restype = None
     add = security.SecKeychainAddGenericPassword
-    add.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_char_p,
-                    ctypes.c_uint32, ctypes.c_char_p, ctypes.c_uint32,
-                    ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+    add.argtypes = [
+        ctypes.c_void_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.c_uint32,
+        ctypes.c_char_p,
+        ctypes.POINTER(ctypes.c_void_p),
+    ]
     add.restype = ctypes.c_int32
     try:
         # Recheck the actual reference's path before Add. Passing a non-null
         # reference prevents Add from creating a missing default keychain.
         get_path = security.SecKeychainGetPath
-        get_path.argtypes = [ctypes.c_void_p, ctypes.POINTER(ctypes.c_uint32), ctypes.c_char_p]
+        get_path.argtypes = [
+            ctypes.c_void_p,
+            ctypes.POINTER(ctypes.c_uint32),
+            ctypes.c_char_p,
+        ]
         get_path.restype = ctypes.c_int32
-        path = ctypes.create_string_buffer(4096); length = ctypes.c_uint32(len(path))
+        path = ctypes.create_string_buffer(4096)
+        length = ctypes.c_uint32(len(path))
         import os
-        if get_path(reference, ctypes.byref(length), path) != 0 or not path.value or not Path(os.fsdecode(path.value)).is_file():
+
+        if (
+            get_path(reference, ctypes.byref(length), path) != 0
+            or not path.value
+            or not Path(os.fsdecode(path.value)).is_file()
+        ):
             raise _Unavailable("key_unavailable")
-        service, user, password = KEYRING_SERVICE.encode(), KEYRING_USERNAME.encode(), encoded_key.encode("ascii")
-        status = int(add(reference, len(service), service, len(user), user, len(password), password, None))
+        service, user, password = (
+            KEYRING_SERVICE.encode(),
+            KEYRING_USERNAME.encode(),
+            encoded_key.encode("ascii"),
+        )
+        status = int(
+            add(
+                reference,
+                len(service),
+                service,
+                len(user),
+                user,
+                len(password),
+                password,
+                None,
+            )
+        )
         if status == -25299:  # errSecDuplicateItem: preserve the existing key.
             raise _Unavailable("key_already_present")
         if status != 0:
@@ -337,7 +440,9 @@ def _macos_add_master_key_no_replace(encoded_key: str) -> None:
         release(reference)
 
 
-def initialization_factory(vault_path: str | Path, *, add_master_key: Callable[[str], Any] | None = None):
+def initialization_factory(
+    vault_path: str | Path, *, add_master_key: Callable[[str], Any] | None = None
+):
     """Factory for a separately reviewed fresh empty-vault initialization.
 
     add_master_key must atomically add-if-absent, never replace an existing
@@ -346,43 +451,81 @@ def initialization_factory(vault_path: str | Path, *, add_master_key: Callable[[
     write, any disk failure is a partial result: we never delete/reset keys.
     Parent directory must already exist; all ancestors are opened nofollow.
     """
+
     def create_empty():
         import os
         import json
         from cryptography.hazmat.primitives.ciphers.aead import ChaCha20Poly1305
         from security.vault import _AEAD_AAD, _VAULT_VERSION
+
         target = Path(vault_path)
         if not target.is_absolute() or ".." in target.parts or target.suffix != ".json":
             raise _Unavailable("initialization_unsupported")
         descriptor = os.open("/", os.O_RDONLY | os.O_DIRECTORY)
         try:
             for component in target.parent.parts[1:]:
-                child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=descriptor)
-                os.close(descriptor); descriptor = child
+                child = os.open(
+                    component,
+                    os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW,
+                    dir_fd=descriptor,
+                )
+                os.close(descriptor)
+                descriptor = child
             encrypted = target.with_suffix(".enc").name
-            reserved = [target.name, encrypted, encrypted + ".prev", encrypted + ".new", target.name + ".bak.legacy"]
+            reserved = [
+                target.name,
+                encrypted,
+                encrypted + ".prev",
+                encrypted + ".new",
+                target.name + ".bak.legacy",
+            ]
+
             def ensure_absent():
                 for name in reserved:
-                    try: os.stat(name, dir_fd=descriptor, follow_symlinks=False)
-                    except FileNotFoundError: continue
+                    try:
+                        os.stat(name, dir_fd=descriptor, follow_symlinks=False)
+                    except FileNotFoundError:
+                        continue
                     raise _Unavailable("vault_artifacts_present")
+
             ensure_absent()
             key = ChaCha20Poly1305.generate_key()
             nonce = os.urandom(12)
-            payload = json.dumps({"version": _VAULT_VERSION, "data": {"credentials": {}}}, separators=(",", ":")).encode()
+            payload = json.dumps(
+                {"version": _VAULT_VERSION, "data": {"credentials": {}}},
+                separators=(",", ":"),
+            ).encode()
             encrypted_payload = ChaCha20Poly1305(key).encrypt(nonce, payload, _AEAD_AAD)
             # Prove generated ciphertext/key agreement before any key write.
-            assert ChaCha20Poly1305(key).decrypt(nonce, encrypted_payload, _AEAD_AAD) == payload
-            (add_master_key or _macos_add_master_key_no_replace)(base64.b64encode(key).decode("ascii"))
+            assert (
+                ChaCha20Poly1305(key).decrypt(nonce, encrypted_payload, _AEAD_AAD)
+                == payload
+            )
+            (add_master_key or _macos_add_master_key_no_replace)(
+                base64.b64encode(key).decode("ascii")
+            )
             try:
                 ensure_absent()
-                fd = os.open(encrypted, os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600, dir_fd=descriptor)
+                fd = os.open(
+                    encrypted,
+                    os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW,
+                    0o600,
+                    dir_fd=descriptor,
+                )
                 with os.fdopen(fd, "w+b") as output:
                     blob = nonce + encrypted_payload
-                    output.write(blob); output.flush(); os.fsync(output.fileno())
+                    output.write(blob)
+                    output.flush()
+                    os.fsync(output.fileno())
                     output.seek(0)
                     persisted = output.read(len(blob) + 1)
-                    if persisted != blob or ChaCha20Poly1305(key).decrypt(persisted[:12], persisted[12:], _AEAD_AAD) != payload:
+                    if (
+                        persisted != blob
+                        or ChaCha20Poly1305(key).decrypt(
+                            persisted[:12], persisted[12:], _AEAD_AAD
+                        )
+                        != payload
+                    ):
                         raise RuntimeError("Initialization readback mismatch")
                 os.fsync(descriptor)
             except Exception as exc:
@@ -392,14 +535,22 @@ def initialization_factory(vault_path: str | Path, *, add_master_key: Callable[[
             # Authenticate the exact in-memory blob without a second keychain
             # read. Opening again later remains the normal read-only factory.
             from security.vault import BlindVault
+
             class NewlyInitializedVault(BlindVault):
                 _explicit_deferred_unlock = True
-                def _master_key(self): return key
+
+                def _master_key(self):
+                    return key
+
                 def _load(self):
-                    self._data = self._normalise_namespaces(self._decrypt_blob(persisted, key=key))
+                    self._data = self._normalise_namespaces(
+                        self._decrypt_blob(persisted, key=key)
+                    )
+
             return NewlyInitializedVault(vault_path=str(target))
         finally:
             os.close(descriptor)
+
     return create_empty
 
 
@@ -411,15 +562,24 @@ class DeferredBootVaultFacade:
     Every write still requires authenticated readiness. Once ready, reads
     delegate to the authenticated vault without opening another keychain.
     """
-    def __init__(self, coordinator: VaultCoordinator): self.coordinator = coordinator
+
+    def __init__(self, coordinator: VaultCoordinator):
+        self.coordinator = coordinator
+
     def retrieve(self, key, requester="executor"):
-        if not self.coordinator.status()["credentials_available"]: return None
+        if not self.coordinator.status()["credentials_available"]:
+            return None
         return self.coordinator.require_ready().retrieve(key, requester=requester)
+
     def get(self, namespace, key, **kwargs):
-        if not self.coordinator.status()["credentials_available"]: return None
+        if not self.coordinator.status()["credentials_available"]:
+            return None
         return self.coordinator.require_ready().get(namespace, key, **kwargs)
+
     def list_keys(self):
-        if not self.coordinator.status()["credentials_available"]: return []
+        if not self.coordinator.status()["credentials_available"]:
+            return []
         return self.coordinator.require_ready().list_keys()
+
     def __getattr__(self, name):
         return getattr(self.coordinator.require_ready(), name)

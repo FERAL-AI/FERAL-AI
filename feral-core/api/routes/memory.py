@@ -1046,7 +1046,7 @@ async def wiki_ingest_repo(body: dict):
             max_files=(body or {}).get("max_files", 100),
             expected_files=(body or {}).get("expected_files"),
         )
-    except Exception as e:
+    except Exception:
         return {"error": "Folder import failed or exceeded its bounds. Notes may already have been stored; inspect memory before retrying."}
 
 

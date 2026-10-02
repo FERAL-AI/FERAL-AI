@@ -18,10 +18,23 @@ from collections.abc import Awaitable  # noqa: F401 — used by quoted return an
 from pathlib import Path
 from uuid import uuid4
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect, Query, Request, Response
+from fastapi import (
+    FastAPI,
+    HTTPException,
+    WebSocket,
+    WebSocketDisconnect,
+    Query,
+    Request,
+    Response,
+)
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.base import BaseHTTPMiddleware
-from starlette.responses import JSONResponse, HTMLResponse, FileResponse, RedirectResponse
+from starlette.responses import (
+    JSONResponse,
+    HTMLResponse,
+    FileResponse,
+    RedirectResponse,
+)
 from starlette.routing import compile_path
 
 from version import VERSION as __version__
@@ -108,12 +121,15 @@ from api.routes.apps import router as apps_router
 from api.routes.uploads import router as uploads_router  # PR 10
 from api.routes.supervisor import router as supervisor_router
 from api.routes.twin import router as twin_router
-from api.routes.sessions import router as sessions_router  # 
+from api.routes.sessions import router as sessions_router  #
 from api.routes.capabilities import router as capabilities_router  # Phase 5
-from api.routes.system_permissions import router as system_permissions_router  # Phase 11
+from api.routes.system_permissions import (
+    router as system_permissions_router,
+)  # Phase 11
 from api.routes.discovery import router as discovery_router  # Phase 13
 from api.routes.approvals import router as approvals_router
 from api.routes.checkpoints import router as checkpoints_router
+
 # --- Subagent A (realtime GA) additions ---
 from api.routes.realtime_client_secret import router as realtime_client_secret_router
 
@@ -123,6 +139,7 @@ from api.routes.realtime_client_secret import router as realtime_client_secret_r
 # credential, so ~/.feral/logs/brain.err filled with both. See
 # observability/log_redaction.py for the evidence and the two layers.
 from observability.log_redaction import configure_brain_logging, install_log_redaction
+
 configure_brain_logging(level=logging.INFO)
 logger = logging.getLogger("feral.brain")
 
@@ -144,16 +161,24 @@ from security.vault_coordinator import VaultLockedRefusal
 async def vault_locked_response(request: Request, exc: VaultLockedRefusal):
     # A typed readiness refusal is actionable; its originating exception
     # may contain private context, so never serialize/log its contents.
-    return JSONResponse(status_code=503, content={"detail": {
-        "code": "vault_locked",
-        "message": "Unlock the vault explicitly before using stored credentials.",
-    }})
+    return JSONResponse(
+        status_code=503,
+        content={
+            "detail": {
+                "code": "vault_locked",
+                "message": "Unlock the vault explicitly before using stored credentials.",
+            }
+        },
+    )
 
 
 from observability.metrics import init_metrics
+
 init_metrics("feral")
 
-CORS_ORIGINS = os.getenv("FERAL_CORS_ORIGINS", "http://localhost:5173,http://localhost:9090").split(",")
+CORS_ORIGINS = os.getenv(
+    "FERAL_CORS_ORIGINS", "http://localhost:5173,http://localhost:9090"
+).split(",")
 app.add_middleware(
     CORSMiddleware,
     allow_origins=CORS_ORIGINS,
@@ -166,7 +191,9 @@ app.add_middleware(
 # Rate Limiting Middleware
 # ─────────────────────────────────────────────
 
-_rate_limit_store: collections.OrderedDict[str, collections.deque] = collections.OrderedDict()
+_rate_limit_store: collections.OrderedDict[str, collections.deque] = (
+    collections.OrderedDict()
+)
 # Default: 1200 req/min per remote IP. Local-first clients poll aggressively
 # (dashboard / ambient / jobs / skills). We keep the limit but trust loopback.
 RATE_LIMIT_RPM = int(os.getenv("FERAL_RATE_LIMIT_RPM", "1200"))
@@ -317,13 +344,17 @@ from api.keys import get_api_key_path as _get_api_key_path
 def _load_or_generate_api_key() -> str:
     """Load FERAL_API_KEY from env or ~/.feral/api_key; generate on first boot."""
     key_path = _get_api_key_path()
-    existed = (key_path.exists() and key_path.read_text().strip()) or os.environ.get("FERAL_API_KEY", "").strip()
+    existed = (key_path.exists() and key_path.read_text().strip()) or os.environ.get(
+        "FERAL_API_KEY", ""
+    ).strip()
     key = _generate_key_impl()
     if not existed:
         print("=" * 70)
         print("FERAL: Generated new API key on first boot.")
         print(f"Location: {key_path}")
-        print("Read the saved key locally to authenticate clients; its value is not logged.")
+        print(
+            "Read the saved key locally to authenticate clients; its value is not logged."
+        )
         print("Set FERAL_API_KEY env var to override.")
         print("=" * 70)
     return key
@@ -332,58 +363,65 @@ def _load_or_generate_api_key() -> str:
 FERAL_API_KEY = _load_or_generate_api_key()
 
 
-_OPEN_PATHS = frozenset({
-    "/health", "/docs", "/redoc", "/openapi.json", "/metrics",
-    "/api/auth/local-key", "/api/boot-report",
-    # Phone-bridge installer script must be fetchable without an API key
-    # because it's delivered over `curl … | bash` from a laptop / phone
-    # that doesn't have the key yet.
-    "/install-phone-bridge.sh",
-    # Note: ``/api/devices/pair/url`` and ``/api/devices/pair/qr``
-    # used to be open-listed here so a brand-new phone could fetch
-    # them. That was wrong — those endpoints **mint** pairing
-    # tokens; leaving them open meant any LAN attacker could spam
-    # token issuance and pollute the paired_devices table (or, in
-    # Mode C, exfiltrate one-time tokens by guessing the URL). They
-    # are now authenticated: the dashboard (which has the API key)
-    # is the only client that issues tokens; the phone receives the
-    # already-issued URL inside the QR / Bluetooth handoff and
-    # only ever talks to the **claim** half of the flow
-    # (``/pair/check`` → ``/pair/verify_pin`` → ``/pair/complete``)
-    # which stays open below.
-    "/api/devices/pair/complete",
-    # Code-pair flow (SDK ↔ dashboard typed pair code).
-    #
-    # ``announce`` stays open because the node SDKs call it from other
-    # machines (feral-nodes/python-node-sdk, ts-node-sdk). It mints
-    # nothing: it records a pending row, and the token is only issued at
-    # claim time.
-    #
-    # ``code/claim`` is NOT open, and used to be. The entropy argument
-    # that justified opening it does not hold: the caller supplies the
-    # code, so there is nothing to guess, and the 5-wrong-attempts limit
-    # never charges because a correct code is not a wrong attempt. That
-    # made an unauthenticated LAN peer able to announce a code of its own
-    # choosing, claim it, upgrade to a phone bearer and read
-    # /api/context/live, /api/conversations and /api/timeline. Because
-    # _OPEN_PATHS is consulted before the trusted-transport gate, it
-    # would also have worked through a relay tunnel, i.e. from the
-    # internet.
-    #
-    # Claiming is an operator action performed from the dashboard, which
-    # is either on loopback (covered by the bypass) or presenting the API
-    # key. It belongs on the same footing as /pair/url, which was already
-    # gated for exactly this reason.
-    "/api/devices/pair/announce",
-    "/api/devices/pair/status",
-    # PIN second-factor (pair-pin-confirm PR). The phone calls /check
-    # before rendering the form to learn whether a PIN is required;
-    # /verify_pin is how it submits the PIN before /complete is allowed
-    # to issue a phone_bearer. Both are open-listed because the phone
-    # has the URL token but no API key yet.
-    "/api/devices/pair/check",
-    "/api/devices/pair/verify_pin",
-})
+_OPEN_PATHS = frozenset(
+    {
+        "/health",
+        "/docs",
+        "/redoc",
+        "/openapi.json",
+        "/metrics",
+        "/api/auth/local-key",
+        "/api/boot-report",
+        # Phone-bridge installer script must be fetchable without an API key
+        # because it's delivered over `curl … | bash` from a laptop / phone
+        # that doesn't have the key yet.
+        "/install-phone-bridge.sh",
+        # Note: ``/api/devices/pair/url`` and ``/api/devices/pair/qr``
+        # used to be open-listed here so a brand-new phone could fetch
+        # them. That was wrong — those endpoints **mint** pairing
+        # tokens; leaving them open meant any LAN attacker could spam
+        # token issuance and pollute the paired_devices table (or, in
+        # Mode C, exfiltrate one-time tokens by guessing the URL). They
+        # are now authenticated: the dashboard (which has the API key)
+        # is the only client that issues tokens; the phone receives the
+        # already-issued URL inside the QR / Bluetooth handoff and
+        # only ever talks to the **claim** half of the flow
+        # (``/pair/check`` → ``/pair/verify_pin`` → ``/pair/complete``)
+        # which stays open below.
+        "/api/devices/pair/complete",
+        # Code-pair flow (SDK ↔ dashboard typed pair code).
+        #
+        # ``announce`` stays open because the node SDKs call it from other
+        # machines (feral-nodes/python-node-sdk, ts-node-sdk). It mints
+        # nothing: it records a pending row, and the token is only issued at
+        # claim time.
+        #
+        # ``code/claim`` is NOT open, and used to be. The entropy argument
+        # that justified opening it does not hold: the caller supplies the
+        # code, so there is nothing to guess, and the 5-wrong-attempts limit
+        # never charges because a correct code is not a wrong attempt. That
+        # made an unauthenticated LAN peer able to announce a code of its own
+        # choosing, claim it, upgrade to a phone bearer and read
+        # /api/context/live, /api/conversations and /api/timeline. Because
+        # _OPEN_PATHS is consulted before the trusted-transport gate, it
+        # would also have worked through a relay tunnel, i.e. from the
+        # internet.
+        #
+        # Claiming is an operator action performed from the dashboard, which
+        # is either on loopback (covered by the bypass) or presenting the API
+        # key. It belongs on the same footing as /pair/url, which was already
+        # gated for exactly this reason.
+        "/api/devices/pair/announce",
+        "/api/devices/pair/status",
+        # PIN second-factor (pair-pin-confirm PR). The phone calls /check
+        # before rendering the form to learn whether a PIN is required;
+        # /verify_pin is how it submits the PIN before /complete is allowed
+        # to issue a phone_bearer. Both are open-listed because the phone
+        # has the URL token but no API key yet.
+        "/api/devices/pair/check",
+        "/api/devices/pair/verify_pin",
+    }
+)
 
 _OPEN_PATH_PREFIXES = (
     "/docs",
@@ -399,20 +437,22 @@ _OPEN_PATH_PREFIXES = (
 # pairing token is validated separately on the WebSocket handshake
 # (`verify_device`), so serving the SPA shell + hashed asset bundles
 # here does not widen the authenticated API surface.
-_OPEN_GET_PATHS = frozenset({
-    "/pair",
-    "/v2/pair",
-    # PWA + browser metadata. A phone scanning a Mode-A LAN pair URL
-    # is not on loopback and does not yet have an API key; the bundle
-    # fetches these eagerly during boot. Without them in the GET
-    # allowlist the pair flow worked but PWA install was silently
-    # broken (manifest 401 → no "Add to Home Screen" prompt; favicon
-    # 401 → red console errors that look scary). They are static and
-    # carry no secrets.
-    "/manifest.webmanifest",
-    "/favicon.ico",
-    "/sw.js",
-})
+_OPEN_GET_PATHS = frozenset(
+    {
+        "/pair",
+        "/v2/pair",
+        # PWA + browser metadata. A phone scanning a Mode-A LAN pair URL
+        # is not on loopback and does not yet have an API key; the bundle
+        # fetches these eagerly during boot. Without them in the GET
+        # allowlist the pair flow worked but PWA install was silently
+        # broken (manifest 401 → no "Add to Home Screen" prompt; favicon
+        # 401 → red console errors that look scary). They are static and
+        # carry no secrets.
+        "/manifest.webmanifest",
+        "/favicon.ico",
+        "/sw.js",
+    }
+)
 
 _OPEN_GET_PATH_PREFIXES = (
     "/assets/",
@@ -520,25 +560,25 @@ _PHONE_NODE_TYPES = ("phone", "ios", "android")
 
 _PHONE_BEARER_GET = _PathAllowlist("_PHONE_BEARER_GET")
 for _p in (
-    "/api/context/live",                  # Phase 7b-2 iOS Context tab
-    "/api/sessions/primary",              # Phase 3 — primary session id
-    "/api/sessions/primary/transcript",   # Phase 9 — chat resume (GET, since_ms is a query arg)
-    "/api/capabilities",                  # Phase 5 — capability registry
-    "/api/capabilities/has",              # Phase 5 — routability probe (GET with query)
-    "/api/system/permissions",            # Phase 11 — macOS TCC status
-    "/api/discovery/brain",               # Phase 13 — onboarding wizard
-    "/api/devices",                       # Phase 10 — connected devices
-    "/api/devices/connected",             # Phase 10 — live HUP set
-    "/api/ambient/next_event",            # ambient calendar context
-    "/api/ambient/briefing",              # ambient morning summary (was the stale "/digest")
-    "/api/approvals",                     # pending approvals list (the phone can already approve/reject)
-    "/api/conversations",                 # chat history list
+    "/api/context/live",  # Phase 7b-2 iOS Context tab
+    "/api/sessions/primary",  # Phase 3 — primary session id
+    "/api/sessions/primary/transcript",  # Phase 9 — chat resume (GET, since_ms is a query arg)
+    "/api/capabilities",  # Phase 5 — capability registry
+    "/api/capabilities/has",  # Phase 5 — routability probe (GET with query)
+    "/api/system/permissions",  # Phase 11 — macOS TCC status
+    "/api/discovery/brain",  # Phase 13 — onboarding wizard
+    "/api/devices",  # Phase 10 — connected devices
+    "/api/devices/connected",  # Phase 10 — live HUP set
+    "/api/ambient/next_event",  # ambient calendar context
+    "/api/ambient/briefing",  # ambient morning summary (was the stale "/digest")
+    "/api/approvals",  # pending approvals list (the phone can already approve/reject)
+    "/api/conversations",  # chat history list
     "/api/conversations/active/thread",
-    "/api/memory/context",                # memory read
-    "/api/memory/recent_summary",         # short digest of the last day, all sessions
-    "/api/timeline",                      # operator timeline (single route, was the stale "/api/timeline/" prefix)
-    "/api/autonomy",                      # iOS may surface current tier
-    "/api/health/frame",                  # health_update frame for the phone
+    "/api/memory/context",  # memory read
+    "/api/memory/recent_summary",  # short digest of the last day, all sessions
+    "/api/timeline",  # operator timeline (single route, was the stale "/api/timeline/" prefix)
+    "/api/autonomy",  # iOS may surface current tier
+    "/api/health/frame",  # health_update frame for the phone
 ):
     _PHONE_BEARER_GET.add_literal(_p)
 # Prefix-matched read-mostly families. Anything below a prefix here is
@@ -551,8 +591,8 @@ for _p in (
 # already covers them) and the "/api/timeline/" prefix (no routes under
 # it; the single canonical route is GET /api/timeline, now a literal above).
 for _p in (
-    "/api/conversations/",   # GET /api/conversations/{id}
-    "/api/skills/",          # GET /api/skills/pending, /api/skills/{id} (latter aspirational)
+    "/api/conversations/",  # GET /api/conversations/{id}
+    "/api/skills/",  # GET /api/skills/pending, /api/skills/{id} (latter aspirational)
 ):
     _PHONE_BEARER_GET.add_prefix(_p)
 del _p
@@ -561,8 +601,12 @@ del _p
 # approvals + UI events are the operator-facing surface that already
 # has WebSocket equivalents (so the security envelope is unchanged).
 _PHONE_BEARER_POST = _PathAllowlist("_PHONE_BEARER_POST")
-_PHONE_BEARER_POST.add_literal("/api/system/permissions/open")  # Phase 13 — open Settings pane
-_PHONE_BEARER_POST.add_literal("/api/system/permissions/request")  # Lane 11 R-PROD-004b — trigger native prompt
+_PHONE_BEARER_POST.add_literal(
+    "/api/system/permissions/open"
+)  # Phase 13 — open Settings pane
+_PHONE_BEARER_POST.add_literal(
+    "/api/system/permissions/request"
+)  # Lane 11 R-PROD-004b — trigger native prompt
 # v2026.6.7 — operator report 2026-06-07: the iOS HealthKit adapter
 # was POSTing to ``/api/health/ingest`` (declared by the iOS SDK's
 # ``BrainHTTP.IngestKind.healthKit``) and getting HTTP 401 because
@@ -605,7 +649,7 @@ def _is_webhook_receive(path: str) -> bool:
     """
     if not path.startswith("/api/webhooks/"):
         return False
-    tail = path[len("/api/webhooks/"):].strip("/")
+    tail = path[len("/api/webhooks/") :].strip("/")
     return bool(tail) and "/" not in tail
 
 
@@ -636,9 +680,16 @@ def _verify_http_device_credential(store, credential: str):
     token_claimed = getattr(store, "token_claimed", None)
     token_pin_verified = getattr(store, "token_pin_verified", None)
     verify_device = getattr(store, "verify_device", None)
-    if not (callable(token_claimed) and callable(token_pin_verified) and callable(verify_device)):
+    if not (
+        callable(token_claimed)
+        and callable(token_pin_verified)
+        and callable(verify_device)
+    ):
         return None, None
-    if token_claimed(credential) is not True or token_pin_verified(credential) is not True:
+    if (
+        token_claimed(credential) is not True
+        or token_pin_verified(credential) is not True
+    ):
         return None, None
     device_id = verify_device(credential)
     if isinstance(device_id, str) and device_id:
@@ -709,11 +760,14 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                 phone_ok = True
 
             if phone_ok:
-                bearer = auth[len("Bearer "):].strip()
+                bearer = auth[len("Bearer ") :].strip()
                 try:
                     from api.state import state as _state
+
                     store = getattr(_state, "device_pairing_store", None)
-                    device_id, credential_kind = _verify_http_device_credential(store, bearer)
+                    device_id, credential_kind = _verify_http_device_credential(
+                        store, bearer
+                    )
                 except Exception:
                     device_id, credential_kind = None, None
                 if device_id:
@@ -727,7 +781,10 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                         pass
                     return await call_next(request)
 
-        return JSONResponse({"error": "Unauthorized — provide Authorization: Bearer <key>"}, status_code=401)
+        return JSONResponse(
+            {"error": "Unauthorized — provide Authorization: Bearer <key>"},
+            status_code=401,
+        )
 
 
 app.add_middleware(APIKeyMiddleware)
@@ -860,8 +917,11 @@ async def _start_reviewed_agent_hooks(brain_state, checkpoint=None):
     Ownership markers prevent duplicate dispatch; failed hooks are not marked
     complete, and the continuation controller requires restart on partial work.
     """
+
     def check():
-        if checkpoint is not None: checkpoint()
+        if checkpoint is not None:
+            checkpoint()
+
     check()
     memory = brain_state.memory
     if memory is None:
@@ -871,12 +931,17 @@ async def _start_reviewed_agent_hooks(brain_state, checkpoint=None):
         brain_state._agent_memory_hook_owner = memory
     check()
     cron = brain_state.cron_service
-    if cron is not None and getattr(brain_state, "_agent_cron_hook_owner", None) is not cron:
+    if (
+        cron is not None
+        and getattr(brain_state, "_agent_cron_hook_owner", None) is not cron
+    ):
         cron.start(execute_routine_job)
         brain_state._agent_cron_hook_owner = cron
     check()
     if not getattr(brain_state, "_agent_ambient_resume_started", False):
-        brain_state.register_background_task(asyncio.ensure_future(_resume_ambient_backlog()))
+        brain_state.register_background_task(
+            asyncio.ensure_future(_resume_ambient_backlog())
+        )
         brain_state._agent_ambient_resume_started = True
     check()
     brain_state._native_agent_hooks_complete = True
@@ -889,9 +954,13 @@ from security.agent_bootstrap_fence import AgentBootstrapFence
 if state.vault_coordinator is not None:
     # Deferred hook reference resolves only when explicitly dispatched after
     # module initialization, never during passive construction.
-    state.agent_bootstrap_controller = create_agent_bootstrap_controller(state, _start_reviewed_agent_hooks)
+    state.agent_bootstrap_controller = create_agent_bootstrap_controller(
+        state, _start_reviewed_agent_hooks
+    )
 app.add_middleware(AgentBootstrapFence, state=state)
-app.include_router(create_agent_bootstrap_router(lambda: state.agent_bootstrap_controller))
+app.include_router(
+    create_agent_bootstrap_router(lambda: state.agent_bootstrap_controller)
+)
 
 app.include_router(dashboard_router)
 app.include_router(config_router)
@@ -909,6 +978,7 @@ app.include_router(conversations_router)
 app.include_router(devices_router)
 app.include_router(access_router)
 app.include_router(checkpoints_router)
+
 
 # Optional demo routes — mounted only when feral-demo-data is installed
 # AND FERAL_DEV_DEMO=1. Discovery is via the `feral.plugins` entry
@@ -935,7 +1005,9 @@ def _maybe_mount_demo_routes() -> None:
                 demo_router = router_factory()
                 if demo_router is not None:
                     app.include_router(demo_router)
-                    logger.info("Mounted /api/demo/* routes from feral-demo-data plugin")
+                    logger.info(
+                        "Mounted /api/demo/* routes from feral-demo-data plugin"
+                    )
         except Exception as exc:  # noqa: BLE001 — demo is best-effort
             logger.warning("Failed to mount feral-demo-data routes: %s", exc)
         break
@@ -964,7 +1036,7 @@ app.include_router(apps_router)
 app.include_router(uploads_router)  # PR 10
 app.include_router(supervisor_router)
 app.include_router(twin_router)
-app.include_router(sessions_router)  # 
+app.include_router(sessions_router)  #
 app.include_router(capabilities_router)  # Phase 5 — capability registry
 app.include_router(system_permissions_router)  # Phase 11 — macOS TCC state
 app.include_router(discovery_router)  # Phase 13 — brain identity discovery
@@ -1000,7 +1072,9 @@ async def install_phone_bridge_script():
     ]
     for candidate in candidates:
         if candidate.is_file():
-            return PlainTextResponse(candidate.read_text(), media_type="text/x-shellscript")
+            return PlainTextResponse(
+                candidate.read_text(), media_type="text/x-shellscript"
+            )
     return PlainTextResponse(
         "# install-phone-bridge.sh not bundled in this build\n",
         status_code=404,
@@ -1051,7 +1125,10 @@ def _metrics_public_enabled() -> bool:
 @app.get("/metrics")
 async def metrics_endpoint(request: Request):
     if _metrics_endpoint_killed():
-        return JSONResponse({"error": "Metrics endpoint disabled. Set FERAL_METRICS_ENDPOINT=1"}, status_code=404)
+        return JSONResponse(
+            {"error": "Metrics endpoint disabled. Set FERAL_METRICS_ENDPOINT=1"},
+            status_code=404,
+        )
     client_host = request.client.host if request.client else None
     # The transport half matters as much as the peer address. A relay
     # tunnel terminates on this machine and therefore presents as
@@ -1059,14 +1136,14 @@ async def metrics_endpoint(request: Request):
     # surface remotely with FERAL_METRICS_PUBLIC=0. This was the last
     # route still deciding trust from client.host alone, the same bug
     # class as /api/auth/local-key.
-    _metrics_trusted = (
-        _session_auth_module.transport_is_trusted(request.scope)
-        and _session_auth_module.is_localhost(client_host)
-    )
+    _metrics_trusted = _session_auth_module.transport_is_trusted(
+        request.scope
+    ) and _session_auth_module.is_localhost(client_host)
     if not _metrics_trusted and not _metrics_public_enabled():
         return JSONResponse({"error": "Not Found"}, status_code=404)
 
     from starlette.responses import PlainTextResponse
+
     body, content_type = _render_prometheus()
 
     # Append legacy in-memory snapshot lines so  increment()/observe()
@@ -1089,6 +1166,7 @@ async def metrics_endpoint(request: Request):
 # ─────────────────────────────────────────────
 # Lifecycle
 # ─────────────────────────────────────────────
+
 
 async def _log_routine_device_action(
     session_id: str,
@@ -1199,13 +1277,15 @@ def _budget_reason_from_payload(payload: dict) -> str:
 def _cron_budget_reason(guard) -> str:
     """The same sentence, built from a BudgetLoopGuard's own view."""
     try:
-        return _budget_reason_from_payload({
-            "call_site": guard.call_site,
-            "cap_dollars": guard._tight_cap(),
-            "current_dollars": guard._current_spend(),
-            "window": guard._tight_window(),
-            "reset_at": guard.paused_until or guard._next_reset(),
-        })
+        return _budget_reason_from_payload(
+            {
+                "call_site": guard.call_site,
+                "cap_dollars": guard._tight_cap(),
+                "current_dollars": guard._current_spend(),
+                "window": guard._tight_window(),
+                "reset_at": guard.paused_until or guard._next_reset(),
+            }
+        )
     except Exception:
         return "cost cap reached; routine skipped"
 
@@ -1252,7 +1332,8 @@ def _run_cron_coroutine(coro, owner=None):
             except Exception:
                 logger.warning(
                     "cron turn background drain failed; some work scheduled by "
-                    "this routine may not have completed", exc_info=True,
+                    "this routine may not have completed",
+                    exc_info=True,
                 )
         return result
     finally:
@@ -1273,7 +1354,9 @@ def execute_routine_job(job):
       4. ``prompt`` / ``action_text`` — run through the orchestrator.
       5. otherwise — log a no-op.
     """
-    logger.info("Routine fired: id=%s type=%s desc=%s", job.id, job.job_type, job.description)
+    logger.info(
+        "Routine fired: id=%s type=%s desc=%s", job.id, job.job_type, job.description
+    )
     # Bookkeeping must not decide whether the routine runs. This is a raw
     # sqlite3 INSERT + commit and it sat outside the try below, so one
     # "database is locked" here propagated all the way out of the callback.
@@ -1284,7 +1367,8 @@ def execute_routine_job(job):
     except Exception:
         logger.warning(
             "Could not open a run record for routine %s; running it anyway",
-            job.id, exc_info=True,
+            job.id,
+            exc_info=True,
         )
         run_id = None
     try:
@@ -1375,6 +1459,7 @@ def execute_routine_job(job):
         # fires, reusing the exact instantiate semantics the REST route uses.
         if workflow_id:
             from api.routes.personas import instantiate_pack
+
             try:
                 flow = instantiate_pack(
                     workflow_id,
@@ -1386,11 +1471,17 @@ def execute_routine_job(job):
                     },
                 )
                 state.cron_service.record_run_finish(
-                    run_id, "success", {"flow_id": flow.get("id"), "workflow_id": workflow_id}, None,
+                    run_id,
+                    "success",
+                    {"flow_id": flow.get("id"), "workflow_id": workflow_id},
+                    None,
                 )
             except KeyError:
                 state.cron_service.record_run_finish(
-                    run_id, "error", {}, f"Unknown workflow pack '{workflow_id}'",
+                    run_id,
+                    "error",
+                    {},
+                    f"Unknown workflow pack '{workflow_id}'",
                 )
             except Exception as exc:
                 state.cron_service.record_run_finish(run_id, "error", {}, str(exc))
@@ -1405,7 +1496,10 @@ def execute_routine_job(job):
                 context={"instantiated_from": "routine", "routine_id": job.id},
             )
             state.cron_service.record_run_finish(
-                run_id, "success", {"flow_id": flow.get("id")}, None,
+                run_id,
+                "success",
+                {"flow_id": flow.get("id")},
+                None,
             )
             return
 
@@ -1423,6 +1517,7 @@ def execute_routine_job(job):
             auto_confirm = bool(payload.get("auto_confirm"))
             try:
                 from security.safety_resolver import resolve_policy, LEVEL_DENY
+
                 decision = resolve_policy(
                     f"{skill_id}__{endpoint}",
                     skill_args,
@@ -1445,15 +1540,20 @@ def execute_routine_job(job):
             # "the user pre-approved a CONFIRM-tier action", not "the user may
             # opt into running a shell at 3am unattended".
             hard_surface_deny = bool(
-                decision is not None
-                and (decision.sources or {}).get("surface_deny")
+                decision is not None and (decision.sources or {}).get("surface_deny")
             )
             deny_overridden = (
                 auto_confirm and not hard_physical_deny and not hard_surface_deny
             )
-            if decision is not None and decision.level == LEVEL_DENY and not deny_overridden:
+            if (
+                decision is not None
+                and decision.level == LEVEL_DENY
+                and not deny_overridden
+            ):
                 state.cron_service.record_run_finish(
-                    run_id, "skipped", {"policy": decision.to_dict()},
+                    run_id,
+                    "skipped",
+                    {"policy": decision.to_dict()},
                     f"denied by safety policy: {decision.deny_reason}",
                 )
                 return
@@ -1476,11 +1576,14 @@ def execute_routine_job(job):
                     return result
 
                 result = _run_cron_coroutine(
-                    _dispatch_skill(), owner=state.orchestrator,
+                    _dispatch_skill(),
+                    owner=state.orchestrator,
                 )
                 state.cron_service.record_run_finish(
-                    run_id, "success" if result.get("success") else "error",
-                    result, result.get("error"),
+                    run_id,
+                    "success" if result.get("success") else "error",
+                    result,
+                    result.get("error"),
                 )
                 return
 
@@ -1530,7 +1633,9 @@ def execute_routine_job(job):
             }
             _run_cron_coroutine(
                 state.orchestrator.handle_command(
-                    session_id, prompt, context=cron_context,
+                    session_id,
+                    prompt,
+                    context=cron_context,
                 ),
                 owner=state.orchestrator,
             )
@@ -1553,7 +1658,9 @@ def execute_routine_job(job):
                     _budget_reason_from_payload(capped),
                 )
                 return
-            state.cron_service.record_run_finish(run_id, "success", {"prompt": prompt}, None)
+            state.cron_service.record_run_finish(
+                run_id, "success", {"prompt": prompt}, None
+            )
             return
 
         # Reaching here means nothing dispatched. That was recorded as
@@ -1584,7 +1691,10 @@ def execute_routine_job(job):
             reason = "no skill, prompt, workflow or flow configured"
         logger.warning("Routine %s did not run: %s", job.id, reason)
         state.cron_service.record_run_finish(
-            run_id, "error", {"reason": reason}, reason,
+            run_id,
+            "error",
+            {"reason": reason},
+            reason,
         )
     except Exception as exc:
         logger.exception("Routine execution error for job %s", job.id)
@@ -1614,7 +1724,8 @@ def check_local_bypass_safety() -> None:
             "Could not resolve the brain's bind host at boot (%s: %s), so the "
             "FERAL_LOCAL_BYPASS safety check could not be evaluated. Check "
             "~/.feral/settings.json.",
-            type(exc).__name__, exc,
+            type(exc).__name__,
+            exc,
         )
         if local_bypass_enabled():
             logger.warning(
@@ -1664,7 +1775,9 @@ def start_probe_sweeper(brain_state) -> bool:
     except Exception as exc:
         logger.warning(
             "Integration probe sweeper did not start (%s: %s). %s",
-            type(exc).__name__, exc, _PROBE_SWEEPER_LOSS,
+            type(exc).__name__,
+            exc,
+            _PROBE_SWEEPER_LOSS,
         )
         return False
     if started:
@@ -1675,12 +1788,12 @@ def start_probe_sweeper(brain_state) -> bool:
         # process mentions it.
         logger.info(
             "Integration probe sweeper is disabled by %s=0. %s",
-            probe_sweeper.ENV_SWEEP_SECONDS, _PROBE_SWEEPER_LOSS,
+            probe_sweeper.ENV_SWEEP_SECONDS,
+            _PROBE_SWEEPER_LOSS,
         )
     else:
         logger.warning(
-            "Integration probe sweeper refused to start even though %s is "
-            "%.0fs. %s",
+            "Integration probe sweeper refused to start even though %s is %.0fs. %s",
             probe_sweeper.ENV_SWEEP_SECONDS,
             probe_sweeper.sweep_interval_seconds(),
             _PROBE_SWEEPER_LOSS,
@@ -1712,7 +1825,9 @@ async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> i
             "Provider catalog refresh failed (%s: %s). This is failure %d in "
             "a row; the Settings model picker keeps serving the list from the "
             "last successful refresh, which is now at least %dh old.",
-            type(exc).__name__, exc, consecutive_failures,
+            type(exc).__name__,
+            exc,
+            consecutive_failures,
             consecutive_failures * PROVIDER_CATALOG_REFRESH_HOURS,
         )
         return consecutive_failures
@@ -1737,6 +1852,7 @@ async def startup():
     # of one is worse than the shape change it was fixing.
     try:
         from migrations import run_pending as _run_migrations
+
         for _mig in _run_migrations():
             if not _mig.ok:
                 logger.warning("migration %s deferred: %s", _mig.name, _mig.detail)
@@ -1759,6 +1875,7 @@ async def startup():
                 await state.broadcast_event("dashboard_update", dashboard)
             except Exception:
                 pass
+
     state.register_background_task(
         asyncio.create_task(_state_heartbeat(), name="feral-state-heartbeat")
     )
@@ -1780,11 +1897,15 @@ async def startup():
         consecutive_failures = 0
         while True:
             consecutive_failures = await refresh_provider_catalog_once(
-                state.provider_catalog, consecutive_failures,
+                state.provider_catalog,
+                consecutive_failures,
             )
             await asyncio.sleep(PROVIDER_CATALOG_REFRESH_HOURS * 3600)
+
     state.register_background_task(
-        asyncio.create_task(_provider_catalog_refresher(), name="feral-provider-catalog-refresher")
+        asyncio.create_task(
+            _provider_catalog_refresher(), name="feral-provider-catalog-refresher"
+        )
     )
 
     # Update availability, and ONLY when the operator asked for it.
@@ -1809,6 +1930,7 @@ async def startup():
     )
 
     if _update_check_enabled():
+
         async def _update_check_refresher():
             await asyncio.sleep(120)
             while True:
@@ -1820,8 +1942,11 @@ async def startup():
                 except Exception as exc:
                     logger.debug("update check refresh failed: %s", exc)
                 await asyncio.sleep(_update_check_ttl_seconds())
+
         state.register_background_task(
-            asyncio.create_task(_update_check_refresher(), name="feral-update-check-refresher")
+            asyncio.create_task(
+                _update_check_refresher(), name="feral-update-check-refresher"
+            )
         )
     else:
         logger.debug("update check is disabled; not scheduling a refresher")
@@ -1853,7 +1978,6 @@ async def shutdown_event():
     if operation is not None and not operation.done():
         controller.invalidate()
         await asyncio.gather(operation, return_exceptions=True)
-
 
     # (a) Cancel every registered background task (heartbeat, catalog
     # refresher, ideas brief, screen loop bootstrap, demo, proactive
@@ -1954,7 +2078,9 @@ async def shutdown_event():
         try:
             await close_reviewed()
         except Exception:
-            logger.warning("Shutdown: reviewed hardware transport could not fully drain")
+            logger.warning(
+                "Shutdown: reviewed hardware transport could not fully drain"
+            )
 
     # (a.3) Close the MemoryStore so the embed queue's background
     # coroutine stops before the event loop starts tearing down.
@@ -2020,18 +2146,21 @@ async def shutdown_event():
         if store is not None:
             from memory.consciousness import default_snapshot_path
             import json as _json
+
             blob = store.snapshot()
             path = default_snapshot_path()
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(_json.dumps(blob, indent=2))
             logger.info(
                 "Consciousness snapshot written: %d entities -> %s",
-                blob.get("count", 0), path,
+                blob.get("count", 0),
+                path,
             )
     except Exception as exc:
         logger.warning("Consciousness snapshot-on-shutdown failed: %s", exc)
     try:
         from services.mdns import stop_advertisement
+
         stop_advertisement()
     except Exception:
         pass
@@ -2089,7 +2218,8 @@ async def _prepare_chat_turn_context(
 
     try:
         state.memory.working_push(
-            session_id, {"role": "user", "text": user_msg_text},
+            session_id,
+            {"role": "user", "text": user_msg_text},
         )
     except Exception:
         logger.debug("working_push (chat prelude) failed", exc_info=True)
@@ -2097,6 +2227,7 @@ async def _prepare_chat_turn_context(
     refined_text = text
     try:
         from agents.prompt_refiner import refine as _refine_prompt
+
         history: list[dict] = []
         try:
             history = state.memory.working_get(session_id) or []
@@ -2118,8 +2249,10 @@ async def _prepare_chat_turn_context(
 
     if attachments:
         from memory.attachment_context import attachment_model_context
+
         ctx["_attachment_model_data"] = attachment_model_context(
-            getattr(state, "uploads", None), attachments,
+            getattr(state, "uploads", None),
+            attachments,
             authorized=ctx.get("attachment_content_authorized") is True,
         )
     else:
@@ -2136,6 +2269,7 @@ async def _prepare_chat_turn_context(
     if not ctx.get("device_target"):
         try:
             from agents.prompt_refiner import infer_device_target
+
             inferred = infer_device_target(text)
             if inferred:
                 ctx["device_target"] = inferred
@@ -2173,15 +2307,17 @@ def _build_chat_turn_runner(
                         service=need.get("service", ""),
                     )
                     if manifest:
-                        await ws.send_json(FeralMessage(
-                            session_id=session_id,
-                            hop="brain",
-                            type="skill_proposal",
-                            payload={
-                                "manifest": manifest,
-                                "reason": need.get("capability", ""),
-                            },
-                        ).model_dump())
+                        await ws.send_json(
+                            FeralMessage(
+                                session_id=session_id,
+                                hop="brain",
+                                type="skill_proposal",
+                                payload={
+                                    "manifest": manifest,
+                                    "reason": need.get("capability", ""),
+                                },
+                            ).model_dump()
+                        )
         except asyncio.CancelledError:
             raise
         except Exception as turn_err:
@@ -2192,16 +2328,18 @@ def _build_chat_turn_runner(
                 exc_info=True,
             )
             try:
-                await ws.send_json(FeralMessage(
-                    session_id=session_id,
-                    hop="brain",
-                    type="error",
-                    payload={
-                        "code": "chat_turn_failed",
-                        "message": "The chat turn failed. Please try again.",
-                        "recoverable": True,
-                    },
-                ).model_dump())
+                await ws.send_json(
+                    FeralMessage(
+                        session_id=session_id,
+                        hop="brain",
+                        type="error",
+                        payload={
+                            "code": "chat_turn_failed",
+                            "message": "The chat turn failed. Please try again.",
+                            "recoverable": True,
+                        },
+                    ).model_dump()
+                )
             except Exception:
                 pass
 
@@ -2211,6 +2349,7 @@ def _build_chat_turn_runner(
 # ─────────────────────────────────────────────
 # Main Client WebSocket
 # ─────────────────────────────────────────────
+
 
 @app.websocket("/v1/session")
 async def client_session(ws: WebSocket, token: str = Query(default=None)):
@@ -2259,8 +2398,14 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     # memory across web tabs AND iOS chat. Multi-thread / "new chat"
     # is now an explicit client opt-in (pass `?session_id=...` on the
     # WebSocket query string).
-    requested_sid = ws.query_params.get("session_id", "").strip() if hasattr(ws, "query_params") else ""
-    session_id = requested_sid or getattr(state, "primary_session_id", "") or str(uuid4())
+    requested_sid = (
+        ws.query_params.get("session_id", "").strip()
+        if hasattr(ws, "query_params")
+        else ""
+    )
+    session_id = (
+        requested_sid or getattr(state, "primary_session_id", "") or str(uuid4())
+    )
     state.sessions[session_id] = ws
     # Phase 3 (audit-r10) — refcount this attachment so concurrent
     # tabs sharing the primary session each register; per-session
@@ -2282,6 +2427,7 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
 
     def _spawn_chat_task(coro: "Awaitable[None]") -> asyncio.Task:
         from security.agent_turn_lease import spawn_agent_turn
+
         task = spawn_agent_turn(state, coro)
         chat_tasks.add(task)
 
@@ -2313,25 +2459,35 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
     greeting = _build_greeting() if not requested_sid else ""
 
     if greeting:
-        await ws.send_json(FeralMessage(
-            session_id=session_id,
-            hop="brain",
-            type="text_response",
-            payload=TextResponsePayload(
-                text=greeting
-            ).model_dump(),
-        ).model_dump())
-        state.memory.working_push(session_id, {"role": "assistant", "content": greeting})
+        await ws.send_json(
+            FeralMessage(
+                session_id=session_id,
+                hop="brain",
+                type="text_response",
+                payload=TextResponsePayload(text=greeting).model_dump(),
+            ).model_dump()
+        )
+        state.memory.working_push(
+            session_id, {"role": "assistant", "content": greeting}
+        )
 
     try:
         while True:
             try:
                 raw = await ws.receive_json()
             except (ValueError, TypeError) as e:
-                logger.warning("Malformed message from session %s: %s", session_id[:8], e)
-                await state.send_to_session(session_id, FeralMessage(
-                    type="error", payload={"text": "Invalid message format. Please send valid JSON."}
-                ))
+                logger.warning(
+                    "Malformed message from session %s: %s", session_id[:8], e
+                )
+                await state.send_to_session(
+                    session_id,
+                    FeralMessage(
+                        type="error",
+                        payload={
+                            "text": "Invalid message format. Please send valid JSON."
+                        },
+                    ),
+                )
                 continue
             raw["session_id"] = session_id
 
@@ -2343,7 +2499,9 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
             try:
                 msg, payload = parse_message(raw)
 
-                if msg.type == "text_command" and isinstance(payload, TextCommandPayload):
+                if msg.type == "text_command" and isinstance(
+                    payload, TextCommandPayload
+                ):
                     # Lane 08 WS7 + WS9 — single shared helper for
                     # WebUI + HUP so the response shape never drifts.
                     attachments: list[dict] = []
@@ -2385,42 +2543,60 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         if mode == "disabled":
                             await state.voice_router.stop_session_voice(session_id)
 
-                    if provider == "gemini" and mode == "realtime" and state.gemini_proxy:
+                    if (
+                        provider == "gemini"
+                        and mode == "realtime"
+                        and state.gemini_proxy
+                    ):
                         system_prompt = ""
                         if state.identity_workspace:
                             try:
-                                frame = state.perception.get_frame(session_id) if getattr(state, "perception", None) else None
+                                frame = (
+                                    state.perception.get_frame(session_id)
+                                    if getattr(state, "perception", None)
+                                    else None
+                                )
                             except Exception:
                                 frame = None
-                            system_prompt = state.identity_workspace.build_system_prompt(
-                                frame=frame,
-                                skill_registry=getattr(state, "skills", None),
+                            system_prompt = (
+                                state.identity_workspace.build_system_prompt(
+                                    frame=frame,
+                                    skill_registry=getattr(state, "skills", None),
+                                )
                             )
 
                         async def _gemini_audio_cb(sid, b64, is_done):
                             try:
-                                await ws.send_json(FeralMessage(
-                                    session_id=sid,
-                                    hop="brain",
-                                    type="audio_response",
-                                    payload={
-                                        "data_b64": b64,
-                                        "encoding": "pcm16",
-                                        "sample_rate": 24000,
-                                        "is_final": is_done,
-                                    },
-                                ).model_dump())
+                                await ws.send_json(
+                                    FeralMessage(
+                                        session_id=sid,
+                                        hop="brain",
+                                        type="audio_response",
+                                        payload={
+                                            "data_b64": b64,
+                                            "encoding": "pcm16",
+                                            "sample_rate": 24000,
+                                            "is_final": is_done,
+                                        },
+                                    ).model_dump()
+                                )
                             except Exception:
                                 pass
 
                         async def _gemini_transcript_cb(sid, text, is_partial):
                             try:
-                                await ws.send_json(FeralMessage(
-                                    session_id=sid,
-                                    hop="brain",
-                                    type="transcript",
-                                    payload={"text": text, "role": "assistant", "is_partial": is_partial},
-                                ).model_dump())
+                                await ws.send_json(
+                                    FeralMessage(
+                                        session_id=sid,
+                                        hop="brain",
+                                        type="transcript",
+                                        payload={
+                                            "text": text,
+                                            "role": "assistant",
+                                            "is_partial": is_partial,
+                                        },
+                                    ).model_dump()
+                                )
                             except Exception:
                                 pass
 
@@ -2432,30 +2608,49 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                             on_transcript=_gemini_transcript_cb,
                         )
 
-                    await ws.send_json(FeralMessage(
-                        session_id=session_id,
-                        hop="brain",
-                        type="voice_config_ack",
-                        payload={"mode": mode, "provider": provider, "status": "ok"},
-                    ).model_dump())
+                    await ws.send_json(
+                        FeralMessage(
+                            session_id=session_id,
+                            hop="brain",
+                            type="voice_config_ack",
+                            payload={
+                                "mode": mode,
+                                "provider": provider,
+                                "status": "ok",
+                            },
+                        ).model_dump()
+                    )
                     logger.info(f"Web client voice mode: {mode} (provider: {provider})")
 
                 elif msg.type == "voice_interrupt":
                     from bridges.client_voice_control import interrupt_client_voice
 
                     if state.sessions.get(session_id) is not ws:
-                        result = {"status": "superseded", "cancel_requested": False,
-                                  "session_preserved": True}
+                        result = {
+                            "status": "superseded",
+                            "cancel_requested": False,
+                            "session_preserved": True,
+                        }
                     else:
                         result = await interrupt_client_voice(state, session_id)
-                    await ws.send_json(FeralMessage(
-                        session_id=session_id, hop="brain", type="voice_interrupt_ack",
-                        payload=result,
-                    ).model_dump())
+                    await ws.send_json(
+                        FeralMessage(
+                            session_id=session_id,
+                            hop="brain",
+                            type="voice_interrupt_ack",
+                            payload=result,
+                        ).model_dump()
+                    )
 
-                elif msg.type == "audio_chunk" and isinstance(payload, AudioChunkPayload):
-                    if state.gemini_proxy and state.gemini_proxy.has_session(session_id):
-                        await state.gemini_proxy.relay_audio(session_id, payload.data_b64)
+                elif msg.type == "audio_chunk" and isinstance(
+                    payload, AudioChunkPayload
+                ):
+                    if state.gemini_proxy and state.gemini_proxy.has_session(
+                        session_id
+                    ):
+                        await state.gemini_proxy.relay_audio(
+                            session_id, payload.data_b64
+                        )
                     elif state.voice_router:
                         await state.voice_router.handle_audio_from_client(
                             session_id=session_id,
@@ -2467,18 +2662,24 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         )
 
                 elif msg.type == "ui_event" and isinstance(payload, UIEventPayload):
-                    await _spawn_chat_task(state.orchestrator.handle_ui_event(
-                        session_id=session_id,
-                        action_id=payload.action_id,
-                        event=payload.event,
-                        value=payload.value,
-                        app_id=payload.app_id,
-                        screen_id=payload.screen_id,
-                    ))
+                    await _spawn_chat_task(
+                        state.orchestrator.handle_ui_event(
+                            session_id=session_id,
+                            action_id=payload.action_id,
+                            event=payload.event,
+                            value=payload.value,
+                            app_id=payload.app_id,
+                            screen_id=payload.screen_id,
+                        )
+                    )
 
-                elif msg.type == "device_register" and isinstance(payload, DeviceRegisterPayload):
+                elif msg.type == "device_register" and isinstance(
+                    payload, DeviceRegisterPayload
+                ):
                     state.devices[payload.device_id] = payload.model_dump()
-                    logger.info(f"Device registered: {payload.device_id} ({payload.device_type})")
+                    logger.info(
+                        f"Device registered: {payload.device_id} ({payload.device_type})"
+                    )
 
                 elif msg.type == "vision_query":
                     payload_dict = raw.get("payload", {})
@@ -2496,7 +2697,9 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                         # and simply never got an answer.
                         state.register_background_task(
                             asyncio.ensure_future(
-                                _analyze_scene_background(target_node, latest, mode="query", query=query_text)
+                                _analyze_scene_background(
+                                    target_node, latest, mode="query", query=query_text
+                                )
                             )
                         )
 
@@ -2520,7 +2723,9 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     else:
                         virtual_node = f"webclient_{session_id[:8]}"
                         state.vision_buffer.push(virtual_node, frame_payload)
-                        state.perception.update_vision(session_id, state.vision_buffer, virtual_node)
+                        state.perception.update_vision(
+                            session_id, state.vision_buffer, virtual_node
+                        )
                         state.bind_session_to_daemon(session_id, virtual_node)
 
                         data_b64 = frame_payload.get("data_b64", "")
@@ -2530,11 +2735,17 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                             frame_payload.get("encoding", "jpeg"),
                         )
                         if change_event and state.scene and state.scene.available:
-                            mode = "tracking" if change_event.trigger_reason == "scene_change" else "general"
+                            mode = (
+                                "tracking"
+                                if change_event.trigger_reason == "scene_change"
+                                else "general"
+                            )
                             # AUDIT-FIXES F-06, see the vision_query branch.
                             state.register_background_task(
                                 asyncio.ensure_future(
-                                    _analyze_scene_background(virtual_node, frame_payload, mode=mode)
+                                    _analyze_scene_background(
+                                        virtual_node, frame_payload, mode=mode
+                                    )
                                 )
                             )
 
@@ -2542,19 +2753,32 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
                     bio = raw.get("payload", {})
                     if state.orchestrator:
                         state.orchestrator.update_biometric(session_id, bio)
-                        await state.orchestrator._emit_brain_event(session_id, "device_telemetry", {"source": "client"})
+                        await state.orchestrator._emit_brain_event(
+                            session_id, "device_telemetry", {"source": "client"}
+                        )
                     state.perception.update_sensors(session_id, bio)
                     if state.somatic_engine:
-                        state.somatic_engine.update_from_perception_frame(session_id, bio)
+                        state.somatic_engine.update_from_perception_frame(
+                            session_id, bio
+                        )
                     _record_biometrics_to_baseline(bio)
 
             except Exception as msg_err:
-                logger.error(f"Error processing message from {session_id[:8]}: {msg_err}", exc_info=True)
+                logger.error(
+                    f"Error processing message from {session_id[:8]}: {msg_err}",
+                    exc_info=True,
+                )
                 try:
-                    await ws.send_json(FeralMessage(
-                        session_id=session_id, hop="brain", type="text_response",
-                        payload=TextResponsePayload(text=f"Sorry, something went wrong: {msg_err}").model_dump(),
-                    ).model_dump())
+                    await ws.send_json(
+                        FeralMessage(
+                            session_id=session_id,
+                            hop="brain",
+                            type="text_response",
+                            payload=TextResponsePayload(
+                                text=f"Sorry, something went wrong: {msg_err}"
+                            ).model_dump(),
+                        ).model_dump()
+                    )
                 except Exception:
                     pass
 
@@ -2610,14 +2834,21 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
         bound_nodes: list = []
         nodes_bound = (
             getattr(state.voice_router, "nodes_bound_to_session", None)
-            if state.voice_router else None
+            if state.voice_router
+            else None
         )
         if callable(nodes_bound):
             try:
-                bound_nodes = [n for n in (nodes_bound(session_id) or []) if isinstance(n, str)]
+                bound_nodes = [
+                    n for n in (nodes_bound(session_id) or []) if isinstance(n, str)
+                ]
             except Exception:
                 bound_nodes = []
-        if state.voice_router and state.sessions.get(session_id) is ws and not bound_nodes:
+        if (
+            state.voice_router
+            and state.sessions.get(session_id) is ws
+            and not bound_nodes
+        ):
             try:
                 await state.voice_router.stop_session_voice(session_id)
             except Exception as voice_exc:
@@ -2677,7 +2908,9 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
             except Exception as snap_exc:
                 logger.debug(f"Primary snapshot on disconnect failed: {snap_exc}")
     except Exception as exc:
-        logger.error(f"Unexpected error in session {session_id[:8]}: {exc}", exc_info=True)
+        logger.error(
+            f"Unexpected error in session {session_id[:8]}: {exc}", exc_info=True
+        )
         # Same identity check as the WebSocketDisconnect path above, for the
         # same reason. This sibling handler was missed when that one was
         # fixed, so the original bug survived here in a narrower window: an
@@ -2710,16 +2943,23 @@ async def client_session(ws: WebSocket, token: str = Query(default=None)):
 NODE_API_KEY = os.environ.get("NODE_API_KEY", "")
 
 
-async def _send_protocol_error(ws: WebSocket, code: int, message: str, *, name: str = "bad_schema") -> None:
+async def _send_protocol_error(
+    ws: WebSocket, code: int, message: str, *, name: str = "bad_schema"
+) -> None:
     """Emit an HUP §8 error frame to the daemon."""
     try:
-        await ws.send_json(hup_frame("error", {
-            "code": code,
-            "name": name,
-            "message": message,
-            "recoverable": False,
-            "ref_action_id": None,
-        }))
+        await ws.send_json(
+            hup_frame(
+                "error",
+                {
+                    "code": code,
+                    "name": name,
+                    "message": message,
+                    "recoverable": False,
+                    "ref_action_id": None,
+                },
+            )
+        )
     except Exception:
         pass
 
@@ -2922,7 +3162,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
     logger.info(
         "Daemon connecting (device_id=%s bearer_kind=%s auth_source=%s)...",
         paired_device_id or "legacy-key",
-        bearer_kind or ("legacy_node_api_key" if credential == NODE_API_KEY else "unknown"),
+        bearer_kind
+        or ("legacy_node_api_key" if credential == NODE_API_KEY else "unknown"),
         credential_source or "none",
     )
 
@@ -2945,7 +3186,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 kind="phone_envelope",
                 session_id=str(node_id or paired_device_id or ""),
                 actor="phone",
-                payload=payload_for_hash if payload_for_hash is not None else {"type": message_type},
+                payload=payload_for_hash
+                if payload_for_hash is not None
+                else {"type": message_type},
                 decision=decision,
                 detail=info,
             )
@@ -2972,7 +3215,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # break test_accepts_legacy_node_api_key_and_registers.
                 logger.info(
                     "daemon_session: peer disconnected (device_id=%s node_id=%s)",
-                    paired_device_id, node_id,
+                    paired_device_id,
+                    node_id,
                 )
                 raise
             except RuntimeError as exc:
@@ -2985,7 +3229,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # outer handler does the cleanup.
                 logger.info(
                     "daemon_session: peer transport gone (device_id=%s node_id=%s) — %s",
-                    paired_device_id, node_id, exc,
+                    paired_device_id,
+                    node_id,
+                    exc,
                 )
                 raise WebSocketDisconnect(code=1006) from exc
             try:
@@ -2999,10 +3245,12 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # sees what's wrong.
                 logger.warning(
                     "daemon_session: malformed payload from device_id=%s: %s",
-                    paired_device_id, exc,
+                    paired_device_id,
+                    exc,
                 )
                 await _send_protocol_error(
-                    ws, 1003,
+                    ws,
+                    1003,
                     f"payload validation failed: {exc.__class__.__name__}: {exc}",
                     name="bad_payload",
                 )
@@ -3027,16 +3275,23 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     _tier_drops_reported.add(_drop_key)
                     logger.info(
                         "dropping %s from %s: operator disabled the %s tier",
-                        msg.type, node_id, _refused_tier,
+                        msg.type,
+                        node_id,
+                        _refused_tier,
                     )
                     _record_phone_envelope(
-                        "denied", msg.type,
-                        detail={"reason": "capability_tier_disabled",
-                                "tier": _refused_tier},
+                        "denied",
+                        msg.type,
+                        detail={
+                            "reason": "capability_tier_disabled",
+                            "tier": _refused_tier,
+                        },
                     )
                 continue
 
-            if msg.type in ("node_register", "register") and isinstance(payload, NodeRegisterPayload):
+            if msg.type in ("node_register", "register") and isinstance(
+                payload, NodeRegisterPayload
+            ):
                 node_id = payload.node_id
                 state.daemons[node_id] = ws
                 # Stash the HUP-declared node_type on the WebSocket so
@@ -3046,13 +3301,27 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # models.protocol.NodeRegisterPayload doesn't yet mirror —
                 # getattr falls back to "" when absent, so we pick them up
                 # from v1.1+ daemons without tripping on v1.0 payloads.
-                setattr(ws, "_feral_node_type", (getattr(payload, "node_type", None) or "unknown").lower())
-                setattr(ws, "_feral_capabilities", list(getattr(payload, "capabilities", []) or []))
+                setattr(
+                    ws,
+                    "_feral_node_type",
+                    (getattr(payload, "node_type", None) or "unknown").lower(),
+                )
+                setattr(
+                    ws,
+                    "_feral_capabilities",
+                    list(getattr(payload, "capabilities", []) or []),
+                )
                 setattr(ws, "_feral_platform", getattr(payload, "platform", "") or "")
-                setattr(ws, "_feral_manufacturer", getattr(payload, "manufacturer", "") or "")
+                setattr(
+                    ws,
+                    "_feral_manufacturer",
+                    getattr(payload, "manufacturer", "") or "",
+                )
                 setattr(ws, "_feral_model", getattr(payload, "model", "") or "")
                 if state.skill_executor:
-                    state.skill_executor.register_daemon_type(node_id, payload.node_type)
+                    state.skill_executor.register_daemon_type(
+                        node_id, payload.node_type
+                    )
                 # Phase 5 (audit-r10 overhaul) — record the structured
                 # skill manifests this node publishes so
                 # `GET /api/capabilities` and the orchestrator's
@@ -3073,20 +3342,27 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     platform=payload.platform,
                     skills=getattr(payload, "skills", []) or [],
                 )
-                logger.info(f"Node registered: {node_id} ({payload.node_type}/{payload.platform}) — caps: {payload.capabilities}, skills: {len(getattr(payload, 'skills', []) or [])}")
+                logger.info(
+                    f"Node registered: {node_id} ({payload.node_type}/{payload.platform}) — caps: {payload.capabilities}, skills: {len(getattr(payload, 'skills', []) or [])}"
+                )
                 _log_activity("device_connected", f"{node_id} ({payload.node_type})")
 
                 for sid in state.sessions:
                     state.bind_session_to_daemon(sid, node_id)
-                    state.perception.update_connected_nodes(sid, list(state.daemons.keys()))
+                    state.perception.update_connected_nodes(
+                        sid, list(state.daemons.keys())
+                    )
 
                 if state.hardware_mesh:
-                    await state.hardware_mesh.on_node_connected(node_id, {
-                        "node_type": payload.node_type,
-                        "platform": payload.platform,
-                        "capabilities": payload.capabilities,
-                        "device_manifest": payload.device_manifest,
-                    })
+                    await state.hardware_mesh.on_node_connected(
+                        node_id,
+                        {
+                            "node_type": payload.node_type,
+                            "platform": payload.platform,
+                            "capabilities": payload.capabilities,
+                            "device_manifest": payload.device_manifest,
+                        },
+                    )
 
                 session_token = str(__import__("uuid").uuid4())
                 # Stashed for the same reason as _feral_capabilities
@@ -3103,29 +3379,39 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # before it builds a frame, so the ack tells the daemon
                 # the truth about what the brain will actually send.
                 _granted_caps, _denied_caps = live_grants().partition(
-                    node_id, list(payload.capabilities),
+                    node_id,
+                    list(payload.capabilities),
                 )
                 if _denied_caps:
                     logger.info(
-                        "node %s: operator has denied %s", node_id, _denied_caps,
+                        "node %s: operator has denied %s",
+                        node_id,
+                        _denied_caps,
                     )
-                await ws.send_json(hup_frame("node_ack", {
-                    "node_id": node_id,
-                    "session_token": session_token,
-                    "hup_version": HUP_VERSION,
-                    "heartbeat_ms": 10000,
-                    "server_time": __import__("time").time(),
-                    "capabilities": list(payload.capabilities),
-                    "granted_capabilities": _granted_caps,
-                    "denied_capabilities": _denied_caps,
-                }))
+                await ws.send_json(
+                    hup_frame(
+                        "node_ack",
+                        {
+                            "node_id": node_id,
+                            "session_token": session_token,
+                            "hup_version": HUP_VERSION,
+                            "heartbeat_ms": 10000,
+                            "server_time": __import__("time").time(),
+                            "capabilities": list(payload.capabilities),
+                            "granted_capabilities": _granted_caps,
+                            "denied_capabilities": _denied_caps,
+                        },
+                    )
+                )
 
             elif msg.type == "execute_result":
                 logger.info(f"Daemon result from {node_id}")
                 result_payload = raw.get("payload", {})
                 request_id = result_payload.get("request_id", "")
                 if state.hardware_mesh and request_id:
-                    state.hardware_mesh.resolve_invoke(request_id, result_payload, connection=ws, node_id=node_id)
+                    state.hardware_mesh.resolve_invoke(
+                        request_id, result_payload, connection=ws, node_id=node_id
+                    )
                 if state.orchestrator:
                     await state.orchestrator.handle_daemon_result(
                         node_id=node_id,
@@ -3156,23 +3442,35 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     state.vision_buffer.push(effective_node, frame_payload)
 
                     for sid in state.get_sessions_for_daemon(effective_node):
-                        state.perception.update_vision(sid, state.vision_buffer, effective_node)
+                        state.perception.update_vision(
+                            sid, state.vision_buffer, effective_node
+                        )
 
                     data_b64 = frame_payload.get("data_b64", "")
                     change_event = state.change_detector.should_analyze(
-                        effective_node, data_b64, frame_payload.get("encoding", "jpeg"),
+                        effective_node,
+                        data_b64,
+                        frame_payload.get("encoding", "jpeg"),
                     )
                     if change_event and state.scene and state.scene.available:
-                        mode = "tracking" if change_event.trigger_reason == "scene_change" else "general"
+                        mode = (
+                            "tracking"
+                            if change_event.trigger_reason == "scene_change"
+                            else "general"
+                        )
                         # AUDIT-FIXES F-06, see the vision_query branch.
                         state.register_background_task(
                             asyncio.ensure_future(
-                                _analyze_scene_background(effective_node, frame_payload, mode=mode)
+                                _analyze_scene_background(
+                                    effective_node, frame_payload, mode=mode
+                                )
                             )
                         )
 
                     if state.orchestrator:
-                        state.orchestrator.resolve_pending_frame(msg.msg_id, frame_payload)
+                        state.orchestrator.resolve_pending_frame(
+                            msg.msg_id, frame_payload
+                        )
 
             elif msg.type == "vision_query":
                 payload_dict = raw.get("payload", {})
@@ -3184,7 +3482,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     # AUDIT-FIXES F-06, see the vision_query branch above.
                     state.register_background_task(
                         asyncio.ensure_future(
-                            _analyze_scene_background(target_node, latest, mode="query", query=query_text)
+                            _analyze_scene_background(
+                                target_node, latest, mode="query", query=query_text
+                            )
                         )
                     )
 
@@ -3199,8 +3499,12 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             await state.orchestrator.handle_command(
                                 session_id=sid,
                                 text=f"[GESTURE] User performed: {gesture}",
-                                context={"source": "gesture", "gesture": gesture, "node": node_id},
-                    )
+                                context={
+                                    "source": "gesture",
+                                    "gesture": gesture,
+                                    "node": node_id,
+                                },
+                            )
 
             elif msg.type == "telemetry":
                 telemetry_payload = raw.get("payload", {})
@@ -3218,9 +3522,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     for sid in state.get_sessions_for_daemon(node_id):
                         state.perception.update_sensors(sid, sensors)
                         if state.somatic_engine:
-                            state.somatic_engine.update_from_perception_frame(sid, sensors)
+                            state.somatic_engine.update_from_perception_frame(
+                                sid, sensors
+                            )
                         if state.orchestrator:
-                            await state.orchestrator._emit_brain_event(sid, "device_telemetry", {"source": node_id, "hr": hr or 0})
+                            await state.orchestrator._emit_brain_event(
+                                sid,
+                                "device_telemetry",
+                                {"source": node_id, "hr": hr or 0},
+                            )
                 _record_biometrics_to_baseline(sensors)
 
             elif msg.type == "sensor_telemetry":
@@ -3235,10 +3545,14 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # update_biometric / sensors_map under the canonical
                 # name. Remove once the iOS App Store update has
                 # propagated.
-                sensor_name = payload_dict.get("sensor") or payload_dict.get("sensor_type", "")
+                sensor_name = payload_dict.get("sensor") or payload_dict.get(
+                    "sensor_type", ""
+                )
                 sensor_data = payload_dict.get("data", {})
                 source = payload_dict.get("source", "unknown")
-                logger.info(f"Sensor [{sensor_name}] from {node_id} ({source}): {sensor_data}")
+                logger.info(
+                    f"Sensor [{sensor_name}] from {node_id} ({source}): {sensor_data}"
+                )
 
                 sensors_map = {sensor_name: sensor_data}
                 if state.orchestrator:
@@ -3247,9 +3561,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     for sid in state.get_sessions_for_daemon(node_id):
                         state.perception.update_sensors(sid, sensors_map)
                         if state.somatic_engine:
-                            state.somatic_engine.update_from_perception_frame(sid, sensors_map)
+                            state.somatic_engine.update_from_perception_frame(
+                                sid, sensors_map
+                            )
                         if state.orchestrator:
-                            await state.orchestrator._emit_brain_event(sid, "device_telemetry", {"source": node_id, "sensor": sensor_name})
+                            await state.orchestrator._emit_brain_event(
+                                sid,
+                                "device_telemetry",
+                                {"source": node_id, "sensor": sensor_name},
+                            )
 
             elif msg.type == "sensor_batch":
                 payload_dict = raw.get("payload", {})
@@ -3261,9 +3581,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     for sid in state.get_sessions_for_daemon(node_id):
                         state.perception.update_sensors(sid, readings)
                         if state.somatic_engine:
-                            state.somatic_engine.update_from_perception_frame(sid, readings)
+                            state.somatic_engine.update_from_perception_frame(
+                                sid, readings
+                            )
                         if state.orchestrator:
-                            await state.orchestrator._emit_brain_event(sid, "device_telemetry", {"source": node_id, "sensors": list(readings.keys())})
+                            await state.orchestrator._emit_brain_event(
+                                sid,
+                                "device_telemetry",
+                                {"source": node_id, "sensors": list(readings.keys())},
+                            )
                 _record_biometrics_to_baseline(readings)
 
             elif msg.type == "node_heartbeat":
@@ -3272,20 +3598,27 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     pending = state.hardware_mesh.ledger.get_pending(node_id)
                     if pending:
                         unacked_ids = [
-                            r.envelope.command_id for r in pending
+                            r.envelope.command_id
+                            for r in pending
                             if r.state.value == "submitted"
                         ]
                         if unacked_ids:
-                            await ws.send_json(hup_frame(
-                                "pending_commands",
-                                {"command_ids": unacked_ids},
-                            ))
+                            await ws.send_json(
+                                hup_frame(
+                                    "pending_commands",
+                                    {"command_ids": unacked_ids},
+                                )
+                            )
 
             elif msg.type == "hup_action_response":
                 result_payload = raw.get("payload", {})
-                action_id = result_payload.get("action_id", "") or result_payload.get("request_id", "")
+                action_id = result_payload.get("action_id", "") or result_payload.get(
+                    "request_id", ""
+                )
                 if state.hardware_mesh and action_id:
-                    state.hardware_mesh.resolve_invoke(action_id, result_payload, connection=ws, node_id=node_id)
+                    state.hardware_mesh.resolve_invoke(
+                        action_id, result_payload, connection=ws, node_id=node_id
+                    )
                 if state.orchestrator:
                     await state.orchestrator.handle_daemon_result(
                         node_id=node_id,
@@ -3294,7 +3627,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     )
 
             elif msg.type == "node_bye":
-                logger.info("node_bye from %s: %s", node_id, raw.get("payload", {}).get("reason", ""))
+                logger.info(
+                    "node_bye from %s: %s",
+                    node_id,
+                    raw.get("payload", {}).get("reason", ""),
+                )
                 if node_id:
                     state.daemons.pop(node_id, None)
                     if state.skill_executor:
@@ -3313,10 +3650,14 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 connected = payload_dict.get("glasses_connected", False)
                 battery = payload_dict.get("battery_level", -1)
                 model = payload_dict.get("glasses_model", "FERAL")
-                logger.info(f"Glasses ({model}) {'connected' if connected else 'disconnected'} via {node_id}, battery={battery}%")
+                logger.info(
+                    f"Glasses ({model}) {'connected' if connected else 'disconnected'} via {node_id}, battery={battery}%"
+                )
                 # Persist into the sub-device truth store so dashboards
                 # render a real binding instead of a hardcoded dot.
-                await _handle_subdevice_status(ws, node_id, "glasses_status", payload_dict)
+                await _handle_subdevice_status(
+                    ws, node_id, "glasses_status", payload_dict
+                )
 
             elif msg.type == "voice_config":
                 payload_dict = raw.get("payload", {})
@@ -3361,13 +3702,18 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         detail={"reason": "missing_text_or_orchestrator"},
                         payload_for_hash=payload_dict,
                     )
-                    await ws.send_json(hup_frame("chat_response", {
-                        "session_id": target_sid,
-                        "text": "",
-                        "reply_mode": reply_mode,
-                        "channel": channel,
-                        "reply_to": reply_to,
-                    }))
+                    await ws.send_json(
+                        hup_frame(
+                            "chat_response",
+                            {
+                                "session_id": target_sid,
+                                "text": "",
+                                "reply_mode": reply_mode,
+                                "channel": channel,
+                                "reply_to": reply_to,
+                            },
+                        )
+                    )
                     continue
 
                 if target_sid not in state.sessions:
@@ -3378,10 +3724,14 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         # First vision turn can race: phone sends frame first, then
                         # chat_request. The frame may land before this session is bound
                         # to the daemon, so refresh perception here after binding.
-                        state.perception.update_vision(target_sid, state.vision_buffer, node_id)
+                        state.perception.update_vision(
+                            target_sid, state.vision_buffer, node_id
+                        )
 
                 if state.memory:
-                    state.memory.working_push(target_sid, {"role": "user", "text": text})
+                    state.memory.working_push(
+                        target_sid, {"role": "user", "text": text}
+                    )
 
                 # Phase 1 (audit-r10 overhaul plan) — `device_target`
                 # tells the brain WHERE the requested action should run.
@@ -3410,6 +3760,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 refined_envelope = None
                 try:
                     from agents.prompt_refiner import refine as _refine_prompt
+
                     history = []
                     if state.memory:
                         try:
@@ -3444,6 +3795,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 if not device_target:
                     try:
                         from agents.prompt_refiner import infer_device_target
+
                         device_target = infer_device_target(text) or None
                     except Exception:
                         logger.debug("device_target inference failed", exc_info=True)
@@ -3458,7 +3810,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 }
                 if device_target in ("brain", "phone", "glasses"):
                     context["device_target"] = device_target
-                elif str(getattr(ws, "_feral_node_type", "") or "").lower() in _PHONE_NODE_TYPES:
+                elif (
+                    str(getattr(ws, "_feral_node_type", "") or "").lower()
+                    in _PHONE_NODE_TYPES
+                ):
                     # A paired phone that names no known device is the
                     # operator asking the brain. Resolve to brain_host
                     # rather than letting source "phone_surface" fall
@@ -3505,7 +3860,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     if isinstance(result, str):
                         response_text = result
                     elif isinstance(result, dict):
-                        response_text = str(result.get("text") or result.get("message") or "")
+                        response_text = str(
+                            result.get("text") or result.get("message") or ""
+                        )
                     if not response_text and state.memory:
                         history = state.memory.working_get(target_sid) or []
                         for item in reversed(history):
@@ -3529,7 +3886,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     _record_phone_envelope(
                         "error",
                         "chat_request",
-                        detail={"reason": "orchestrator_error", "error": orch_error[:200]},
+                        detail={
+                            "reason": "orchestrator_error",
+                            "error": orch_error[:200],
+                        },
                         payload_for_hash=payload_dict,
                     )
                     response_text = ""
@@ -3621,7 +3981,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     session_id = requested_sid
                 elif (
                     node_kind in _PHONE_NODE_TYPES
-                    and isinstance(primary_sid, str) and primary_sid
+                    and isinstance(primary_sid, str)
+                    and primary_sid
                 ):
                     session_id = primary_sid
                 else:
@@ -3636,9 +3997,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # VoiceRouter.open_session. Phone emits the selected mode
                 # in the `voice_mode` payload field; falls back to the
                 # operator's configured default when absent.
-                selected_mode = (
-                    payload_dict.get("voice_mode")
-                    or payload_dict.get("provider_mode")
+                selected_mode = payload_dict.get("voice_mode") or payload_dict.get(
+                    "provider_mode"
                 )
                 if not selected_mode:
                     cfg = getattr(state, "config", None)
@@ -3648,7 +4008,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     voice_cfg = merged_cfg.get("voice") or {}
                     selected_mode = voice_cfg.get("mode", "openai_realtime")
                 if selected_mode not in (
-                    "openai_realtime", "gemini_live", "chained",
+                    "openai_realtime",
+                    "gemini_live",
+                    "chained",
                 ):
                     logger.warning(
                         "voice_session_start: unknown voice_mode=%r, "
@@ -3660,18 +4022,25 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 voice_provider = "openai"
                 if selected_mode == "gemini_live":
                     voice_provider = "gemini"
-                mode_for_router = selected_mode if selected_mode in {"openai_realtime", "gemini_live", "chained"} else "openai_realtime"
+                mode_for_router = (
+                    selected_mode
+                    if selected_mode in {"openai_realtime", "gemini_live", "chained"}
+                    else "openai_realtime"
+                )
                 state.voice_router.register_voice_config(
                     node_id,
                     {
                         "node_id": node_id,
                         "mode": mode_for_router,
                         "voice_provider": voice_provider,
-                        "supports_realtime": selected_mode in {"openai_realtime", "gemini_live"},
+                        "supports_realtime": selected_mode
+                        in {"openai_realtime", "gemini_live"},
                         "sample_rate": payload_dict.get("sample_rate", 24000),
                         "channels": payload_dict.get("channels", 1),
                         "language_hint": payload_dict.get("language_hint", "en-US"),
-                        "interrupt_policy": payload_dict.get("interrupt_policy", "barge_in"),
+                        "interrupt_policy": payload_dict.get(
+                            "interrupt_policy", "barge_in"
+                        ),
                         "camera_linked": bool(payload_dict.get("camera_linked", False)),
                         "phone_mode": payload_dict.get("mode", "push_to_talk"),
                         "skip_wake": True,
@@ -3705,7 +4074,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 except Exception as exc:
                     logger.exception(
                         "voice_router.open_session failed for mode=%s: %s",
-                        selected_mode, exc,
+                        selected_mode,
+                        exc,
                     )
                     open_error = str(exc)[:200] or exc.__class__.__name__
 
@@ -3715,7 +4085,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     )
                     logger.warning(
                         "voice_session_start refused for node=%s mode=%s: %s",
-                        node_id, selected_mode, open_error,
+                        node_id,
+                        selected_mode,
+                        open_error,
                     )
                     _record_phone_envelope(
                         "error",
@@ -3818,7 +4190,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         # cancel nothing on a chained call. Falls back to
                         # that derivation when no binding is known.
                         bound_sid = ""
-                        session_for_node = getattr(state.voice_router, "session_for_node", None)
+                        session_for_node = getattr(
+                            state.voice_router, "session_for_node", None
+                        )
                         if callable(session_for_node):
                             try:
                                 bound_sid = session_for_node(node_id)
@@ -3826,7 +4200,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                                 bound_sid = ""
                         if not (isinstance(bound_sid, str) and bound_sid):
                             bound_sid = ""
-                        chained_session_id = bound_sid or stream_id or f"voice-{node_id}"
+                        chained_session_id = (
+                            bound_sid or stream_id or f"voice-{node_id}"
+                        )
                         cancel_chained = getattr(
                             state.voice_router, "cancel_chained_response", None
                         )
@@ -3843,13 +4219,18 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         logger.info(
                             "voice_interrupt for node=%s found no live session "
                             "to cancel — ignoring (barge-in never tears a "
-                            "session down)", node_id,
+                            "session down)",
+                            node_id,
                         )
                 except Exception as exc:
                     _record_phone_envelope(
                         "error",
                         "voice_interrupt",
-                        detail={"reason": "interrupt_failed", "error": str(exc)[:200], "stream_id": stream_id},
+                        detail={
+                            "reason": "interrupt_failed",
+                            "error": str(exc)[:200],
+                            "stream_id": stream_id,
+                        },
                         payload_for_hash=payload_dict,
                     )
                     continue
@@ -3865,7 +4246,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 payload_dict = raw.get("payload", {})
                 if not node_id or not state.voice_router:
                     _record_phone_envelope(
-                        "denied", "voice_mute",
+                        "denied",
+                        "voice_mute",
                         detail={"reason": "missing_node_or_voice_router"},
                         payload_for_hash=payload_dict,
                     )
@@ -3875,10 +4257,13 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 mute_sid = payload_dict.get("stream_id", "") or f"voice-{node_id}"
                 muted = bool(payload_dict.get("muted"))
                 changed = await state.voice_router.set_session_muted(
-                    mute_sid, muted, source="client",
+                    mute_sid,
+                    muted,
+                    source="client",
                 )
                 _record_phone_envelope(
-                    "allowed", "voice_mute",
+                    "allowed",
+                    "voice_mute",
                     detail={"session_id": mute_sid, "muted": muted, "changed": changed},
                     payload_for_hash=payload_dict,
                 )
@@ -3901,7 +4286,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     event_type = payload_dict.get("event_type", "tap")
                     action_id = payload_dict.get("action_id", "")
                     value = payload_dict.get("value")
-                    target_sid = next(iter(state.get_sessions_for_daemon(node_id)), "") if node_id else ""
+                    target_sid = (
+                        next(iter(state.get_sessions_for_daemon(node_id)), "")
+                        if node_id
+                        else ""
+                    )
                     if not target_sid:
                         target_sid = f"phone-{node_id or paired_device_id or 'session'}"
                         state.sessions[target_sid] = ws
@@ -3910,7 +4299,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     screen_id = payload_dict.get("screen_id")
                     if not screen_id:
                         registry = getattr(state, "app_registry", None)
-                        if registry is not None and hasattr(registry, "build_screen_id"):
+                        if registry is not None and hasattr(
+                            registry, "build_screen_id"
+                        ):
                             screen_id = registry.build_screen_id(
                                 app_id=app_id,
                                 surface_id=surface_id or "home",
@@ -3982,13 +4373,16 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         )
                         continue
                     triggered = await state.location_engine.update_location(
-                        lat, lon, source=str(src)[:64],
+                        lat,
+                        lon,
+                        source=str(src)[:64],
                     )
                     _record_phone_envelope(
                         "accepted",
                         "location_update",
                         detail={
-                            "lat": lat, "lon": lon,
+                            "lat": lat,
+                            "lon": lon,
                             "source": src,
                             "geofence_events": len(triggered),
                         },
@@ -4026,17 +4420,25 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         if not manifest_dict.get("device_id"):
                             manifest_dict["device_id"] = device_id
                         if not manifest_dict.get("device_type"):
-                            manifest_dict["device_type"] = entry.get("kind", "sensor_hub")
+                            manifest_dict["device_type"] = entry.get(
+                                "kind", "sensor_hub"
+                            )
                         if not manifest_dict.get("name"):
                             manifest_dict["name"] = device_id or "phone-bridge-device"
                         if not manifest_dict.get("connection_type"):
-                            manifest_dict["connection_type"] = entry.get("protocol", "websocket")
+                            manifest_dict["connection_type"] = entry.get(
+                                "protocol", "websocket"
+                            )
                         if not isinstance(manifest_dict.get("capabilities"), list):
                             manifest_dict["capabilities"] = []
-                        elif manifest_dict["capabilities"] and not isinstance(manifest_dict["capabilities"][0], dict):
+                        elif manifest_dict["capabilities"] and not isinstance(
+                            manifest_dict["capabilities"][0], dict
+                        ):
                             manifest_dict["capabilities"] = []
                         if not isinstance(manifest_dict.get("sensors"), list):
-                            manifest_dict["sensors"] = list(entry.get("capabilities", []) or [])
+                            manifest_dict["sensors"] = list(
+                                entry.get("capabilities", []) or []
+                            )
                         if not isinstance(manifest_dict.get("actuators"), list):
                             manifest_dict["actuators"] = []
                         manifest = DeviceManifest(**manifest_dict)
@@ -4045,7 +4447,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         # instead of registering a manifest with no adapter.
                         bridge_adapter = None
                         try:
-                            from hardware.adapters.bridge import BridgedPeripheralAdapter
+                            from hardware.adapters.bridge import (
+                                BridgedPeripheralAdapter,
+                            )
 
                             bridge_adapter = BridgedPeripheralAdapter(
                                 manifest.device_id,
@@ -4063,7 +4467,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                                 state, "register_generic_hardware_skill_for", None
                             )
                             if callable(register) and bridge_adapter is not None:
-                                register(manifest, bridge_adapter, device_id=manifest.device_id)
+                                register(
+                                    manifest,
+                                    bridge_adapter,
+                                    device_id=manifest.device_id,
+                                )
                         except Exception:
                             pass
                         if manifest.device_id:
@@ -4089,7 +4497,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     _record_phone_envelope(
                         "error",
                         "peripheral_bridge_register",
-                        detail={"reason": "registry_write_failed", "error": str(exc)[:200]},
+                        detail={
+                            "reason": "registry_write_failed",
+                            "error": str(exc)[:200],
+                        },
                         payload_for_hash=payload_dict,
                     )
 
@@ -4101,7 +4512,11 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 
                 request_id = payload_dict.get("request_id") or str(uuid4())
                 req_ts = float(raw.get("ts") or time.time())
-                device_id = payload_dict.get("device_id") or node_id or str(paired_device_id or "")
+                device_id = (
+                    payload_dict.get("device_id")
+                    or node_id
+                    or str(paired_device_id or "")
+                )
                 kind = payload_dict.get("kind", "general")
                 status = payload_dict.get("status", "pending")
                 payload_json = _json.dumps(payload_dict, sort_keys=True, default=str)
@@ -4132,14 +4547,22 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     _record_phone_envelope(
                         "allowed",
                         "backchannel_request",
-                        detail={"id": request_id, "device_id": device_id, "kind": kind, "status": status},
+                        detail={
+                            "id": request_id,
+                            "device_id": device_id,
+                            "kind": kind,
+                            "status": status,
+                        },
                         payload_for_hash=payload_dict,
                     )
                 except Exception as exc:
                     _record_phone_envelope(
                         "error",
                         "backchannel_request",
-                        detail={"reason": "sqlite_persist_failed", "error": str(exc)[:200]},
+                        detail={
+                            "reason": "sqlite_persist_failed",
+                            "error": str(exc)[:200],
+                        },
                         payload_for_hash=payload_dict,
                     )
 
@@ -4150,7 +4573,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # in-process: the REST route a phone would otherwise POST
                 # to is not on the phone-bearer allowlist.
                 await _handle_ambient_transcript(
-                    ws, node_id, paired_device_id, raw,
+                    ws,
+                    node_id,
+                    paired_device_id,
+                    raw,
                     record_envelope=_record_phone_envelope,
                 )
 
@@ -4159,7 +4585,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # alone is a no-op: without this branch the frame
                 # validates and then falls through to the terminal else.
                 await _handle_ambient_digest_request(
-                    ws, node_id, paired_device_id, raw,
+                    ws,
+                    node_id,
+                    paired_device_id,
+                    raw,
                 )
 
             elif msg.type == "audio_chunk" and node_id:
@@ -4172,8 +4601,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # failure mode is invisible from the brain side.
                 if chunk_idx == 0 or (chunk_idx % 50 == 0):
                     logger.info(
-                        "audio_chunk from node=%s chunk=%d bytes_b64=%d "
-                        "final=%s", node_id, chunk_idx, len(audio_b64 or ""),
+                        "audio_chunk from node=%s chunk=%d bytes_b64=%d final=%s",
+                        node_id,
+                        chunk_idx,
+                        len(audio_b64 or ""),
                         payload_dict.get("is_final", False),
                     )
                 if state.voice_router and audio_b64:
@@ -4201,7 +4632,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     if chunk_idx == 0:
                         logger.warning(
                             "audio_chunk from node=%s dropped — "
-                            "voice_router not initialised", node_id,
+                            "voice_router not initialised",
+                            node_id,
                         )
                 elif not audio_b64:
                     if chunk_idx == 0:
@@ -4266,7 +4698,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
 
             elif msg.type == "frame":
                 frame_payload = raw.get("payload", {})
-                data_b64 = frame_payload.get("data_b64") or frame_payload.get("image_b64", "")
+                data_b64 = frame_payload.get("data_b64") or frame_payload.get(
+                    "image_b64", ""
+                )
                 if data_b64:
                     frame_payload["data_b64"] = data_b64
                     # F-03: decoded bytes, not base64 characters. Same budget
@@ -4283,10 +4717,14 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             f"cap is {VISION_MAX_FRAME_KB * 1024}",
                         )
                     else:
-                        effective_node = node_id or frame_payload.get("node_id", "unknown")
+                        effective_node = node_id or frame_payload.get(
+                            "node_id", "unknown"
+                        )
                         state.vision_buffer.push(effective_node, frame_payload)
                         for sid in state.get_sessions_for_daemon(effective_node):
-                            state.perception.update_vision(sid, state.vision_buffer, effective_node)
+                            state.perception.update_vision(
+                                sid, state.vision_buffer, effective_node
+                            )
 
                         # `frame` is what the shipped iOS bridge sends
                         # (feral-nodes/ios-app FeralBrainClient.sendCameraFrame
@@ -4302,7 +4740,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         #     what the phone saw was ever written to memory.
                         # Same two calls as `vision_frame` and `_handle_video_frame`.
                         change_event = state.change_detector.should_analyze(
-                            effective_node, data_b64,
+                            effective_node,
+                            data_b64,
                             frame_payload.get("encoding", "jpeg"),
                         )
                         if change_event and state.scene and state.scene.available:
@@ -4315,14 +4754,17 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             state.register_background_task(
                                 asyncio.ensure_future(
                                     _analyze_scene_background(
-                                        effective_node, frame_payload, mode=mode,
+                                        effective_node,
+                                        frame_payload,
+                                        mode=mode,
                                     )
                                 )
                             )
 
                         if msg.msg_id and state.orchestrator:
                             state.orchestrator.resolve_pending_frame(
-                                msg.msg_id, frame_payload,
+                                msg.msg_id,
+                                frame_payload,
                             )
 
             elif msg.type == "video_frame":
@@ -4332,7 +4774,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # for size. It cannot send: it is sync and never gets `ws`.
                 # Before this, "HUP error 4020" existed only inside the log
                 # line, so the daemon's send reported success.
-                reason = _handle_video_frame(node_id, raw.get("payload", {}), msg.msg_id)
+                reason = _handle_video_frame(
+                    node_id, raw.get("payload", {}), msg.msg_id
+                )
                 if reason:
                     await _send_frame_too_large(ws, reason)
 
@@ -4351,7 +4795,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # dedicated per-device circular buffer at
                 # ``state.glasses_buffer`` which the orchestrator's
                 # vision-context-attach (Lane 08) reads.
-                reason = _handle_glasses_frame(node_id, raw.get("payload", {}), msg.msg_id)
+                reason = _handle_glasses_frame(
+                    node_id, raw.get("payload", {}), msg.msg_id
+                )
                 if reason:
                     await _send_frame_too_large(ws, reason)
 
@@ -4411,7 +4857,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     }
                     for sid in state.get_sessions_for_daemon(node_id):
                         state.perception.update_sensors(
-                            sid, {"robot": _robot_sensors},
+                            sid,
+                            {"robot": _robot_sensors},
                         )
                 elif ev_type.endswith("_status"):
                     # Sub-device status frames (e.g. ``glasses_status``,
@@ -4435,12 +4882,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                             "Ignoring device_event event_type=%r from %s: no "
                             "handler. Nothing from this sensor reaches memory, "
                             "perception or the LLM. Logged once per node+type.",
-                            ev_type, node_id,
+                            ev_type,
+                            node_id,
                         )
 
             else:
                 logger.debug("Unknown HUP msg type=%r from %s", msg.type, node_id)
-                await _send_protocol_error(ws, 1002, f"Unknown message type: {msg.type}")
+                await _send_protocol_error(
+                    ws, 1002, f"Unknown message type: {msg.type}"
+                )
 
     except WebSocketDisconnect:
         if node_id:
@@ -4511,12 +4961,14 @@ async def sync_peer_endpoint(ws: WebSocket):
                 # real peer sends immediately after connecting.
                 try:
                     raw = await asyncio.wait_for(
-                        ws.receive_json(), timeout=SYNC_FIRST_FRAME_TIMEOUT_SECONDS,
+                        ws.receive_json(),
+                        timeout=SYNC_FIRST_FRAME_TIMEOUT_SECONDS,
                     )
                 except asyncio.TimeoutError:
                     logger.debug(
                         "Sync peer %s sent no handshake within %.0fs; closing",
-                        client_host or "unknown", SYNC_FIRST_FRAME_TIMEOUT_SECONDS,
+                        client_host or "unknown",
+                        SYNC_FIRST_FRAME_TIMEOUT_SECONDS,
                     )
                     break
                 first_frame = False
@@ -4548,6 +5000,7 @@ async def sync_peer_endpoint(ws: WebSocket):
                     authenticate_sync_peer as _authenticate_sync_peer,
                     get_peer_roster as _get_peer_roster,
                 )
+
                 expected_pass = os.getenv("FERAL_SYNC_PASSPHRASE", "") or _local_pass
                 peer_address = ""
                 try:
@@ -4567,11 +5020,13 @@ async def sync_peer_endpoint(ws: WebSocket):
                     address=peer_address,
                 )
                 if not auth.ok:
-                    await ws.send_json({
-                        "type": "sync_error",
-                        "message": auth.message,
-                        "reason": auth.reason,
-                    })
+                    await ws.send_json(
+                        {
+                            "type": "sync_error",
+                            "message": auth.message,
+                            "reason": auth.reason,
+                        }
+                    )
                     break
 
                 # v2026.5.34 (PR 2 D12): refuse the handshake when a
@@ -4581,22 +5036,32 @@ async def sync_peer_endpoint(ws: WebSocket):
                 # between two brains and both copies must rotate
                 # before sync can land safely.
                 if state.sync_engine and peer_id == state.sync_engine.node_id:
-                    await ws.send_json({
-                        "type": "sync_error",
-                        "message": (
-                            "duplicate_node_id: peer advertised the same "
-                            "node_id as the local brain. Rotate ~/.feral/sync_node_id "
-                            "on one side and restart."
-                        ),
-                    })
-                    logger.warning("Sync handshake rejected: duplicate node_id %s", peer_id)
+                    await ws.send_json(
+                        {
+                            "type": "sync_error",
+                            "message": (
+                                "duplicate_node_id: peer advertised the same "
+                                "node_id as the local brain. Rotate ~/.feral/sync_node_id "
+                                "on one side and restart."
+                            ),
+                        }
+                    )
+                    logger.warning(
+                        "Sync handshake rejected: duplicate node_id %s", peer_id
+                    )
                     break
 
-                await ws.send_json({
-                    "type": "sync_response",
-                    "node_id": state.sync_engine.node_id if state.sync_engine else "",
-                    "vector_clock": state.sync_engine.get_vector_clock() if state.sync_engine else {},
-                })
+                await ws.send_json(
+                    {
+                        "type": "sync_response",
+                        "node_id": state.sync_engine.node_id
+                        if state.sync_engine
+                        else "",
+                        "vector_clock": state.sync_engine.get_vector_clock()
+                        if state.sync_engine
+                        else {},
+                    }
+                )
 
                 # Chunked read. The change set used to arrive as one
                 # frame, which capped a peer's entire history at the
@@ -4636,22 +5101,29 @@ async def sync_peer_endpoint(ws: WebSocket):
                     try:
                         refresh = await state.memory.refresh()
                         if not refresh.get("ok", True):
-                            await ws.send_json({
-                                "type": "sync_error",
-                                "message": (
-                                    f"memory_refresh_failed: {refresh.get('error', 'unknown')}"
-                                ),
-                            })
+                            await ws.send_json(
+                                {
+                                    "type": "sync_error",
+                                    "message": (
+                                        f"memory_refresh_failed: {refresh.get('error', 'unknown')}"
+                                    ),
+                                }
+                            )
                             logger.warning(
-                                "Sync apply aborted: memory.refresh() reported %s", refresh,
+                                "Sync apply aborted: memory.refresh() reported %s",
+                                refresh,
                             )
                             break
                     except Exception as exc:
-                        await ws.send_json({
-                            "type": "sync_error",
-                            "message": f"memory_refresh_exception: {exc}",
-                        })
-                        logger.warning("Sync apply aborted: memory.refresh() raised %s", exc)
+                        await ws.send_json(
+                            {
+                                "type": "sync_error",
+                                "message": f"memory_refresh_exception: {exc}",
+                            }
+                        )
+                        logger.warning(
+                            "Sync apply aborted: memory.refresh() raised %s", exc
+                        )
                         break
                     # Scoped sharing, receive side. Routed through the
                     # peer-aware entry point so the grant set comes off
@@ -4661,11 +5133,12 @@ async def sync_peer_endpoint(ws: WebSocket):
                     # exists for local bundle import and has no peer
                     # boundary at all.
                     applied = await state.sync_engine.apply_remote_changes_from_peer(
-                        incoming_changes, peer_node_id=peer_id,
+                        incoming_changes,
+                        peer_node_id=peer_id,
                     )
 
                 my_changes = []
-                if state.sync_engine and hasattr(state.sync_engine, '_wal'):
+                if state.sync_engine and hasattr(state.sync_engine, "_wal"):
                     # Per-origin cutoffs, from the peer's whole vector
                     # clock. The old code cut at
                     # ``remote_vc[state.sync_engine.node_id]``, the
@@ -4741,10 +5214,12 @@ _BIOMETRIC_KEY_MAP = {
 # keep working back-compat. Lagging / unknown sources only train
 # the bare row (per-source rows are reserved for the canonical
 # wearable taxonomy listed below).
-_BASELINE_PER_SOURCE_VITALS: frozenset[str] = frozenset({
-    "hr",
-    "spo2_pct",
-})
+_BASELINE_PER_SOURCE_VITALS: frozenset[str] = frozenset(
+    {
+        "hr",
+        "spo2_pct",
+    }
+)
 
 
 # HUP_SPEC.md §5.4.1 cap, on DECODED bytes. Stays here rather than in
@@ -4769,7 +5244,9 @@ def _unwrap_hup_frame(raw_payload: dict) -> dict:
     """
     if not isinstance(raw_payload, dict):
         return {}
-    nested = raw_payload.get("data") if isinstance(raw_payload.get("data"), dict) else {}
+    nested = (
+        raw_payload.get("data") if isinstance(raw_payload.get("data"), dict) else {}
+    )
     if not nested:
         return raw_payload
     merged: dict = {}
@@ -4809,7 +5286,9 @@ def _handle_video_frame(node_id, frame_payload: dict, msg_id=None) -> str | None
     if decoded_bytes > VIDEO_FRAME_MAX_BYTES:
         logger.warning(
             "Rejecting oversized video_frame from %s: %dB decoded > %dB (HUP error 4020)",
-            node_id, decoded_bytes, VIDEO_FRAME_MAX_BYTES,
+            node_id,
+            decoded_bytes,
+            VIDEO_FRAME_MAX_BYTES,
         )
         return (
             f"video_frame decoded to {decoded_bytes} bytes; "
@@ -4823,10 +5302,14 @@ def _handle_video_frame(node_id, frame_payload: dict, msg_id=None) -> str | None
         state.perception.update_vision(sid, state.vision_buffer, effective_node)
 
     change_event = state.change_detector.should_analyze(
-        effective_node, data_b64, frame_payload.get("codec", "jpeg"),
+        effective_node,
+        data_b64,
+        frame_payload.get("codec", "jpeg"),
     )
     if change_event and state.scene and state.scene.available:
-        mode = "tracking" if change_event.trigger_reason == "scene_change" else "general"
+        mode = (
+            "tracking" if change_event.trigger_reason == "scene_change" else "general"
+        )
         # AUDIT-FIXES F-06, see the vision_query branch.
         state.register_background_task(
             asyncio.ensure_future(
@@ -4905,7 +5388,9 @@ async def _handle_audio_frame(node_id, frame_payload: dict) -> str | None:
     if decoded_bytes > AUDIO_FRAME_MAX_BYTES:
         logger.warning(
             "Rejecting oversized audio_frame from %s: %dB decoded > %dB (HUP error 4020)",
-            node_id, decoded_bytes, AUDIO_FRAME_MAX_BYTES,
+            node_id,
+            decoded_bytes,
+            AUDIO_FRAME_MAX_BYTES,
         )
         return (
             f"audio_frame decoded to {decoded_bytes} bytes; "
@@ -5010,7 +5495,9 @@ def _handle_glasses_frame(node_id, frame_payload: dict, msg_id=None) -> str | No
     if decoded_bytes > VIDEO_FRAME_MAX_BYTES:
         logger.warning(
             "Rejecting oversized glasses_frame from %s: %dB decoded > %dB (HUP error 4020)",
-            node_id, decoded_bytes, VIDEO_FRAME_MAX_BYTES,
+            node_id,
+            decoded_bytes,
+            VIDEO_FRAME_MAX_BYTES,
         )
         return (
             f"glasses_frame decoded to {decoded_bytes} bytes; "
@@ -5029,9 +5516,7 @@ def _handle_glasses_frame(node_id, frame_payload: dict, msg_id=None) -> str | No
     try:
         buf.ingest(frame_payload, node_id=effective_node)
     except Exception as exc:
-        logger.warning(
-            "glasses_buffer.ingest raised for %s: %s", effective_node, exc
-        )
+        logger.warning("glasses_buffer.ingest raised for %s: %s", effective_node, exc)
         return None
 
     if msg_id and state.orchestrator:
@@ -5065,7 +5550,8 @@ async def _handle_device_announce(node_id, frame_payload: dict) -> None:
     if not callable(ingest):
         logger.debug(
             "Received device_announce from %s but hardware_mesh has no "
-            "ingest_device_announce hook; dropping.", node_id,
+            "ingest_device_announce hook; dropping.",
+            node_id,
         )
         return
     # Brain falls back to the WS-level node id when the scanner_node_id
@@ -5077,9 +5563,10 @@ async def _handle_device_announce(node_id, frame_payload: dict) -> None:
         await ingest(payload)
     except Exception as exc:
         logger.warning(
-            "hardware_mesh.ingest_device_announce raised for scanner=%s "
-            "device=%s: %s",
-            node_id, payload.get("device_id", "?"), exc,
+            "hardware_mesh.ingest_device_announce raised for scanner=%s device=%s: %s",
+            node_id,
+            payload.get("device_id", "?"),
+            exc,
         )
 
 
@@ -5105,7 +5592,9 @@ async def _resume_ambient_backlog() -> None:
     for row in pending:
         try:
             await _process_ambient_transcript(
-                row["transcript_id"], row["session_id"], row["payload"],
+                row["transcript_id"],
+                row["session_id"],
+                row["payload"],
             )
         except Exception:
             logger.debug("ambient: backlog item failed", exc_info=True)
@@ -5114,6 +5603,7 @@ async def _resume_ambient_backlog() -> None:
 def _ambient_db_path():
     """Where received transcripts live until they are processed."""
     from config.loader import feral_home
+
     return feral_home() / "ambient_transcripts.db"
 
 
@@ -5202,7 +5692,11 @@ def _ambient_store(
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
             (
-                transcript_id, time.time(), node_id, device_id, session_id,
+                transcript_id,
+                time.time(),
+                node_id,
+                device_id,
+                session_id,
                 _json.dumps(payload, sort_keys=True, default=str),
                 owner_key or "",
             ),
@@ -5212,7 +5706,9 @@ def _ambient_store(
 
 
 def _ambient_mark_processed(
-    transcript_id: str, episode_id: str, digest_json: str = "",
+    transcript_id: str,
+    episode_id: str,
+    digest_json: str = "",
 ) -> None:
     """Record the outcome on the success path.
 
@@ -5223,6 +5719,7 @@ def _ambient_mark_processed(
     which is not a contract worth having.
     """
     import sqlite3 as _sqlite3
+
     try:
         with _sqlite3.connect(str(_ambient_db_path())) as conn:
             _ambient_ensure_schema(conn)
@@ -5238,7 +5735,10 @@ def _ambient_mark_processed(
 
 
 def _ambient_digest_rows(
-    transcript_ids: list[str], *, owner_key: str, node_id: str,
+    transcript_ids: list[str],
+    *,
+    owner_key: str,
+    node_id: str,
 ) -> dict[str, dict]:
     """The stored rows for these ids THAT THIS CALLER OWNS, by id.
 
@@ -5253,6 +5753,7 @@ def _ambient_digest_rows(
     look exactly like data loss and re-upload every recording.
     """
     import sqlite3 as _sqlite3
+
     if not transcript_ids:
         return {}
     out: dict[str, dict] = {}
@@ -5337,24 +5838,28 @@ def _ambient_digest_frame(
             logger.debug("ambient: unreadable digest_json for %s", transcript_id)
             digest = {}
 
-    frame.update({
-        "status": "ready",
-        "summary": str(digest.get("summary") or ""),
-        # Up to 20,000 chars, and the reason include_detail defaults off.
-        "detail": str(digest.get("detail") or "") if include_detail else "",
-        "people": [str(x) for x in (digest.get("people") or [])],
-        "topics": [str(x) for x in (digest.get("topics") or [])],
-        "commitments": [c for c in (digest.get("commitments") or []) if isinstance(c, dict)],
-        "degraded": [str(x) for x in (digest.get("degraded") or [])],
-        "episode_id": str(row.get("episode_id") or ""),
-        "processed_at": row.get("processed_at"),
-        # Already sanitised when the digest was written: confounded
-        # moments never reached the model and the sentence it produced
-        # was re-checked for emotion words. Read back as stored, with a
-        # length cap in case an older row predates the cap.
-        "physiological_note": str(digest.get("physiological_note") or "")[:1000],
-        "moments_considered": int(digest.get("moments_considered") or 0),
-    })
+    frame.update(
+        {
+            "status": "ready",
+            "summary": str(digest.get("summary") or ""),
+            # Up to 20,000 chars, and the reason include_detail defaults off.
+            "detail": str(digest.get("detail") or "") if include_detail else "",
+            "people": [str(x) for x in (digest.get("people") or [])],
+            "topics": [str(x) for x in (digest.get("topics") or [])],
+            "commitments": [
+                c for c in (digest.get("commitments") or []) if isinstance(c, dict)
+            ],
+            "degraded": [str(x) for x in (digest.get("degraded") or [])],
+            "episode_id": str(row.get("episode_id") or ""),
+            "processed_at": row.get("processed_at"),
+            # Already sanitised when the digest was written: confounded
+            # moments never reached the model and the sentence it produced
+            # was re-checked for emotion words. Read back as stored, with a
+            # length cap in case an older row predates the cap.
+            "physiological_note": str(digest.get("physiological_note") or "")[:1000],
+            "moments_considered": int(digest.get("moments_considered") or 0),
+        }
+    )
     return frame
 
 
@@ -5366,6 +5871,7 @@ def _ambient_pending(limit: int = 50) -> list[dict]:
     """
     import json as _json
     import sqlite3 as _sqlite3
+
     try:
         with _sqlite3.connect(str(_ambient_db_path())) as conn:
             rows = conn.execute(
@@ -5378,15 +5884,24 @@ def _ambient_pending(limit: int = 50) -> list[dict]:
     out = []
     for tid, sid, payload_json in rows:
         try:
-            out.append({"transcript_id": tid, "session_id": sid,
-                        "payload": _json.loads(payload_json)})
+            out.append(
+                {
+                    "transcript_id": tid,
+                    "session_id": sid,
+                    "payload": _json.loads(payload_json),
+                }
+            )
         except Exception:
             continue
     return out
 
 
 async def _handle_ambient_transcript(
-    ws, node_id, paired_device_id, raw: dict, record_envelope=None,
+    ws,
+    node_id,
+    paired_device_id,
+    raw: dict,
+    record_envelope=None,
 ) -> None:
     """Ingest one finished ambient conversation from the phone.
 
@@ -5409,7 +5924,9 @@ async def _handle_ambient_transcript(
 
     if not node_id:
         await _send_protocol_error(
-            ws, 1003, "ambient_transcript requires an identified node",
+            ws,
+            1003,
+            "ambient_transcript requires an identified node",
             name="ambient_no_node",
         )
         return
@@ -5417,7 +5934,10 @@ async def _handle_ambient_transcript(
     text = str(payload.get("text") or "")
     if not text.strip():
         await _send_protocol_error(
-            ws, 1003, "ambient_transcript.text is empty", name="ambient_empty",
+            ws,
+            1003,
+            "ambient_transcript.text is empty",
+            name="ambient_empty",
         )
         return
 
@@ -5445,9 +5965,12 @@ async def _handle_ambient_transcript(
 
     try:
         is_new = await asyncio.to_thread(
-            _ambient_store, transcript_id,
-            node_id=node_id, device_id=device_id,
-            session_id=session_id, payload=payload,
+            _ambient_store,
+            transcript_id,
+            node_id=node_id,
+            device_id=device_id,
+            session_id=session_id,
+            payload=payload,
             # The authenticated identity, not payload["device_id"].
             # Digest reads are scoped on this.
             owner_key=str(paired_device_id or ""),
@@ -5456,29 +5979,41 @@ async def _handle_ambient_transcript(
         logger.warning("ambient: persist failed for %s: %s", transcript_id, exc)
         if record_envelope is not None:
             record_envelope(
-                "error", "ambient_transcript",
+                "error",
+                "ambient_transcript",
                 detail={"reason": "sqlite_persist_failed", "error": str(exc)[:200]},
                 payload_for_hash=payload,
             )
         # No ack: the phone must keep this and try again.
         await _send_protocol_error(
-            ws, 1011, "could not store transcript", name="ambient_persist_failed",
+            ws,
+            1011,
+            "could not store transcript",
+            name="ambient_persist_failed",
         )
         return
 
-    await ws.send_json(hup_frame("ambient_transcript_ack", {
-        "transcript_id": transcript_id,
-        "duplicate": not is_new,
-        "accepted": True,
-        "detail": "" if is_new else "already received",
-    }))
+    await ws.send_json(
+        hup_frame(
+            "ambient_transcript_ack",
+            {
+                "transcript_id": transcript_id,
+                "duplicate": not is_new,
+                "accepted": True,
+                "detail": "" if is_new else "already received",
+            },
+        )
+    )
 
     if record_envelope is not None:
         record_envelope(
-            "allowed", "ambient_transcript",
+            "allowed",
+            "ambient_transcript",
             detail={
-                "transcript_id": transcript_id, "device_id": device_id,
-                "chars": len(text), "duplicate": not is_new,
+                "transcript_id": transcript_id,
+                "device_id": device_id,
+                "chars": len(text),
+                "duplicate": not is_new,
                 "source": payload.get("source", "unknown"),
             },
             payload_for_hash=payload,
@@ -5495,7 +6030,10 @@ async def _handle_ambient_transcript(
 
 
 async def _handle_ambient_digest_request(
-    ws, node_id, paired_device_id, raw: dict,
+    ws,
+    node_id,
+    paired_device_id,
+    raw: dict,
 ) -> None:
     """Answer the phone's "what did you make of these?" on connect.
 
@@ -5514,7 +6052,9 @@ async def _handle_ambient_digest_request(
 
     if not node_id:
         await _send_protocol_error(
-            ws, 1003, "ambient_digest_request requires an identified node",
+            ws,
+            1003,
+            "ambient_digest_request requires an identified node",
             name="ambient_digest_no_node",
         )
         return
@@ -5522,7 +6062,9 @@ async def _handle_ambient_digest_request(
     raw_ids = payload.get("transcript_ids") or []
     if not isinstance(raw_ids, list):
         await _send_protocol_error(
-            ws, 1003, "ambient_digest_request.transcript_ids must be a list",
+            ws,
+            1003,
+            "ambient_digest_request.transcript_ids must be a list",
             name="ambient_digest_bad_ids",
         )
         return
@@ -5544,13 +6086,16 @@ async def _handle_ambient_digest_request(
 
     include_detail = bool(payload.get("include_detail"))
     rows = await asyncio.to_thread(
-        _ambient_digest_rows, ids,
-        owner_key=str(paired_device_id or ""), node_id=str(node_id or ""),
+        _ambient_digest_rows,
+        ids,
+        owner_key=str(paired_device_id or ""),
+        node_id=str(node_id or ""),
     )
 
     for i, tid in enumerate(ids):
         frame = _ambient_digest_frame(
-            tid, rows.get(tid),
+            tid,
+            rows.get(tid),
             include_detail=include_detail,
             remaining=len(ids) - i - 1,
         )
@@ -5565,7 +6110,9 @@ async def _handle_ambient_digest_request(
 
     logger.info(
         "ambient: answered digest request for %d id(s) from node %s (detail=%s)",
-        len(ids), node_id, include_detail,
+        len(ids),
+        node_id,
+        include_detail,
     )
 
 
@@ -5577,7 +6124,9 @@ async def _ambient_push_digest(transcript_id: str) -> None:
     and costs nothing. A phone that misses this pulls the same frame.
     """
     import sqlite3 as _sqlite3
+
     try:
+
         def _read():
             with _sqlite3.connect(str(_ambient_db_path())) as conn:
                 _ambient_ensure_schema(conn)
@@ -5600,18 +6149,27 @@ async def _ambient_push_digest(transcript_id: str) -> None:
         # the detail: the size argument for withholding it is about a
         # reconnect burst, which this is not.
         payload = _ambient_digest_frame(
-            transcript_id, row, include_detail=True, remaining=0,
+            transcript_id,
+            row,
+            include_detail=True,
+            remaining=0,
         )
-        await state._send_dict_to_node(node_id, {
-            "type": "ambient_digest", "payload": payload,
-        })
+        await state._send_dict_to_node(
+            node_id,
+            {
+                "type": "ambient_digest",
+                "payload": payload,
+            },
+        )
         logger.info("ambient: pushed digest for %s to node %s", transcript_id, node_id)
     except Exception:
         logger.debug("ambient: digest push failed for %s", transcript_id, exc_info=True)
 
 
 async def _process_ambient_transcript(
-    transcript_id: str, session_id: str, payload: dict,
+    transcript_id: str,
+    session_id: str,
+    payload: dict,
 ) -> None:
     """Summarize, store the episode, record the promises. Never raises.
 
@@ -5646,11 +6204,18 @@ async def _process_ambient_transcript(
 
         llm = getattr(getattr(state, "orchestrator", None), "llm", None)
         outcome = await summarize_transcript(
-            text, llm=llm, started_at=started_at,
-            speakers=speakers, source=f"ambient:{source}",
+            text,
+            llm=llm,
+            started_at=started_at,
+            speakers=speakers,
+            source=f"ambient:{source}",
             moments=moments,
-            baseline_hr=float(baseline_hr) if isinstance(baseline_hr, (int, float)) else None,
-            respiratory_bpm=float(respiratory_bpm) if isinstance(respiratory_bpm, (int, float)) else None,
+            baseline_hr=float(baseline_hr)
+            if isinstance(baseline_hr, (int, float))
+            else None,
+            respiratory_bpm=float(respiratory_bpm)
+            if isinstance(respiratory_bpm, (int, float))
+            else None,
             # None means "load ~/.feral/USER.md yourself". Passed
             # explicitly rather than left to the default so this call
             # site records that the summariser needs to know who the
@@ -5662,7 +6227,10 @@ async def _process_ambient_transcript(
         memory = getattr(state, "memory", None)
         if memory is not None:
             fields = build_episode_fields(
-                outcome, started_at=started_at, source=source, speakers=speakers,
+                outcome,
+                started_at=started_at,
+                source=source,
+                speakers=speakers,
             )
             saved = await memory.episode_save(session_id=session_id, **fields)
             episode_id = str((saved or {}).get("id") or "")
@@ -5680,7 +6248,9 @@ async def _process_ambient_transcript(
             kg = getattr(memory, "kg", None)
             if kg is not None and outcome.people:
                 try:
-                    await kg.extract_and_store(outcome.detail[:8000], source="ambient_conversation")
+                    await kg.extract_and_store(
+                        outcome.detail[:8000], source="ambient_conversation"
+                    )
                 except Exception:
                     logger.debug("ambient: kg extraction failed", exc_info=True)
 
@@ -5703,12 +6273,17 @@ async def _process_ambient_transcript(
         # forced into prose.
         digest_json = _json.dumps(asdict(outcome), default=str)
         await asyncio.to_thread(
-            _ambient_mark_processed, transcript_id, episode_id, digest_json,
+            _ambient_mark_processed,
+            transcript_id,
+            episode_id,
+            digest_json,
         )
         logger.info(
             "ambient transcript %s processed: episode=%s commitments=%d degraded=%s",
-            transcript_id, episode_id or "none",
-            len(outcome.commitments), outcome.degraded or "no",
+            transcript_id,
+            episode_id or "none",
+            len(outcome.commitments),
+            outcome.degraded or "no",
         )
 
         # Push leg. Summarization finishes seconds to minutes after the
@@ -5785,7 +6360,9 @@ async def _handle_subdevice_status(
     else:
         logger.debug(
             "Subdevice status frame from %s/%s missing status field; dropping payload=%r",
-            node_id, event_type, payload,
+            node_id,
+            event_type,
+            payload,
         )
         return
 
@@ -5801,7 +6378,8 @@ async def _handle_subdevice_status(
     if not isinstance(capability, str) or not capability.strip():
         logger.debug(
             "Subdevice status from %s missing capability id; dropping payload=%r",
-            node_id, payload,
+            node_id,
+            payload,
         )
         return
     capability = capability.strip()
@@ -5817,7 +6395,10 @@ async def _handle_subdevice_status(
         logger.warning(
             "Subdevice status from %s/%s carried unknown provenance=%r; "
             "rejecting (allowed=%s)",
-            node_id, capability, provenance_raw, sorted(allowed_provenances),
+            node_id,
+            capability,
+            provenance_raw,
+            sorted(allowed_provenances),
         )
         if ws is not None:
             await _send_protocol_error(
@@ -5836,8 +6417,13 @@ async def _handle_subdevice_status(
     # the canonical envelope. Top-level ``glasses_status`` adds
     # ``battery_level`` / ``glasses_model`` automatically.
     reserved = {
-        "status", "source", "capability", "provenance",
-        "event_type", "node_id", "ts",
+        "status",
+        "source",
+        "capability",
+        "provenance",
+        "event_type",
+        "node_id",
+        "ts",
     }
     attrs: dict = {}
     for key, value in payload.items():
@@ -5856,7 +6442,9 @@ async def _handle_subdevice_status(
     except Exception as exc:
         logger.warning(
             "node_subdevices.upsert failed for %s/%s: %s",
-            node_id, capability, exc,
+            node_id,
+            capability,
+            exc,
         )
 
 
@@ -5955,6 +6543,7 @@ def _resolve_sample_ts(
         if isinstance(raw, (int, float)) and raw > 0:
             return float(raw)
     from perception.fusion import _is_lagging_source as _lag
+
     if _lag(source):
         return 0.0
     return time.time()
@@ -6021,7 +6610,8 @@ def _grounding_sources_for_turn(session_id: str) -> list[dict]:
         logger.debug("grounding sources lookup failed for turn", exc_info=True)
         return []
     return [
-        s for s in (sources or [])
+        s
+        for s in (sources or [])
         if isinstance(s, dict) and isinstance(s.get("url"), str) and s.get("url")
     ]
 
@@ -6088,11 +6678,14 @@ def _somatic_publish(session_id: str, node_id: str, *, reason: str) -> None:
         async def _send() -> None:
             try:
                 await state._send_dict_to_node(
-                    node_id, {"type": "somatic_state", "payload": frame},
+                    node_id,
+                    {"type": "somatic_state", "payload": frame},
                 )
             except Exception:
                 logger.debug(
-                    "somatic_state push failed for %s", node_id, exc_info=True,
+                    "somatic_state push failed for %s",
+                    node_id,
+                    exc_info=True,
                 )
 
         try:
@@ -6118,13 +6711,28 @@ def _somatic_publish(session_id: str, node_id: str, *, reason: str) -> None:
 # to the branches so the "dropped" log below can tell a daemon author
 # what the brain actually understands instead of just saying no.
 _EXTRACTABLE_EVENT_TYPES = (
-    "heart_rate", "hrv", "spo2", "skin_temperature", "temperature", "steps",
-    "uv", "accelerometer", "gyroscope", "ambient_light", "battery",
-    "gps", "gesture", "button_press", "activity", "blood_pressure",
+    "heart_rate",
+    "hrv",
+    "spo2",
+    "skin_temperature",
+    "temperature",
+    "steps",
+    "uv",
+    "accelerometer",
+    "gyroscope",
+    "ambient_light",
+    "battery",
+    "gps",
+    "gesture",
+    "button_press",
+    "activity",
+    "blood_pressure",
 )
 
 
-def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict) -> None:
+def _handle_biometric_device_event(
+    node_id, event_type: str, frame_payload: dict
+) -> None:
     """Dispatch ``device_event`` payloads with biometric / sensor event types.
 
     Accepts both SDK-nested and flat shapes. Lands in the same sinks
@@ -6191,10 +6799,16 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
         # clamp turns a scale error into a confident maximum-stress
         # reading.
         val = _first_present(
-            frame_payload, "rmssd_ms", "hrv_ms", "hrv_rmssd_ms", "value", "hrv",
+            frame_payload,
+            "rmssd_ms",
+            "hrv_ms",
+            "hrv_rmssd_ms",
+            "value",
+            "hrv",
         )
         if val is not None:
             from perception.somatic import HRV_MAX_MS, HRV_MIN_MS, plausible_hrv_ms
+
             if plausible_hrv_ms(val):
                 sensors["hrv_ms"] = float(val)
                 _src = (
@@ -6218,7 +6832,10 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
                     "Dropping hrv device_event from %s: %r is not RMSSD in "
                     "milliseconds (expected %.0f-%.0f ms). Send RMSSD, not a "
                     "vendor HRV index.",
-                    effective_node, val, HRV_MIN_MS, HRV_MAX_MS,
+                    effective_node,
+                    val,
+                    HRV_MIN_MS,
+                    HRV_MAX_MS,
                 )
                 return
     elif event_type == "activity":
@@ -6228,7 +6845,11 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
         # accelerometer, so a node that knows has to say so. Accepts the
         # fusion vocabulary (`inferred_state`) or a 0-1 number.
         state_label = _first_present(
-            frame_payload, "state", "activity", "inferred_state", "value",
+            frame_payload,
+            "state",
+            "activity",
+            "inferred_state",
+            "value",
         )
         if isinstance(state_label, str) and state_label.strip():
             sensors["inferred_state"] = state_label.strip().lower()
@@ -6236,7 +6857,11 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
         if isinstance(level, (int, float)):
             sensors["activity_level"] = max(0.0, min(1.0, float(level)))
     elif event_type == "spo2":
-        val = frame_payload.get("current") or frame_payload.get("spo2") or frame_payload.get("value")
+        val = (
+            frame_payload.get("current")
+            or frame_payload.get("spo2")
+            or frame_payload.get("value")
+        )
         if val is not None:
             sensors["spo2_pct"] = val
             _src = frame_payload.get("spo2_source") or frame_payload.get("source")
@@ -6347,7 +6972,12 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             sensors["ambient_light_lux"] = val
     elif event_type == "battery":
         val = _first_present(
-            frame_payload, "percent", "pct", "battery_pct", "level", "value",
+            frame_payload,
+            "percent",
+            "pct",
+            "battery_pct",
+            "level",
+            "value",
         )
         if val is not None:
             sensors["battery_pct"] = val
@@ -6368,11 +6998,14 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             # nothing downstream could tell a fresh fix from a stale one
             # and "where am I" would answer with equal confidence either
             # way. Falls back to arrival time when the node omits it.
-            gps_reading["ts"] = _resolve_sample_ts(
-                frame_payload,
-                source=str(_infer_wearable_source_from_node(effective_node) or ""),
-                ts_keys=("ts", "sample_ts", "timestamp"),
-            ) or time.time()
+            gps_reading["ts"] = (
+                _resolve_sample_ts(
+                    frame_payload,
+                    source=str(_infer_wearable_source_from_node(effective_node) or ""),
+                    ts_keys=("ts", "sample_ts", "timestamp"),
+                )
+                or time.time()
+            )
             sensors["gps"] = gps_reading
     elif event_type == "button_press":
         # HUP_SPEC.md §5.4 lists button_press, and this function's
@@ -6409,7 +7042,9 @@ def _handle_biometric_device_event(node_id, event_type: str, frame_payload: dict
             "from %r. Extractable types: %s. Either the payload keys differ "
             "from the HUP_SPEC.md §5.4 conventions or this event_type needs a "
             "branch in _handle_biometric_device_event.",
-            event_type, effective_node, frame_payload,
+            event_type,
+            effective_node,
+            frame_payload,
             ", ".join(_EXTRACTABLE_EVENT_TYPES),
         )
         return
@@ -6518,14 +7153,18 @@ def _record_biometrics_to_baseline(data: dict) -> None:
                 ts_raw = data.get(ts_key, 0.0)
                 ts = float(ts_raw) if isinstance(ts_raw, (int, float)) else 0.0
                 window = _BASELINE_FRESH_WINDOW_OVERRIDES_S.get(
-                    raw_key, _BASELINE_FRESH_WINDOW_S,
+                    raw_key,
+                    _BASELINE_FRESH_WINDOW_S,
                 )
                 fresh = ts > 0 and (now - ts) <= window
                 if _is_lagging_source(src) or not fresh:
                     logger.debug(
                         "Skipping baseline record for %s=%.1f — source=%r fresh=%s "
                         "(lagging/cloud or stale vitals do not train the baseline)",
-                        raw_key, value, src, fresh,
+                        raw_key,
+                        value,
+                        src,
+                        fresh,
                     )
                     continue
             metric_id, category = mapping
@@ -6538,10 +7177,7 @@ def _record_biometrics_to_baseline(data: dict) -> None:
             # Fix #5: per-source namespaced row. Only known live
             # wearable sources get their own series so unknown /
             # untagged daemons don't fragment the baseline space.
-            if (
-                metric_id in _BASELINE_PER_SOURCE_VITALS
-                and _is_live_wearable(src)
-            ):
+            if metric_id in _BASELINE_PER_SOURCE_VITALS and _is_live_wearable(src):
                 src_norm = src.strip().lower()
                 state.baseline_engine.record(
                     f"{metric_id}:{src_norm}",
@@ -6564,10 +7200,14 @@ _HISTORY_METRIC_MAP = {
     "spo2_pct": ("spo2", "spo2_source", "spo2_sample_ts"),
     "spo2": ("spo2", "spo2_source", "spo2_sample_ts"),
     "skin_temperature_c": (
-        "skin_temp", "skin_temperature_source", "skin_temperature_sample_ts",
+        "skin_temp",
+        "skin_temperature_source",
+        "skin_temperature_sample_ts",
     ),
     "skin_temp_c": (
-        "skin_temp", "skin_temperature_source", "skin_temperature_sample_ts",
+        "skin_temp",
+        "skin_temperature_source",
+        "skin_temperature_sample_ts",
     ),
     "temperature": ("body_temp", None, None),
     "steps": ("steps", None, None),
@@ -6583,10 +7223,14 @@ _HISTORY_METRIC_MAP = {
     # applies to HRV exactly as it does to heart rate.
     "hrv_ms": ("hrv", "hrv_source", "hrv_sample_ts"),
     "bp_systolic": (
-        "bp_systolic", "blood_pressure_source", "blood_pressure_sample_ts",
+        "bp_systolic",
+        "blood_pressure_source",
+        "blood_pressure_sample_ts",
     ),
     "bp_diastolic": (
-        "bp_diastolic", "blood_pressure_source", "blood_pressure_sample_ts",
+        "bp_diastolic",
+        "blood_pressure_source",
+        "blood_pressure_sample_ts",
     ),
 }
 
@@ -6631,11 +7275,7 @@ def _record_biometrics_to_history(data: dict, effective_node: str = "") -> None:
             if _is_lagging_source(src):
                 continue
             ts_raw = data.get(ts_key, 0.0) if ts_key else 0.0
-            ts = (
-                float(ts_raw)
-                if isinstance(ts_raw, (int, float)) and ts_raw
-                else now
-            )
+            ts = float(ts_raw) if isinstance(ts_raw, (int, float)) and ts_raw else now
             eng.record_sample(metric, float(value), source=src, ts=ts)
     except Exception as exc:
         logger.debug("Biometric history recording error: %s", exc)
@@ -6645,8 +7285,12 @@ def _record_biometrics_to_history(data: dict, effective_node: str = "") -> None:
 # Background Scene Analysis
 # ─────────────────────────────────────────────
 
+
 async def _analyze_scene_background(
-    node_id: str, frame_payload: dict, mode: str = "general", query: str = "",
+    node_id: str,
+    frame_payload: dict,
+    mode: str = "general",
+    query: str = "",
 ):
     """Run VLM scene analysis on a vision frame and update perception."""
     try:
@@ -6656,13 +7300,19 @@ async def _analyze_scene_background(
             return
 
         result = await state.scene.analyze_frame(
-            data_b64=data_b64, encoding=encoding, node_id=node_id,
-            force=True, mode=mode, query=query,
+            data_b64=data_b64,
+            encoding=encoding,
+            node_id=node_id,
+            force=True,
+            mode=mode,
+            query=query,
         )
         if result:
             for sid in state.get_sessions_for_daemon(node_id):
                 frame = state.perception.get_frame(sid)
-                frame.scene_description = result.get("scene_description", result.get("answer", ""))
+                frame.scene_description = result.get(
+                    "scene_description", result.get("answer", "")
+                )
                 frame.detected_objects = result.get("detected_objects", [])
                 frame.text_in_scene = result.get("text_in_scene", [])
 
@@ -6670,10 +7320,18 @@ async def _analyze_scene_background(
                     answer = result.get("answer", result.get("scene_description", ""))
                     if answer and state.orchestrator:
                         from models.protocol import FeralMessage, TextResponsePayload
-                        await state.send_to_session(sid, FeralMessage(
-                            session_id=sid, hop="brain", type="text_response",
-                            payload=TextResponsePayload(text=f"[Vision] {answer}").model_dump(),
-                        ))
+
+                        await state.send_to_session(
+                            sid,
+                            FeralMessage(
+                                session_id=sid,
+                                hop="brain",
+                                type="text_response",
+                                payload=TextResponsePayload(
+                                    text=f"[Vision] {answer}"
+                                ).model_dump(),
+                            ),
+                        )
     except Exception as e:
         logger.warning(f"Background scene analysis failed: {e}")
 
@@ -6727,13 +7385,18 @@ async def _analyze_scene_background(
 _webui_v2_dir = Path(__file__).parent.parent / "webui_v2"
 _webui_legacy_dir = Path(__file__).parent.parent / "webui"
 _webui_v2_ready = _webui_v2_dir.is_dir() and (_webui_v2_dir / "index.html").exists()
-_webui_legacy_ready = _webui_legacy_dir.is_dir() and (_webui_legacy_dir / "index.html").exists()
+_webui_legacy_ready = (
+    _webui_legacy_dir.is_dir() and (_webui_legacy_dir / "index.html").exists()
+)
 
 #: Opt-in override that re-enables serving the superseded v1 client when the
 #: v2 bundle is missing. Never on by default.
 _SERVE_LEGACY_WEBUI_ENV = "FERAL_SERVE_LEGACY_WEBUI"
 _webui_legacy_opt_in = os.getenv(_SERVE_LEGACY_WEBUI_ENV, "").strip().lower() in (
-    "1", "true", "yes", "on",
+    "1",
+    "true",
+    "yes",
+    "on",
 )
 _webui_legacy_serving = (
     not _webui_v2_ready and _webui_legacy_ready and _webui_legacy_opt_in
@@ -6741,14 +7404,28 @@ _webui_legacy_serving = (
 
 _webui_dir = _webui_v2_dir if _webui_v2_ready else _webui_legacy_dir
 _webui_ready = _webui_v2_ready or _webui_legacy_serving
-_webui_variant = "v2" if _webui_v2_ready else ("v1-legacy" if _webui_legacy_serving else "missing")
+_webui_variant = (
+    "v2" if _webui_v2_ready else ("v1-legacy" if _webui_legacy_serving else "missing")
+)
 _webui_route_mode = "spa" if _webui_ready else "fallback"
-logger.info("Web UI routing mode=%s variant=%s path=%s", _webui_route_mode, _webui_variant, _webui_dir)
+logger.info(
+    "Web UI routing mode=%s variant=%s path=%s",
+    _webui_route_mode,
+    _webui_variant,
+    _webui_dir,
+)
 
 if _webui_ready and (_webui_dir / "assets").is_dir():
     from starlette.staticfiles import StaticFiles
-    app.mount("/assets", StaticFiles(directory=str(_webui_dir / "assets")), name="webui-assets")
-    logger.info(f"Web UI ({_webui_variant}) bundled from {_webui_dir} — open {brain_public_base_url()}")
+
+    app.mount(
+        "/assets",
+        StaticFiles(directory=str(_webui_dir / "assets")),
+        name="webui-assets",
+    )
+    logger.info(
+        f"Web UI ({_webui_variant}) bundled from {_webui_dir} — open {brain_public_base_url()}"
+    )
 elif _webui_legacy_ready and not _webui_v2_ready:
     logger.error(
         "Web UI v2 bundle is MISSING at %s while the superseded v1 client is "
@@ -6756,7 +7433,9 @@ elif _webui_legacy_ready and not _webui_v2_ready:
         "the packaging-fault page at / rather than silently downgrading to v1; "
         "run 'make bundle-webui' to fix, or set %s=1 to serve v1 with a "
         "warning banner.",
-        _webui_v2_dir, _webui_legacy_dir, _SERVE_LEGACY_WEBUI_ENV,
+        _webui_v2_dir,
+        _webui_legacy_dir,
+        _SERVE_LEGACY_WEBUI_ENV,
     )
 else:
     logger.warning(
@@ -6809,7 +7488,9 @@ if _webui_v2_ready:
     async def _v2_sw_deep(subpath: str):  # noqa: ARG001
         return _v2_sw_response()
 
-    app.mount("/v2", StaticFiles(directory=str(_webui_v2_dir), html=True), name="webui-v2")
+    app.mount(
+        "/v2", StaticFiles(directory=str(_webui_v2_dir), html=True), name="webui-v2"
+    )
     logger.info(f"Web UI v2 alias also available at {brain_public_base_url()}/v2/")
 
 _FALLBACK_HTML = """<!DOCTYPE html>
@@ -6910,7 +7591,7 @@ def _inject_legacy_banner(html: str) -> str:
     if start != -1:
         end = html.find(">", start)
         if end != -1:
-            return html[: end + 1] + _LEGACY_WEBUI_BANNER + html[end + 1:]
+            return html[: end + 1] + _LEGACY_WEBUI_BANNER + html[end + 1 :]
     return _LEGACY_WEBUI_BANNER + html
 
 
@@ -7158,6 +7839,7 @@ app.state.feral = state
 
 if __name__ == "__main__":
     import uvicorn
+
     print(f"""
     ╔══════════════════════════════════════╗
     ║        FERAL v{__version__:<22s}║

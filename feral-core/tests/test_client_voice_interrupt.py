@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, Mock
 import pytest
 
 from bridges.client_voice_control import interrupt_client_voice
-from tests.test_server_websocket import ws_client, ws_mock_state  # noqa: F401
+pytest_plugins = ["tests.test_server_websocket"]
 
 pytestmark = pytest.mark.no_auto_feral_home
 

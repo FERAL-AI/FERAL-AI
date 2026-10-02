@@ -60,17 +60,18 @@ import AppKit
         return (data, http)
     })
     private let prefs: UserDefaults
+    private let preferencesUnavailable: Bool
     private let session: URLSession
     private let transportDelegate = NativeLocalSessionDelegate()
     lazy var voice = NativeVoiceEngine(sendFrame: { [weak self] frame in
-        guard let self, self.ready, !self.switchingConversation, let socket = self.socket, socket.state == .running,
+        guard let self, !self.preferencesUnavailable, self.ready, !self.switchingConversation, let socket = self.socket, socket.state == .running,
               frame["session_id"] as? String == self.conversationID else { throw NativeFailure("Voice is disconnected or the conversation changed.") }
         let data = try JSONSerialization.data(withJSONObject: frame)
         try await socket.send(.string(String(decoding: data, as: UTF8.self)))
     })
 
-    var featureBaseURL: URL? { ready ? runtime.baseURL : nil }
-    var securityBaseURL: URL? { serviceReachable || ready ? runtime.baseURL : nil }
+    var featureBaseURL: URL? { !preferencesUnavailable && ready ? runtime.baseURL : nil }
+    var securityBaseURL: URL? { !preferencesUnavailable && (serviceReachable || ready) ? runtime.baseURL : nil }
     var activeConversationID: String { conversationID }
     // App REST dispatch can run agent turns without Chat turn IDs. Give it
     // a distinct scope so late app replies cannot complete an active Chat turn.
@@ -90,14 +91,39 @@ import AppKit
         richChat.configure(sessionID: id, connectionID: socketGeneration)
     }
 
-    init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil) {
+    /// A named suite equal to the app domain can return nil on macOS.
+    /// Standard defaults already owns that domain; never create/reset it.
+    static func resolvePreferences(suiteName: String, bundleIdentifier: String?, standard: UserDefaults,
+                                   factory: (String) -> UserDefaults? = { UserDefaults(suiteName: $0) }) -> UserDefaults? {
+        if suiteName == bundleIdentifier { return standard }
+        guard !suiteName.isEmpty else { return nil }
+        return factory(suiteName)
+    }
+
+    init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil,
+         preferencesResolver: (() -> UserDefaults?)? = nil) {
         injectedRuntimeOwner = runtimeOwner
-        prefs = preferences ?? UserDefaults(suiteName: ProcessInfo.processInfo.environment["FERAL_NATIVE_PREFS_SUITE"] ?? "ai.feral.native.preview")!
-        displayName = prefs.string(forKey: "displayName") ?? ""
-        avatarChoice = prefs.string(forKey: "avatarChoice") ?? "photo"
-        importedAvatarPath = prefs.string(forKey: "importedAvatarPath")
-        onboarded = prefs.bool(forKey: "onboarded")
-        showProviderSetup = !prefs.bool(forKey: "onboarded")
+        let resolved: UserDefaults?
+        if let preferences { resolved = preferences }
+        else if let preferencesResolver { resolved = preferencesResolver() }
+        else {
+            resolved = Self.resolvePreferences(suiteName: ProcessInfo.processInfo.environment["FERAL_NATIVE_PREFS_SUITE"] ?? "ai.feral.native.preview",
+                                               bundleIdentifier: Bundle.main.bundleIdentifier, standard: .standard)
+        }
+        preferencesUnavailable = resolved == nil
+        // Failure never reads or writes this placeholder domain. It keeps the
+        // recovery dependency initialized while startup/profile effects are fenced.
+        prefs = resolved ?? .standard
+        if let resolved {
+            displayName = resolved.string(forKey: "displayName") ?? ""
+            avatarChoice = resolved.string(forKey: "avatarChoice") ?? "photo"
+            importedAvatarPath = resolved.string(forKey: "importedAvatarPath")
+            onboarded = resolved.bool(forKey: "onboarded")
+            showProviderSetup = !resolved.bool(forKey: "onboarded")
+        } else {
+            error = "Local preferences are unavailable. Your saved profile has not been changed. Quit and reopen FERAL; no reset is required."
+            startupStatus = "Local preferences are unavailable. Startup is paused."
+        }
         let configuration = URLSessionConfiguration.ephemeral
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 300
@@ -127,8 +153,17 @@ import AppKit
         }
     }
 
+    private func preferencesPermitEffects() -> Bool {
+        guard preferencesUnavailable else { return true }
+        error = "Local preferences are unavailable. Your saved profile has not been changed. Quit and reopen FERAL; no reset is required."
+        startupStatus = "Local preferences are unavailable. Startup is paused."
+        ready = false
+        return false
+    }
+
     // Exact-owner events only. Fixtures inject ownership; production uses BrainRuntime.
     func observeRuntimeHealth(_ event: NativeRuntimeHealthEvent) {
+        guard preferencesPermitEffects() else { return }
         guard !shuttingDown, (injectedRuntimeOwner?() ?? runtime.ownership) == event.ownership else { return }
         runtimeHealthWarning = event.healthWarning
         if event.phase == .unavailable || event.phase == .limited || (event.phase == .ready && !event.availableForActions) {
@@ -188,6 +223,7 @@ import AppKit
     }
 
     private func request(_ path: String, body: [String: Any]? = nil, allowMissingConversation: Bool = false) async throws -> Any {
+        guard preferencesPermitEffects() else { throw NativeFailure("Local preferences are unavailable; startup and profile changes are paused.") }
         guard ready else { throw NativeFailure("The local agent is not ready yet.") }
         let owner = runtimeRevision, origin = runtime.baseURL
         var req = URLRequest(url: URL(string: path, relativeTo: origin)!)
@@ -208,6 +244,7 @@ import AppKit
     }
 
     func start() async {
+        guard preferencesPermitEffects() else { return }
         guard !shuttingDown && !connecting && !ready else { return }
         let priorID = conversationID, priorRecords = messages.map(\.savedRecord)
         connecting = true; busy = true; error = nil
@@ -246,6 +283,7 @@ import AppKit
     // Callable without starting BrainRuntime so the exact boot contract is testable.
     // UI records never implicitly become model context for an isolated session.
     func resolveStartupConversation() async throws {
+        guard preferencesPermitEffects() else { throw NativeFailure("Local preferences are unavailable; startup and profile changes are paused.") }
         guard ready, !shuttingDown else { throw NativeFailure("The local agent is not ready for recovery.") }
         runtimeRevision = UUID(); conversationRevision = UUID()
         let runtimeOwner = runtimeRevision, revision = conversationRevision
@@ -300,10 +338,12 @@ import AppKit
         return body
     }
     private func rememberCurrentSelection() {
+        guard preferencesPermitEffects() else { return }
         do { try recovery.rememberSelection(conversationID) }
         catch { recoveryStatus = "Selection was not saved because the primary installation is unverified." }
     }
     private func recoverCurrentTranscript(revision: UUID, runtimeOwner: UUID) async {
+        guard preferencesPermitEffects() else { return }
         let id = conversationID
         guard let primary = recovery.primarySessionID else { recoveryStatus = "Shared session unavailable. Saved thread retained; runtime context was not restored."; return }
         do {
@@ -319,6 +359,7 @@ import AppKit
     }
 
     private func connectChat() async {
+        guard preferencesPermitEffects() else { return }
         guard ready, !shuttingDown else { return }
         voice.configureConnection(sessionID: conversationID, connected: false)
         receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
@@ -363,6 +404,7 @@ import AppKit
     }
 
     func consume(_ frame: [String: Any]) async {
+        guard preferencesPermitEffects() else { return }
         guard ready, !shuttingDown else { return }
         let owner = runtimeRevision, connection = socketGeneration
         let type = frame["type"] as? String ?? ""
@@ -430,6 +472,7 @@ import AppKit
     }
 
     func respondToChatPermission(_ response: NativeRichPermissionResponse) async throws {
+        guard preferencesPermitEffects() else { throw NativeFailure("Local preferences are unavailable; startup and profile changes are paused.") }
         guard ready, !switchingConversation, response.sessionID == conversationID,
               response.connectionID == socketGeneration, let socket, socket.state == .running,
               richChat.permissions.contains(where: { $0.id == response.requestID && $0.session == conversationID && $0.supported && !$0.expired && $0.state == "responding" }) else {
@@ -447,6 +490,7 @@ import AppKit
     private func discardPartialResponse() { if let id = streamMessageID { messages.removeAll { $0.id == id } } }
 
     func uploadAttachments(_ urls: [URL]) async {
+        guard preferencesPermitEffects() else { return }
         guard ready, !uploadingAttachments, !isSending, !switchingConversation else { return }
         uploadingAttachments = true; attachmentError = nil
         let revision = conversationRevision
@@ -460,6 +504,7 @@ import AppKit
         }
     }
     @discardableResult func sendChat(_ text: String, authorizedAttachmentIDs: [String]? = nil) async -> Bool {
+        guard preferencesPermitEffects() else { return false }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard ready && !shuttingDown && !isSending && !switchingConversation && !uploadingAttachments && !text.isEmpty else { return false }
         if !pendingAttachments.isEmpty && authorizedAttachmentIDs != pendingAttachments.map(\.id) {
@@ -602,6 +647,7 @@ import AppKit
     }
 
     func saveSettings() async {
+        guard preferencesPermitEffects() else { return }
         guard !modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { error = "Choose an installed model first."; return }
         busy = true; error = nil; defer { busy = false }
         do {
@@ -613,10 +659,12 @@ import AppKit
         catch { self.error = error.localizedDescription }
     }
     func finishOnboarding() async {
+        guard preferencesPermitEffects() else { return }
         await saveSettings()
         if error == nil { onboarded = true; prefs.set(true, forKey: "onboarded"); showProviderSetup = true }
     }
     func completeProfileOnboarding() {
+        guard preferencesPermitEffects() else { return }
         saveProfile(); onboarded = true; prefs.set(true, forKey: "onboarded"); showProviderSetup = true
     }
     func openProviderSetup() { showProviderSetup = true }
@@ -625,9 +673,11 @@ import AppKit
     // Clearing a local sheet must never mark backend setup complete.
     func completeProviderSetup() { showProviderSetup = false }
     func saveProfile() {
+        guard preferencesPermitEffects() else { return }
         prefs.set(displayName, forKey: "displayName"); prefs.set(avatarChoice, forKey: "avatarChoice"); prefs.set(importedAvatarPath, forKey: "importedAvatarPath")
     }
     func importAvatar(_ url: URL) {
+        guard preferencesPermitEffects() else { return }
         let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
             guard NSImage(contentsOf: url) != nil else { throw NativeFailure("Choose a supported image file.") }

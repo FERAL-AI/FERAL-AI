@@ -50,7 +50,9 @@ struct NativeDesktopPreferenceReview: Identifiable {
     @Published private(set) var agentState: NativeDesktopAgentState = .stopped
     let registrationEligible: Bool
     let registrationExplanation: String
-    private let preferences: UserDefaults
+    private let preferences: UserDefaults?
+    var preferencesAvailable: Bool { preferences != nil }
+    private static let preferencesUnavailable = "Local desktop preferences are unavailable. Desktop changes and Login Items controls are paused. Your saved settings have not been reset or changed; quit and reopen FERAL."
     private let destinations: Set<String>
     private let fallback: String
     private let login: NativeDesktopLoginService
@@ -64,30 +66,37 @@ struct NativeDesktopPreferenceReview: Identifiable {
     private var stateItem: NSMenuItem?
     private var chatItem: NSMenuItem?
     private var navigationItem: NSMenuItem?
-    init(allowedDestinations: [String], fallback: String = "Chat", preferences: UserDefaults? = nil, loginService: NativeDesktopLoginService? = nil, bundleURL: URL = Bundle.main.bundleURL, homeURL: URL = FileManager.default.homeDirectoryForCurrentUser) {
+    static func resolvePreferences(suiteName: String, bundleIdentifier: String?, standard: UserDefaults, factory: (String) -> UserDefaults? = { UserDefaults(suiteName: $0) }) -> UserDefaults? {
+        if suiteName == bundleIdentifier { return standard }
+        guard !suiteName.isEmpty else { return nil }
+        return factory(suiteName)
+    }
+    init(allowedDestinations: [String], fallback: String = "Chat", preferences: UserDefaults? = nil, loginService: NativeDesktopLoginService? = nil, bundleURL: URL = Bundle.main.bundleURL, homeURL: URL = FileManager.default.homeDirectoryForCurrentUser, preferenceSuite: String? = nil, bundleIdentifier: String? = Bundle.main.bundleIdentifier, standardPreferences: UserDefaults = .standard, preferenceFactory: (String) -> UserDefaults? = { UserDefaults(suiteName: $0) }) {
         let allowed = Set(allowedDestinations.filter { !$0.isEmpty && $0.utf8.count <= 128 && $0.utf8.allSatisfy { $0 >= 32 && $0 != 127 } })
         precondition(allowed.contains(fallback), "Desktop destination fallback must belong to the navigation whitelist")
-        let prefs = preferences ?? UserDefaults(suiteName: ProcessInfo.processInfo.environment["FERAL_NATIVE_PREFS_SUITE"] ?? "ai.feral.native.preview")!
+        let prefs = preferences ?? Self.resolvePreferences(suiteName: preferenceSuite ?? ProcessInfo.processInfo.environment["FERAL_NATIVE_PREFS_SUITE"] ?? "ai.feral.native.preview", bundleIdentifier: bundleIdentifier, standard: standardPreferences, factory: preferenceFactory)
         self.preferences = prefs; self.destinations = allowed; self.fallback = fallback
         let service = loginService ?? NativeSystemLoginService()
-        login = service; loginStatus = service.status
-        let initialMenu = desktopSavedBool(prefs.object(forKey: "desktop.menuBarEnabled")) ?? true
+        login = service; loginStatus = prefs == nil ? .unknown : service.status
+        let initialMenu = prefs == nil ? false : (desktopSavedBool(prefs?.object(forKey: "desktop.menuBarEnabled")) ?? true)
         menuBarEnabled = initialMenu
-        keepRunningWhenClosed = (desktopSavedBool(prefs.object(forKey: "desktop.keepRunningWhenClosed")) ?? false) && initialMenu
-        restoreLastDestination = desktopSavedBool(prefs.object(forKey: "desktop.restoreLastDestination")) ?? true
-        let saved = prefs.string(forKey: "desktop.lastDestination") ?? fallback
+        keepRunningWhenClosed = (desktopSavedBool(prefs?.object(forKey: "desktop.keepRunningWhenClosed")) ?? false) && initialMenu
+        restoreLastDestination = prefs == nil ? false : (desktopSavedBool(prefs?.object(forKey: "desktop.restoreLastDestination")) ?? true)
+        let saved = prefs?.string(forKey: "desktop.lastDestination") ?? fallback
         lastDestination = allowed.contains(saved) ? saved : fallback
         // Do not register a temporary build/copy as a login item. Signing and
         // actual launch behavior remain macOS-verified, not inferred from path.
         let parent = bundleURL.deletingLastPathComponent().path
         let eligible = bundleURL.isFileURL && bundleURL.pathExtension.lowercased() == "app" && (parent == "/Applications" || parent == homeURL.appendingPathComponent("Applications").path)
-        registrationEligible = eligible
-        registrationExplanation = eligible ? "Installed bundle location recognized. macOS still verifies code signing and consent. This preview’s next-login launch has not been release validated." : "Launch at login is disabled for temporary/build bundles. Install the signed application directly in /Applications or ~/Applications first; release signing and a real login test remain required."
+        registrationEligible = eligible && prefs != nil
+        registrationExplanation = prefs == nil ? Self.preferencesUnavailable : (eligible ? "Installed bundle location recognized. macOS still verifies code signing and consent. This preview’s next-login launch has not been release validated." : "Launch at login is disabled for temporary/build bundles. Install the signed application directly in /Applications or ~/Applications first; release signing and a real login test remain required.")
         super.init()
-        if saved != lastDestination { prefs.removeObject(forKey: "desktop.lastDestination") }
+        if prefs == nil { error = Self.preferencesUnavailable }
+        if saved != lastDestination { prefs?.removeObject(forKey: "desktop.lastDestination") }
     }
     var initialDestination: String { restoreLastDestination ? lastDestination : fallback }
     private func reloadPreferences() {
+        guard let preferences else { error = Self.preferencesUnavailable; return }
         menuBarEnabled = desktopSavedBool(preferences.object(forKey: "desktop.menuBarEnabled")) ?? true
         keepRunningWhenClosed = (desktopSavedBool(preferences.object(forKey: "desktop.keepRunningWhenClosed")) ?? false) && menuBarEnabled
         restoreLastDestination = desktopSavedBool(preferences.object(forKey: "desktop.restoreLastDestination")) ?? true
@@ -95,10 +104,11 @@ struct NativeDesktopPreferenceReview: Identifiable {
         lastDestination = destinations.contains(saved) ? saved : fallback
         updateMenuInstallation()
     }
-    func rememberDestination(_ value: String) { guard restoreLastDestination, destinations.contains(value) else { return }; lastDestination = value; preferences.set(value, forKey: "desktop.lastDestination") }
-    func refreshLoginStatus() { loginStatus = login.status }
-    func openLoginSettings() { login.openSettings(); refreshLoginStatus() }
+    func rememberDestination(_ value: String) { guard let preferences else { error = Self.preferencesUnavailable; return }; guard restoreLastDestination, destinations.contains(value) else { return }; lastDestination = value; preferences.set(value, forKey: "desktop.lastDestination") }
+    func refreshLoginStatus() { guard preferencesAvailable else { error = Self.preferencesUnavailable; return }; loginStatus = login.status }
+    func openLoginSettings() { guard preferencesAvailable else { error = Self.preferencesUnavailable; return }; login.openSettings(); refreshLoginStatus() }
     func review(_ action: NativeDesktopPreferenceAction) -> NativeDesktopPreferenceReview? {
+        guard preferencesAvailable else { error = Self.preferencesUnavailable; return nil }
         reloadPreferences(); refreshLoginStatus(); error = nil
         let title: String, scope: String, previous: String, proposed: String
         switch action {
@@ -124,6 +134,7 @@ struct NativeDesktopPreferenceReview: Identifiable {
     func cancel(_ review: NativeDesktopPreferenceReview) { reviews[review.id] = nil }
     func discardReviews() { reviews = [:] }
     func perform(_ supplied: NativeDesktopPreferenceReview) -> Bool {
+        guard let preferences else { reviews[supplied.id] = nil; error = Self.preferencesUnavailable; return false }
         reloadPreferences(); refreshLoginStatus(); error = nil; notice = nil
         guard let review = reviews.removeValue(forKey: supplied.id), ProcessInfo.processInfo.systemUptime - review.createdUptime <= 300, review.oldKeep == keepRunningWhenClosed, review.oldMenu == menuBarEnabled, review.oldRemember == restoreLastDestination, review.oldLogin == loginStatus else { error = "Desktop state changed or the review expired. Review again."; return false }
         do {
@@ -192,7 +203,7 @@ struct NativeDesktopExperienceView: View {
     @State private var review: NativeDesktopPreferenceReview?
     var body: some View {
         VStack(alignment: .leading, spacing: 14) {
-            HStack { Text("Desktop behavior").font(.title2.bold()); Spacer(); Button("Refresh macOS status") { experience.refreshLoginStatus() } }
+            HStack { Text("Desktop behavior").font(.title2.bold()); Spacer(); Button("Refresh macOS status") { experience.refreshLoginStatus() }.disabled(!experience.preferencesAvailable) }
             if let message = experience.error { Text(message).foregroundStyle(.red).textSelection(.enabled) }
             if let message = experience.notice { Text(message).foregroundStyle(.secondary).textSelection(.enabled) }
             preferenceRow("After the last window closes", value: experience.keepRunningWhenClosed ? "Keep app and brain running" : "Quit app and owned brain", action: .keepRunning(!experience.keepRunningWhenClosed))
@@ -201,10 +212,10 @@ struct NativeDesktopExperienceView: View {
             Divider()
             Text("Launch at login: \(experience.loginStatus.label)").font(.headline)
             Text(experience.registrationExplanation).foregroundStyle(.secondary)
-            HStack { Button("Review enable at login…") { review = experience.review(.login(true)) }.disabled(!experience.registrationEligible || experience.loginStatus == .enabled); Button("Review unregister…") { review = experience.review(.login(false)) }.disabled(experience.loginStatus == .notRegistered); Button("Open Login Items settings") { experience.openLoginSettings() } }
+            HStack { Button("Review enable at login…") { review = experience.review(.login(true)) }.disabled(!experience.registrationEligible || experience.loginStatus == .enabled); Button("Review unregister…") { review = experience.review(.login(false)) }.disabled(experience.loginStatus == .notRegistered); Button("Open Login Items settings") { experience.openLoginSettings() } }.disabled(!experience.preferencesAvailable)
             Text("No global shortcut is registered. Closing a window does not undo completed agent actions. Background operation and login registration are separate preferences.").font(.caption).foregroundStyle(.secondary)
         }.padding()
         .sheet(item: $review, onDismiss: { experience.discardReviews() }) { item in VStack(alignment: .leading, spacing: 12) { Text(item.title).font(.title2.bold()); Text(item.scope).textSelection(.enabled); Text("Previous: \(item.previous)\nProposed: \(item.proposed)").textSelection(.enabled); HStack { Button("Cancel") { experience.cancel(item); review = nil }; Spacer(); Button("Confirm") { _ = experience.perform(item); review = nil } } }.padding(24).frame(width: 620) }
     }
-    private func preferenceRow(_ title: String, value: String, action: NativeDesktopPreferenceAction) -> some View { HStack { VStack(alignment: .leading) { Text(title).font(.headline); Text(value).font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Review change…") { review = experience.review(action) }.accessibilityLabel("Review change: " + title) } }
+    private func preferenceRow(_ title: String, value: String, action: NativeDesktopPreferenceAction) -> some View { HStack { VStack(alignment: .leading) { Text(title).font(.headline); Text(value).font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Review change…") { review = experience.review(action) }.accessibilityLabel("Review change: " + title).disabled(!experience.preferencesAvailable) } }
 }

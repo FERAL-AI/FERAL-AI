@@ -26,9 +26,18 @@ layout and a bounded composer. The complete native fixture runner, web suite
 (171 files / 1,358 tests), local build and strict ad-hoc signature passed. The
 bounded packaged audit inspected 13,052 files, 265 Mach-O objects and 9 internal
 links with no findings; isolated bundled Python FTS5/OpenCode probes passed.
-Computer-use selection of FERAL repeatedly timed out, so visual acceptance of
-this layout remains open. Backend/model work must be staged again after its final
-changes; these results do not certify untested subsequent payloads.
+Actual launch subsequently failed in both 9.23 and 9.24: macOS returned nil for
+the preferences suite matching the application domain, and a force unwrap trapped
+in `NativeModel.init`. The 9.25 actual launch exposed the same second trap in the desktop settings
+controller. The 9.26 candidate uses existing standard defaults in both controllers for that
+domain and pauses startup if a distinct selected suite cannot open. It does not
+reset saved settings. The rebuilt 9.26 app launched into visible avatar onboarding,
+quit normally and relaunched successfully through actual macOS interaction.
+Its strict ad-hoc build and bounded 13,052-file audit passed. Desktop fixtures
+passed 39 assertions, including unavailable-suite refusal without settings writes
+or Login Items effects. This establishes bounded startup acceptance, not every
+screen or existing-profile migration. Backend resources were staged again from
+the final source; subsequent changes require renewed staging and acceptance.
 
 The existing feature-rich web client and desktop shell remain in `feral-client-v2` and `desktop`. No web routes or Settings sections were deleted to create this preview. The installed FERAL app has not been replaced. See [FEATURE_PARITY.md](FEATURE_PARITY.md) for all 44 web route patterns and 16 Settings sections, concrete API actions, missing native controls and migration gates. [MIGRATION_PLAN.md](MIGRATION_PLAN.md) tracks the remaining full-app milestones.
 

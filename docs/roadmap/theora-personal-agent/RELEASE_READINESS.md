@@ -4,7 +4,7 @@ Updated October 1, 2026. This is an implementation and acceptance roadmap, not a
 
 ## Current boundary
 
-The latest accepted local Mac artifact is **2026.9.23**, a SwiftUI/AppKit application with a bundled Python brain and OpenCode engine. It remains `FERAL Native Preview`, uses an isolated preview profile, and has partial native coverage. It is not an Electron shell; changing the shell does not establish completeness, safe autonomy or production distribution. The complete existing web client and legacy desktop shell remain separate surfaces. No feature-inventory row is release-certified.
+The latest bounded local Mac checkpoint is **2026.9.26**, a SwiftUI/AppKit application with a bundled Python brain and OpenCode engine. Subsequent actual launches of 9.23 and 9.24 crashed during preferences initialization; their previous passing checks do not establish reliable launch. Actual 9.25 launch exposed the same second trap in the desktop settings controller. The 9.26 correction to both controllers passed actual avatar-onboarding launch, normal quit and relaunch. It remains `FERAL Native Preview`, uses an isolated preview profile, and has partial native coverage. It is not an Electron shell; changing the shell does not establish completeness, safe autonomy or production distribution. The complete existing web client and legacy desktop shell remain separate surfaces. No feature-inventory row is release-certified.
 
 A full product lets a person set up their chosen agent, understand its model/data/device state, converse and retain useful context, perform supported authorized tasks, inspect actual outcomes and recover safely across declared platforms. Every enabled feature needs an executable contract, truthful failure states and acceptance evidence. Unsupported features must be unavailable rather than implying unrestricted computer, glasses, messaging or purchasing powers.
 
@@ -16,6 +16,9 @@ Separate source inspection, isolated fixtures, actual app interaction, actual ex
 
 | Evidence | Established boundary | Still unverified |
 |---|---|---|
+| Actual 9.26 avatar-onboarding launch, normal quit and relaunch; strict ad-hoc build and bounded audit passed, 39 desktop fixture assertions | Bounded real startup and safe unavailable-suite behavior | Full screens, existing-profile migration, backend task outcomes |
+| Actual 9.23/9.24 crash reports and compiled instruction inspection: nil application-domain UserDefaults suite force-unwrapped in NativeModel.init | Confirmed native startup failure before backend work; 9.26 removes both traps without resetting settings | Both startup traps corrected; supported populated-profile acceptance remains |
+| Full isolated October 1 backend run: 12,150 passed, 9 failed, 50 skipped | Broad executed regression coverage; failures retained for investigation | Corrected complete rerun and remote CI; no universal pass claim |
 | Actual 9.23 build, strict ad-hoc signature verification; bounded audit of 13,036 files, 265 Mach-O objects, 9 internal links; bundled SQLite FTS5 verified | Inspected local artifact assembled and passed these checks | Developer ID, notarization, clean Gatekeeper install, updater, Intel Mac, Linux, iOS |
 | Actual 9.23 isolated profile retained avatar/name/conversation; local `31 + 11` delivered `42`, 6,579 prompt tokens, `task_truncated=0`, no input-truncation warning | One delivered local reply and bounded persistence | General model quality, arbitrary context lengths, fallback, real-user retention |
 | Actual 9.23 hardware-review accessibility exposed labels/buttons and expanded original details; Cancel caused no hardware POST | Bounded review accessibility and cancellation | All screens, complete VoiceOver journeys, physical hardware |
@@ -134,7 +137,12 @@ No full release claim until all enabled gates pass. A smaller release requires e
 - `.github/workflows/ci.yml` covers backend/client/web checks. The new
   `native-checks.yml` automatically runs native features/linked models, real child
   lifeline tests and bundle-audit tests on relevant PRs and main pushes. Remote
-  execution and required branch-protection status remain to be verified. This is
+  execution exposed an oversized Workflow view expression on the CI compiler;
+  decomposition passed a focused local compile and is awaiting remote rerun.
+  Global backend Ruff failures have been corrected and the exact command passes
+  locally; backend CI was skipped behind that initial failed lint gate. Web unit
+  coverage, SDKs, asset coherence, docs, naming and version checks passed remotely.
+  Browser end-to-end failures remain under investigation. Required branch-protection status remains to be verified. This is
   not yet exact-source packaged-app, physical-device or signing acceptance.
 - `.github/workflows/desktop.yml` is manual experimental debug Tauri CI, not native Mac acceptance or a Linux product release.
 - `publish.yml`, `install-smoke.yml` and wheel tooling cover Python distribution. `scripts/release.py` can commit/push/open a PR; it was not executed here. Skip flags cannot satisfy release evidence.

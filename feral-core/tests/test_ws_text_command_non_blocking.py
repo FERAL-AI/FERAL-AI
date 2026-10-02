@@ -17,8 +17,8 @@ This module pins:
      receiving the NEXT message — the loop is not stuck on the await.
   2. Concurrent turns on the same session still serialise via the
      per-session lock (orderering preserved).
-  3. Failures inside a background turn surface as a friendly
-     ``text_response`` (no silent disappearance, no 500 propagation).
+  3. Failures inside a background turn surface as a friendly structured
+     ``error`` (no silent disappearance or private exception disclosure).
 """
 
 from __future__ import annotations
@@ -81,10 +81,10 @@ def test_loop_keeps_receiving_while_orchestrator_turn_in_flight(ws_mock_state, w
     assert slow_call_count == 2
 
 
-def test_background_turn_failure_surfaces_text_response(ws_mock_state, ws_client):  # noqa: F811
+def test_background_turn_failure_surfaces_safe_structured_error(ws_mock_state, ws_client):  # noqa: F811
     """When the orchestrator raises inside the background task we
-    still send the operator a 'Sorry, something went wrong' chat
-    message instead of dropping the failure silently.
+    still send the operator a recoverable error instead of dropping the
+    failure silently or pretending the exception is an assistant answer.
     """
     ws_mock_state.orchestrator.handle_command_stream = AsyncMock(
         side_effect=RuntimeError("boom-task")
@@ -98,5 +98,12 @@ def test_background_turn_failure_surfaces_text_response(ws_mock_state, ws_client
         })
         err = ws.receive_json()
 
-    assert err["type"] == "text_response"
-    assert "boom-task" in err["payload"]["text"]
+    assert err["type"] == "error"
+    assert err["payload"] == {
+        "code": "chat_turn_failed",
+        "message": "The chat turn failed. Please try again.",
+        "recoverable": True,
+    }
+    assert err["hop"] == "brain"
+    assert isinstance(err["session_id"], str) and err["session_id"]
+    assert "boom-task" not in str(err)

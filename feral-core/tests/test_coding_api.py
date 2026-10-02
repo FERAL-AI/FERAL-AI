@@ -8,7 +8,7 @@ from fastapi import FastAPI
 
 from api.routes import coding
 from bridges import coding_setup
-from tests.test_external_agent_skill import fake_agent, isolated_registry
+pytest_plugins = ["tests.test_external_agent_skill"]
 
 
 @pytest.fixture

@@ -76,7 +76,8 @@ def _read_file_at(parent: int, name: str, limit: int) -> bytes:
             remaining -= len(chunk)
         raw = b"".join(parts)
         after = os.fstat(fd)
-        signature = lambda item: (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
+        def signature(item):
+            return (item.st_dev, item.st_ino, item.st_size, item.st_mtime_ns, item.st_ctime_ns)
         if len(raw) > limit or signature(before) != signature(after) or len(raw) != before.st_size:
             raise ValueError("File changed during snapshot; review again")
         return raw
