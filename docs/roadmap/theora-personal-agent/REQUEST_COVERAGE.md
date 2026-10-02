@@ -6,7 +6,7 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Latest source66c7cd500 required CI/native passed: **12,305 backend tests,
+- Latest sourcecd1571ef9 required CI/native passed: **12,369 backend tests,
   83 skipped, coverage74% rounded**. Non-blocking mypy remains failed at846
   versus812 baseline. Live-brain and main Linux matrix skipped.
 - [Actual9.27](NATIVE_9_27_ACCEPTANCE.md) passed local reply, exact native
@@ -23,6 +23,12 @@ The detailed contracts and acceptance work packages remain in [release readiness
   passed remote CI. Actual9.28 passed the old New conversation crash path and
   a local reply, but reproduced a separate Permissions and Cost SIGTRAP,
   an unexplained normal exit and early timeout. App acceptance remains open.
+- Next frozen integration passed235 backend tests and all36 native feature
+  suites, with linked25 groups and desktop39/error5 assertions. Exact native
+  task status/Stop, layout repair, Forge drafting and structured intervals are
+  implemented. Trusted checkpoint lifecycle passes restart/no-replay tests but
+  stays inactive until every writer/cleanup is covered.9.29 is the next assembly,
+  not yet an accepted app. [Evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md).
 
 The following bullets retain earlier evidence; their counts and artifacts do
 not describe this new source wave.

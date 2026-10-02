@@ -30,7 +30,7 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Most recent publication | `66c7cd500d7ec353c68da97f44b99d6201af9abe` (native172 migration, context fitting, live SDK continuity, maintenance and dependency repairs) |
+| Most recent publication | `cd1571ef94aa2fe244023d56ba468f7ba3266700` (fenced context storage, trusted chat progress, verified automation controls, failed9.28 evidence) |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
 | Disk observation | About4.0 GiB available during9.28 acceptance; macOS reported6,967MiB swap used. Stagger heavy model/compiler checks; no personal/cache cleanup performed |
@@ -41,6 +41,16 @@ every historic source identifier to HEAD or regenerate a baseline to make a gate
 appear green.
 
 ## Latest checked source and active candidate
+
+Source **cd1571ef94aa2fe244023d56ba468f7ba3266700** is committed/pushed.
+[CI37066669634](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37066669634)
+and [native37066669777](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37066669777),
+docs/naming/version passed. Actual backend job111036192549: **12,369 passed,
+83 skipped,572 warnings in788.00s**, coverage74% rounded. Generic SDK/web/device/
+extension/architecture/syntax/Ruff/assets passed; live-brain/main Linux skipped.
+Mypy job111036125955 still failed: **846 errors in238 files,1,253 checked** versus
+812 baseline, with no checkpoint-code diagnostics. The actual9.28 artifact
+below remains on66c7; this publication does not rebuild it.
 
 Source **66c7cd500d7ec353c68da97f44b99d6201af9abe** is committed/pushed.
 [CI37043435460](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37043435460)
@@ -57,18 +67,32 @@ executable SHA256`dba3785d53634fb699986c2ade9290f42ff5c0631c63224510bfb34350d165
 All479 production Python files match that commit. Bundle audit passed13,054
 files/265 Mach-O/9 internal links, pinned Python3.11.15/SQLite3.53.1/FTS5 and
 OpenCode1.18.10. Ad-hoc verification is not Developer-ID/notarization.
-Actual isolated app acceptance is in progress. Original New conversation/
+Actual isolated app acceptance ended **failed**. Original New conversation/
 retained-error AX path survives, real42 reply passed, and growing context now
 narrows complete optional schemas below the byte budget. **A new SIGTRAP during
-Permissions and Cost navigation is being investigated**; no crash-free claim.
+Permissions and Cost navigation was confirmed**; no crash-free claim.
 An earlier unexplained normal exit0 and early response-timeout banner are
 preserved independently. New IPS identifies main-thread EXC_BREAKPOINT/SIGTRAP
 through `+[NSApplication _crashOnException:]` and repeated NSView constraint
 updates, distinct from the old accessibility-label recursion. The exact-time OS
 layout-cycle log points to `NativeSelectableTextField.fittingSize` invalidating
-intrinsic content size during measurement. Minimal reproduction and exact
-exception reason remain pending; disk space is not an established cause.
-Never replace this immutable bundle during acceptance.
+intrinsic content size during measurement. A focused purity assertion failed
+on that live-field mutation and passes after measuring a copied cell. Small
+actual Security and Unicode/copy probes pass; they did not reproduce the full
+candidate geometry crash. The privacy-redacted exception reason and full next
+candidate acceptance remain open; disk space is not an established cause.
+9.28 acceptance is frozen. No process from that candidate remains owned/running.
+
+The next reviewed source wave passed **235 integrated backend tests,7 warnings
+in9.38s**. It includes the inactive trusted runtime-context lifecycle, direct
+owner progress and explicit interval automation follow-up. The frozen complete
+native fixture runner passed all36 feature suites, linked25 groups, desktop39
+and error5 assertions. Production typecheck and18 child-lifeline/auditor/source-
+equality regression tests passed. The next assembly is
+9.29/build2026100203, not yet a built candidate. See
+[integration evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md). Production
+checkpoint activation is not enabled: authenticated presave readiness and every
+writer/cleanup/restore boundary must close first.
 
 The next storage/progress/workflow slice passed **165 integrated backend tests,
 8 warnings in5.80s** on frozen sources. Warnings include an older memory suite's
@@ -152,17 +176,17 @@ as containing every later source commit or completing the populated-profile matr
 
 | Worker | Exclusive scope | Active work |
 |---|---|---|
-| Parent | Shared docs/CI/Git, backend trusted progress identity and native build-runner integration | Published77-file checkpoint; frozen storage/progress integration165 passed; next independent publication pending; 9.28 immutable |
-| coding_session_isolation | Workflow source/tests frozen; now APIModel/NativeViews/NativeModelTests/new ChatTurn feature/tests | Workflow67 fixtures plus3 real router/SQLite cases passed; native exact-turn negotiation/Stop/read-only reconciliation adoption underway |
-| python_sdk_contracts | DATA01A codec/store/tests/evidence frozen; new runtime-context coordinator, narrow orchestrator, lifecycle tests/evidence | DATA01A accepted; first DATA01B lifecycle slice explicitly inactive until all entry/cleanup/manual/voice writers close |
-| native_populated_acceptance | New9.28 report/probe frozen for publication; NativeRichText/SelectableText tests/new layout evidence and reproduction assets | Layout-cycle log points to intrinsic-size invalidation during fittingSize; production edits held until linked compile finishes |
+| Parent | Shared docs/CI/Git, frozen receipt/layout/Forge/workflow integration, next version/build | Published cd1571 CI passed; next frozen backend235, full native fixtures, production typecheck and18 lifeline/auditor/equality regression tests passed; publication/assembly next |
+| coding_session_isolation | Receipt and Forge source/evidence frozen and transferred; read-only generation recovery plan | Forge86 native assertions and actual local router/engine/SQLite probe passed; backend atomic generation recovery is next proposed card |
+| python_sdk_contracts | First DATA01B lifecycle source frozen; two new activation baseline fixtures/evidence frozen | First lifecycle remains inactive; attachment/readiness interface agreed, production activation edits held until checkpoint publication |
+| native_populated_acceptance | Layout source/evidence frozen; only new9.29 acceptance probe/launcher | Prepare guarded next-candidate journey; no launch until exact source/hash/audit READY |
 
 Original immutable bundle evidence is frozen in [NATIVE_POPULATED_ACCEPTANCE.md](NATIVE_POPULATED_ACCEPTANCE.md): actual rich persistence/search/rename/pin/relaunch and one local-model reply passed. **SIGSEGV with excessive SwiftUI accessibility recursion is confirmed by macOS report and watched exit**. Context truncation, guessed Weather fallback, missing result success key and pending-review false-completion text are also reproduced. Do not call this app release-ready.
 
 Source can change in these exclusive areas during targeted checks; freeze all workers before full integration suites and candidate assembly. Recheck free disk before packaging. Preserve unrelated `AUDIT-FIXES.md`. No real external accounts/messages/purchases or personal data changes occurred.
 
-Next: finish exact-turn native adoption; fix/reproduce shared AppKit sizing
-reentrancy; activate runtime checkpoints only after every writer/cleanup/restore
+Next: publish the integrated wave and build/audit9.29, then run guarded actual
+acceptance. Activate runtime checkpoints only after every writer/cleanup/restore
 path is fenced. Then memory migration/native parity/voice and exact-device/iOS
 contracts. Messaging/browser/Link, social/Linux/distribution remain explicit
 cards. Durable processing receipts do not implement read/seen or prove effects.

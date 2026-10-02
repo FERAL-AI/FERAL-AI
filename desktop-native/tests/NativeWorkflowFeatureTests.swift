@@ -40,10 +40,10 @@ final class WorkflowFixture: URLProtocol {
         case "/api/intents/p1/complete/a1": done = true;return (200,["success":true])
         case "/api/automations":
             if request.httpMethod == "POST" {
-                let text = body["text"] as! String,minutes = Int(text.split(separator:" ")[1])!,id = nextAutomationID;nextAutomationID += 1
+                let minutes = body["interval_minutes"] as! Int,text = "every \(minutes) minutes, " + (body["action"] as! String),id = nextAutomationID;nextAutomationID += 1
                 let row:[String:Any] = ["id":id,"description":text,"cron_expr":"every \(minutes)m","job_type":"custom","session_id":body["session_id"]!,"enabled":true,"payload":["source":"natural_language","original_text":text,"action_text":text],"disabled_reason":""]
                 automations[String(id)] = row
-                return (200,["success":true,"job_id":id,"cron":"every \(minutes)m","description":text])
+                return (200,["success":true,"job_id":id,"cron":"every \(minutes)m","description":text,"creation_mode":"explicit_interval"])
             }
             return (200,["automations":automations.values.map(automationInventory)])
         default:
@@ -84,8 +84,11 @@ final class WorkflowFixture: URLProtocol {
         check(model.rows("automations").isEmpty && model.errors["automations"] == nil,"new scheduled-automation section uses existing passive inventory")
         let normal = WorkflowFixture.normal
         let attempted = WorkflowFixture.requests.count
-        for action in ["Read notes every morning","Read daily tasks","weekly review",String(repeating:"x",count:8001),"bad\u{0000}action"] {
-            do { _ = try model.review(.createAutomation(minutes:60,action:action));fatalError("schedule override action accepted") } catch {}
+        for action in [String(repeating:"x",count:8001),"bad\u{0000}action", "   "] {
+            do { _ = try model.review(.createAutomation(minutes:60,action:action));fatalError("invalid action accepted") } catch {}
+        }
+        for action in ["Read notes every morning","Read daily tasks","weekly review"] {
+            check(try model.review(.createAutomation(minutes:60,action:action)).explanation.contains(action),"ordinary schedule words remain task text in explicit interval review")
         }
         for minutes in [0,10081] { do { _ = try model.review(.createAutomation(minutes:minutes,action:"Read notes"));fatalError("unbounded schedule accepted") } catch {} }
         check(WorkflowFixture.requests.count == attempted,"invalid/ambiguous automation input refuses before any request")
@@ -94,7 +97,7 @@ final class WorkflowFixture: URLProtocol {
         check(await model.perform(reviewed) && model.receipt?.contains("No completed run") == true,"CUSTOM creation requires persisted schedule receipt, not effect success")
         let createRequest = WorkflowFixture.requests.last { $0.url!.path == "/api/automations" && $0.httpMethod == "POST" }!
         let body = try JSONSerialization.jsonObject(with:createRequest.httpBody!) as! [String:Any]
-        check(body.count == 2 && body["text"] as? String == "every 60 minutes, Read local notes" && body["session_id"] as? String == "thread-a","existing text/session contract exact with no bypass fields")
+        check(body.count == 3 && body["interval_minutes"] as? Int == 60 && body["action"] as? String == "Read local notes" && body["session_id"] as? String == "thread-a","structured interval/action/session contract exact with no bypass fields")
         let usedCount = WorkflowFixture.requests.count
         check(!(await model.perform(reviewed)) && WorkflowFixture.requests.count == usedCount,"creation review consumed once, no duplicate write")
         let id = model.rows("automations")[0].id

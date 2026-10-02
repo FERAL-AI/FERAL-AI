@@ -52,6 +52,23 @@ private struct AssertionFailure: Error, CustomStringConvertible { let descriptio
 private func expect(_ condition: @autoclosure () -> Bool, _ message: String) throws {
     if !condition() { throw AssertionFailure(description: message) }
 }
+@MainActor private final class TrackedChatFrames {
+    var frames:[[String:Any]] = []
+    var failCommand = false
+    var beforeCommand:(([String:Any]) async throws -> Void)?
+    var savedBeforeSubmission = false
+    func send(_ frame:[String:Any]) async throws {
+        frames.append(frame)
+        if frame["type"] as? String == "text_command" {
+            let rows = WireProtocol.bodies("/api/conversations/save").last?["messages"] as? [[String:Any]] ?? []
+            savedBeforeSubmission = (rows.last?["chat_turn"] as? [String:Any])?["request_id"] as? String == frame["msg_id"] as? String
+            if failCommand { throw NativeFailure("Fixture lost send reply") }
+            try await beforeCommand?(frame)
+        }
+    }
+    var commands:[[String:Any]] { frames.filter { $0["type"] as? String == "text_command" } }
+    var aborts:[[String:Any]] { frames.filter { $0["method"] as? String == "chat.abort" } }
+}
 
 @main struct NativeModelTests {
     @MainActor static func model(preferences injectedPreferences: UserDefaults? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil) -> NativeModel {
@@ -66,6 +83,158 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         return model
     }
     static func frame(_ type: String, _ payload: [String: Any]) -> [String: Any] { ["type": type, "payload": payload] }
+    @MainActor private static func trackedModel(_ transport:TrackedChatFrames) async throws -> NativeModel {
+        let configuration = URLSessionConfiguration.ephemeral;configuration.protocolClasses = [WireProtocol.self]
+        let name = "feral.native-chat-receipt-fixture." + UUID().uuidString
+        let preferences = UserDefaults(suiteName:name)!;preferences.removePersistentDomain(forName:name)
+        let model = NativeModel(session:URLSession(configuration:configuration),preferences:preferences,chatSender:{ frame in try await transport.send(frame) })
+        model.ready = true;try model.restoreThread(["id":"fixture-thread","messages":[[String:Any]]()])
+        await model.reconnectVerifiedChat();return model
+    }
+    @MainActor static func negotiate(_ model:NativeModel) async {
+        await model.consume(["type":"res","id":model.chatCapabilityFrame!["id"]!,"ok":true,"payload":["session_id":model.activeConversationID,"turn_contract_versions":[1],"durable_receipts":true,"whole_turn_terminal":true]])
+    }
+    static func receipt(_ reference:NativeTurnReference,type:String,turn:String,outcome:String = "completed",text:String = "Final actual response") -> [String:Any] {
+        var payload = reference.record;payload["turn_id"] = turn;payload["durable"] = true;payload["replayed"] = false
+        if type == "chat_turn_accepted" { payload["status"] = "accepted" }
+        else { payload["processing_outcome"] = outcome;payload["final_text"] = text;payload["action_outcome"] = "not_asserted";payload["approval_request_ids"] = [String]() }
+        return ["type":type,"session_id":reference.sessionID,"payload":payload]
+    }
+    static func progress(_ reference:NativeTurnReference,type:String,turn:String,payload:[String:Any]) -> [String:Any] {
+        var data = payload;data["chat_turn"] = ["contract_version":1,"request_id":reference.requestID,"turn_id":turn]
+        return ["type":type,"session_id":reference.sessionID,"payload":data]
+    }
+    @MainActor static func trackedChatTests() async throws {
+        WireProtocol.reset()
+        let transport = TrackedChatFrames(),model = try await trackedModel(transport)
+        let refusedBeforeCapability = await model.sendChat("Do not execute before negotiation")
+        try expect(!refusedBeforeCapability && transport.commands.isEmpty && model.messages.isEmpty,"unsupported/silent capability must fail before any prompt or user record")
+        await model.consume(["type":"res","id":model.chatCapabilityFrame!["id"]!,"ok":true,"payload":["session_id":"fixture-thread","turn_contract_versions":[true,1.5],"durable_receipts":true,"whole_turn_terminal":true]])
+        try expect(!model.chatReceiptReady,"boolean/floating capability cannot enable native submission")
+        await negotiate(model)
+        try expect(model.chatCanSend,"valid capability enables idle native Chat")
+        model.pendingAttachments = [NativeAttachmentRef(id:"tracked-upload",filename:"fixture.txt",contentType:"text/plain",sizeBytes:7,sha256:String(repeating:"a",count:64))]
+        let unreviewed = await model.sendChat("Read the file")
+        try expect(!unreviewed && transport.commands.isEmpty && model.messages.isEmpty,"tracked attachment content still requires exact review")
+        let sent = await model.sendChat("Read the file",authorizedAttachmentIDs:["tracked-upload"])
+        let reference = model.trackedChatReference!,connection = model.chatConnectionID,turn = UUID().uuidString.lowercased()
+        let command = transport.commands[0],commandPayload = command["payload"] as! [String:Any]
+        try expect(sent && transport.savedBeforeSubmission && command["msg_id"] as? String == reference.requestID && NativeChatTurnWire.uuid(reference.requestID) && NativeChatTurnWire.version(commandPayload["turn_contract_version"]),"exact UUID reference saved and acknowledged before opt-in command")
+        try expect((commandPayload["attachments"] as? [[String:Any]])?.first?["upload_id"] as? String == "tracked-upload" && (commandPayload["context"] as? [String:Any])?["attachment_content_authorized"] as? Bool == true && model.pendingAttachments.isEmpty,"attachment consent/content presentation retained in tracked task")
+        await model.stopChat()
+        try expect(model.isSending && transport.aborts.isEmpty,"early Stop waits for server turn id without close/reconnect or fake completion")
+        await model.consume(receipt(reference,type:"chat_turn_accepted",turn:turn))
+        let abort = transport.aborts[0],params = abort["params"] as! [String:Any]
+        try expect(params["request_id"] as? String == reference.requestID && params["turn_id"] as? String == turn && model.isSending,"Stop targets only accepted exact request")
+        await model.stopChat();try expect(transport.aborts.count == 1,"Stop is one call without replay")
+        await model.consume(["type":"res","id":abort["id"]!,"ok":true,"payload":["request_id":reference.requestID,"turn_id":turn,"status":"cancel_requested","cancel_requested":true]])
+        try expect(model.isSending,"Stop acknowledgement is not terminal cancellation")
+        await model.consume(["type":"stream_delta","session_id":"fixture-thread","payload":["delta":"unscoped foreign output","is_final":true]])
+        await model.consume(progress(NativeTurnReference(sessionID:"fixture-thread",requestID:UUID().uuidString.lowercased()),type:"tool_result",turn:turn,payload:["tool":"wrong","success":true]))
+        try expect(model.messages.count == 1 && model.richChat.tools.isEmpty && model.isSending,"unscoped/foreign progress cannot populate or finish tracked Chat")
+        await model.consume(progress(reference,type:"stream_delta",turn:turn,payload:["delta":"First iteration","is_final":true]))
+        await model.consume(progress(reference,type:"tool_result",turn:turn,payload:["tool":"read","call_id":"exact-call","success":true,"result":"Fixture read only"]))
+        await model.consume(progress(reference,type:"text_response",turn:turn,payload:["text":"Intermediate approval text","model":"fixture","usage":["tokens":3]]))
+        await model.consume(progress(reference,type:"stream_delta",turn:turn,payload:["delta":"Later partial","is_final":false]))
+        try expect(model.isSending && model.messages.contains(where:{$0.text == "First iteration"}) && model.messages.contains(where:{$0.text == "Intermediate approval text"}) && model.richChat.tools.count == 1,"multi-iteration provider finals/status prose preserve processing and rich tools")
+        var cancelled = receipt(reference,type:"chat_turn_terminal",turn:turn,outcome:"cancelled",text:"")
+        var cancelledPayload = cancelled["payload"] as! [String:Any];cancelledPayload["action_outcome"] = "unknown";cancelled["payload"] = cancelledPayload
+        await model.consume(cancelled)
+        try expect(!model.isSending && model.trackedChatReference == nil && model.messages.last?.text == "Later partial" && model.chatTurnStatus.contains("may still need checking"),"exact terminal ends processing, preserves partial output and never certifies rollback")
+        await model.consume(["type":"res","id":abort["id"]!,"ok":false,"payload":[:]])
+        try expect(!model.isSending && !model.chatRecoveryBlocked,"late abort response cannot change finished receipt")
+        let nextSent = await model.sendChat("Next independent task"),next = model.trackedChatReference!
+        try expect(nextSent && next.requestID != reference.requestID,"each task mints a fresh UUID")
+        await model.checkChatDeadline(reference,connectionID:connection)
+        try expect(model.isSending && model.chatError == nil,"old task deadline cannot flag a newer task")
+        await model.checkChatDeadline(next,connectionID:UUID())
+        try expect(model.isSending,"foreign connection deadline ignored")
+        await model.checkChatDeadline(next,connectionID:model.chatConnectionID)
+        try expect(!model.isSending && model.chatRecoveryBlocked && model.unresolvedChatRequest?.requestID == next.requestID,"missing whole-turn receipt preserves exact unresolved request")
+        let held = await model.sendChat("Do not replay")
+        try expect(!held && transport.commands.count == 2,"unresolved selected thread holds new prompts")
+        await model.reconnectVerifiedChat();await negotiate(model)
+        let beforeLegacy = model.messages.map(\.text)
+        await model.consume(["type":"text_response","session_id":"fixture-thread","payload":["text":"unscoped reconnect output"]])
+        try expect(model.messages.map(\.text) == beforeLegacy && model.chatRecoveryBlocked,"unresolved hold cannot accept untagged legacy progress after reconnect")
+        let status = transport.frames.last { $0["method"] as? String == "chat.status" }!
+        try expect((status["params"] as? [String:Any])?["request_id"] as? String == next.requestID && transport.commands.count == 2 && model.trackedChatReference == nil,"new connection performs passive status lookup without authority/replay")
+        await model.stopChat();try expect(transport.aborts.count == 1,"restored request reference grants no new-socket abort authority")
+        await model.consume(["type":"res","id":status["id"]!,"ok":true,"payload":["found":true,"receipt":receipt(next,type:"chat_turn_terminal",turn:UUID().uuidString.lowercased())["payload"]!]])
+        try expect(!model.chatRecoveryBlocked && model.chatCanSend && model.messages.last?.text == "Final actual response","exact read-only terminal resolves processing hold and retains real final text")
+        let saved = model.messages.map(\.savedRecord)
+        let restoredTransport = TrackedChatFrames(),restored = try await trackedModel(restoredTransport)
+        var unresolvedRows = saved
+        var marker = next.record;marker["state"] = "outcome_unknown"
+        let userIndex = unresolvedRows.firstIndex { ($0["chat_turn"] as? [String:Any])?["request_id"] as? String == next.requestID && $0["role"] as? String == "user" }!
+        unresolvedRows[userIndex]["chat_turn"] = marker
+        try restored.restoreThread(["id":"fixture-thread","messages":unresolvedRows])
+        try expect(restored.chatRecoveryBlocked && restored.unresolvedChatRequest?.requestID == next.requestID && restored.messages.count == saved.count,"saved reference restores recovery hold without erasing text or gaining authority")
+        await restored.reconnectVerifiedChat();await negotiate(restored)
+        let missingStatus = restoredTransport.frames.last { $0["method"] as? String == "chat.status" }!
+        await restored.consume(["type":"res","id":missingStatus["id"]!,"ok":true,"payload":["found":false,"receipt":NSNull()]])
+        try expect(restored.chatRecoveryBlocked && restoredTransport.commands.isEmpty,"missing status does not claim no effect or replay task")
+        WireProtocol.reset(["/api/conversations/new":["id":"new-independent-thread"]])
+        restored.newConversation()
+        for _ in 0..<100 where restored.switchingConversation { try await Task.sleep(nanoseconds:10_000_000) }
+        try expect(restored.activeConversationID == "new-independent-thread" && !restored.chatRecoveryBlocked && restored.unresolvedChatRequest == nil && restored.messages.isEmpty,"new independent thread clears only its old selected recovery hold")
+        print("PASS tracked native capability, persistence barrier, attachments, progress isolation, multiround finality, exact Stop and deadline/reconciliation")
+        for badReceipt in [["id":"foreign","message_count":1],["id":"fixture-thread","message_count":true],["id":"fixture-thread","message_count":0],["id":"fixture-thread","message_count":1.5]] as [[String:Any]] {
+            WireProtocol.reset(["/api/conversations/save":badReceipt])
+            let failedTransport = TrackedChatFrames(),failed = try await trackedModel(failedTransport);await negotiate(failed)
+            let dispatched = await failed.sendChat("Presave must fail closed")
+            try expect(!dispatched && failedTransport.commands.isEmpty && !failed.isSending && failed.messages.count == 1 && (failed.messages[0].metadata["chat_turn"] as? [String:Any])?["state"] as? String == "not_submitted","unverified save acknowledgement blocks all task dispatch, keeps actual user draft")
+        }
+        WireProtocol.reset()
+        let lostTransport = TrackedChatFrames(),lost = try await trackedModel(lostTransport);await negotiate(lost)
+        lostTransport.failCommand = true
+        let lostResult = await lost.sendChat("May already have executed")
+        try expect(!lostResult && lost.chatRecoveryBlocked && lost.messages.first?.text == "May already have executed" && lostTransport.commands.count == 1,"lost send preserves user request and uncertainty rather than deleting/retrying")
+        print("PASS presend-save identity/type/count refusal and uncertain submission preservation")
+        WireProtocol.reset()
+        let instantTransport = TrackedChatFrames(),instant = try await trackedModel(instantTransport);await negotiate(instant)
+        instantTransport.beforeCommand = { frame in
+            let reference = NativeTurnReference(sessionID:"fixture-thread",requestID:frame["msg_id"] as! String),turn = UUID().uuidString.lowercased()
+            await instant.consume(receipt(reference,type:"chat_turn_accepted",turn:turn))
+            await instant.consume(receipt(reference,type:"chat_turn_terminal",turn:turn))
+        }
+        let instantResult = await instant.sendChat("Finish while send awaits")
+        try expect(instantResult && !instant.isSending && instant.trackedChatReference == nil,"terminal arriving inside send cannot leave stale busy/deadline installation")
+        instantTransport.beforeCommand = nil
+        let secondInstant = await instant.sendChat("Later task")
+        let firstReference = NativeTurnReference(sessionID:"fixture-thread",requestID:instantTransport.commands[0]["msg_id"] as! String)
+        await instant.checkChatDeadline(firstReference,connectionID:instant.chatConnectionID)
+        try expect(secondInstant && instant.isSending && instant.chatError == nil,"first late deadline cannot contaminate later turn after early terminal")
+        print("PASS early terminal during send and exact later-turn deadline fence")
+        WireProtocol.reset()
+        let movedTransport = TrackedChatFrames(),moved = try await trackedModel(movedTransport);await negotiate(moved)
+        let attachment = NativeAttachmentRef(id:"same-retained-upload",filename:"fixture.txt",contentType:"text/plain",sizeBytes:1,sha256:String(repeating:"b",count:64))
+        moved.pendingAttachments = [attachment]
+        movedTransport.beforeCommand = { frame in
+            let reference = NativeTurnReference(sessionID:"fixture-thread",requestID:frame["msg_id"] as! String),turn = UUID().uuidString.lowercased()
+            await moved.consume(receipt(reference,type:"chat_turn_accepted",turn:turn))
+            await moved.consume(receipt(reference,type:"chat_turn_terminal",turn:turn))
+            try moved.restoreThread(["id":"other-thread","messages":[[String:Any]]()]);moved.pendingAttachments = [attachment]
+        }
+        let movedResult = await moved.sendChat("Reviewed file",authorizedAttachmentIDs:[attachment.id])
+        try expect(movedResult && moved.activeConversationID == "other-thread" && moved.pendingAttachments.map(\.id) == [attachment.id],"old send returning after terminal/thread switch cannot clear new-thread attachments")
+        movedTransport.beforeCommand = nil
+        print("PASS post-send attachment mutation exact conversation/connection fence")
+        WireProtocol.reset()
+        let errorTransport = TrackedChatFrames(),failed = try await trackedModel(errorTransport);await negotiate(failed)
+        _ = await failed.sendChat("Preserve observed failure")
+        let failedReference = failed.trackedChatReference!,failedTurn = UUID().uuidString.lowercased()
+        await failed.consume(receipt(failedReference,type:"chat_turn_accepted",turn:failedTurn))
+        await failed.consume(progress(failedReference,type:"stream_delta",turn:failedTurn,payload:["delta":"Actual partial before failure","is_final":false]))
+        await failed.consume(progress(failedReference,type:"error",turn:failedTurn,payload:["message":"Fixture execution failed"]))
+        try expect(failed.isSending,"correlated error progress cannot certify whole-turn completion")
+        var failure = receipt(failedReference,type:"chat_turn_terminal",turn:failedTurn,outcome:"failed",text:"")
+        var failurePayload = failure["payload"] as! [String:Any];failurePayload["action_outcome"] = "unknown";failure["payload"] = failurePayload
+        await failed.consume(failure)
+        let failureMarker = failed.messages[0].metadata["chat_turn"] as! [String:Any]
+        try expect(!failed.isSending && failureMarker["reported_error"] as? String == "Fixture execution failed" && failed.messages.last?.text == "Actual partial before failure" && failed.messages.last?.metadata["action_outcome"] as? String == "unknown" && failed.messages.last?.metadata["processing_outcome"] as? String == "failed","failed terminal preserves actual partial text, observed error and uncertain action outcome")
+        print("PASS failed terminal retains observed error and uncertain effects without output success")
+    }
 
     @MainActor static func main() async {
         do {
@@ -422,7 +591,8 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             dying.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: staleHealthOwner, phase: .limited, reason: "Memory unavailable; use Security.", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false, serviceReachable: true))
             try expect(!dying.ready && dying.serviceReachable && dying.securityBaseURL != nil && dying.featureBaseURL == nil, "limited memory readiness exposes Security only and never full agent features")
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 20 groups; mocked HTTP/wire only, no engine/model execution")
+            try await trackedChatTests()
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 25 groups; mocked HTTP/wire only, no engine/model execution")
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)
             exit(1)

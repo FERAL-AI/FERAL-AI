@@ -1,5 +1,6 @@
 import SwiftUI
 import AppKit
+import CoreFoundation
 
 @MainActor final class NativeModel: ObservableObject {
     @Published var ready = false
@@ -11,6 +12,10 @@ import AppKit
     @Published private(set) var recoveryStatus = "Shared conversation recovery has not been verified."
     @Published var startupStatus = "Starting your local agent…"
     @Published var isSending = false
+    @Published private(set) var chatTurnStatus = "Connecting verified chat…"
+    @Published private(set) var unresolvedChatRequest:NativeTurnReference?
+    @Published private(set) var checkingChatStatus = false
+    @Published private(set) var chatRecoveryBlocked = false
     @Published var codingBusy = false
     @Published var switchingConversation = false
     @Published var uploadingAttachments = false
@@ -35,6 +40,8 @@ import AppKit
     private var receiveTask: Task<Void, Never>?
     private var codingPoll: Task<Void, Never>?
     private var responseDeadline: Task<Void, Never>?
+    private var capabilityDeadline:Task<Void,Never>?
+    private var statusDeadline:Task<Void,Never>?
     private var conversationID = "" {
         didSet { if oldValue != conversationID { appSessionScope = UUID() } }
     }
@@ -49,10 +56,17 @@ import AppKit
     private var shuttingDown = false
     private var connecting = false
     private var runtimeRevision = UUID()
-    private var conversationSaveTask: Task<Void, Never>?
+    private var conversationSaveTask: Task<Bool, Never>?
     private var workspaceCenter: NotificationCenter?
     private var workspaceObservers: [NSObjectProtocol] = []
     private let injectedRuntimeOwner: (() -> NativeRuntimeOwnership?)?
+    private let injectedChatSender: (([String:Any]) async throws -> Void)?
+    private var chatTurns = NativeChatTurnState()
+    var trackedChatReference:NativeTurnReference? { chatTurns.active }
+    var chatCapabilityFrame:[String:Any]? { chatTurns.capabilitiesFrame }
+    var chatConnectionID:UUID { socketGeneration }
+    var chatReceiptReady:Bool { chatTurns.ready }
+    var chatCanSend:Bool { ready && chatTurns.ready && !chatRecoveryBlocked && unresolvedChatRequest == nil && !isSending && !switchingConversation && !uploadingAttachments && !shuttingDown }
 
     private lazy var recovery = NativeSessionRecoveryModel(preferences: prefs, transport: { [session] request in
         let (data, response) = try await session.data(for: request)
@@ -89,6 +103,7 @@ import AppKit
         }
         conversationID = id; messages = rows.map(NativeMessage.restored); observedTodos = nil
         richChat.configure(sessionID: id, connectionID: socketGeneration)
+        chatTurns.configure(sessionID:nil,connectionID:nil);recoverSavedChatRequest()
     }
 
     /// A named suite equal to the app domain can return nil on macOS.
@@ -101,8 +116,9 @@ import AppKit
     }
 
     init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil,
-         preferencesResolver: (() -> UserDefaults?)? = nil) {
+         preferencesResolver: (() -> UserDefaults?)? = nil, chatSender: (([String:Any]) async throws -> Void)? = nil) {
         injectedRuntimeOwner = runtimeOwner
+        injectedChatSender = chatSender
         let resolved: UserDefaults?
         if let preferences { resolved = preferences }
         else if let preferencesResolver { resolved = preferencesResolver() }
@@ -173,8 +189,9 @@ import AppKit
                 messages[index].metadata["responseIncomplete"] = true
                 messages[index].metadata["deliveryError"] = event.reason
             }
-            finishResponse()
+            if chatTurns.isTracked { markTrackedUnknown("The local agent became unavailable before the whole-turn receipt. Earlier effects are unknown; check status after reconnection.") } else { finishResponse() }
             receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil); socket = nil; socketGeneration = UUID()
+            chatTurns.configure(sessionID:nil,connectionID:nil);checkingChatStatus = false
             codingPoll?.cancel(); codingPoll = nil; codingBusy = false
             if !coding.status.isEmpty { coding.status = "connection_lost" }
             voice.configureConnection(sessionID: conversationID, connected: false)
@@ -361,11 +378,29 @@ import AppKit
     private func connectChat() async {
         guard preferencesPermitEffects() else { return }
         guard ready, !shuttingDown else { return }
+        if chatTurns.isTracked {
+            let revision = conversationRevision
+            markTrackedUnknown("The chat connection is changing before its terminal receipt arrived. Check status; the request has not been retried.")
+            await persistConversation()
+            guard ready,!shuttingDown,revision == conversationRevision else { return }
+        }
         voice.configureConnection(sessionID: conversationID, connected: false)
         receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
         socketGeneration = UUID()
         let generation = socketGeneration
         richChat.configure(sessionID: conversationID, connectionID: generation)
+        chatTurns.configure(sessionID:conversationID,connectionID:generation);checkingChatStatus = false;chatTurnStatus = "Verifying chat receipt support…"
+        capabilityDeadline?.cancel();statusDeadline?.cancel()
+        let capabilityID = chatTurns.capabilityID
+        capabilityDeadline = Task { [weak self] in
+            try? await Task.sleep(nanoseconds:15_000_000_000)
+            guard !Task.isCancelled,let self,self.socketGeneration == generation,self.chatTurns.capabilityID == capabilityID,!self.chatTurns.ready else { return }
+            self.recordChatFailure("Chat receipt negotiation timed out. No prompt was sent; reconnect explicitly.");self.chatTurnStatus = "Verified chat unavailable"
+        }
+        if injectedChatSender != nil {
+            do { if let frame = chatTurns.capabilitiesFrame { try await sendChatFrame(frame) } } catch { recordChatFailure("Chat capability verification failed. No task was sent.") }
+            return
+        }
         var components = URLComponents(url: runtime.baseURL, resolvingAgainstBaseURL: false)!
         components.scheme = "ws"; components.path = "/v1/session"
         components.queryItems = [URLQueryItem(name: "session_id", value: conversationID)]
@@ -394,13 +429,105 @@ import AppKit
                             self.messages[index].metadata["deliveryError"] = "Chat disconnected before this reply completed."
                         }
                         self?.socket = nil
-                        self?.recordChatFailure("Chat disconnected. Retry to reconnect.")
-                        self?.finishResponse()
+                        if let self {
+                            if self.chatTurns.isTracked { self.markTrackedUnknown("Chat disconnected before the request receipt arrived. Check status; it has not been retried.") }
+                            else { self.recordChatFailure("Chat disconnected. Reconnect explicitly.");self.finishResponse() }
+                            self.chatTurns.configure(sessionID:nil,connectionID:nil);self.checkingChatStatus = false
+                            await self.persistConversation()
+                        }
                     }
                     break
                 }
             }
         }
+        do { if let frame = chatTurns.capabilitiesFrame { try await sendChatFrame(frame) } }
+        catch { recordChatFailure("Chat capability verification failed. No task was sent.") }
+    }
+
+    // The injected transport is a fixture seam; production always sends through
+    // this exact current socket and never chooses execution identity from JSON.
+    func reconnectVerifiedChat() async { await connectChat() }
+    private func sendChatFrame(_ frame:[String:Any]) async throws {
+        if let injectedChatSender { try await injectedChatSender(frame);return }
+        guard let socket,socket.state == .running else { throw NativeFailure("Chat is disconnected.") }
+        let data = try JSONSerialization.data(withJSONObject:frame)
+        try await socket.send(.string(String(decoding:data,as:UTF8.self)))
+    }
+    private func recoverSavedChatRequest() {
+        unresolvedChatRequest = nil;chatRecoveryBlocked = false;checkingChatStatus = false
+        for message in messages where message.role == "user" {
+            guard let marker = message.metadata["chat_turn"] as? [String:Any] else { continue }
+            if marker["state"] as? String == "not_submitted" { continue }
+            if marker["state"] as? String == "terminal",NativeChatTurnWire.boolean(marker["durable"]) == true,let outcome = marker["processing_outcome"] as? String,NativeChatTurnWire.outcomes.contains(outcome) { continue }
+            chatRecoveryBlocked = true
+            unresolvedChatRequest = NativeTurnReference.restored(marker,sessionID:conversationID)
+            chatTurnStatus = "Earlier request outcome needs checking"
+            return
+        }
+        chatTurnStatus = "Connecting verified chat…"
+    }
+    private func updateRequestMarker(_ reference:NativeTurnReference,record:[String:Any]) {
+        guard reference.sessionID == conversationID,let index = messages.firstIndex(where:{ $0.role == "user" && ($0.metadata["chat_turn"] as? [String:Any])?["request_id"] as? String == reference.requestID }) else { return }
+        messages[index].metadata["chat_turn"] = record
+    }
+    private func markTrackedUnknown(_ reason:String) {
+        guard let reference = chatTurns.active ?? unresolvedChatRequest else { return }
+        var marker = reference.record;marker["state"] = "outcome_unknown"
+        updateRequestMarker(reference,record:marker)
+        if let id = streamMessageID,let index = messages.firstIndex(where:{$0.id == id}) { messages[index].metadata["responseIncomplete"] = true;messages[index].metadata["deliveryError"] = reason }
+        unresolvedChatRequest = reference;chatRecoveryBlocked = true;chatTurnStatus = "Outcome needs checking"
+        recordChatFailure(reason);finishResponse()
+    }
+    func checkChatDeadline(_ reference:NativeTurnReference,connectionID:UUID) async {
+        guard connectionID == socketGeneration,chatTurns.active?.requestID == reference.requestID,reference.sessionID == conversationID,isSending else { return }
+        markTrackedUnknown("The whole-turn receipt has not arrived within four minutes. Earlier actions may have run. Check status or request Stop; no task was retried.")
+        await persistConversation()
+    }
+    func checkChatStatus() async {
+        guard ready,!shuttingDown,!checkingChatStatus,let reference = unresolvedChatRequest else { return }
+        if !chatTurns.ready { await connectChat();return }
+        guard let frame = chatTurns.statusFrame(reference) else { return }
+        let connection = socketGeneration
+        checkingChatStatus = true
+        statusDeadline?.cancel()
+        let statusID = frame["id"] as! String
+        statusDeadline = Task { [weak self] in
+            try? await Task.sleep(nanoseconds:20_000_000_000)
+            guard !Task.isCancelled,let self,self.socketGeneration == connection,self.chatTurns.expireStatus(statusID) else { return }
+            self.checkingChatStatus = false;self.recordChatFailure("Status read timed out. Earlier effects remain unknown; no task was retried.")
+        }
+        do { try await sendChatFrame(frame) }
+        catch { if connection == socketGeneration { chatTurns.expireStatus(statusID);statusDeadline?.cancel();checkingChatStatus = false;recordChatFailure("Status could not be read. The earlier task has not been retried.") } }
+    }
+    private func applyChatTerminal(_ terminal:NativeTurnTerminal) async {
+        guard terminal.reference.sessionID == conversationID else { return }
+        let connection = socketGeneration
+        let observedError = chatError
+        let failed = ["failed","cancelled","outcome_unknown","unavailable","budget_exceeded"].contains(terminal.outcome)
+        var record = terminal.record;if failed,let observedError { record["reported_error"] = observedError }
+        updateRequestMarker(terminal.reference,record:record)
+        if let index = messages.firstIndex(where:{ $0.role == "user" && ($0.metadata["chat_turn"] as? [String:Any])?["request_id"] as? String == terminal.reference.requestID }) {
+            if failed { messages[index].metadata["deliveryError"] = observedError ?? terminal.summary }
+            else { messages[index].metadata.removeValue(forKey:"deliveryError") }
+        }
+        archiveRichTurn()
+        if !terminal.text.isEmpty {
+            if let id = streamMessageID,let index = messages.firstIndex(where:{$0.id == id}) { messages[index].text = terminal.text;messages[index].metadata["chat_turn"] = terminal.record }
+            else if let index = messages.lastIndex(where:{ $0.role == "assistant" && ($0.metadata["chat_turn"] as? [String:Any])?["request_id"] as? String == terminal.reference.requestID && $0.text == terminal.text }) { streamMessageID = messages[index].id;messages[index].metadata["chat_turn"] = terminal.record }
+            else { let id = UUID().uuidString;streamMessageID = id;messages.append(NativeMessage(id:id,role:"assistant",text:terminal.text,metadata:["chat_turn":terminal.record])) }
+        }
+        archiveRichTurn();finishResponse();statusDeadline?.cancel();checkingChatStatus = false;error = failed ? observedError : nil;chatError = failed ? observedError : nil
+        recoverSavedChatRequest()
+        if !chatRecoveryBlocked { chatTurnStatus = terminal.summary }
+        if failed {
+            for index in messages.indices where messages[index].role == "assistant" && (messages[index].metadata["chat_turn"] as? [String:Any])?["request_id"] as? String == terminal.reference.requestID {
+                messages[index].metadata["processing_outcome"] = terminal.outcome
+                messages[index].metadata["action_outcome"] = terminal.actionOutcome
+                if terminal.outcome != "cancelled" || terminal.actionOutcome == "unknown" { messages[index].metadata["responseIncomplete"] = true;messages[index].metadata["deliveryError"] = observedError ?? terminal.summary }
+            }
+        }
+        await persistConversation()
+        guard connection == socketGeneration else { return }
     }
 
     func consume(_ frame: [String: Any]) async {
@@ -412,6 +539,31 @@ import AppKit
         let globalBudget = type == "state_push" && frame["event"] as? String == "cost_cap_hit"
         if let sid = frame["session_id"] as? String, sid != conversationID, !globalBudget { return }
         if let sid = payload["session_id"] as? String, sid != conversationID, !globalBudget { return }
+        let turnEvent = chatTurns.consume(frame,connectionID:connection)
+        switch turnEvent {
+        case .ready:
+            capabilityDeadline?.cancel()
+            chatTurnStatus = chatRecoveryBlocked ? "Earlier request outcome needs checking" : "Verified chat ready"
+            if unresolvedChatRequest != nil { await checkChatStatus() };return
+        case .accepted:
+            if let reference = chatTurns.active {
+                var marker = reference.record;marker["state"] = "accepted";updateRequestMarker(reference,record:marker)
+                chatTurnStatus = chatTurns.stopRequested ? "Requesting Stop…" : "Request accepted; processing…"
+                if let abort = chatTurns.pendingAbortFrame() { do { try await sendChatFrame(abort) } catch { markTrackedUnknown("Stop could not be sent. Check status; cancellation is not confirmed.") } }
+                await persistConversation()
+            };return
+        case .stopAcknowledged:chatTurnStatus = "Stop requested; waiting for the terminal receipt";return
+        case .terminal(let terminal):await applyChatTerminal(terminal);return
+        case .unavailable(let reason):
+            if !chatTurns.statusPending { statusDeadline?.cancel() }
+            checkingChatStatus = false
+            if chatTurns.isTracked || unresolvedChatRequest != nil { markTrackedUnknown(reason);await persistConversation() }
+            else { recordChatFailure(reason);chatTurnStatus = "Verified chat unavailable" };return
+        case .ignored:break
+        }
+        if ["chat_turn_accepted","chat_turn_terminal"].contains(type) { return }
+        let trackedProgress = chatTurns.isTracked || chatRecoveryBlocked || payload["chat_turn"] != nil
+        if trackedProgress && !globalBudget && !chatTurns.matchesProgress(frame,connectionID:connection) { return }
         await voice.handle(frame: frame)
         guard ready, !shuttingDown, owner == runtimeRevision, connection == socketGeneration else { return }
         let structured = richChat.consume(frame, connectionID: socketGeneration)
@@ -423,7 +575,7 @@ import AppKit
                     messages[index].metadata["responseIncomplete"] = true
                     messages[index].metadata["deliveryError"] = chatError ?? "Response incomplete"
                 }
-                finishResponse(); await persistConversation()
+                if !trackedProgress { finishResponse() };await persistConversation()
             }
             return
         }
@@ -433,29 +585,28 @@ import AppKit
             guard payload["kind"] as? String != "reasoning" else { return }
             let delta = payload["delta"] as? String ?? ""
             if !delta.isEmpty {
-                if streamMessageID == nil { let id = UUID().uuidString; streamMessageID = id; messages.append(NativeMessage(id: id, role: "assistant", text: "")) }
+                if streamMessageID == nil { let id = UUID().uuidString; streamMessageID = id; messages.append(NativeMessage(id: id, role: "assistant", text: "",metadata:chatTurns.active.map { ["chat_turn":$0.record] } ?? [:])) }
                 if let index = messages.firstIndex(where: { $0.id == streamMessageID }) { messages[index].text += delta }
             }
             if payload["is_final"] as? Bool == true {
-                if streamMessageID == nil { recordChatFailure("The model returned an empty reply. Choose a different model or retry.") }
+                if streamMessageID == nil && !trackedProgress { recordChatFailure("The model returned an empty reply. Choose a different model or retry.") }
                 archiveRichTurn()
                 archiveResponsePayload(payload)
-                finishResponse(); await persistConversation()
+                if trackedProgress { streamMessageID = nil } else { finishResponse() };await persistConversation()
             }
         } else if type == "text_response" || type == "chat_response" {
             let text = payload["text"] as? String ?? ""
             if !text.isEmpty {
                 if let index = messages.firstIndex(where: { $0.id == streamMessageID }) { messages[index].text = text }
-                else { let id = UUID().uuidString; streamMessageID = id; messages.append(NativeMessage(id: id, role: "assistant", text: text)) }
+                else { let id = UUID().uuidString; streamMessageID = id; messages.append(NativeMessage(id: id, role: "assistant", text: text,metadata:chatTurns.active.map { ["chat_turn":$0.record] } ?? [:])) }
             }
             archiveResponsePayload(payload)
             archiveRichTurn()
-            if text.isEmpty && streamMessageID == nil { recordChatFailure("The model returned an empty reply. Choose a different model or retry.") }
-            finishResponse(); await persistConversation()
+            if text.isEmpty && streamMessageID == nil && !trackedProgress { recordChatFailure("The model returned an empty reply. Choose a different model or retry.") }
+            if trackedProgress { streamMessageID = nil } else { finishResponse() };await persistConversation()
         } else if type == "error" {
             recordChatFailure(payload["message"] as? String ?? payload["text"] as? String ?? "The agent could not generate a reply. Try a different model.")
-            discardPartialResponse()
-            finishResponse()
+            if !trackedProgress { discardPartialResponse();finishResponse() }
             await persistConversation()
         }
     }
@@ -511,36 +662,54 @@ import AppKit
             attachmentError = "Review the current attachments before sending their contents to the configured model and fallbacks."
             return false
         }
+        guard !chatRecoveryBlocked,unresolvedChatRequest == nil else { recordChatFailure("Check the earlier request's status or choose a new conversation. It has not been retried.");return false }
+        if !chatTurns.ready { await connectChat() }
+        guard chatCanSend,let reference = chatTurns.beginRequest() else { recordChatFailure("Verified chat capability negotiation is not ready. No task was sent.");return false }
+        let connection = socketGeneration,revision = conversationRevision
         archiveRichTurn(); richChat.clearTurnPresentation()
         error = nil; chatError = nil; isSending = true; streamMessageID = nil
-        if socket?.state != .running { await connectChat() }
         let userID = UUID().uuidString
         pendingUserMessageID = userID
         let attachments = pendingAttachments
         var record: [String: Any] = ["id": userID, "role": "user", "text": text, "content": text]
         if !attachments.isEmpty { record["attachments"] = attachments.map(\.record) }
+        var marker = reference.record;marker["state"] = "submitted";record["chat_turn"] = marker
         messages.append(NativeMessage(id: userID, role: "user", text: text, metadata: record))
+        guard await persistConversation(),connection == socketGeneration,revision == conversationRevision,chatTurns.active?.requestID == reference.requestID,ready,!shuttingDown else {
+            if connection == socketGeneration,revision == conversationRevision {
+                marker["state"] = "not_submitted";updateRequestMarker(reference,record:marker);chatTurns.discardUnsubmitted(reference);finishResponse()
+                recordChatFailure("The request reference could not be saved before submission. No task was sent; your draft and attachments are retained.")
+            };return false
+        }
+        responseDeadline?.cancel()
+        responseDeadline = Task { [weak self] in
+            try? await Task.sleep(nanoseconds:240_000_000_000)
+            guard !Task.isCancelled else { return };await self?.checkChatDeadline(reference,connectionID:connection)
+        }
         do {
-            var payload: [String: Any] = ["text": text, "context": attachments.isEmpty ? [:] : ["attachment_content_authorized": true]]
+            var payload: [String: Any] = ["text": text, "turn_contract_version":1,"context": attachments.isEmpty ? [:] : ["attachment_content_authorized": true]]
             if !attachments.isEmpty { payload["attachments"] = attachments.map(\.record) }
-            let data = try JSONSerialization.data(withJSONObject: ["type": "text_command", "hop": "client", "session_id": conversationID, "payload": payload])
-            guard let socket else { throw NativeFailure("Chat is disconnected.") }
-            try await socket.send(.string(String(decoding: data, as: UTF8.self)))
-            let sentIDs = Set(attachments.map(\.id)); pendingAttachments.removeAll { sentIDs.contains($0.id) }
-            await persistConversation()
-            responseDeadline = Task { [weak self] in
-                try? await Task.sleep(nanoseconds: 240_000_000_000)
-                guard !Task.isCancelled, let self, self.isSending else { return }
-                self.chatError = "The model has not replied within four minutes. You can stop this request and choose another model."
+            try await sendChatFrame(["type":"text_command","msg_id":reference.requestID,"hop":"client","session_id":reference.sessionID,"payload":payload])
+            if connection == socketGeneration,revision == conversationRevision,reference.sessionID == conversationID {
+                let sentIDs = Set(attachments.map(\.id));pendingAttachments.removeAll { sentIDs.contains($0.id) }
             }
             return true
         } catch {
-            messages.removeAll { $0.id == userID }; finishResponse(); self.error = "Could not send: \(error.localizedDescription)"
+            if connection == socketGeneration,revision == conversationRevision,chatTurns.active?.requestID == reference.requestID {
+                markTrackedUnknown("Submission was not confirmed. The task may have started. Check status; its user message and partial output are retained.");await persistConversation()
+            }
             return false
         }
     }
 
-    func stopChat() async { receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil); discardPartialResponse(); finishResponse(); await persistConversation(); await connectChat() }
+    func stopChat() async {
+        guard chatTurns.isTracked else { return }
+        chatTurnStatus = "Requesting Stop…"
+        guard let frame = chatTurns.requestStop() else { return }
+        let connection = socketGeneration
+        do { try await sendChatFrame(frame) }
+        catch { if connection == socketGeneration { markTrackedUnknown("Stop could not be sent. Cancellation is not confirmed; check status.");await persistConversation() } }
+    }
     func newConversation() {
         guard ready && !shuttingDown && !isSending && !switchingConversation && !uploadingAttachments else { return }
         switchingConversation = true
@@ -555,7 +724,7 @@ import AppKit
                 conversationID = id
                 rememberCurrentSelection()
                 recoveryStatus = "New isolated conversation. This exact session does not inherit shared-primary history."
-                messages = []; pendingAttachments = []; attachmentError = nil; chatError = nil; await connectChat()
+                messages = []; pendingAttachments = []; attachmentError = nil; chatError = nil; recoverSavedChatRequest(); await connectChat()
             } catch { self.error = error.localizedDescription }
         }
     }
@@ -567,7 +736,7 @@ import AppKit
         switchingConversation = true; conversationRevision = UUID()
         let revision = conversationRevision
         defer { if conversationRevision == revision { switchingConversation = false } }
-        await conversationSaveTask?.value
+        _ = await conversationSaveTask?.value
         guard ready, revision == conversationRevision else { return }
         do {
             let segment = NativeMemoryWire.segment(id)
@@ -611,7 +780,7 @@ import AppKit
         switchingConversation = true; conversationRevision = UUID()
         let revision = conversationRevision
         defer { applyingSnapshotHistory = false; if conversationRevision == revision { switchingConversation = false } }
-        await conversationSaveTask?.value
+        _ = await conversationSaveTask?.value
         guard ready, revision == conversationRevision else { throw NativeFailure("The conversation changed while finishing its previous save.") }
         // The feature reviewed runtime restoration separately. This operation
         // also replaces the saved UI thread, preserving every history field.
@@ -631,19 +800,20 @@ import AppKit
         pendingAttachments = []; attachmentError = nil; chatError = nil; error = nil
         await connectChat()
     }
-    private func persistConversation() async {
+    @discardableResult private func persistConversation() async -> Bool {
         let id = conversationID
-        guard !id.isEmpty, !deletedConversationIDs.contains(id) else { return }
+        guard !id.isEmpty, !deletedConversationIDs.contains(id) else { return false }
         let rows = messages.map(\.savedRecord), owner = runtimeRevision, previous = conversationSaveTask
         let task = Task { [weak self] in
-            await previous?.value
-            guard let self, self.ready, owner == self.runtimeRevision, !self.deletedConversationIDs.contains(id) else { return }
+            _ = await previous?.value
+            guard let self, self.ready, owner == self.runtimeRevision, !self.deletedConversationIDs.contains(id) else { return false }
             do {
-                guard let receipt = try await self.request("/api/conversations/save", body: ["id": id, "messages": rows]) as? [String: Any], receipt["id"] as? String == id else { throw NativeFailure("The saved conversation acknowledgement did not match its ID.") }
-            } catch { if owner == self.runtimeRevision, id == self.conversationID { self.error = "Conversation could not be saved: \(error.localizedDescription)" } }
+                guard let receipt = try await self.request("/api/conversations/save", body: ["id": id, "messages": rows]) as? [String: Any], receipt["id"] as? String == id,let count = receipt["message_count"] as? NSNumber,CFGetTypeID(count) != CFBooleanGetTypeID(),["c","s","i","l","q","C","S","I","L","Q"].contains(String(cString:count.objCType)),count.intValue == rows.count else { throw NativeFailure("The saved conversation acknowledgement did not match its ID and exact message count.") }
+                return true
+            } catch { if owner == self.runtimeRevision, id == self.conversationID { self.error = "Conversation could not be saved: \(error.localizedDescription)" };return false }
         }
         conversationSaveTask = task
-        await task.value
+        return await task.value
     }
 
     func saveSettings() async {
@@ -824,7 +994,7 @@ import AppKit
             messages[index].metadata["responseIncomplete"] = true
             messages[index].metadata["deliveryError"] = "The app closed before this reply completed."
         }
-        finishResponse()
+        if chatTurns.isTracked { markTrackedUnknown("The app closed before the whole-turn receipt. Check the stored request status after reopening; it has not been retried.") } else { finishResponse() }
         await persistConversation()
     }
     func shutdown() async {
@@ -836,6 +1006,7 @@ import AppKit
         richChat.configure(sessionID: nil, connectionID: nil)
         responseDeadline?.cancel(); codingPoll?.cancel(); receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
         await runtime.stop(); runtimeRevision = UUID(); recovery.configure(baseURL: nil, connectionID: nil); session.invalidateAndCancel(); ready = false; serviceReachable = false
+        capabilityDeadline?.cancel();statusDeadline?.cancel()
     }
 }
 

@@ -1,11 +1,16 @@
 import Foundation
 import SwiftUI
 import CoreFoundation
+import CryptoKit
 
 // Local management reads are automatic. Registry traffic is a separate reviewed action.
 private struct CapabilitiesFailure: LocalizedError { let message: String; var errorDescription: String? { message } }
 private func capabilitiesBool(_ value: Any?) -> Bool? { guard let n = value as? NSNumber, CFGetTypeID(n) == CFBooleanGetTypeID() else { return nil }; return n.boolValue }
 private func capabilitiesJSON(_ value: Any) -> String { guard let bytes = try? JSONSerialization.data(withJSONObject: value, options: [.sortedKeys, .prettyPrinted]) else { return "Unreadable disclosure" }; return String(decoding: bytes, as: UTF8.self) }
+private func capabilitiesCount(_ value: Any?) -> Int? {
+    guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(), ["c","s","i","l","q","C","S","I","L","Q"].contains(String(cString:number.objCType)),let count = Int(number.stringValue),count >= 0 else { return nil };return count
+}
+private func forgePrefix(_ value:String,_ length:Int) -> String { String(String.UnicodeScalarView(value.unicodeScalars.prefix(length))) }
 final class NativeCapabilitiesRedirectGuard: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         guard let from = task.originalRequest?.url, let to = request.url, from.scheme == to.scheme, from.host == to.host, from.port == to.port else { completionHandler(nil); return }; completionHandler(request)
@@ -22,8 +27,12 @@ struct NativeCapabilityRow: Identifiable {
 enum NativeCapabilityAction {
     case reload(String), decision(source: String, id: String, approve: Bool), uninstall(source: String, id: String)
     case browse(kind: String, query: String), preview(kind: String, id: String), install
+    case propose(intent:String), generate(sequenceID:String)
 }
-struct NativeCapabilityReview: Identifiable { let id = UUID(); let generation: UUID; let action: NativeCapabilityAction; let title: String, explanation: String, signature: String; let disclosure: NativeCapabilityRow? }
+struct NativeCapabilityReview: Identifiable { let id = UUID(); let generation: UUID; let action: NativeCapabilityAction; let title: String, explanation: String, signature: String; let disclosure: NativeCapabilityRow?;let expires:Date }
+struct NativeForgeOutcome {
+    let state:String,toolID:String,input:String,preview:String
+}
 struct NativeCapabilityInstall {
     let generation: UUID, kind: String, id: String, token: String, payload: [String: Any], expires: Date
 }
@@ -35,15 +44,25 @@ struct NativeCapabilityInstall {
     @Published private(set) var receipt: String?
     @Published private(set) var actionError: String?
     @Published private(set) var install: NativeCapabilityInstall?
+    @Published var forgeIntent = ""
+    @Published private(set) var forgeOutcome:NativeForgeOutcome?
+    @Published private(set) var forgeStats:[String:Int]?
     private(set) var catalogueKind: String?
     private var baseURL: URL?
     private var generation = UUID()
     private let session: URLSession
+    private let now:() -> Date
     private var issued: [UUID: NativeCapabilityReview] = [:]
+    private var uncertainForgeTargets:Set<String> = []
     static let kinds = ["skill", "daemon", "mcp", "channel", "provider", "memory", "workflow", "agent", "app"]
-    static let reads: [(String, String, String?)] = [("skills", "/skills", nil), ("skillDrafts", "/api/skills/pending", "pending"), ("toolDrafts", "/api/tool-genesis/pending", "proposals"), ("generated", "/api/tool-genesis/list", "tools"), ("installed", "/api/marketplace/installed", "skills"), ("apps", "/api/apps", "apps")]
-    init(baseURL: URL?, session: URLSession? = nil) { self.baseURL = baseURL; self.session = session ?? NativeCapabilitiesRedirectGuard.session() }
-    func configure(baseURL: URL?) { guard self.baseURL != baseURL else { return }; self.baseURL = baseURL; generation = UUID(); rows = [:]; errors = [:]; install = nil; catalogueKind = nil; issued = [:]; busy = false; receipt = nil; actionError = nil }
+    static let reads: [(String, String, String?)] = [("skills", "/skills", nil), ("skillDrafts", "/api/skills/pending", "pending"), ("toolDrafts", "/api/tool-genesis/pending", "proposals"), ("generated", "/api/tool-genesis/list", "tools"), ("installed", "/api/marketplace/installed", "skills"), ("apps", "/api/apps", "apps"),("proposals","/api/tool-genesis/proposals","proposals")]
+    static let statKeys = ["sequences_tracked","proposals_ready","tools_generated","total_uses"]
+    nonisolated static func intentToolID(_ intent:String) -> String {
+        let digest = Insecure.MD5.hash(data:Data(("intent::" + forgePrefix(intent,200)).utf8)).map { String(format:"%02x",$0) }.joined()
+        return "genesis_intent_" + digest.prefix(12)
+    }
+    init(baseURL: URL?, session: URLSession? = nil,now:@escaping () -> Date = Date.init) { self.baseURL = baseURL; self.session = session ?? NativeCapabilitiesRedirectGuard.session();self.now = now }
+    func configure(baseURL: URL?) { guard self.baseURL != baseURL else { return }; self.baseURL = baseURL; generation = UUID(); rows = [:]; errors = [:]; install = nil; catalogueKind = nil; issued = [:]; busy = false; receipt = nil; actionError = nil;forgeIntent = "";forgeOutcome = nil;forgeStats = nil }
     private func segment(_ value: String) throws -> String {
         guard !value.isEmpty, value.count <= 256, value != ".", value != "..", value.unicodeScalars.allSatisfy({ CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_ .:@/").contains($0) }) else { throw CapabilitiesFailure(message: "Unsupported item identity. No change sent.") }
         return value.addingPercentEncoding(withAllowedCharacters: CharacterSet(charactersIn: "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.~"))!
@@ -67,7 +86,10 @@ struct NativeCapabilityInstall {
         guard let list else { throw CapabilitiesFailure(message: "This catalogue returned an unreadable list; it is not confirmed empty.") }
         var seen = Set<String>()
         return try list.map { row in
-            guard let key = (row["skill_id"] ?? row["tool_id"] ?? row["app_id"] ?? row["id"] ?? row["item_id"]) as? String, !key.isEmpty, seen.insert(key).inserted else { throw CapabilitiesFailure(message: "Catalogue identities are missing or duplicated.") }
+            guard let key = (row["skill_id"] ?? row["tool_id"] ?? row["app_id"] ?? row["id"] ?? row["item_id"] ?? row["sequence_id"]) as? String, !key.isEmpty, seen.insert(key).inserted else { throw CapabilitiesFailure(message: "Catalogue identities are missing or duplicated.") }
+            if source == "proposals" {
+                guard key.count == 12,key.allSatisfy({ "0123456789abcdef".contains($0) }),row["sequence_id"] as? String == key,let tools = row["tools"] as? [String],!tools.isEmpty,tools.count <= 6,tools.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 }),capabilitiesCount(row["seen_count"]) != nil,row["name"] is String,row["description"] is String else { throw CapabilitiesFailure(message:"Sequence proposal terms are incomplete. Generation is unavailable.") }
+            }
             _ = try segment(key); return NativeCapabilityRow(source: source, key: key, raw: row)
         }
     }
@@ -81,12 +103,42 @@ struct NativeCapabilityInstall {
             do { let list = try parse(await request(path), source: source, field: field); guard start == generation else { return }; rows[source] = list; errors[source] = nil }
             catch { if start == generation { rows[source] = nil; errors[source] = error.localizedDescription } }
         }
+        guard start == generation else { return }
+        do {
+            guard let value = try await request("/api/tool-genesis/stats") as? [String:Any] else { throw CapabilitiesFailure(message:"Tool Genesis statistics are unreadable.") }
+            var counters:[String:Int] = [:]
+            if !value.isEmpty { for key in Self.statKeys { guard let count = capabilitiesCount(value[key]) else { throw CapabilitiesFailure(message:"Tool Genesis statistics are incomplete or malformed; no counters are confirmed.") };counters[key] = count } }
+            guard start == generation else { return };forgeStats = counters;errors["stats"] = nil
+        } catch { if start == generation { forgeStats = nil;errors["stats"] = error.localizedDescription } }
+    }
+    private func requireNewTarget(_ id:String) throws {
+        guard let stats = forgeStats,!stats.isEmpty else { throw CapabilitiesFailure(message:"Tool Genesis availability and statistics are not confirmed. Refresh before drafting.") }
+        guard !uncertainForgeTargets.contains(id) else { throw CapabilitiesFailure(message:"An earlier request for \(id) has an unknown outcome. It cannot be resubmitted. Inspect the inventory or use an intent with a distinct first 200 characters.") }
+        for source in ["generated","toolDrafts","skills"] {
+            guard let inventory = rows[source],errors[source] == nil else { throw CapabilitiesFailure(message:"Refresh generated tools, pending drafts and loaded skills before drafting.") }
+            guard !inventory.contains(where:{$0.key == id}) else { throw CapabilitiesFailure(message:"The deterministic draft ID \(id) already exists in \(source). Replacement is unavailable without an atomic backend conflict contract. Use a distinct intent or inspect the existing item.") }
+        }
+    }
+    private func freshNewTarget(_ id:String,start:UUID) async throws {
+        for source in ["generated","toolDrafts","skills"] {
+            let entry = Self.reads.first(where:{$0.0 == source})!
+            let list = try parse(await request(entry.1),source:source,field:entry.2)
+            guard start == generation else { throw CapabilitiesFailure(message:"Agent changed. Review again.") };rows[source] = list;errors[source] = nil
+        };try requireNewTarget(id)
     }
     func review(_ action: NativeCapabilityAction) throws -> NativeCapabilityReview {
         guard !busy else { throw CapabilitiesFailure(message: "Wait for the current request.") }
         let title: String, explanation: String, signature: String
         var disclosure: NativeCapabilityRow?
         switch action {
+        case .propose(let intent):
+            guard intent == forgeIntent,!intent.trimmingCharacters(in:.whitespacesAndNewlines).isEmpty,intent.utf8.count <= 8_000 else { throw CapabilitiesFailure(message:"Review the current nonempty intent, at most 8,000 UTF-8 bytes.") }
+            let id = Self.intentToolID(intent);try requireNewTarget(id)
+            title = "Draft this capability?";explanation = "Exact intent sent to the configured language model:\n\(intent)\n\nExpected draft ID: \(id). This may use a remote provider and incur model costs. It AST-checks generated code and stores an unapproved draft; it does not sandbox-run, register or execute that code. IDs depend on the first 200 characters. Existing IDs are blocked, but the server has no atomic conflict check against concurrent callers.";signature = capabilitiesJSON(["intent":intent,"tool_id":id])
+        case .generate(let id):
+            guard let row = rows["proposals"]?.first(where:{$0.key == id}),errors["proposals"] == nil else { throw CapabilitiesFailure(message:"Refresh and choose an exact tracked sequence first.") }
+            try requireNewTarget("genesis_" + id)
+            title = "Draft this tracked sequence?";explanation = "Sequence \(id). The exact tool order and proposal terms below are sent to the configured language model. This may incur model costs. Code is AST-checked and stored pending separate registration approval; it is not sandbox-run or executed. Existing deterministic IDs are blocked. Concurrent callers are not protected by an atomic server conflict check.";signature = capabilitiesJSON(row.raw);disclosure = row
         case .browse(let kind, let query):
             guard Self.kinds.contains(kind), query.count <= 500 else { throw CapabilitiesFailure(message: "Choose a supported catalogue kind and a shorter query.") }
             title = "Contact the community registry?"; explanation = "The backend sends this kind and search text to its configured external registry and may try fallback registry addresses. Kind: \(kind). Search: \(query.isEmpty ? "none" : query). Catalogue metadata is unsigned and is not an install consent. Nothing is installed."; signature = ""
@@ -107,7 +159,7 @@ struct NativeCapabilityInstall {
             guard ["installed", "apps"].contains(source), let row = rows[source]?.first(where: { $0.key == id }) else { throw CapabilitiesFailure(message: "Refresh the installed inventory first.") }
             title = "Uninstall this \(source == "apps" ? "app" : "skill")?"; explanation = "\(row.name) (\(id)). Removes the installed bundle. It does not revoke upstream credentials, erase external data, undo file edits or stop every already-running task. Other apps may depend on it."; signature = capabilitiesJSON(row.raw); disclosure = row
         }
-        if issued.count >= 20 { issued.removeAll() }; let review = NativeCapabilityReview(generation: generation, action: action, title: title, explanation: explanation, signature: signature, disclosure: disclosure); issued[review.id] = review; return review
+        issued = issued.filter { $0.value.expires > now() };if issued.count >= 20 { issued.removeAll() }; let review = NativeCapabilityReview(generation: generation, action: action, title: title, explanation: explanation, signature: signature, disclosure: disclosure,expires:now().addingTimeInterval(120)); issued[review.id] = review; return review
     }
     private func sameRow(source: String, id: String, signature: String, start: UUID) async throws {
         guard generation == start else { throw CapabilitiesFailure(message: "Agent changed. Review again.") }
@@ -125,10 +177,36 @@ struct NativeCapabilityInstall {
         return NativeCapabilityInstall(generation: generation, kind: kind, id: id, token: token, payload: value, expires: Date().addingTimeInterval(ttl.doubleValue))
     }
     func perform(_ reviewed: NativeCapabilityReview) async -> Bool {
-        guard !busy, reviewed.generation == generation, let issuedReview = issued.removeValue(forKey: reviewed.id), issuedReview.signature == reviewed.signature else { actionError = "Review is stale or already used. Review again."; return false }
+        guard !busy, reviewed.generation == generation, let issuedReview = issued.removeValue(forKey: reviewed.id), issuedReview.signature == reviewed.signature,issuedReview.expires > now() else { actionError = "Review is stale, expired or already used. Review again."; return false }
         let start = generation; busy = true; receipt = nil; actionError = nil; defer { if start == generation { busy = false } }
+        var attemptedForge:NativeForgeOutcome?
         do {
             switch issuedReview.action {
+            case .propose(let intent),.generate(let intent):
+                let isIntent:Bool
+                if case .propose = issuedReview.action { isIntent = true } else { isIntent = false }
+                let toolID = isIntent ? Self.intentToolID(intent) : "genesis_" + intent
+                var sequence:[String] = []
+                if isIntent {
+                    guard forgeIntent == intent,capabilitiesJSON(["intent":intent,"tool_id":toolID]) == issuedReview.signature else { throw CapabilitiesFailure(message:"The intent changed after review. No draft request was sent.") }
+                } else {
+                    try await sameRow(source:"proposals",id:intent,signature:issuedReview.signature,start:start)
+                    sequence = rows["proposals"]?.first(where:{$0.key == intent})?.raw["tools"] as? [String] ?? []
+                }
+                try await freshNewTarget(toolID,start:start)
+                guard start == generation,issuedReview.expires > now() else { throw CapabilitiesFailure(message:"The review expired during preflight. No draft request was sent.") }
+                if isIntent,forgeIntent != intent { throw CapabilitiesFailure(message:"The intent changed during preflight. No draft request was sent.") }
+                let drafting = NativeForgeOutcome(state:"drafting",toolID:toolID,input:intent,preview:"");attemptedForge = drafting;forgeOutcome = drafting
+                let result = try await request(isIntent ? "/api/tool-genesis/propose" : "/api/tool-genesis/generate",method:"POST",body:[isIntent ? "intent" : "sequence_id":intent]) as? [String:Any]
+                guard let result,capabilitiesBool(result["success"]) == true,let tool = isIntent ? result : result["tool"] as? [String:Any],tool["tool_id"] as? String == toolID,let preview = tool["preview"] as? String,!preview.isEmpty,preview.unicodeScalars.count <= 800 else { throw CapabilitiesFailure(message:"Draft response identity or code preview was not confirmed.") }
+                attemptedForge = NativeForgeOutcome(state:"outcome_unknown",toolID:toolID,input:intent,preview:preview)
+                let pending = try parse(await request("/api/tool-genesis/pending"),source:"toolDrafts",field:"proposals")
+                let generated = try parse(await request("/api/tool-genesis/list"),source:"generated",field:"tools")
+                guard start == generation,let draft = pending.first(where:{$0.key == toolID}),let stored = generated.first(where:{$0.key == toolID}),draft.raw["preview"] as? String == forgePrefix(preview,400),draft.raw["source_sequence"] as? [String] == sequence,stored.raw["source"] as? [String] == sequence,draft.raw["name"] as? String == stored.raw["name"] as? String,draft.raw["description"] as? String == stored.raw["description"] as? String else { throw CapabilitiesFailure(message:"Generated response could not be matched to the current unapproved queue and inventory.") }
+                if !isIntent { guard tool["name"] as? String == draft.raw["name"] as? String,tool["description"] as? String == draft.raw["description"] as? String else { throw CapabilitiesFailure(message:"Generated sequence terms differ from readback.") } }
+                forgeOutcome = NativeForgeOutcome(state:"pending",toolID:toolID,input:intent,preview:preview)
+                receipt = "Draft \(toolID) is present in the unapproved queue and generated inventory. Code safety, durable restart recovery and execution are not verified. Registration needs a separate review."
+                await refreshLocal(start:start)
             case .browse(let kind, let query):
                 rows["catalogue"] = nil; catalogueKind = nil; install = nil
                 let value = try await request("/api/marketplace/catalog", query: [URLQueryItem(name: "kind", value: kind), URLQueryItem(name: "q", value: query)])
@@ -169,7 +247,10 @@ struct NativeCapabilityInstall {
                 guard let value = try await request(path + (try segment(id)), method: "DELETE") as? [String: Any], capabilitiesBool(value["success"]) == true else { throw CapabilitiesFailure(message: "Uninstall was not confirmed.") }; receipt = "Backend confirms bundle removal; external data and running work are not reverted."; await refreshLocal(start: start)
             }
             guard start == generation else { return false }; return true
-        } catch { if start == generation { actionError = "Action not confirmed. " + error.localizedDescription }; return false }
+        } catch { if let attemptedForge { uncertainForgeTargets.insert(attemptedForge.toolID) };if start == generation {
+            if let attemptedForge { forgeOutcome = NativeForgeOutcome(state:"outcome_unknown",toolID:attemptedForge.toolID,input:attemptedForge.input,preview:attemptedForge.preview);actionError = "Draft outcome unknown. A draft may have been created. Inspect pending drafts and generated inventory before any new request; this review cannot retry. " + error.localizedDescription }
+            else { actionError = "Action not confirmed. " + error.localizedDescription }
+        }; return false }
     }
 }
 
@@ -195,9 +276,34 @@ struct NativeCapabilitiesFeatureView: View {
                 case .skills: section("skills", title: "Loaded skills") { row in Button("Reload from disk…") { requestReview(.reload(row.key)) }.disabled(model.busy) }
                 case .forge:
                     Text("Generated code is not proven safe. Tool Genesis returns a truncated code preview. Registration may execute import/constructor code immediately and arm background cron jobs; a persisted draft is not necessarily live.").foregroundStyle(.orange)
+                    card {
+                        Text("Draft a capability").font(.headline)
+                        Text("Describe the exact capability to send to your configured model. Drafting may incur model costs. It stores AST-checked code for a separate registration review; it does not run the code.").foregroundStyle(.secondary)
+                        NativePlainTextEditor(text:$model.forgeIntent,label:"Exact capability intent").frame(minHeight:110).disabled(model.busy)
+                        Text("\(model.forgeIntent.utf8.count) / 8,000 UTF-8 bytes").font(.caption).foregroundStyle(.secondary)
+                        Button("Review draft request…") { requestReview(.propose(intent:model.forgeIntent)) }.disabled(model.busy || baseURL == nil)
+                    }
+                    if let outcome = model.forgeOutcome {
+                        card {
+                            Text(outcome.state == "pending" ? "Draft pending registration review" : outcome.state == "drafting" ? "Draft request in progress" : "Draft outcome needs checking").font(.headline)
+                            NativeSelectableText(outcome.toolID).font(.caption)
+                            if outcome.state == "outcome_unknown" { Text("Inspect pending drafts and generated tools before making another request. Nothing was automatically retried.").foregroundStyle(.orange) }
+                            if !outcome.preview.isEmpty { DisclosureGroup("Returned code preview, at most 800 characters") { NativeSelectableText(outcome.preview).font(.system(.caption,design:.monospaced)) } }
+                        }
+                    }
+                    card {
+                        Text("Tool Genesis statistics").font(.headline)
+                        if let error = model.errors["stats"] { Text(error).foregroundStyle(.red) }
+                        if let stats = model.forgeStats {
+                            if stats.isEmpty { Text("The agent returned no statistics; Tool Genesis may be unavailable. No zero counts are inferred.").foregroundStyle(.secondary) }
+                            else { ForEach(NativeCapabilitiesModel.statKeys,id:\.self) { key in Text("\(key.replacingOccurrences(of:"_",with:" ")): \(stats[key]!)") } }
+                        }
+                    }
+                    section("proposals",title:"Tracked tool sequences") { row in Button("Review sequence draft…") { requestReview(.generate(sequenceID:row.key)) }.disabled(model.busy) }
                     section("skillDrafts", title: "Skill-generator drafts") { row in decisionButtons(row) }
                     section("toolDrafts", title: "Tool Genesis drafts") { row in decisionButtons(row) }
                     section("generated", title: "Generated tools") { _ in EmptyView() }
+                    Text("The generated inventory includes drafts and does not prove approval, live registration or execution. Existing deterministic draft IDs are blocked; replacement needs an atomic backend contract.").font(.caption).foregroundStyle(.secondary)
                 case .marketplace:
                     card { Text("External community registry").font(.headline); Text("Browsing sends your kind/search to the configured registry. Metadata is unsigned; verified preview and installation each require another review.").foregroundStyle(.secondary); HStack { Picker("Kind", selection: $kind) { ForEach(NativeCapabilitiesModel.kinds, id: \.self) { Text($0).tag($0) } }; TextField("Search", text: $query); Button("Review registry request…") { requestReview(.browse(kind: kind, query: query)) }.disabled(model.busy || baseURL == nil) } }
                     section("catalogue", title: "Remote metadata") { row in Button("Review download and verification…") { requestReview(.preview(kind: model.catalogueKind ?? "", id: row.key)) }.disabled(model.busy) }
@@ -234,6 +340,7 @@ struct NativeCapabilitiesFeatureView: View {
     }
     private func decisionButtons(_ row: NativeCapabilityRow) -> some View { HStack { Button("Review registration…") { requestReview(.decision(source: row.source, id: row.key, approve: true)) }; Button("Discard…", role: .destructive) { requestReview(.decision(source: row.source, id: row.key, approve: false)) } }.disabled(model.busy) }
     @ViewBuilder private func rowDisclosure(_ row: NativeCapabilityRow) -> some View {
+        if let tools = row.raw["tools"] as? [String] { NativeSelectableText("Exact order: " + tools.joined(separator:" → "));if let count = capabilitiesCount(row.raw["seen_count"]) { Text("Observed \(count) times").font(.caption) } }
         if let endpoints = row.raw["endpoints"] as? [[String: Any]] { ForEach(Array(endpoints.enumerated()), id: \.offset) { _, e in NativeSelectableText("\(e["method"] as? String ?? "") \(e["id"] as? String ?? "") — \(e["description"] as? String ?? "")").font(.caption) } }
         if let preview = row.raw["preview"] as? String ?? row.raw["python_impl"] as? String { DisclosureGroup(row.source == "toolDrafts" ? "Truncated implementation preview" : "Generated implementation") { NativeSelectableText(preview).font(.system(.caption, design: .monospaced)) } }
         disclosure(row.raw)

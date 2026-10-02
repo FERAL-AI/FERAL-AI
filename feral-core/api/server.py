@@ -2286,13 +2286,19 @@ def _build_chat_turn_runner(
     refined_text: str,
     ctx: dict,
     tracked: bool = False,
-) -> "Awaitable[None]":
+) -> "Awaitable[str | None]":
     """Construct the coroutine that drives ``handle_command_stream``
     plus the optional skill-gen detection. Identical between WebUI
     and HUP so the parity test diffs the same execution path.
     """
 
-    async def _run() -> None:
+    async def send_progress(message: FeralMessage) -> None:
+        if tracked:
+            from agents.chat_turns import correlate_progress
+            message = correlate_progress(session_id, message)
+        await ws.send_json(message.model_dump())
+
+    async def _run() -> str | None:
         try:
             if state.orchestrator is None:
                 return None
@@ -2310,7 +2316,7 @@ def _build_chat_turn_runner(
                         service=need.get("service", ""),
                     )
                     if manifest:
-                        await ws.send_json(
+                        await send_progress(
                             FeralMessage(
                                 session_id=session_id,
                                 hop="brain",
@@ -2319,7 +2325,7 @@ def _build_chat_turn_runner(
                                     "manifest": manifest,
                                     "reason": need.get("capability", ""),
                                 },
-                            ).model_dump()
+                            )
                         )
             return result
         except asyncio.CancelledError:
@@ -2332,17 +2338,17 @@ def _build_chat_turn_runner(
                 exc_info=True,
             )
             try:
-                await ws.send_json(
+                await send_progress(
                     FeralMessage(
                         session_id=session_id,
                         hop="brain",
                         type="error",
                         payload={
                             "code": "chat_turn_failed",
-                            "message": "The chat turn failed. Please try again.",
-                            "recoverable": True,
+                            "message": "The chat turn failed. Inspect its status and earlier actions before another attempt." if tracked else "The chat turn failed. Please try again.",
+                            "recoverable": not tracked,
                         },
-                    ).model_dump()
+                    )
                 )
             except Exception:
                 pass

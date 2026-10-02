@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 test_cache=/private/tmp/theora-native-feature-tests-cache
-all_features=(Health Memory Oversight Configuration Providers Conversation Attachment Operations Security Connections Voice Identity Capabilities Workflow ChatTools VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery SurfaceUpdate HealthHistory RuntimeHealth Vault Hardware OnboardingSetup ReviewSummary SelectableText)
+all_features=(Health Memory Oversight Configuration Providers Conversation Attachment Operations Security Connections Voice Identity Capabilities Workflow ChatTools ChatTurn VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery SurfaceUpdate HealthHistory RuntimeHealth Vault Hardware OnboardingSetup ReviewSummary SelectableText)
 features=("${all_features[@]}")
 if [[ $# -gt 0 ]]; then
   features=("$@")
@@ -19,6 +19,7 @@ for feature in "${features[@]}"; do
   test_source="tests/Native${feature}FeatureTests.swift"
   if [[ "$feature" == "ReviewSummary" ]]; then feature_sources=(NativeRichText.swift NativePlainTextEditor.swift); main_source=NativeReviewSummary.swift; test_source=tests/NativeReviewSummaryTests.swift; fi
   if [[ "$feature" == "SelectableText" ]]; then feature_sources=(); main_source=NativeRichText.swift; test_source=tests/NativeSelectableTextTests.swift; fi
+  if [[ "$feature" == "ChatTurn" ]]; then feature_sources=(); fi
   if [[ "$feature" == "AppSurface" ]]; then feature_sources+=(NativeRichChatFeature.swift NativeAppConfirmationFeature.swift NativeSurfaceUpdateFeature.swift); fi
   if [[ "$feature" == "SurfaceUpdate" ]]; then feature_sources+=(NativeRichChatFeature.swift NativeAppConfirmationFeature.swift NativeAppSurfaceFeature.swift); fi
   if [[ "$feature" == "Providers" ]]; then feature_sources+=(NativeProviderRoutingFeature.swift); fi
@@ -32,7 +33,7 @@ done
 model_binary=/private/tmp/theora-native-model-wire-tests
 xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
   -module-cache-path "$test_cache" -parse-as-library \
-  BrainRuntime.swift APIModel.swift NativeViews.swift NativeErrorPresentation.swift \
+  BrainRuntime.swift APIModel.swift NativeViews.swift NativeErrorPresentation.swift NativeChatTurnFeature.swift \
   NativeHealthFeature.swift NativeHealthHistoryFeature.swift NativeRuntimeHealthFeature.swift NativeMemoryFeature.swift NativeOversightFeature.swift \
   NativeConfigurationFeature.swift NativeProvidersFeature.swift NativeConversationFeature.swift \
   NativeAttachmentFeature.swift NativeRichText.swift NativePlainTextEditor.swift NativeReviewSummary.swift \

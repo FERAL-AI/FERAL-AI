@@ -55,6 +55,7 @@ from agents.multimodal_blocks import (
     should_prune_images,
 )
 from agents.llm_provider import LLMProvider
+from agents.runtime_context_checkpoint import RuntimeContextCoordinator
 from agents import llm_router
 from agents.genui_generator import GenUIGenerator
 from perception.fusion import PerceptionEngine, PerceptionFrame
@@ -122,6 +123,10 @@ class Orchestrator:
       - RefusalHandler   – LLM refusal detection and fallback execution
       - IdentityLoader   – ~/.feral/ identity files → system prompt
     """
+
+    # Inactive default also preserves minimal headless instances constructed
+    # without the full runtime constructor. Installation remains instance-only.
+    _context_checkpoints: RuntimeContextCoordinator | None = None
 
     # Class-level constants kept on Orchestrator for backward compat.
     #
@@ -249,6 +254,9 @@ class Orchestrator:
         # ordering. Different sessions still run fully parallel — only
         # turns on the same session are serialised.
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Installed only after every production entry/writer/cleanup adopts the
+        # lifecycle. BrainState deliberately does not activate this first slice.
+        self._context_checkpoints: RuntimeContextCoordinator | None = None
         # Image-bearing tool results (screenshots) travel OUT OF BAND.
         #
         # ``conversation_history`` stays pure text and provider-agnostic:
@@ -2997,6 +3005,18 @@ class Orchestrator:
             logger.warning("vision context attach failed", exc_info=True)
             return user_content
 
+    def install_runtime_context_checkpoints(self, store: "MemoryStore") -> RuntimeContextCoordinator:
+        """Internal integration hook; never restore arbitrary UI history here."""
+        if self._context_checkpoints is not None or self._active_turns:
+            raise RuntimeError("Runtime checkpoint lifecycle is already installed or busy")
+        coordinator = RuntimeContextCoordinator(
+            store, history=self.conversation_history, lock_for=self._get_session_lock,
+            image_call_ids=lambda sid: frozenset(self._tool_result_images.get(sid, {})),
+            clear_images=self._forget_tool_images,
+        )
+        self._context_checkpoints = coordinator
+        return coordinator
+
     async def handle_command(self, session_id: str, text: str, context: Optional[dict] = None):
         """Process a user command through the full agentic pipeline.
 
@@ -3007,7 +3027,9 @@ class Orchestrator:
         """
         owned_lock = False
         try:
-            async with self._get_session_lock(session_id):
+            scope = (self._context_checkpoints.command_scope(session_id)
+                     if self._context_checkpoints is not None else self._get_session_lock(session_id))
+            async with scope:
                 owned_lock = True
                 return await self._handle_command_impl(session_id, text, context)
         finally:
@@ -4016,7 +4038,9 @@ class Orchestrator:
         """Streaming variant of handle_command with a per-session lock."""
         owned_lock = False
         try:
-            async with self._get_session_lock(session_id):
+            scope = (self._context_checkpoints.command_scope(session_id)
+                     if self._context_checkpoints is not None else self._get_session_lock(session_id))
+            async with scope:
                 owned_lock = True
                 return await self._handle_command_stream_impl(session_id, text, context)
         finally:
@@ -4803,7 +4827,8 @@ class Orchestrator:
             del self.conversation_history[sid]
             # Drop the per-session lock too so long-running brains don't
             # grow the lock dict without bound.
-            self._session_locks.pop(sid, None)
+            if self._context_checkpoints is None:
+                self._session_locks.pop(sid, None)
             self._session_surfaces.pop(sid, None)
             # Same reasoning for the consolidation clocks: the ladder's
             # background tick iterates them, so a stale entry is a
@@ -4826,7 +4851,8 @@ class Orchestrator:
             await self.learner.summarize_session(session_id)
         self.conversation_history.pop(session_id, None)
         self._last_proactive_check.pop(session_id, None)
-        self._session_locks.pop(session_id, None)
+        if self._context_checkpoints is None:
+            self._session_locks.pop(session_id, None)
         self._session_surfaces.pop(session_id, None)
         self._forget_consolidation_state(session_id)
         self._forget_session_activity(session_id)

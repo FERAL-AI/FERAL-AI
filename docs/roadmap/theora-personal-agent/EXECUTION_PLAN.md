@@ -14,7 +14,7 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Latest published source: `66c7cd500d7ec353c68da97f44b99d6201af9abe`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,305 backend tests,83 skipped,74% rounded coverage; generic Python/Node transport jobs passed. Non-blocking mypy846 versus812 baseline remains failed. [WORK_STATE](WORK_STATE.md) names exact runs. The following table retains prior evidence. The runtime/SDK wave passed330 integrated tests and72 Node tests locally before this remote check.
+Latest published source: `cd1571ef94aa2fe244023d56ba468f7ba3266700`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,369 backend tests,83 skipped,74% rounded coverage; generic Python/Node transport jobs passed. Non-blocking mypy846 versus812 baseline remains failed. [WORK_STATE](WORK_STATE.md) names exact runs. The following table retains prior evidence. The runtime/SDK wave passed330 integrated tests and72 Node tests locally before its earlier remote check; storage/progress follow-up passed165 integrated tests before this publication.
 
 Actual immutable9.27 passed exact reviewed Deny/Allow, local reply and copy/link,
 but New conversation caused another accessibility recursion SIGSEGV and context

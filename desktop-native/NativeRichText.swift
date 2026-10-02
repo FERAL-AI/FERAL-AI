@@ -78,6 +78,10 @@ struct NativeSelectableText: View {
     }
 }
 
+private final class NativeSelectableField: NSTextField {
+    var usesAttributedValue = false
+}
+
 struct NativeSelectableTextField: NSViewRepresentable {
     let text: String
     let font: NSFont
@@ -92,7 +96,7 @@ struct NativeSelectableTextField: NSViewRepresentable {
     }
 
     static func makeField(text: String) -> NSTextField {
-        let field = NSTextField(wrappingLabelWithString: text)
+        let field = NativeSelectableField(wrappingLabelWithString: text)
         field.isSelectable = true
         field.isEditable = false
         field.allowsEditingTextAttributes = true
@@ -107,12 +111,13 @@ struct NativeSelectableTextField: NSViewRepresentable {
     }
 
     func configure(_ field: NSTextField) {
-        field.font = font
-        field.textColor = color
-        field.maximumNumberOfLines = maximumNumberOfLines
-        field.lineBreakMode = wraps ? .byWordWrapping : .byClipping
-        field.cell?.wraps = wraps
-        field.cell?.isScrollable = false
+        if field.font != font { field.font = font }
+        if field.textColor != color { field.textColor = color }
+        if field.maximumNumberOfLines != maximumNumberOfLines { field.maximumNumberOfLines = maximumNumberOfLines }
+        let breakMode: NSLineBreakMode = wraps ? .byWordWrapping : .byClipping
+        if field.lineBreakMode != breakMode { field.lineBreakMode = breakMode }
+        if field.cell?.wraps != wraps { field.cell?.wraps = wraps }
+        if field.cell?.isScrollable != false { field.cell?.isScrollable = false }
         if let attributed {
             let styled = NSMutableAttributedString(attributedString: attributed)
             let full = NSRange(location: 0, length: styled.length)
@@ -120,10 +125,15 @@ struct NativeSelectableTextField: NSViewRepresentable {
             styled.enumerateAttribute(.font, in: full) { existing, range, _ in
                 if existing == nil { styled.addAttribute(.font, value: font, range: range) }
             }
-            field.attributedStringValue = styled
-        } else { field.stringValue = text }
-        field.setAccessibilityLabel(label ?? field.stringValue)
-        field.invalidateIntrinsicContentSize()
+            if !field.attributedStringValue.isEqual(to: styled) { field.attributedStringValue = styled }
+            (field as? NativeSelectableField)?.usesAttributedValue = true
+        } else {
+            let wasAttributed = (field as? NativeSelectableField)?.usesAttributedValue ?? true
+            if wasAttributed || field.stringValue != text { field.stringValue = text }
+            (field as? NativeSelectableField)?.usesAttributedValue = false
+        }
+        let accessible = label ?? field.stringValue
+        if field.accessibilityLabel() != accessible { field.setAccessibilityLabel(accessible) }
     }
 
     func sizeThatFits(_ proposal: ProposedViewSize, nsView field: NSTextField, context: Context) -> CGSize? {
@@ -131,10 +141,15 @@ struct NativeSelectableTextField: NSViewRepresentable {
     }
 
     func fittingSize(width proposedWidth: CGFloat?, field: NSTextField) -> CGSize {
-        let width = max(1, wraps ? (proposedWidth ?? 600) : max(proposedWidth ?? 0, field.cell?.cellSize.width ?? 1))
-        field.preferredMaxLayoutWidth = wraps ? width : 0
-        let size = field.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude)) ?? .zero
-        return CGSize(width: width, height: max(1, ceil(size.height)))
+        // Measuring an attached field must not invalidate its intrinsic size.
+        // Updating preferredMaxLayoutWidth here re-enters AppKit constraints.
+        guard let cell = field.cell?.copy() as? NSTextFieldCell else { return .zero }
+        let proposed = proposedWidth.flatMap { $0.isFinite && $0 > 0 ? $0 : nil }
+        let natural = cell.cellSize.width
+        let width = max(1, wraps ? (proposed ?? 600) : max(proposed ?? 0, natural.isFinite ? natural : 600))
+        let size = cell.cellSize(forBounds: NSRect(x: 0, y: 0, width: width, height: .greatestFiniteMagnitude))
+        let height = size.height.isFinite ? size.height : font.pointSize
+        return CGSize(width: width, height: max(1, ceil(height)))
     }
 }
 

@@ -58,3 +58,27 @@ combined run. Full repository CI and type ratchet belong to the resulting
 published commit; neither is inferred from this local result. Native fixtures,
 actual rebuilt app acceptance, durable runtime writer restoration and effects
 remain their own gates.
+
+## Direct owner-socket follow-up
+
+On base `cd1571ef94aa2fe244023d56ba468f7ba3266700`, the private runner's
+skill-proposal and error frames now use the same trusted audit identity before
+delivery to their original owner socket. A tracked failure reports that the
+outcome needs inspection, rather than recommending an automatic retry. Legacy
+error behavior is preserved. The return annotation describes the actual optional
+text result.
+
+Two new controlled cases use the actual manager and disposable SQLite store.
+They verify exact accepted request/turn identity on direct progress, an unapproved
+skill proposal, private exception redaction, and a durable unknown terminal after
+work began. They do not execute generated code or external actions.
+
+The first targeted run failed **10 cases / 22 passed** because the new annotation
+referenced an unimported Optional. Replacing it with the supported Python 3.11
+union corrected the source. The corrected four-suite run passed **32 tests /
+7 warnings in2.41s**; edited-file Ruff passed. Parent's frozen combined backend
+run then passed **235 tests / 7 warnings in9.38s**, including the lifecycle,
+checkpoint, progress, structured automation, streaming/orchestrator, receipt,
+abort, failure-wire and timeline/scheduler suites. Existing deprecations and
+environment-leak restoration warnings remain visible. The exact combined command
+is in [integrated wave evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md).

@@ -9,7 +9,7 @@ sources=(
   NativeSecurityFeature.swift NativeVaultFeature.swift NativeConnectionsFeature.swift
   NativeHardwareFeature.swift NativeOnboardingSetupFeature.swift NativeVoiceFeature.swift
   NativeIdentityFeature.swift NativeCapabilitiesFeature.swift NativeWorkflowFeature.swift
-  NativeChatToolsFeature.swift NativeVoiceConfigurationFeature.swift NativeIntegrationFeature.swift
+  NativeChatToolsFeature.swift NativeChatTurnFeature.swift NativeVoiceConfigurationFeature.swift NativeIntegrationFeature.swift
   NativeRichChatFeature.swift NativeAmbientFeature.swift NativeAgentFeature.swift
   NativeKnowledgeFeature.swift NativeMemoryContextFeature.swift NativeAutomationFeature.swift
   NativeAppSurfaceFeature.swift NativeAppConfirmationFeature.swift NativeProviderRoutingFeature.swift

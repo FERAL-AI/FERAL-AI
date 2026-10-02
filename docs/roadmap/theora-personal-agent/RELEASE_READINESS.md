@@ -4,18 +4,27 @@ Updated October 2, 2026. This is an implementation and acceptance roadmap, not a
 
 ## Latest October 2 checkpoint
 
-Published source66c7cd500 passed required CI/native checks. Full Ubuntu/Python3.11
-PR backend: **12,305 passed,83 skipped,574 warnings**, coverage74% rounded.
+Published sourcecd1571ef9 passed required CI/native checks. Full Ubuntu/Python3.11
+PR backend: **12,369 passed,83 skipped,572 warnings**, coverage74% rounded.
 Live-brain and main Linux matrix were skipped. Non-blocking mypy remains failed
 at846 errors versus812 baseline; this is not a clean type gate.
 
-The assembled **9.28** candidate contains that exact source:479 production Python
+The assembled **9.28** candidate contains prior source66c7cd500:479 production Python
 files matched Git; bundle/runtime/ad-hoc signature checks passed. Actual isolated
 testing passed the previously crashing retained-error New conversation path and
 a real local-model42 reply. **A distinct SIGTRAP during Permissions and Cost
-navigation remains under investigation**, alongside an unexplained normal exit
+navigation was confirmed**, alongside an unexplained normal exit
 and an early timeout banner. [Current acceptance](NATIVE_9_28_ACCEPTANCE.md)
-does not certify daily use. Do not replace this candidate during acceptance.
+does not certify daily use.9.28 acceptance is now frozen. A source repair avoids
+live-field mutation while measuring selectable text; focused invariants and
+small actual Security/copy probes pass, but full new-candidate acceptance remains.
+
+The next integrated wave passed235 backend tests and all36 native feature suites,
+linked25 groups, desktop39/error5 assertions. It adds exact-turn native status/
+Stop/reconciliation, Forge proposal/statistics/drafting, explicit-interval
+scheduling and an inactive trusted context lifecycle. Production activation and
+legacy migration remain open.9.29/build2026100203 is the next assembly version;
+it is not yet built or accepted. [Wave evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md).
 
 The assembled **9.27** candidate stages source34a43e640, independently matched
 against all478 production Python files. Actual local model response, reviewed

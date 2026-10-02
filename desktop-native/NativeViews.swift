@@ -537,7 +537,7 @@ private struct NativeChatView: View {
                                     }
                                 }.id(message.id)
                             }
-                            if model.isSending { HStack(spacing: 9) { ProgressView().controlSize(.small); Text("Thinking…").foregroundStyle(.secondary) }.id("thinking") }
+                            if model.isSending { HStack(spacing: 9) { ProgressView().controlSize(.small); Text(model.chatTurnStatus).foregroundStyle(.secondary) }.id("thinking") }
                             NativeChatEventsHost(model: model)
                         }.padding(.horizontal, 24).padding(.vertical, 20).frame(maxWidth: 850).frame(maxWidth: .infinity, alignment: .center)
                     }.frame(maxWidth: .infinity, maxHeight: .infinity).layoutPriority(1)
@@ -549,6 +549,15 @@ private struct NativeChatView: View {
             if model.messages.isEmpty {
                 NativeEmptyChatEventsHost(model: model, rich: model.richChat)
             }
+            HStack {
+                Text(model.chatTurnStatus).font(.caption).foregroundStyle(model.chatRecoveryBlocked ? .orange : .secondary)
+                if model.chatRecoveryBlocked {
+                    Button(model.checkingChatStatus ? "Checking…" : "Check status") { Task { await model.checkChatStatus() } }.disabled(!model.ready || model.checkingChatStatus || model.unresolvedChatRequest == nil)
+                    Text("Choose a new conversation to work separately. Earlier tasks are never replayed.").font(.caption).foregroundStyle(.secondary)
+                } else if model.ready && !model.chatReceiptReady && !model.isSending {
+                    Button("Reconnect chat") { Task { await model.reconnectVerifiedChat() } }
+                }
+            }.padding(.horizontal,24)
             if !model.pendingAttachments.isEmpty {
                 ScrollView(.horizontal) {
                     HStack {
@@ -574,14 +583,14 @@ private struct NativeChatView: View {
                     .overlay(alignment: .topLeading) {
                         if draft.isEmpty { Text("Message FERAL…").foregroundStyle(.tertiary).padding(.top, 14).padding(.leading, 12).allowsHitTesting(false) }
                     }.accessibilityLabel("Message FERAL").accessibilityIdentifier("native-chat-composer")
-                if model.isSending {
+                if model.isSending || model.trackedChatReference != nil {
                     Button { Task { await model.stopChat() } } label: { Image(systemName: "stop.fill").font(.headline).frame(width: 28, height: 28) }
                         .buttonStyle(.bordered).clipShape(RoundedRectangle(cornerRadius: 10))
                         .keyboardShortcut(.escape, modifiers: []).accessibilityLabel("Stop response")
                 } else {
                     Button(action: send) { Image(systemName: "arrow.up").font(.headline).frame(width: 28, height: 28) }
                         .buttonStyle(.borderedProminent).clipShape(RoundedRectangle(cornerRadius: 10))
-                        .disabled(!model.ready || model.switchingConversation || model.uploadingAttachments || dispatching || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+                        .disabled(!model.chatCanSend || dispatching || draft.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
                         .keyboardShortcut(.return, modifiers: .command).accessibilityLabel("Send message")
                 }
             }.padding(12).background(RoundedRectangle(cornerRadius: 18).fill(Color(nsColor: .controlBackgroundColor)))
@@ -624,7 +633,7 @@ private struct NativeChatView: View {
 
     private func dispatchSend(authorizedIDs: [String]?) {
         let text = draft.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard model.ready, !model.isSending, !model.switchingConversation, !model.uploadingAttachments, !dispatching, !text.isEmpty else { return }
+        guard model.chatCanSend, !dispatching, !text.isEmpty else { return }
         let original = draft; dispatching = true
         Task {
             let sent = await model.sendChat(text, authorizedAttachmentIDs: authorizedIDs)

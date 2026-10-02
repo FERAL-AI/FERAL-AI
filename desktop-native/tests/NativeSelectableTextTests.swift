@@ -18,9 +18,26 @@ import SwiftUI
         value.configure(field)
         precondition(field.isSelectable && !field.isEditable && field.allowsEditingTextAttributes)
         precondition(field.stringValue == text && field.textColor == .secondaryLabelColor)
+        let initialWidth = field.preferredMaxLayoutWidth
+        let originalFrame = field.frame
+        let originalText = field.attributedStringValue.copy() as! NSAttributedString
         let narrow = value.fittingSize(width: 140, field: field)
         let wide = value.fittingSize(width: 700, field: field)
         precondition(narrow.height > wide.height && wide.height > 0)
+        precondition(field.preferredMaxLayoutWidth == initialWidth && field.frame == originalFrame)
+        precondition(field.attributedStringValue.isEqual(to: originalText))
+        for width: CGFloat in [140, 700, 140, 300, 700] { _ = value.fittingSize(width: width, field: field) }
+        precondition(field.preferredMaxLayoutWidth == initialWidth)
+        for width: CGFloat? in [nil, .infinity, .nan, -1, 0] {
+            let measured = value.fittingSize(width: width, field: field)
+            precondition(measured.width.isFinite && measured.height.isFinite && measured.height > 0)
+        }
+        let unicodeText = String(repeating: "👩🏽‍💻 café العربية 漢字 e\u{301} ", count: 200)
+        let unicode = NativeSelectableTextField(text: unicodeText, font: font, color: .labelColor, attributed: nil, wraps: true)
+        unicode.configure(field)
+        let unicodeWidth = field.preferredMaxLayoutWidth
+        precondition(unicode.fittingSize(width: 120, field: field).height > unicode.fittingSize(width: 900, field: field).height)
+        precondition(field.stringValue == unicodeText && field.preferredMaxLayoutWidth == unicodeWidth)
         let code = NativeSelectableTextField(text: text, font: .monospacedSystemFont(ofSize: 14, weight: .regular), color: .labelColor, attributed: nil, wraps: false)
         code.configure(field)
         precondition(code.fittingSize(width: 140, field: field).width > 140)
@@ -29,6 +46,9 @@ import SwiftUI
         let preservedBold = field.attributedStringValue.attribute(.font, at: 0, effectiveRange: nil) as! NSFont
         precondition(NSFontManager.shared.traits(of: preservedBold).contains(.boldFontMask))
         precondition(field.attributedStringValue.attribute(.link, at: 17, effectiveRange: nil) as? URL == URL(string: "https://example.com"))
+        let plainReplacement = NativeSelectableTextField(text: markdown.string, font: font, color: .labelColor, attributed: nil, wraps: true)
+        plainReplacement.configure(field)
+        precondition(field.attributedStringValue.attribute(.link, at: 17, effectiveRange: nil) == nil, "Reused dynamic plain text must clear prior link attributes")
         let diagnostic = NativeSelectableText(verbatim: "**exact** [not a link](file:///synthetic)")
             .font(.system(.caption, design: .monospaced)).foregroundStyle(.secondary)
             .lineLimit(2).accessibilityLabel("Exact diagnostic")
