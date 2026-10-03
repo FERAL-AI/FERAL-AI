@@ -57,9 +57,84 @@ import json
 import os
 import subprocess
 import sys
+from pathlib import Path
 from typing import Callable, Optional
 
 PACKAGE = "feral-ai"
+
+
+def _resource_candidates(path: Path) -> set[Path]:
+    """Exact shipped/staged resource structures, independent of install metadata."""
+    roots = set()
+    for ancestor in (path, *path.parents):
+        if (ancestor.name == "Resources" and ancestor.parent.name == "Contents"
+                and ancestor.parent.parent.name.endswith(".app")):
+            roots.add(ancestor)
+        if (ancestor.name == "Contents" and ancestor.parent.name.endswith(".app")):
+            roots.add(ancestor / "Resources")
+        if ancestor.name == "resources" and ancestor.parent.name == "src-tauri":
+            roots.add(ancestor)
+        if ancestor.parts[-3:] in {("usr", "lib", "FERAL"), ("usr", "lib", "feral-desktop")}:
+            roots.add(ancestor)
+    return roots
+
+
+def bundled_runtime() -> Optional[dict[str, str]]:
+    """Classify this loaded command before any index, metadata or service work.
+
+    The pip destination is sys.prefix. An ordinary external venv remains
+    independently updateable even if its base executable resolves into an app.
+    A loaded bundle module, bundled prefix or lexically bundled executable must
+    instead be coherent with one exact whole-app resource root. Redirects and
+    mixed bundle/source installations are refused rather than guessed safe.
+    """
+    raw_module = Path(__file__).absolute()
+    raw_executable = Path(sys.executable).absolute()
+    raw_prefix = Path(sys.prefix).absolute()
+    candidates = set()
+    for path in (raw_module, raw_executable, raw_prefix):
+        candidates.update(_resource_candidates(path))
+    try:
+        module = raw_module.resolve(strict=True)
+        executable = raw_executable.resolve(strict=True)
+        prefix = raw_prefix.resolve(strict=True)
+        base = Path(sys.base_prefix).resolve(strict=True)
+        # Canonical source/pip destinations can reveal a redirected app root.
+        for path in (module, prefix):
+            candidates.update(_resource_candidates(path))
+    except (OSError, RuntimeError):
+        if candidates:
+            return {"kind": "ambiguous", "detail": "Bundle module or interpreter paths cannot be verified."}
+        return None
+    if not candidates:
+        return None
+    for resource in candidates:
+        try:
+            root = resource.resolve(strict=True)
+            python = (resource / "python").resolve(strict=True)
+        except (OSError, RuntimeError):
+            continue
+        # Whole-app roots cannot quietly redirect their source/interpreter to
+        # a different environment. /tmp's system alias is already normalized.
+        if resource != root or python != root / "python":
+            continue
+        core_module = root / "feral-core" / "cli" / "update_command.py"
+        try:
+            relative = module.relative_to(python)
+        except ValueError:
+            relative = None
+        wheel_module = (
+            relative is not None and len(relative.parts) == 5
+            and relative.parts[0] == "lib" and relative.parts[1].startswith("python3.")
+            and relative.parts[2:] == ("site-packages", "cli", "update_command.py")
+        )
+        module_matches = module == core_module or wheel_module
+        if (module_matches and prefix == python and base == python
+                and executable.parent == python / "bin"
+                and executable.name in {"python", "python3", "python3.11", "python3.12", "python3.13", "python3.14"}
+                and executable.is_file()):
+            return {"kind": "bundled", "detail": "The loaded command and interpreter belong to one whole-app runtime."}
+    return {"kind": "ambiguous", "detail": "Bundle source, interpreter and Python prefixes do not identify one coherent runtime."}
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -273,6 +348,17 @@ def cmd_update(
     """
     run = runner or subprocess.run
     say = print
+
+    bundle = bundled_runtime()
+    if bundle is not None:
+        say("FERAL update")
+        say(bundle["detail"])
+        say("This desktop runtime must be updated as a whole app; pip self-upgrade is unavailable.")
+        say("Install a verified replacement desktop package, preserving your separate user profile.")
+        if check_only:
+            say("--check: no package-index comparison was performed for this bundled runtime.")
+        say("No network check, package installation or service restart was performed.")
+        return 1
 
     kind = install_kind()
     current = kind.get("version")

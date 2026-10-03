@@ -1,5 +1,15 @@
 # Theora / FERAL full-product release readiness
 
+**Current checkpoint (October 3): published `4eded179e2060c226739511fc53f5a8bde0eaa16`.**
+Exact-head general CI passes13,013 backend tests/83 skipped/75.24% coverage,
+web/SDK/type-count/asset checks. Separate native CI fails at a30s Process fixture
+without retained phase diagnostics; Linux Debian assembly succeeds but extracted
+payload verification fails. Both narrow corrections are active; all-checks-green
+acceptance remains open. Native9.34 is built, audited and source-matched; its actual
+offline archive/reader round-trip passes. Local-model recovery is active.
+[9.34 evidence](NATIVE_9_34_ACCEPTANCE.md) and [current work](WORK_STATE.md).
+The following checkpoint paragraphs are historical and do not supersede this one.
+
 Current published source before this integration is
 **`ec1c301fade5301fa604b29333612f5fa094b075`**. Its backend CI passes12,871 tests/
 83 skipped/75.10%, and web/native/mypy count gates pass. Generated asset coherence

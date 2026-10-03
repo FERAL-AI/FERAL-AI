@@ -7,6 +7,55 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
+- Published source: `4eded179e2060c226739511fc53f5a8bde0eaa16` on the existing
+  review branch; main is unchanged and PR310 remains open/unmerged.
+- Exact-head general CI [37131532584](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37131532584)
+  passed: **13,013 backend tests, 83 skipped, 75.24% coverage**, Python SDK112,
+  web build/coverage/Playwright, asset coherence and the type-count gate.
+  The main-only backend matrix was skipped. The two independent workflows below
+  are failed; this is not an all-checks-green release.
+- Native workflow37131532534 passed production typecheck and all feature/linked
+  checks, then its genuine Process fixture timed out at the unchanged30s bound.
+  The old harness lost phase/child diagnostics. Local28 assertions pass, but the
+  remote blocked phase remains unknown. A narrow three-file diagnostics repair
+  preserves bounded synthetic evidence on failure; next-head CI must diagnose it.
+- Linux workflow37131532547 built the actual Debian package, then failed
+  extracted-payload verification. Inspection confirms Tauri uses productName
+  `FERAL` for `usr/lib/FERAL`; the smoke helper incorrectly assumed the binary
+  name `feral-desktop` for that directory. Its original receipt lacks the first
+  failing guard. Config-bound paths and phase diagnostics are now corrected;
+  19 payload tests and seven platform tests pass. Corrected package acceptance
+  remains open. Further Linux engineering is deferred while Mac delivery is prioritized.
+- Native9.34/build2026100301 is **built**, with51 compiled native sources and487
+  packaged production Python files matching4eded. Strict ad-hoc signature and
+  bounded bundle audit pass. Actual bundled offline archive/readers round-trip
+  passes with fresh synthetic data; original and restored bytes, preference/avatar
+  hashes, context fence and negative refusal cases are verified.
+  [Exact candidate evidence](NATIVE_9_34_ACCEPTANCE.md).
+- Actual9.34 local-model recovery is active with unchanged deadlines. Available
+  disk fell from910MiB to250MiB during host/model activity; the owner monitors its
+  resource floor and must preserve any incomplete result. No disk-caused app crash
+  is established. Do not rebuild or replace the canonical9.34 app while it is used.
+- Worker ownership: native fixture diagnostics and the narrow Linux repair are
+  frozen. The former Linux worker now audits Mac cloud/local onboarding gaps;
+  the recovery worker owns its private actual probe. The bundled-update guard
+  is frozen and passes63 tests; its worker now prepares the concrete managed
+  chained-voice contract before any overlapping edits.
+  Parent owns documentation, integration and Git. Mac delivery is the current
+  priority. Gen-UI expansion stays deferred; coding-engine expansion follows
+  dependable cloud/local setup, recovery, voice and data continuity.
+- Ready publication: bundle update protection, native bounded failure diagnostics,
+  the previously frozen Linux path correction and actual9.34 archive evidence.
+  [Guard and diagnostics evidence](BUNDLED_UPDATE_GUARD_EVIDENCE.md).
+  Mac provider-review repair is active in two separate Swift files: stale drafts,
+  reused confirmation and changed saved configuration all dispatched writes in
+  the baseline reproduction. Keep those unfinished edits out of this publication.
+
+Historical results below remain source-bound records. GUI/audio, cloud accounts, physical
+devices, clean installation, signing and managed saved-context voice are open.
+
+### Prior pre-publication checkpoint
+
 - **Current published source before this integration:** `ec1c301fade5301fa604b29333612f5fa094b075`,
   [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310), unmerged.
   Main remains `452a012557d06274063b72546433257b4694d611`.

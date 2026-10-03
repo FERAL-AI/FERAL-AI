@@ -2,7 +2,16 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
-**Current verified artifact:2026.9.33/build2026100207**, exact source
+**Current packaged artifact:2026.9.34/build2026100301**, source
+`4eded179e2060c226739511fc53f5a8bde0eaa16`. Assembly, strict ad-hoc signature,
+51 compiled native input comparisons and487 packaged Python comparisons pass.
+Actual offline backup/restore and production readers pass with synthetic data;
+actual local-model recovery is active. General CI passes13,013 backend tests,
+while separate native Process-fixture and Linux payload checks fail and are being
+corrected. GUI/audio and all distribution gates remain open.
+[9.34 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_34_ACCEPTANCE.md).
+
+**Preceding verified artifact:2026.9.33/build2026100207**, exact source
 `7f818da08139952b1698644469e7016563512cd5`. Packaged local-model recovery and
 restart passed with485 unchanged production Python files, executable hash and
 strict ad-hoc signature; its verified copy is preserved.

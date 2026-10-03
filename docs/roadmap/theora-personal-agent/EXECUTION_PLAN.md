@@ -14,6 +14,16 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
+Latest published source is `4eded179e2060c226739511fc53f5a8bde0eaa16`.
+Its general CI passes13,013 backend tests/83 skipped/75.24% and web/SDK/type gates.
+Separate native Process ownership CI times out without phase evidence; Linux
+Debian assembly passes but extracted-payload smoke fails. Narrow diagnostics and
+the confirmed productName resource-path correction are being integrated.
+Native9.34 is assembled, audited and immutable; actual bundled offline archive
+and readers pass. Local-model recovery is active. Next independent source work
+is the bundled-update guard, followed by the managed chained-voice adapter.
+[9.34 evidence](NATIVE_9_34_ACCEPTANCE.md). Earlier records follow.
+
 Published `ec1c301fade5301fa604b29333612f5fa094b075` passes exact-head backend
 12,871/83 skipped/75.10%, web, native and mypy808 count gates. Generated asset
 coherence now passes; all executed jobs succeeded. Frozen7f actual browser

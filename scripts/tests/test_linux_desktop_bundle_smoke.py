@@ -1,5 +1,7 @@
 """Disposable payload contract fixtures; not actual Linux artifact acceptance."""
 import importlib.util
+from contextlib import redirect_stdout
+import io
 import json
 import os
 from pathlib import Path
@@ -14,6 +16,7 @@ SCRIPTS = Path(__file__).parents[1]
 sys.path.insert(0, str(SCRIPTS))
 spec = importlib.util.spec_from_file_location("linux_bundle_smoke", SCRIPTS / "linux_desktop_bundle_smoke.py")
 smoke = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = smoke
 spec.loader.exec_module(smoke)
 
 
@@ -26,14 +29,23 @@ def elf():
 
 
 class LinuxSmokeContractTests(unittest.TestCase):
+    def build_metadata(self, root, **updates):
+        root.mkdir(parents=True, exist_ok=True)
+        config = json.loads(smoke.DEFAULT_TAURI_CONFIG.read_text())
+        config.update(updates)
+        path = root / "tauri.conf.json"
+        path.write_text(json.dumps(config))
+        (root / "Cargo.toml").write_text('[package]\nname = "feral-desktop"\nversion = "2026.9.7"\n')
+        return path
+
     def fixture(self, root):
-        for name in ("usr/bin/feral-desktop", "usr/lib/feral-desktop/python/bin/python3",
-                     "usr/lib/feral-desktop/opencode/bin/opencode"):
+        for name in ("usr/bin/feral-desktop", "usr/lib/FERAL/python/bin/python3",
+                     "usr/lib/FERAL/opencode/bin/opencode"):
             path = root / name
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(elf())
             path.chmod(0o755)
-        core = root / "usr/lib/feral-desktop/feral-core"
+        core = root / "usr/lib/FERAL/feral-core"
         (core / "api").mkdir(parents=True)
         (core / "api/server.py").write_text("# Synthetic source fixture\n")
         (core / "webui_v2").mkdir()
@@ -52,6 +64,114 @@ class LinuxSmokeContractTests(unittest.TestCase):
             (core / "api/server.py").unlink()
             with self.assertRaises(smoke.LinuxBundleError):
                 smoke.payload_paths(root)
+
+    def test_trusted_build_metadata_matches_pinned_debian_product_layout(self):
+        layout = smoke.bundle_layout(smoke.DEFAULT_TAURI_CONFIG)
+        config = json.loads(smoke.DEFAULT_TAURI_CONFIG.read_text())
+        self.assertEqual(layout.product_name, config["productName"])
+        self.assertEqual(layout.native_name, "feral-desktop")
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "payload"
+            core = self.fixture(root)
+            # The old Cargo-name resource assumption cannot satisfy Tauri's
+            # productName contract, even with otherwise valid ELF files.
+            (root / "usr/lib/FERAL").rename(root / "usr/lib/feral-desktop")
+            self.assertFalse(core.exists())
+            with self.assertRaisesRegex(smoke.LinuxBundleError, "required_payload_file_missing"):
+                smoke.payload_paths(root, layout)
+
+    def test_explicit_main_binary_name_is_exact_not_directory_discovery(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config = self.build_metadata(root / "metadata", mainBinaryName="FERAL-shell")
+            layout = smoke.bundle_layout(config)
+            payload = root / "payload"
+            self.fixture(payload)
+            with self.assertRaises(smoke.LinuxBundleError):
+                smoke.payload_paths(payload, layout)
+            (payload / "usr/bin/feral-desktop").rename(payload / "usr/bin/FERAL-shell")
+            smoke.payload_paths(payload, layout)
+
+    def test_build_metadata_unsafe_ambiguous_or_drifted_layout_refused(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for key in ("productName", "mainBinaryName"):
+                for value in ("../FERAL", "/FERAL", "..", ".", "FERAL/other", "FERAL\n", "", True, 1.0, None):
+                    with self.subTest(key=key, value=value):
+                        config = self.build_metadata(root, **{key: value})
+                        with self.assertRaisesRegex(smoke.LinuxBundleError, "component_invalid"):
+                            smoke.bundle_layout(config)
+            config = self.build_metadata(root)
+            (root / "Cargo.toml").write_text('[package]\nname="feral-desktop"\n[[bin]]\nname="other"\n')
+            with self.assertRaisesRegex(smoke.LinuxBundleError, "binary_ambiguous"):
+                smoke.bundle_layout(config)
+            config = self.build_metadata(root, bundle={"resources": {"resources/python": "elsewhere"}})
+            with self.assertRaisesRegex(smoke.LinuxBundleError, "resource_mapping"):
+                smoke.bundle_layout(config)
+            config = self.build_metadata(root)
+            config.unlink()
+            config.symlink_to(smoke.DEFAULT_TAURI_CONFIG)
+            with self.assertRaisesRegex(smoke.LinuxBundleError, "metadata_invalid"):
+                smoke.bundle_layout(config)
+
+    def test_failure_receipt_records_exact_phase_layout_and_no_private_exception(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            payload = root / "payload"
+            self.fixture(payload)
+            (payload / "usr/lib/FERAL").rename(payload / "usr/lib/feral-desktop")
+            before = smoke.inventory(payload)
+            parent = root / "evidence"
+            parent.mkdir()
+            pin = root / "python-pin"
+            pin.write_text("3.11.15\n")
+            args = ["smoke", "--extracted-root", str(payload), "--work-parent", str(parent),
+                    "--python-pin", str(pin), "--tauri-config", str(smoke.DEFAULT_TAURI_CONFIG)]
+            selected = smoke.platform_check.select_platform("Linux", "x86_64", "glibc")
+            output = io.StringIO()
+            with patch.object(sys, "argv", args), patch.object(smoke.platform_check, "host_platform", return_value=selected), patch.object(smoke.subprocess, "Popen") as start, redirect_stdout(output):
+                self.assertEqual(smoke.main(), 1)
+            receipt = json.loads(output.getvalue())
+            self.assertEqual(receipt["error_code"], "required_payload_file_missing_or_external")
+            self.assertEqual(receipt["checkpoint"]["phase"], "source_layout")
+            self.assertEqual(receipt["checkpoint"]["source_inventory"], before)
+            self.assertEqual(receipt["checkpoint"]["layout"]["usr_lib_components_first_16"], ["feral-desktop"])
+            self.assertEqual(smoke.inventory(payload), before)
+            start.assert_not_called()
+            for error in (smoke.LinuxBundleError("private-synthetic-sentinel"), RuntimeError("private-synthetic-sentinel"), OSError("private-synthetic-sentinel"), smoke.LinuxBundleError({"private": "sentinel"})):
+                self.assertEqual(smoke.failure_code(error), "verification_failed_redacted")
+                self.assertNotIn("sentinel", smoke.failure_code(error))
+
+    def test_layout_observation_is_bounded_and_only_expected_file_paths(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            self.fixture(root)
+            for index in range(30):
+                (root / "usr/lib" / f"component-{index}").mkdir()
+            observed = smoke.layout_observation(root, smoke.bundle_layout(smoke.DEFAULT_TAURI_CONFIG))
+            self.assertEqual(len(observed["usr_lib_components_first_16"]), 16)
+            self.assertEqual(len(observed["required_files"]), 5)
+            self.assertTrue(all(item["is_file"] for item in observed["required_files"]))
+
+    def test_cli_redacts_unknown_failure_and_preserves_fixed_deadline_diagnostic(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            pin = root / "python-pin"
+            pin.write_text("3.11.15\n")
+            args = ["smoke", "--extracted-root", str(root / "unexecuted"),
+                    "--work-parent", str(root / "evidence"), "--python-pin", str(pin),
+                    "--tauri-config", str(smoke.DEFAULT_TAURI_CONFIG)]
+            for error, expected_code in [
+                (RuntimeError("private-synthetic-sentinel"), "verification_failed_redacted"),
+                (subprocess.TimeoutExpired(["private-synthetic-sentinel"], 60), "owned_subprocess_deadline_exceeded"),
+            ]:
+                output = io.StringIO()
+                with patch.object(sys, "argv", args), patch.object(smoke, "run", side_effect=error), redirect_stdout(output):
+                    self.assertEqual(smoke.main(), 1)
+                receipt = json.loads(output.getvalue())
+                self.assertEqual(receipt["error_code"], expected_code)
+                self.assertNotIn("private-synthetic-sentinel", output.getvalue())
+                self.assertEqual(json.loads((Path(receipt["workspace"]) / "receipt.json").read_text()), receipt)
 
     def test_inventory_content_mode_and_source_changes(self):
         with tempfile.TemporaryDirectory() as temporary:

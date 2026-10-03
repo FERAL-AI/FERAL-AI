@@ -6,6 +6,15 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
+- Latest publication is `4eded179e2060c226739511fc53f5a8bde0eaa16`.
+  General CI passes13,013 backend tests/83 skipped/75.24% coverage and web/SDK/type
+  gates. Native Process-fixture timeout and Linux extracted-payload check remain
+  failed. Native9.34 is built with source/hash/signature checks and its actual
+  offline backup/restore/readers journey passes. Local-model recovery is active;
+  GUI/audio and release qualification remain open.
+  [9.34 evidence](NATIVE_9_34_ACCEPTANCE.md). The older bullets below describe the
+  preceding publication/freeze, not the current package state.
+
 - Published `ec1c301fade5301fa604b29333612f5fa094b075`: backend12,871/83 skipped/
   75.10%, web/native/mypy808 count gates and generated-asset coherence pass.
   All executed jobs succeeded; opt-in/main-only jobs were skipped.

@@ -66,7 +66,7 @@ jobs:
           test "$(df --output=avail -B1 "$RUNNER_TEMP" | tail -1)" -ge 2147483648
           extracted="$(mktemp -d "$RUNNER_TEMP/feral-deb-extracted-XXXXXX")"
           dpkg-deb --extract "${packages[0]}" "$extracted"
-          python3 scripts/linux_desktop_bundle_smoke.py --extracted-root "$extracted" --work-parent "$RUNNER_TEMP" --python-pin .python-pin --timeout 90
+          python3 scripts/linux_desktop_bundle_smoke.py --extracted-root "$extracted" --work-parent "$RUNNER_TEMP" --python-pin .python-pin --tauri-config desktop/src-tauri/tauri.conf.json --timeout 90
           sha256sum "${packages[0]}" > desktop/src-tauri/target/release/bundle/deb/SHA256SUMS
       - name: Preserve bounded smoke evidence
         if: always()
@@ -75,6 +75,7 @@ jobs:
           name: linux-desktop-smoke-evidence
           path: |
             ${{ runner.temp }}/feral-linux-bundle-smoke-*/receipt.json
+            ${{ runner.temp }}/feral-linux-bundle-smoke-*/phase.json
             ${{ runner.temp }}/feral-linux-bundle-smoke-*/runtime-probe.json
             ${{ runner.temp }}/feral-linux-bundle-smoke-*/brain.log
           if-no-files-found: ignore

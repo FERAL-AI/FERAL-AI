@@ -5,9 +5,20 @@ import Darwin
 /// exercises the production runtime and launcher, not a mocked owner callback.
 @main struct NativeArchiveRuntimeOwnershipTests {
     @MainActor static var assertions = 0
+    @MainActor private static var phaseRoot: URL?
+    @MainActor private static var phases: [[String: Any]] = []
+    @MainActor private static func checkpoint(_ name: String) throws {
+        guard let phaseRoot else { return }
+        phases.append(["phase": name, "uptime": ProcessInfo.processInfo.systemUptime, "assertions": assertions])
+        if phases.count > 64 { phases.removeFirst(phases.count - 64) }
+        let path = phaseRoot.appendingPathComponent("phases.json")
+        try JSONSerialization.data(withJSONObject: ["synthetic_fixture": true, "phases": phases], options: [.sortedKeys]).write(to: path, options: .atomic)
+        try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: path.path)
+    }
     @MainActor static func check(_ value: @autoclosure () -> Bool, _ message: String) throws {
         guard value() else { throw NativeFailure("Archive ownership fixture assertion failed: " + message) }
         assertions += 1
+        try checkpoint("assertion: " + message)
     }
     @MainActor static func refuses(_ operation: () async throws -> Void) async throws {
         do { try await operation() }
@@ -75,10 +86,14 @@ import Darwin
         guard let canonical = realpath(root, nil) else { throw NativeFailure("Fixture root is unavailable.") }
         defer { free(canonical) }
         guard String(cString: canonical) == root else { throw NativeFailure("Fixture root was redirected.") }
+        phaseRoot = URL(fileURLWithPath: root, isDirectory: true)
+        try checkpoint("fixture validated; preparing actual BrainRuntime")
         let runtime = BrainRuntime(); var events: [NativeRuntimeHealthEvent] = [], progress: [String] = []
-        runtime.onHealthEvent = { events.append($0) }
+        runtime.onHealthEvent = { events.append($0); try? checkpoint("health: " + $0.phase.rawValue) }
         do {
-            try await runtime.start { progress.append($0) }
+            try checkpoint("first start entered")
+            try await runtime.start { progress.append($0); try? checkpoint("first startup: " + $0) }
+            try checkpoint("first start returned; observing actual health")
             let first = try await observe(runtime, profile: home)
             try check(runtime.profileConfigRoot?.path == home && runtime.profileDataRoot?.path == home, "actual runtime uses reviewed same-root backend policy")
             try check(!runtime.isQuiesced(first.owner), "a running owner never has archive stop proof")
@@ -91,14 +106,18 @@ import Darwin
                       "wrong-owner stop leaves exact original backend and child alive")
             try check(events.count == before, "wrong-owner stop emits no lifecycle retirement")
             try check(!runtime.isQuiesced(wrong) && !runtime.isQuiesced(first.owner), "wrong owner cannot forge quiescence")
+            try checkpoint("first exact stop entered")
             try await runtime.stop(ifOwnedBy: first.owner)
+            try checkpoint("first exact stop returned; verifying absence")
             try await verifyAbsent(first)
             try check(runtime.ownership == nil && runtime.isQuiesced(first.owner), "exact stop publishes proof only after actual cleanup")
             try check(!runtime.isQuiesced(wrong) && !runtime.serviceReachable && !runtime.isReady, "cold proof is exact and action readiness revoked")
             try await refuses { try await runtime.stop(ifOwnedBy: first.owner) }
             try check(runtime.isQuiesced(first.owner), "repeated exact stop refusal preserves settled proof without replay")
 
-            try await runtime.start { progress.append($0) }
+            try checkpoint("replacement start entered")
+            try await runtime.start { progress.append($0); try? checkpoint("replacement startup: " + $0) }
+            try checkpoint("replacement start returned; observing actual health")
             let second = try await observe(runtime, profile: home)
             try check(second.owner != first.owner && second.owner.generation != first.owner.generation,
                       "new real launch owns a new lifecycle generation")
@@ -109,7 +128,9 @@ import Darwin
             let stillSecond = try await observe(runtime, profile: home)
             try check(stillSecond.owner == second.owner && stillSecond.pid == second.pid && stillSecond.childPID == second.childPID,
                       "stale stop cannot kill replacement backend or owned child")
+            try checkpoint("replacement exact stop entered")
             try await runtime.stop(ifOwnedBy: second.owner)
+            try checkpoint("replacement exact stop returned; verifying absence")
             try await verifyAbsent(second)
             try check(runtime.isQuiesced(second.owner) && !runtime.isQuiesced(first.owner), "only exact replacement cleanup establishes current cold proof")
             try check(events.allSatisfy { !$0.automaticActionReplay }, "real lifecycle events never request replay")
@@ -120,10 +141,14 @@ import Darwin
                 "native_model_archive_host_verified": false, "signed_app_verified": false, "runtime_started_automatically_after_stop": false,
                 "observed_phases": events.map { $0.phase.rawValue }, "progress": progress]
             let output = try JSONSerialization.data(withJSONObject: evidence, options: [.sortedKeys])
+            try checkpoint("verified receipt ready")
             print(String(decoding: output, as: UTF8.self))
         } catch {
             // This runtime exists only inside the isolated fixture bundle.
-            await runtime.stop(); throw error
+            try? checkpoint("test failed; exact fixture runtime cleanup entered")
+            await runtime.stop()
+            try? checkpoint("test failure cleanup returned")
+            throw error
         }
     }
 }

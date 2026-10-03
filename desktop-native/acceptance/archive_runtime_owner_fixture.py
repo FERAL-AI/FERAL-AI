@@ -17,6 +17,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 
 NATIVE = Path(__file__).resolve().parents[1]
 TEST = NATIVE / "tests/NativeArchiveRuntimeOwnershipTests.swift"
@@ -24,6 +25,10 @@ SOURCES = [NATIVE / name for name in (
     "BrainRuntime.swift", "NativeProfileLayoutFeature.swift", "NativeRuntimeHealthFeature.swift",
 )] + [TEST]
 LAUNCHER = NATIVE / "native_backend_launcher.py"
+DIAGNOSTIC_FILES = ("manifest.json", "evidence.json", "failure.json", "phases.json",
+                    "stdout.log", "stderr.log", "compile.log", "fixture-owned-processes.json",
+                    "profile/native-desktop.log")
+MAX_DIAGNOSTIC_BYTES = 65536
 
 SERVER = '''"""Disposable owned-health fixture, never a real agent backend."""
 import json
@@ -92,6 +97,31 @@ def digest(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
+def export_diagnostics(root: Path, destination: Path) -> None:
+    """Export only bounded synthetic fixture evidence, never the app/profile tree."""
+    entries = []
+    for relative in DIAGNOSTIC_FILES:
+        source = root / relative
+        if source.is_symlink() or not source.is_file():
+            continue
+        with source.open("rb") as stream:
+            size = os.fstat(stream.fileno()).st_size
+            if size > MAX_DIAGNOSTIC_BYTES:
+                stream.seek(size - MAX_DIAGNOSTIC_BYTES)
+            payload = stream.read(MAX_DIAGNOSTIC_BYTES)
+        output = destination / relative.replace("/", "-")
+        with output.open("xb") as stream:
+            os.chmod(output, 0o600)
+            stream.write(payload)
+        entries.append({"file": output.name, "original_bytes": size, "exported_bytes": len(payload),
+                        "truncated": size > MAX_DIAGNOSTIC_BYTES,
+                        "export_sha256": hashlib.sha256(payload).hexdigest()})
+    summary = {"synthetic_fixture": True, "fixture_root": str(root),
+               "maximum_bytes_per_file": MAX_DIAGNOSTIC_BYTES, "files": entries}
+    (destination / "diagnostics.json").write_text(json.dumps(summary, sort_keys=True, indent=2) + "\n")
+    os.chmod(destination / "diagnostics.json", 0o600)
+
+
 def stage(root: Path, interpreter: Path) -> tuple[Path, dict]:
     if (not str(root).startswith("/private/tmp/feral-native-archive-owner-")
             or root.resolve() != root or not root.is_dir() or any(root.iterdir())):
@@ -142,10 +172,26 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--python", type=Path, default=NATIVE.parent / ".venv/bin/python", help="Explicit pinned test interpreter; never a model/provider executable")
     parser.add_argument("--prepare-only", action="store_true", help="Compile the disposable bundle without launching its processes")
+    parser.add_argument("--evidence-output", type=Path, help="Fresh directory for bounded synthetic diagnostic files only")
+    parser.add_argument("--execution-timeout", type=float, default=30,
+                        help="Bounded fixture execution deadline; lower values support failure-path checks (maximum 30 seconds)")
     args = parser.parse_args()
     if sys.platform != "darwin":
         parser.error("This fixture requires macOS Foundation and process ownership")
+    if not 0 < args.execution_timeout <= 30:
+        parser.error("Execution timeout must be greater than zero and at most 30 seconds")
+    evidence_output = None
+    if args.evidence_output:
+        target = args.evidence_output.absolute()
+        if target.exists() or target.is_symlink() or target.parent.resolve() != target.parent:
+            parser.error("Use a fresh evidence directory beneath an existing canonical parent")
+        try:
+            target.mkdir(mode=0o700)
+            evidence_output = target
+        except OSError:
+            parser.error("The fresh evidence directory could not be created")
     root = Path(tempfile.mkdtemp(prefix="feral-native-archive-owner-", dir="/private/tmp"))
+    entered = time.monotonic()
     try:
         binary, manifest = stage(root, args.python)
         if args.prepare_only:
@@ -153,12 +199,18 @@ def main() -> int:
             return 0
         environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "FERAL_HOME": str(root / "profile"),
                        "FERAL_DATA_HOME": str(root / "profile"), "FERAL_ARCHIVE_OWNER_FIXTURE_ROOT": str(root)}
-        result = subprocess.run([str(binary)], env=environment, capture_output=True, text=True, timeout=30)
-        (root / "stdout.log").write_text(result.stdout)
-        (root / "stderr.log").write_text(result.stderr)
+        # File streams persist even if run() kills the native host on timeout.
+        # Do not lose the actual startup/retirement phase as the old harness did.
+        with (root / "stdout.log").open("xb") as stdout, (root / "stderr.log").open("xb") as stderr:
+            os.chmod(root / "stdout.log", 0o600)
+            os.chmod(root / "stderr.log", 0o600)
+            result = subprocess.run([str(binary)], env=environment, stdout=stdout, stderr=stderr,
+                                    timeout=args.execution_timeout)
         if result.returncode != 0:
             raise ValueError("Real runtime ownership fixture failed; inspect stdout.log/stderr.log")
-        evidence = json.loads(result.stdout)
+        if (root / "stdout.log").stat().st_size > MAX_DIAGNOSTIC_BYTES:
+            raise ValueError("Fixture receipt exceeds the bounded evidence contract")
+        evidence = json.loads((root / "stdout.log").read_text())
         if evidence.get("status") != "passed" or evidence.get("exact_quiescence_verified") is not True:
             raise ValueError("Fixture did not produce verified ownership evidence")
         if any(digest(path) != manifest["source_sha256"][path.name] for path in SOURCES):
@@ -170,8 +222,16 @@ def main() -> int:
                           "native_model_archive_host_verified": False}, sort_keys=True))
         return 0
     except (OSError, ValueError, subprocess.SubprocessError) as error:
-        print(json.dumps({"status": "failed", "fixture_root": str(root), "reason": str(error)}, sort_keys=True), file=sys.stderr)
+        failure = {"status": "failed", "synthetic_fixture": True, "fixture_root": str(root),
+                   "reason": str(error), "elapsed_seconds": time.monotonic() - entered,
+                   "execution_timeout_seconds": args.execution_timeout}
+        (root / "failure.json").write_text(json.dumps(failure, sort_keys=True, indent=2) + "\n")
+        os.chmod(root / "failure.json", 0o600)
+        print(json.dumps(failure, sort_keys=True), file=sys.stderr)
         return 1
+    finally:
+        if evidence_output:
+            export_diagnostics(root, evidence_output)
 
 
 if __name__ == "__main__":
