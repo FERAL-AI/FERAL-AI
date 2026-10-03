@@ -3284,12 +3284,13 @@ class BrainState:
         it.
         """
         from skills.impl import register_instance
+        from skills.base import BaseSkill
 
         state_ref = self
 
-        class _BrowserSkillBridge:
+        class _BrowserSkillBridge(BaseSkill):
             def __init__(self):
-                self.skill_id = skill_id
+                super().__init__(skill_id)
                 self._state = state_ref
 
             async def execute(self, endpoint_id: str, args: dict, vault: dict):

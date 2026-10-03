@@ -1,4 +1,4 @@
-"""Demonstrate the current reload ACK limitation without executing a handler."""
+"""Verify a bare SDK plugin is refused without executing a handler."""
 from __future__ import annotations
 import asyncio
 import json
@@ -45,11 +45,12 @@ def exercise(home: Path) -> dict:
     async def reload():
         async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
             response = await client.post("/api/skills/reload", params={"skill_id": Bare.name})
-            assert response.status_code == 200 and response.json()["ok"] is True
+            assert response.status_code == 409 and response.json()["ok"] is False
+            assert response.json()["code"] == "invalid_implementation"
     asyncio.run(reload())
-    assert Bare.name in registry.skills and get_implementation(Bare.name) is None
-    return {"reload_acknowledged": True, "backing_implementation_present": False,
-            "handler_executed": False, "known_loader_gap": True}
+    assert Bare.name not in registry.skills and get_implementation(Bare.name) is None
+    return {"reload_acknowledged": False, "backing_implementation_present": False,
+            "handler_executed": False, "invalid_adapter_refused": True}
 
 
 if __name__ == "__main__":

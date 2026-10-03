@@ -54,9 +54,11 @@ is returned as the existing HTTP executor's `data`, without a fabricated nested
 tool-success envelope. Duplicate/malformed tool definitions fail before hosting.
 
 See the [executable authoring examples](../../examples/sdk-authoring/README.md).
-The current runtime reload ACK is not readiness proof, especially for Python
-backing classes. Node tests separately verify the actual HTTP host and existing
-central review/executor gates; they do not start a production Brain lifespan.
+Runtime reload acknowledgement is not host reachability, account availability
+or verified tool execution. Installed Python packages now require a valid backing
+adapter before publication; shipped-manifest inventory refresh is reported
+separately. Node tests verify the actual HTTP host and existing central
+review/executor gates; they do not start a production Brain lifespan.
 
 ## Brain client
 

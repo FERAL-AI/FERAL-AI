@@ -57,12 +57,14 @@ Direct positive fresh-process walkthrough exited 0 and verified:
 - Deny with zero calls, foreign-session/reused review refusal;
 - argument and implementation bounds failure, uninstall, and stale review refusal.
 
-The direct negative probe exited 0 **confirming a remaining defect**: current
+At the original SDK publication, the direct negative probe exited 0
+**confirming a defect**: that source's
 reload returns `ok:true` for a bare FeralPlugin module, while the implementation
 lookup is absent and no handler executed. This acknowledgement is not readiness.
 The SDK adapter positive is verified separately. This negative behavior snapshot
-must be updated with the separate future truthful-loader repair; do not preserve
-the false ACK as a desired production invariant.
+is historical evidence, not a desired production invariant. The subsequent
+[registry recovery card](REGISTRY_RELOAD_RECOVERY_EVIDENCE.md) changes the negative
+probe to require refusal without activation and records separate verification.
 
 From `sdk/node`:
 
@@ -137,8 +139,9 @@ Production source SHA256 at freeze:
 ## Remaining gates and explicit limitations
 
 Core loader false ACK/import-error handling, failed replacement preservation and
-manifest/implementation identity matching remain a separately reviewed card.
-This adapter does not repair them. Marketplace/low-level installation alone does
+manifest/implementation identity matching are addressed in the separately tested
+[registry recovery card](REGISTRY_RELOAD_RECOVERY_EVIDENCE.md); the original adapter
+publication alone did not repair them. Marketplace/low-level installation alone does
 not prove active implementation or invocation. No automatic SDK dependency
 installation, boot activation, plugin lifecycle-hook execution or native SDK
 bundling was added. Uninstall may leave a cached implementation object, while

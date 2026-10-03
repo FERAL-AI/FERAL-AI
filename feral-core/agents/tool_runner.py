@@ -579,7 +579,8 @@ class ToolRunner:
 
         needs_approval = False
         if self._autonomy_mode == "strict":
-            needs_approval = not read_only_flag
+            # A read hint or tool name cannot override resolved review policy.
+            needs_approval = level == SafetyLevel.CONFIRM or not read_only_flag
         elif self._autonomy_mode == "hybrid":
             needs_approval = level == SafetyLevel.CONFIRM
         # loose: nothing needs approval

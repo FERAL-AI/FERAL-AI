@@ -57,14 +57,18 @@ Install the package using the existing runtime's package contract, then request
 credentials. Review and invoke through FERAL's existing tool path. Do not use a
 direct Python handler call as proof of FERAL authorization.
 
-**Current loader limitation:** a reload acknowledgement can succeed even when
-`impl.py` fails or exports no BaseSkill adapter. Verify the backing implementation
-and actual authorized invocation separately. A bare FeralPlugin subclass in
-`impl.py` is insufficient. Reload also is not an atomic replacement guarantee.
+Installed Python packages must export one unique BaseSkill adapter with the
+matching skill ID and an asynchronous implementation. A bare FeralPlugin
+subclass is insufficient. Reload prepares the replacement before publication;
+an invalid package or changed source preserves the working implementation.
+Cancellation or registry replacement prevents a late candidate from publishing.
+Trusted Python imports are not sandboxed or rolled back. Shipped-manifest
+inventory refresh is identified separately from installed-package replacement;
+neither acknowledgement proves account availability or a verified tool outcome.
 The executable [SDK authoring walkthrough](../../examples/sdk-authoring/README.md)
 checks installation, the actual registered reload route, actual SkillExecutor,
 Deny, foreign/reused reviews and uninstall in a disposable fresh process. Its
-negative probe preserves the current false-acknowledgement behavior visibly.
+negative probe requires an unusable bare plugin to be refused without activation.
 
 ## Key modules
 

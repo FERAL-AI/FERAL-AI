@@ -43,9 +43,11 @@ The positive result verifies sum 42 exactly once after a session/action-bound
 single-use review, Deny with zero handler invocations, foreign/reused review
 refusal, bad/bounded arguments, uninstall and refusal of an earlier review after
 uninstall. A loader ACK alone is not considered sufficient: the actual backing
-class and invocation are checked. The negative check demonstrates that a bare
-FeralPlugin class still produces a successful reload ACK with no backing class.
-That core loader defect is a separate repair, not hidden by this SDK adapter.
+class and invocation are checked. The negative check requires a bare FeralPlugin
+class to be refused without registering a manifest or backing implementation.
+Installed Python replacements are prepared and validated before publication;
+failed replacements retain the working implementation. This is not a sandbox
+or rollback guarantee for arbitrary trusted Python import effects.
 The loader currently does not call plugin load/unload lifecycle hooks, and
 uninstall does not remove every cached implementation object; registration gates
 subsequent central dispatch. Neither implementation is a malicious-code sandbox.

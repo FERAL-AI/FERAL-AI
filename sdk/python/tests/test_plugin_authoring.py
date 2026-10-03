@@ -144,13 +144,13 @@ def test_actual_registry_executor_review_walkthrough(tmp_path):
                         "bounds_refused": True, "uninstalled": True, "stale_review_no_execution": True}
 
 
-def test_current_reload_ack_does_not_certify_python_backing(tmp_path):
+def test_bare_plugin_reload_is_refused_without_python_backing(tmp_path):
     result = subprocess.run([sys.executable, str(REPO / "examples/sdk-authoring/loader_negative_check.py")],
                             cwd=tmp_path, capture_output=True, text=True, timeout=20)
     assert result.returncode == 0, result.stderr
     assert json.loads(result.stdout.splitlines()[-1]) == {
-        "reload_acknowledged": True, "backing_implementation_present": False,
-        "handler_executed": False, "known_loader_gap": True}
+        "reload_acknowledged": False, "backing_implementation_present": False,
+        "handler_executed": False, "invalid_adapter_refused": True}
 
 
 def test_container_and_boolean_hints():
