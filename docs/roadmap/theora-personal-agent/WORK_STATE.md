@@ -30,10 +30,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Core commit `90b75587a`, plus this checkpoint's SDK authoring follow-up; read actual HEAD and remote tracking before claiming publication/CI |
+| Current checkpoint | Published core `90b75587a` and executable SDK `205f468a2`; mandatory SDK CI setup and disconnect fixture correction are the next integration |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | Native worker observed2.3GiB during9.29 inference; parent subsequent df reports4.3GiB. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
+| Disk observation | Parent latest df reports8.0GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update
@@ -48,8 +48,20 @@ Node loopback plugin hosting: **112 Python tests and 82 Node tests passed**, plu
 isolated wheel import and actual central-runtime invocation using an installed
 Node tarball. [SDK authoring evidence](SDK_PLUGIN_AUTHORING_EVIDENCE.md) states
 the dependency/bundling and loader-acknowledgement limits. Both commits are being
-published to the existing draft PR. Exact latest HEAD/remote CI must be checked;
-no new-source full CI result or new packaged app is asserted here.
+published to the existing draft PR. Both are now published. Actual
+[CI37079499104](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37079499104)
+on `205f468a2` completed the backend with **12,540 passed, 1 failed, 83 skipped,
+585 warnings in831.17s; coverage74.66%**, above the unchanged50% floor. Sole
+failure is `test_web_disconnect_stops_voice`: its bare voice mock does not
+declare node ownership, so the new exact-ownership guard refuses teardown.
+The fixture repair now explicitly tests empty, bound and unknown ownership;
+108 local tests passed with production ownership checks intact. Generic Node CI passed81 tests but
+failed the real-runtime test because its Node-only job has no repository Python
+environment. The correction retains mandatory runtime testing in both installed
+brain jobs, with standalone81 unit tests and explicit validated interpreter
+selection. Local82 tests pass with no skips; corrected remote verification is
+pending. Native, web, lint and docs checks passed on205. Nonblocking mypy still
+fails **845 errors against812**. No new packaged app is asserted here.
 
 Source **634595c7194aedaf6eb9b8c91cbacb87fedea4bd** is committed/pushed.
 [CI37071282138](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37071282138)
@@ -107,20 +119,23 @@ Mandatory boot now installs the lifecycle, unknown legacy sessions remain legacy
 and managed voice/handoff/manual context mutations remain explicitly unavailable.
 No native candidate contains this working wave yet.
 
-Native saved-context source and selected linked fixtures/typecheck passed;
-Agents/Workflows/Automation/Connections task gates are a separate follow-up.
-No new native candidate has been assembled. Native worker now implements the
-approved action-specific gate design in four other feature models and tests;
-its new saved-context evidence remains separate from packaged acceptance.
-Developer worker now owns public
-Python adapter/Node loopback HTTP plugin authoring and new SDK examples/tests,
-without core edits. Memory worker now has read-only full mypy triage/new evidence
-and full-backend harness/failure investigation only. Parent owns full verification, shared docs, explicit-path Git publication
-and next candidate identity. Preserved AUDIT-FIXES.md stays excluded; all old failed
-candidate evidence stays intact. Next: finish frozen tests, resolve actual failures,
-publish the coherent core wave with the failed full run disclosed, obtain exact
-remote CI, then integrate native/SDK follow-ups and assemble
-a new exact-source candidate for real acceptance.
+Native saved-context and Agents/Workflows/Automation/Connections gates are
+implemented. Full pre-label37-feature matrix passed. The narrow
+Workflow scope-label refinement passed its affected runner:80 Workflow assertions,
+25 linked model groups,39 Desktop and5 Error assertions. Final production
+typecheck passed. Parent review then found late readback/refresh publication gaps
+in four panels; the native worker is fixing and testing those before packaging.
+The working native evidence keeps each tested revision distinct. No new candidate
+has been assembled. Developer worker prepares bounded9.30 launcher/read-only probes.
+The required local full-suite recheck is running with explicit50% coverage floor,
+PR performance exclusions and a read-only descriptor/mock observer;1261 frozen
+core files have digest39a8b055528037f4a4652d67f9372a32c4871b3fed10791be3333ae14ca7d1d8.
+See [recheck evidence](FULL_BACKEND_RECHECK_20261002.md).
+Parent owns source freeze, shared docs, explicit-path
+publication and candidate identity. Preserved AUDIT-FIXES.md stays excluded;
+historic failed candidate evidence stays intact. Next: publish coherent corrections
+and native integration, verify corrected-source remote CI and local full suite,
+then assemble/audit an exact-source9.30 candidate for actual isolated acceptance.
 
 Source **cd1571ef94aa2fe244023d56ba468f7ba3266700** is committed/pushed.
 [CI37066669634](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37066669634)

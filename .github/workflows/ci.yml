@@ -283,6 +283,18 @@ jobs:
         working-directory: .
         run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      - name: Actual Node plugin execution through the installed brain runtime
+        working-directory: sdk/node
+        run: |
+          npm ci --ignore-scripts
+          FERAL_TEST_PYTHON="$(command -v python)" npm run test:runtime
+
       - name: Run tests with coverage (50% threshold)
         # Raised from 46 → 50 alongside the pyproject.toml change.
         # Addopts there enables --cov by default, but we still pass the
@@ -370,6 +382,18 @@ jobs:
       - name: Generic Python SDK HTTP and WebSocket contracts
         working-directory: .
         run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      - name: Actual Node plugin execution through the installed brain runtime
+        working-directory: sdk/node
+        run: |
+          npm ci --ignore-scripts
+          FERAL_TEST_PYTHON="$(command -v python)" npm run test:runtime
 
       - name: Run tests with coverage (50% threshold)
         # --timeout=60 per-test ceiling: surfaces any single hanging test as a
@@ -567,7 +591,9 @@ jobs:
       - name: Install locked compiler
         run: npm ci --ignore-scripts
       - name: Compile and test SDK contracts
-        run: npm test
+        # Cross-language execution is a required brain-job step above, where
+        # Python and the locked runtime dependencies are actually installed.
+        run: npm run test:unit
 
   webui-v2-coherence:
     name: WebUI v2 — bundled asset coherence

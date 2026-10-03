@@ -171,3 +171,60 @@ Logs retained in `/private/tmp`:
 `feral-sdk-authoring-node-pack-20261002.log`,
 `feral-sdk-authoring-node-install-20261002.log`,
 `feral-sdk-authoring-node-package-runtime-20261002.log`.
+
+
+## CI placement correction after SDK publication
+
+Parent inspection of SDK commit `205f468a2b783e847acfe810e2e753d3785f89ad`
+CI Node job `111076675612` found **81 passed, 1 failed**: the cross-language fixture
+tried the repository `.venv/bin/python`, absent from the standalone Node runner,
+and spawn returned ENOENT. The earlier local82 result was valid local evidence,
+not a passing CI claim. No runtime test is removed or marked skipped.
+
+The narrow correction preserves `npm test` as all mandatory checks, adding:
+
+- `test:unit`: build plus standalone client/thread/host tests, 81 tests;
+- `test:runtime`: build plus actual central-runtime invocation fixture, one test;
+- explicit `FERAL_TEST_PYTHON` interpreter selection, defaulting to the repository
+  pinned environment only for local execution. Explicit configuration must be
+  absolute, a regular file, readable and executable, with no control characters.
+  Invalid/missing paths fail before host startup or credential handoff.
+
+Parent owns the CI workflow change: standalone Node22 runs `test:unit`; both
+`brain-tests` and `brain-tests-pr` run mandatory `test:runtime` after core dependency
+installation, Node22 setup and `npm ci`, passing the absolute active interpreter
+with `FERAL_TEST_PYTHON="$(command -v python)"`. The worker read/parsed that actual
+workflow and verified both runtime steps are mandatory, not continue-on-error,
+and use working-directory `sdk/node`. It did not edit the workflow or publish Git.
+New remote CI success is not claimed before its result arrives.
+
+Local checks used Node25.4.0; the wired remote Node22 rerun remains pending.
+Final local commands from `sdk/node`, all exited 0:
+
+```sh
+npm run test:unit
+npm test
+FERAL_TEST_PYTHON=/Users/mahmoudomar/Desktop/thoera-mac/ASOS/.venv/bin/python npm run test:runtime
+```
+
+Results: unit **81 passed, zero skipped**; all **81 unit + 1 actual runtime passed,
+zero skipped**; explicit interpreter **1 actual runtime passed, zero skipped**.
+The all command verified the default pinned interpreter on the final fixture.
+There is no changed dependency/lock, public client or production runtime source.
+`git diff --check` passed for the owned SDK paths.
+
+Seven isolated negative Node processes exercised the actual fixture with missing,
+relative, empty, directory, nonexecutable, unreadable and control-containing
+interpreter paths. Each exited nonzero with a clear interpreter diagnostic;
+a preload sentinel verified the host-start function was **never called**.
+These are intentional failure probes, not seven passing runtime integrations.
+The reproducible probe script is retained at
+`/private/tmp/feral-sdk-ci-negative-probe.py`; its result is
+`/private/tmp/feral-sdk-node-ci-repair-negative-20261002.log`.
+
+Additional final logs:
+`feral-sdk-node-ci-repair-unit-20261002.log`,
+`feral-sdk-node-ci-repair-all-20261002.log`,
+`feral-sdk-node-ci-repair-runtime-explicit-20261002.log`.
+The prior package artifact hashes above refer to the artifact check before this
+CI-script metadata change; no newly packed/published SDK is asserted by this fix.

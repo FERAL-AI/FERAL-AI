@@ -146,11 +146,25 @@ raises a bounded diagnostic. No automatic HTTP retries occur.
 
 ```sh
 npm ci
-npm test
+npm test                         # All standalone and actual-runtime checks
+npm run test:unit                # Standalone Node checks
+FERAL_TEST_PYTHON=/absolute/path/to/core/python npm run test:runtime
 ```
 
-The test runner builds the generic package and runs Node's built-in tests. Tests
-use controlled Fetch/WebSocket transports, not accounts or live model inference.
+`npm test` runs both mandatory suites. `test:unit` builds and runs the standalone
+client/thread/plugin-host tests; `test:runtime` builds and runs the actual
+FERAL executor integration. The runtime fixture requires the core dependencies
+in its Python environment and the built Node SDK. It defaults to the repository
+`.venv/bin/python` locally; CI supplies the absolute active interpreter using
+`FERAL_TEST_PYTHON`. A missing/nonabsolute/nonexecutable interpreter fails before
+a plugin host is opened; the runtime test is never silently skipped. CI runs the
+standalone suite in its Node job and the mandatory runtime suite in the Brain job
+after installing core dependencies, with Node 22 available.
+
+Standalone client tests use controlled Fetch/WebSocket transports; plugin-host
+tests use real disposable loopback sockets. The runtime test uses the actual
+central ToolRunner/SkillExecutor and a known read-only handler, not accounts or
+live model inference.
 Python SDK integration separately checks the shared protocol against the actual
 registered server, SQLite receipts and real controlled orchestration. See
 [tracked-turn evidence](../../docs/roadmap/theora-personal-agent/SDK_WEBSOCKET_EVIDENCE.md)
