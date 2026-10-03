@@ -2,6 +2,8 @@
 
 Root must provide a stable controller bound to the existing coordinator;
 no route creates another coordinator or changes the release acceptance gate.
+The passive GET reports missing optional setup with HTTP 200 and no prepare
+authority; underlying storage remains uninspected. Mutations still refuse it.
 """
 from fastapi import APIRouter, HTTPException
 from security.vault_initialization_api import VaultInitializationAPIRefusal
@@ -27,7 +29,25 @@ def create_vault_initialization_router(controller_provider):
 
     @router.get("/api/security/vault/initialize/status")
     async def status():
-        return controller().status()
+        value = controller_provider()
+        if value is None:
+            # These conservative wire fields confer no prepare authority. The
+            # missing optional controller has not inspected the underlying vault;
+            # storage_inspected and the message explicitly preserve that unknown.
+            return {
+                "supported": False,
+                "code": "initializer_not_configured",
+                "can_initialize": False,
+                "configured": False,
+                "storage_inspected": False,
+                "message": "Secure fresh-vault initialization is not configured. Credential readiness and existing vault artifacts have not been inspected. Local operation does not require initialization.",
+                "in_flight": False,
+                "credential_storage_available": False,
+                "existing_artifacts": False,
+                "requires_signed_acceptance": True,
+                "local_use_requires_vault": False,
+            }
+        return value.status()
 
     @router.post("/api/security/vault/initialize/review")
     async def review(body: dict):

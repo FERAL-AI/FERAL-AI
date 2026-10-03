@@ -3183,7 +3183,8 @@ class BrainState:
 
         ``skills/manifests/browser_use.json`` is the source of truth and is
         already loaded by ``load_builtin_skills()`` at this point. When it is
-        present we keep that manifest and only bind the bridge instance,
+        present we keep the selected registered manifest (including an
+        installed package override) and only bind the bridge instance,
         because rebuilding it from the raw dict below is LOSSY: the
         conversion carries id / method / url / description / params /
         returns_description / ui_hint and drops ``safety_tier``,
@@ -3191,7 +3192,8 @@ class BrainState:
         and ``trigger_phrases``. Overwriting the registered manifest with
         the rebuilt one therefore silently disarmed every safety
         declaration the manifest made and clamped every result back to the
-        2 000-character default tier.
+        2 000-character default tier. An intentionally empty endpoint list
+        is also valid and must not be replaced with fallback capabilities.
         """
         try:
             from skills.impl.browser_use import get_browser_skill_manifest
@@ -3206,10 +3208,10 @@ class BrainState:
             raw_manifest = get_browser_skill_manifest()
             declared_id = str(raw_manifest.get("skill_id", "browser"))
             already = self.skill_registry.skills.get(declared_id)
-            if already is not None and getattr(already, "endpoints", None):
+            if already is not None:
                 self._bind_browser_bridge(already.skill_id)
                 logger.info(
-                    "Browser skill kept from shipped manifest: %s (%d endpoints)",
+                    "Browser skill kept from registered manifest: %s (%d endpoints)",
                     already.skill_id,
                     len(already.endpoints),
                 )

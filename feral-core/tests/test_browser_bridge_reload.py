@@ -49,6 +49,62 @@ def bind(browser):
     return state, bridge
 
 
+def test_startup_preserves_valid_installed_empty_browser_manifest(tmp_path, monkeypatch):
+    from api.state import BrainState
+    from agents.tool_dispatch_validator import ToolDispatchValidator
+    from models.skill_manifest import SkillManifest
+    from skills.impl.browser_use import BROWSER_MANIFEST_PATH
+
+    monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+    package = tmp_path / "skills" / "browser"
+    package.mkdir(parents=True)
+    manifest = SkillManifest.model_validate_json(BROWSER_MANIFEST_PATH.read_bytes())
+    manifest.endpoints = []
+    manifest.description = "Installed fixture deliberately exposes no browser endpoints"
+    (package / "manifest.json").write_text(manifest.model_dump_json())
+    # The real package loader permits an empty inventory without impl.py.
+    registry = SkillRegistry()
+    registry.load_builtin_skills()
+    installed = registry.skills["browser"]
+    assert installed.description == manifest.description and installed.endpoints == []
+    assert registry.get_tools_for_skills([installed]) == []
+    assert get_implementation("browser") is None
+    terms, generation = installed.model_dump_json(), registry.generation
+    state = BrainState.__new__(BrainState)
+    state.browser = ControlledBrowser({})
+    state.skill_registry = registry
+    state._register_browser_skill()
+    assert registry.skills["browser"] is installed
+    assert installed.model_dump_json() == terms and registry.generation == generation
+    assert registry.get_tools_for_skills([installed]) == []
+    assert not any(tool["function"]["name"].startswith("browser__") for tool in registry.get_all_tools())
+    bridge = registry.get_skill("browser")
+    assert isinstance(bridge, BaseSkill) and bridge._state is state
+    refused = ToolDispatchValidator(registry=registry).validate("browser", "get_tabs", {})
+    assert not refused.ok and refused.error_code == "unknown_endpoint"
+    assert state.browser.initializations == 0 and state.browser.calls == []
+
+
+def test_startup_registers_fallback_only_when_browser_manifest_is_missing(tmp_path, monkeypatch):
+    from api.state import BrainState
+    from skills.impl import browser_use
+
+    monkeypatch.setenv("FERAL_HOME", str(tmp_path))
+    monkeypatch.setattr(browser_use, "BROWSER_MANIFEST_PATH", tmp_path / "absent-manifest.json")
+    state = BrainState.__new__(BrainState)
+    state.browser = ControlledBrowser({})
+    state.skill_registry = SkillRegistry()
+    assert "browser" not in state.skill_registry.skills
+    state._register_browser_skill()
+    manifest = state.skill_registry.skills["browser"]
+    expected = {endpoint["id"] for endpoint in browser_use._fallback_browser_manifest()["endpoints"]}
+    assert {endpoint.id for endpoint in manifest.endpoints} == expected and expected
+    assert len(state.skill_registry.get_tools_for_skills([manifest])) == len(expected)
+    bridge = state.skill_registry.get_skill("browser")
+    assert isinstance(bridge, BaseSkill) and bridge._state is state
+    assert state.browser.initializations == 0 and state.browser.calls == []
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("result,success,error", [
     ({"tabs": ["controlled"]}, True, None),

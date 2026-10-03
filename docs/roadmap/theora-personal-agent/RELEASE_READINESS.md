@@ -1,15 +1,29 @@
 # Theora / FERAL full-product release readiness
 
-Latest published source is `d2158fc6a88586aa443f5adf24e471ee7a90d29f`;
-required CI/native passed, including12,654 backend tests/83 skipped/74.77%
-coverage and Python SDK112. Its non-blocking mypy remained818 versus812.
-The working completion wave adds explicit interrupted-context recovery, reviewed
-cloud setup and offline profile archives. Final integrated570 tests passed;
-frozen full local mypy811 versus812 satisfies the aggregate local ratchet,
-zero added/seven removed versus d215. Native journal fixtures,26 linked-model
-groups and production typecheck passed on87 frozen inputs. Candidate assembly,
-actual GUI and current-source remote verification are pending at this checkpoint.
+Latest published source is `2d6839ab49cc570959cc3b9057181b0b6c3eba3e`.
+The completion wave implements explicit interrupted-context recovery with a
+native durable journal, reviewed cloud setup and offline profile archives.
+Integrated local backend checks: 570 passed. Current PR native checks passed;
+the unchanged type ratchet passed with 811 diagnostics against baseline 812.
+The full backend CI has one attributable failure: optional vault setup status
+returned 503; 12,749 other tests passed, 83 skipped, coverage 74.88%.
+That status-contract correction passed the unchanged real route sweep locally
+and needs corrected-head CI. No overall CI success is claimed for 2d6839.
+
+Assembled **9.31/build2026100205** contains that exact source: all 484 production
+Python files match; build, strict ad-hoc signature and bounded runtime audit
+passed. Actual packaged backend Stop/recovery/restart/real local-model recall
+passed with an explicit empty-tool disposable profile, no replay, four terminal
+receipts and clean owned-process shutdown. Two failed attempts are retained.
+Actual 9.31 GUI remains blocked by the Computer Use native-pipe failure.
+[Candidate evidence](NATIVE_9_31_ACCEPTANCE.md).
 [Completion evidence](COMPLETION_WAVE_EVIDENCE.md).
+
+## Earlier source and candidate checkpoints
+
+Published `d2158fc6a` required CI/native passed with 12,654 backend tests,
+83 skipped and 74.77% coverage; its mypy 818 exceeded baseline 812. These results
+remain historical and do not certify the later completion wave.
 
 The preceding published integration source is `dd69c7bf5175517966a363591fa8137782358535`.
 The required local backend run passed **12,576 tests,50 skipped,75.03% coverage**

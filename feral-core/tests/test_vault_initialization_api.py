@@ -1,6 +1,5 @@
 """9.20 reviewed initialization tests with fake OS and real AEAD/disk."""
 
-import asyncio
 import base64
 import json
 import threading
@@ -14,7 +13,6 @@ from fastapi import FastAPI
 from api.routes.vault_initialization import create_vault_initialization_router
 from security.vault_coordinator import (
     VaultCoordinator,
-    initialization_factory,
     _Unavailable,
 )
 from security.vault_initialization_api import (
@@ -75,6 +73,57 @@ def test_linux_has_no_automatic_weaker_fallback(setup):
     with pytest.raises(VaultInitializationAPIRefusal):
         unsupported.review()
     assert adapter.adds == 0
+
+
+@pytest.mark.asyncio
+async def test_optional_unconfigured_status_answers_without_inspection_or_prepare_authority(monkeypatch):
+    storage = Mock(side_effect=AssertionError("must not inspect vault artifacts"))
+    coordinator_status = Mock(side_effect=AssertionError("must not inspect vault readiness"))
+    keychain = Mock(side_effect=AssertionError("must not query OS key storage"))
+    monkeypatch.setattr(VaultInitializationAPI, "_storage_snapshot", storage)
+    monkeypatch.setattr(VaultCoordinator, "status", coordinator_status)
+    monkeypatch.setattr("security.vault._macos_default_keychain_state", keychain)
+    provider = Mock(return_value=None)
+    app = FastAPI()
+    app.include_router(create_vault_initialization_router(provider))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        response = await client.get("/api/security/vault/initialize/status")
+        assert response.status_code == 200
+        status = response.json()
+        assert status["code"] == "initializer_not_configured"
+        assert status["supported"] is status["can_initialize"] is status["configured"] is False
+        assert status["storage_inspected"] is status["local_use_requires_vault"] is False
+        assert "have not been inspected" in status["message"]
+        assert not (status["supported"] and status["code"] == "available")
+        provider.assert_called_once_with()
+        for endpoint, body in [
+            ("/review", {}), ("", {"review_token": "a55f2162-52c4-42a0-8c0c-c4f77b867bdb"}),
+            ("/cancel", {"review_token": "a55f2162-52c4-42a0-8c0c-c4f77b867bdb"}),
+        ]:
+            refused = await client.post("/api/security/vault/initialize" + endpoint, json=body)
+            assert refused.status_code == 503
+            assert refused.json()["detail"]["code"] == "initializer_not_configured"
+    storage.assert_not_called()
+    coordinator_status.assert_not_called()
+    keychain.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_disabled_release_gate_status_answers_but_review_stays_refused(setup):
+    _, coordinator, adapter, path = setup
+    gated = VaultInitializationAPI(coordinator, path, platform="darwin")
+    app = FastAPI()
+    app.include_router(create_vault_initialization_router(lambda: gated))
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://127.0.0.1") as client:
+        response = await client.get("/api/security/vault/initialize/status")
+        assert response.status_code == 200
+        status = response.json()
+        assert status["code"] == "release_acceptance_required"
+        assert not status["supported"] and status["requires_signed_acceptance"]
+        refused = await client.post("/api/security/vault/initialize/review", json={})
+        assert refused.status_code == 409
+        assert refused.json()["detail"]["code"] == "release_acceptance_required"
+    assert adapter.adds == 0 and list(path.parent.iterdir()) == []
 
 
 @pytest.mark.asyncio

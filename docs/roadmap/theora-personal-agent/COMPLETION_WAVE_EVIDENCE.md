@@ -1,7 +1,9 @@
 # Native daily-use completion wave
 
-October 2, 2026. This report distinguishes the working-source integration from
-published-source CI and the installed candidate. It records completed checks,
+October 2, 2026. Source `2d6839ab49cc570959cc3b9057181b0b6c3eba3e` is
+published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
+This report distinguishes source integration, remote CI and the assembled
+candidate. It records completed checks,
 not a production-release declaration or a delivery forecast.
 
 ## Changes in this wave
@@ -24,7 +26,7 @@ See [recovery source tests](../../../feral-core/tests/test_runtime_context_recov
 The parent ran the frozen combined backend integration with the pinned interpreter
 and disposable FERAL_HOME/FERAL_DATA_HOME under an isolated temporary profile:
 
-**570 tests passed,19 warnings in18.99 seconds**, exit0. This includes runtime
+**570 tests passed, 19 warnings in 18.99 seconds**, exit 0. This includes runtime
 checkpoint recovery/lifecycle/activation/ingress/storage, central authorization and
 exact approvals, executor admission and task identity, tracked-turn cancellation,
 pending-review behavior, workflow dispatch, profile archive and vault/release
@@ -38,24 +40,25 @@ physical-device actions or native GUI operation.
 
 This final run includes the profile-archive correction that converts temporary-file
 creation failure into a typed refusal, with two missing-destination API/CLI tests.
-The earlier568-test run remains historical evidence for the preceding source.
+The earlier 568-test run remains historical evidence for the preceding source.
 
 ## Frozen type result
 
 The configured fresh-cache whole-core mypy measurement reported **811 diagnostics
-in233 files,1,269 source files checked**. Diagnostic exit was1; the unchanged
-aggregate count ratchet is satisfied locally because811 <=812. This is neither
-zero type errors nor a current-source Linux CI result.
+in 233 files, 1,269 source files checked**. Diagnostic exit was 1; the unchanged
+aggregate count ratchet is satisfied because 811 <= 812. The current PR's Ubuntu
+mypy job also passed with the same normalized diagnostics. Existing errors
+remain; an aggregate ratchet pass is not zero type errors.
 
-Before/after input manifests contained1,273 files and matched aggregate SHA-256
+Before/after input manifests contained 1,273 files and matched aggregate SHA-256
 `05f734ffd8effc15a3cc579b8e70c2a18e028deb6b4e73a9049eaac596e9e487`.
 Normalized exact-message/multiplicity comparison found zero added and seven
-removed diagnostics versus the published d215 result of818. Compared with the
-tracked baseline,15 added and16 removed occurrences remain, net-1. The lower
+removed diagnostics versus the published d215 result of 818. Compared with the
+tracked baseline, 15 added and 16 removed occurrences remain, net -1. The lower
 aggregate count does not erase those remaining messages. Configuration and the
 tracked baseline were not changed.
 
-This final fresh-cache measurement took13.67 seconds and includes the archive
+This final fresh-cache measurement took 13.67 seconds and includes the archive
 error-path correction. Logs and before/after manifests use the prefix
 `/private/tmp/feral-completion-final-mypy-20261002`.
 [Type evidence](TYPE_RELEASE_GATE_EVIDENCE.md) preserves the earlier measurement,
@@ -72,21 +75,45 @@ checks passed on that source. Its non-blocking mypy job still reported818 agains
 [Exact prior-source CI](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37086090592),
 [prior-source native checks](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37086090563).
 
-These results do not cover the new recovery, cloud setup, archive or type changes.
-Current-source remote CI remains pending publication/verification. Skipped live
-browser/Linux jobs and earlier GUI failures remain separate evidence.
+These historical results do not cover the new recovery, cloud setup, archive or
+type changes. Current-source verification is recorded separately below. Skipped
+live browser/Linux jobs and earlier GUI failures remain separate evidence.
+
+## Current PR verification
+
+[CI 37095062677](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37095062677)
+and [native 37095062634](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37095062634)
+belong to PR head `2d6839ab49cc570959cc3b9057181b0b6c3eba3e`.
+The workflow checkout is synthetic PR merge
+`2d8a28713f7dd936ded739067e9823bef2b8b2c5`, combining that head with main
+`452a012557d06274063b72546433257b4694d611`.
+
+Confirmed terminal results: native workflow success; mypy ratchet success with
+811 diagnostics; web coverage 1,358 tests in 171 files, 65.5% statements and
+68.79% lines; API-stubbed Playwright 107 passed. Python/Node SDK, extension,
+registry, Ruff/syntax/architecture, assets, naming/version and documentation
+checks passed. Live-brain and main-only Linux matrix jobs were skipped.
+
+The full backend job **failed**: 12,749 passed, 1 failed, 83 skipped,
+599 warnings in 891.75 seconds; coverage 74.88% exceeds the unchanged 50% floor.
+The sole failure is the authenticated GET-route sweep: the newly registered
+optional vault-initialization status returned 503 when its controller was absent.
+The sweep observed 143 routes, 142 answers, one failure and zero timeouts. This
+is an attributable status-contract regression; overall CI is not green.
+A source correction must report passive unavailability without granting setup
+authority and retain mutation refusal. Its new-head checks remain separate.
 
 ## Native artifact and remaining acceptance
 
-The frozen9.30/build2026100204 app still contains source
+The preserved 9.30/build2026100204 app contains source
 `dd69c7bf5175517966a363591fa8137782358535`; it does not contain this working wave.
 Its earlier real packaged-backend replies, memory restart and cancellation checks
 remain valid for that artifact. They cannot certify a subsequently assembled app.
 
 Final production native typecheck and the selected ContextCheckpoint, VaultSetup,
 Vault, OnboardingSetup, ChatTurn, Conversation, ChatTools and SessionRecovery
-runner passed, including **26 linked-model groups**,39 desktop assertions and
-5 error-presentation assertions. All87 native source/test inputs stayed unchanged
+runner passed, including **26 linked-model groups**, 39 desktop assertions and
+5 error-presentation assertions. All 87 native source/test inputs stayed unchanged
 during verification; manifest digest:
 `c6c5c4cacb8dcad971d59313cb4ff336d60c4cbbed3d9c91cfe6e54d74122911`.
 Logs: `/private/tmp/feral-native-9-31-final-tests.log` and
@@ -103,11 +130,28 @@ cooperating app instances; it is not signed storage or protection against a
 hostile same-user filesystem writer. Duplicate JSON keys are not explicitly
 rejected by the decoder.
 
-An exact-source9.31 candidate and actual current GUI acceptance remain pending
-at this checkpoint. Developer-ID signing/notarization,
+A new **2026.9.31/build2026100205** candidate contains the published source above.
+All 484 production Python files match that commit. Build, strict ad-hoc signature,
+bounded bundle/runtime audit and packaged-source checks passed. The audit found
+13,095 files, 265 Mach-O objects and 9 internal symlinks; bundled Python 3.11.15,
+SQLite 3.53.1/FTS5 and OpenCode 1.18.10 passed their runtime probes.
+
+Executable SHA-256:
+`ccf2fa65bec6a0caf4bd88c9cd69515533ec82e91908006f11c808502b31fedb`.
+[Candidate acceptance](NATIVE_9_31_ACCEPTANCE.md) records actual outcomes,
+including failed attempts. Current GUI acceptance is blocked by Computer Use
+native-pipe startup failure. Developer-ID signing/notarization,
 clean-machine installation/update/rollback, populated-profile migration, real
 provider/audio and enabled account/device acceptance remain independent gates.
 There was no merge, release or public binary distribution in this evidence card.
+
+The following frozen source wave corrects that CI status failure, intentional
+empty-browser startup preservation and native voice admission/origin checks.
+Combined386 backend tests, native voice37/configuration45/vault33 plus linked26,
+production typecheck and the unchanged811 type ratchet passed locally.
+See [hardening evidence](NATIVE_CONTRACT_HARDENING_EVIDENCE.md). The preserved
+9.31 artifact and its accepted recovery journey do not contain those later fixes;
+9.32 assembly and corrected-head CI remain separate acceptance steps.
 
 Gen-UI expansion is deferred. Coding-engine expansion follows dependable setup,
 chat/recovery, voice and data continuity. Existing coding capabilities remain

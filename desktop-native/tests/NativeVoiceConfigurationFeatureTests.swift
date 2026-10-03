@@ -5,7 +5,7 @@ private final class SpeechSettingsWire: URLProtocol {
     static var calls: [(String, String, [String: Any])] = []
     static var config: [String: Any] = ["audio": ["realtime_providers": ["gemini_live", "openai_realtime"], "chained_fallback": ["stt_provider": "deepgram", "tts_provider": "elevenlabs"], "future_audio": true, "opaque_private": "fixture-secret-sentinel"], "voice": ["chained": ["stt_provider": "groq_whisper", "tts_provider": "elevenlabs", "opaque": ["retain": true, "private": "fixture-secret-sentinel"]]], "unrelated": "keep"]
     static var wake: [String: Any] = ["enabled": false, "supported": true, "phrase": "hey feral", "effective_phrase": "hey jarvis", "detector": "fixture"]
-    static var probeOK = false, failWrite = false, hostileVerdict = false, networkFailure = false, toggleDetectorChange = false, hook: (() -> Void)?
+    static var probeOK = false, failWrite = false, hostileVerdict = false, networkFailure = false, toggleDetectorChange = false, foreignResponse = false, hook: (() -> Void)?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -28,7 +28,7 @@ private final class SpeechSettingsWire: URLProtocol {
         default: result = ["error": "unexpected request"]
         }
         Self.hook?(); Self.hook = nil
-        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!, cacheStoragePolicy: .notAllowed)
+        client?.urlProtocol(self, didReceive: HTTPURLResponse(url: Self.foreignResponse ? URL(string: "http://127.0.0.1:29998/foreign")! : request.url!, statusCode: 200, httpVersion: nil, headerFields: [:])!, cacheStoragePolicy: .notAllowed)
         client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: result)); client?.urlProtocolDidFinishLoading(self)
     }
     override func stopLoading() {}
@@ -118,6 +118,11 @@ private final class SpeechSettingsWire: URLProtocol {
         let guardDelegate = NativeVoiceConfigurationRedirectGuard(); let guardedSession = NativeVoiceConfigurationRedirectGuard.session(); let req = URLRequest(url: URL(string: "http://127.0.0.1:19998/api/config/update")!); let task = guardedSession.dataTask(with: req); var accepted = true
         guardDelegate.urlSession(guardedSession, task: task, willPerformHTTPRedirection: HTTPURLResponse(url: req.url!, statusCode: 307, httpVersion: nil, headerFields: [:])!, newRequest: URLRequest(url: URL(string: "https://remote.invalid")!)) { accepted = $0 != nil }
         check(!accepted, "redirect cannot replay saved settings off origin"); task.cancel(); guardedSession.invalidateAndCancel()
+        SpeechSettingsWire.foreignResponse = true
+        let foreignReply = NativeVoiceConfigurationModel(baseURL: URL(string: "http://127.0.0.1:19998")!, session: session)
+        await foreignReply.refresh()
+        check(foreignReply.config == nil && foreignReply.status == nil && foreignReply.wake == nil && foreignReply.errors.count == 3, "responses from another origin cannot establish voice settings or readiness")
+        SpeechSettingsWire.foreignResponse = false
         print("NativeVoiceConfigurationFeatureTests PASS \(count) assertions; no live probes, mic, providers or accounts")
     }
 }

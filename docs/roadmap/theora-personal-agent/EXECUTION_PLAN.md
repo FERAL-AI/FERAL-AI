@@ -14,16 +14,18 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Published source `d2158fc6a88586aa443f5adf24e471ee7a90d29f` is in
-[draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Exact-source
-[required CI37086090592](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37086090592)
-and [native37086090563](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37086090563)
-passed. Backend:12,654 passed/83 skipped/74.77% coverage; Python SDK112 passed.
-Mypy remains818 against the unchanged812 baseline. Packaged9.30 still contains
-`dd69c7bf5`, not the later extension/approval/type repairs. Its real isolated
-backend restart/recall/cancellation checks passed; current GUI acceptance is
-blocked by the Computer Use native pipe startup failure. Earlier artifacts and
-failed runs below remain historical evidence.
+Published source `2d6839ab49cc570959cc3b9057181b0b6c3eba3e` is in
+[draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
+Native workflow and the unchanged type ratchet passed; mypy 811 against 812.
+Full backend CI failed only optional vault status: 12,749 passed, one failed,
+83 skipped, 74.88% coverage. The source correction passes the unchanged actual
+route sweep locally; new-head verification is required.
+Packaged 9.31 contains exact 2d6839 source. Its actual isolated Stop → recovery →
+real local-model recall → restart → recall journey passed without task replay.
+GUI acceptance remains blocked by Computer Use native-pipe startup failure.
+See [completion evidence](COMPLETION_WAVE_EVIDENCE.md) and
+[candidate acceptance](NATIVE_9_31_ACCEPTANCE.md). Earlier artifacts and failed
+runs below remain historical evidence.
 
 ## Active completion wave
 
@@ -34,10 +36,10 @@ No speculative calendar deadline or source-only completion claim closes a gate.
 
 | Owner | Exclusive workstream | Required outcome |
 |---|---|---|
-| Context worker | Runtime checkpoint/activation recovery and focused tests | Explicit exact-owner recovery after Stop; retain saved context and uncertain outcomes; no automatic task replay; restart/concurrency/stale-review tests |
-| Onboarding worker | Existing vault initializer/router/state and native setup/provider views | Reviewed secure fresh setup, cancellation and independent outcome readback; preserve existing vaults; trusted signed release acceptance stays distinct from fixture proof |
-| Integration worker | Attributable type repairs in mesh, multi-agent and places modules | Precise types without baseline inflation or weakened behavior; targeted runtime tests and exact-source ratchet measurement |
-| Parent | Native recovery presentation, shared integration, checkpoint, Git and final assembly | Wire verified contracts, integrate sequentially, freeze/test sources, package their exact runtime, then actual app and installation acceptance |
+| Context/acceptance worker | Completed recovery source and actual packaged probe | Backend Stop/recovery/restart recall passed; durable native journal fixture checks passed; actual GUI remains separate |
+| Voice worker | NativeVoiceFeature/Configuration and owned tests | Reproduced pre-ACK media, missing session/wrong provider and foreign configuration-origin gaps; bounded fixes and focused verification; managed voice guard remains until checkpoint/attempt authority exists |
+| Integration worker | Optional vault status and browser boot registration/tests | Passive unsupported status answers without initialization authority; preserve valid installed empty browser manifest instead of reinstating fallback tools |
+| Parent | Shared integration, native vault compatibility fixture, evidence/Git and final assembly | Freeze tested source, publish coherent commits, verify corrected-head CI, assemble an exact-source candidate and perform enabled app journeys |
 
 Each completed workstream moves to the next ready card. Physical device,
 account and signed-distribution dependencies must not stall independent source

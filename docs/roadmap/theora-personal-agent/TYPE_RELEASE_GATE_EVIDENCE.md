@@ -148,3 +148,14 @@ unavailable; their authorization/availability was not inspected.
 Developer-ID signing/notarization, signed vault operation, clean-machine install,
 migration/update/rollback and physical account/device acceptance remain separate
 release gates. No binary was rebuilt, distributed or published by this card.
+
+## Current PR type confirmation
+
+PR head `2d6839ab49cc570959cc3b9057181b0b6c3eba3e` passed the unchanged
+812-count mypy ratchet in [CI 37095062677](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37095062677),
+job 111123204458. Actual result: **811 diagnostics in 233 files; 1,269 checked**.
+Normalized exact messages match the final frozen local measurement. The workflow
+checked synthetic merge `2d8a28713f7dd936ded739067e9823bef2b8b2c5` with main
+`452a012557d06274063b72546433257b4694d611`. This confirms the aggregate gate,
+not zero errors or every other CI job: the backend route sweep on that head
+failed independently as recorded in [completion evidence](COMPLETION_WAVE_EVIDENCE.md).

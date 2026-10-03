@@ -256,8 +256,13 @@ struct NativeVoiceTranscript: Identifiable {
         }
     }
     func handle(frame: [String: Any]) async {
-        guard connected, let sessionID, frame["session_id"] as? String == nil || frame["session_id"] as? String == sessionID, !["off", "ended", "authorizing"].contains(state) else { return }
+        guard connected, let sessionID, frame["session_id"] as? String == sessionID, !["off", "ended", "authorizing"].contains(state) else { return }
         let type = frame["type"] as? String ?? "", payload = frame["payload"] as? [String: Any] ?? [:]
+        // Status may precede configuration acknowledgment. Media never may:
+        // queued frames from an earlier run must not play while a new run waits.
+        if ["voice_state", "transcript", "speech_started", "audio_response", "audio_delta", "tts_chunk"].contains(type) {
+            guard captureRunning, ["active", "degraded"].contains(state) else { return }
+        }
         switch type {
         case "voice_interrupt_ack":
             guard awaitingInterrupt else { return }; awaitingInterrupt = false
@@ -269,7 +274,8 @@ struct NativeVoiceTranscript: Identifiable {
             else { diagnostic = "Local playback stopped; remote cancellation is not confirmed (\(status))." }
         case "voice_config_ack":
             guard state == "starting" else { return }
-            guard payload["status"] as? String == "ok", payload["mode"] as? String == requestedMode else { fail("The agent refused or mismatched the voice configuration."); return }
+            guard payload["status"] as? String == "ok", payload["mode"] as? String == requestedMode,
+                  payload["provider"] as? String == requestedProvider else { fail("The agent refused or mismatched the voice configuration."); return }
             acknowledgedProvider = payload["provider"] as? String
             acknowledgmentDeadline?.cancel(); acknowledgmentDeadline = nil
             let current = generation

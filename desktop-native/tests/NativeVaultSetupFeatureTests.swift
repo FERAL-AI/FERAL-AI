@@ -72,6 +72,11 @@ private final class SetupFixture:URLProtocol {
         for code in ["release_acceptance_required","vault_artifacts_present","key_already_present","platform_unsupported"] {
             SetupFixture.reset();SetupFixture.state=SetupFixture.status(code);await model.refresh();let blocked=await model.prepareReview();check(blocked==nil && writes==0 && !model.canPrepare,"blocked "+code+" remains available only for local use")
         }
+        SetupFixture.reset();SetupFixture.state=["supported":false,"code":"initializer_not_configured","can_initialize":false,"configured":false,"storage_inspected":false,"in_flight":false,"credential_storage_available":false,"existing_artifacts":false,"requires_signed_acceptance":true,"local_use_requires_vault":false]
+        await model.refresh()
+        check(model.status?.code=="initializer_not_configured" && model.error==nil,"optional unavailable service is a readable status")
+        let unavailable=await model.prepareReview()
+        check(unavailable==nil && !model.canPrepare && writes==0 && SetupFixture.requests.allSatisfy{$0.httpMethod=="GET"},"uninspected unavailable status cannot mint or dispatch initialization review")
         SetupFixture.reset();SetupFixture.foreign=true;await model.refresh();check(model.error != nil && writes==0,"foreign response cannot establish authority")
         SetupFixture.reset();await model.refresh();let old=await model.prepareReview()!;SetupFixture.delay=true
         let task=Task{await model.confirm(old)}
