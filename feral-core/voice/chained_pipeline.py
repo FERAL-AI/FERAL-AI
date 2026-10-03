@@ -41,9 +41,9 @@ together they were most of the turn:
 
 Barge-in
 --------
-:meth:`cancel` stops the turn in flight: the LLM task, the sentence
-queue, the in-flight synthesis and the audio already queued on the
-client. The chained path had no such thing, so a user who started
+:meth:`interrupt_output` stops speech while the agent command continues.
+Explicit :meth:`cancel` and session teardown still cancel the whole turn.
+The chained path previously had no such distinction, so a user who started
 talking over a wrong answer had to listen to all of it.
 """
 
@@ -125,8 +125,17 @@ class ChainedSession:
     # Fires the end-of-utterance flush when the client stops sending
     # audio and nothing faster has already ended the utterance.
     _silence_task: asyncio.Task | None = field(default=None, repr=False)
-    # The turn itself, as a cancellable unit. Barge-in cancels this.
+    # Explicit task cancellation/Stop owns the whole turn. Barge-in only
+    # interrupts its speech output, so an already-running command can finish.
     _turn_task: asyncio.Task | None = field(default=None, repr=False)
+    _speech_task: asyncio.Task | None = field(default=None, repr=False)
+    _output_interrupted: bool = False
+    # Coalesce overlapping endpoint signals; audio/transcript data remains
+    # in the existing provider buffers, never in a second command queue.
+    _queued_flush: bool = False
+    _queued_source: str = ""
+    _turn_input_count: int = 0
+    _turn_failed: bool = False
     _last_audio_ts: float = 0.0
     # Final transcript text handed over by the STT consumer task,
     # waiting to be picked up by the next flush.
@@ -351,8 +360,10 @@ class ChainedVoicePipeline:
         """Run the VAD over one chunk. Returns True on end-of-speech.
 
         Also owns barge-in: speech detected while the assistant is
-        talking cancels the turn.
+        talking interrupts speech without cancelling its command.
         """
+        if self._sessions.get(session.session_id) is not session:
+            return False
         endpointer = session._endpointer
         if endpointer is None or not audio_bytes:
             return False
@@ -383,7 +394,7 @@ class ChainedVoicePipeline:
                         "Barge-in on session %s (%s)",
                         session.session_id[:8], session.state.value,
                     )
-                    await self.cancel(session.session_id, reason="barge_in")
+                    await self.interrupt_output(session.session_id, reason="barge_in")
             elif event == VadEvent.SPEECH_END:
                 session._vad_speaking = False
                 ended = True
@@ -479,28 +490,57 @@ class ChainedVoicePipeline:
         The VAD path passes False because it runs on the audio ingest
         path, which must not stall for the length of a reply.
 
-        ``asyncio.wait`` rather than ``await task`` on purpose: a
-        barge-in that cancels the turn must not raise ``CancelledError``
+        ``asyncio.wait`` rather than ``await task`` on purpose: an
+        explicit cancellation of the turn must not raise ``CancelledError``
         out of whichever coroutine happened to be waiting on it.
         """
+        if self._sessions.get(session.session_id) is not session:
+            return
         existing = session._turn_task
         if existing is not None and not existing.done():
+            if session._pending_finals or session._chunk_count > session._turn_input_count:
+                if not session._queued_flush:
+                    session._queued_source = source
+                session._queued_flush = True
             if wait:
                 await asyncio.wait({existing})
             return
+        task = self._start_turn(session, source)
+        if wait:
+            await asyncio.wait({task})
+
+    def _start_turn(self, session: ChainedSession, source: str) -> asyncio.Task:
         # Recorded only by the driver that actually opens the turn.
         # Setting it at the call sites let a later loser (usually the
         # silence-timer backstop) overwrite the winner and the bench
         # then credited the wrong endpointer.
         session.last_endpoint_source = source
+        session._queued_flush = False
+        session._queued_source = ""
+        session._turn_input_count = session._chunk_count
+        session._turn_failed = False
         task = asyncio.create_task(self._flush_pipeline(session))
         session._turn_task = task
-        if wait:
-            await asyncio.wait({task})
+
+        def drain_endpoint(completed: asyncio.Task) -> None:
+            # Only the live exact session/turn may admit buffered new speech.
+            # Failures and explicit cancellation never replay queued work.
+            if self._sessions.get(session.session_id) is not session or session._turn_task is not completed:
+                return
+            queued, source = session._queued_flush, session._queued_source
+            session._queued_flush = False
+            session._queued_source = ""
+            if (queued and not completed.cancelled() and completed.exception() is None
+                    and not session._turn_failed and not session._cancelled
+                    and (session._pending_finals or session._chunk_count > session._turn_input_count)):
+                self._start_turn(session, source)
+
+        task.add_done_callback(drain_endpoint)
+        return task
 
     async def _flush_pipeline(self, session: ChainedSession) -> None:
         """Run the full STT -> LLM -> TTS chain for accumulated audio."""
-        if session._flushing:
+        if self._sessions.get(session.session_id) is not session or session._flushing:
             # Several drivers (VAD end-of-speech + provider
             # end-of-speech + silence timer + an explicit is_final) can
             # land on the same utterance. First one through owns it;
@@ -509,6 +549,7 @@ class ChainedVoicePipeline:
             return
         session._flushing = True
         session._cancelled = False
+        session._output_interrupted = False
         session._audio_seq = 0
         session.last_turn_started = time.monotonic()
         self._cancel_silence_timer(session)
@@ -546,13 +587,17 @@ class ChainedVoicePipeline:
             await self._set_state(session, VoiceState.IDLE)
 
         except asyncio.CancelledError:
-            # Barge-in. Not an error: the user interrupted on purpose,
-            # and the state was already moved by ``cancel``.
+            session._turn_failed = True
+            self._cancel_silence_timer(session)
+            # Explicit cancellation/Stop. Speech-only interruption leaves
+            # this command running and never enters this path.
             logger.debug(
                 "Chained turn cancelled for session %s", session.session_id[:8]
             )
             return
         except Exception as exc:
+            session._turn_failed = True
+            self._cancel_silence_timer(session)
             logger.exception("Chained pipeline error for session %s", session.session_id[:8])
             await self._set_state(session, VoiceState.ERROR, error=str(exc))
             await self._set_state(session, VoiceState.IDLE)
@@ -626,7 +671,15 @@ class ChainedVoicePipeline:
         collector = DeltaCollector() if tap is not None else None
 
         speech_queue: asyncio.Queue = asyncio.Queue()
-        speaker = asyncio.create_task(self._speech_consumer(session, speech_queue))
+        owner = asyncio.current_task()
+        speaker = asyncio.create_task(self._speech_consumer(session, speech_queue, owner))
+        session._speech_task = speaker
+
+        def clear_speaker(completed: asyncio.Task) -> None:
+            if session._speech_task is completed:
+                session._speech_task = None
+
+        speaker.add_done_callback(clear_speaker)
 
         # How much text is worth one synthesis request is a property of
         # the engine, not of the language. macOS ``say`` pays roughly a
@@ -656,7 +709,8 @@ class ChainedVoicePipeline:
                 try:
                     async for delta in collector.stream():
                         for chunk in accumulator.push(delta):
-                            await speech_queue.put(chunk)
+                            if self._speech_allowed(session, owner):
+                                await speech_queue.put(chunk)
                     # Surface an LLM failure rather than answering with
                     # silence: the caller turns it into an error state.
                     await llm_task
@@ -669,7 +723,7 @@ class ChainedVoicePipeline:
                         ):
                             await llm_task
                 tail = accumulator.flush()
-                if tail:
+                if tail and self._speech_allowed(session, owner):
                     await speech_queue.put(tail)
                 response_text = accumulator.full_text()
 
@@ -687,7 +741,8 @@ class ChainedVoicePipeline:
                 response_text = self._extract_last_response(session)
                 split_kwargs = {"min_chars": int(min_chars)} if min_chars else {}
                 for chunk in split_sentences(response_text, **split_kwargs):
-                    await speech_queue.put(chunk)
+                    if self._speech_allowed(session, owner):
+                        await speech_queue.put(chunk)
         except asyncio.CancelledError:
             speaker.cancel()
             with contextlib.suppress(asyncio.CancelledError):
@@ -704,7 +759,12 @@ class ChainedVoicePipeline:
                 collector.close()
 
         await speech_queue.put(None)
-        await speaker
+        # Cancelling speech is not cancellation of the command that produced
+        # it. Caller/Stop cancellation still propagates through gather.
+        result = (await asyncio.gather(speaker, return_exceptions=True))[0]
+        if isinstance(result, BaseException):
+            if not (isinstance(result, asyncio.CancelledError) and session._output_interrupted):
+                raise result
         return response_text
 
     def _tap_for(self, llm_handle: Any):
@@ -720,8 +780,13 @@ class ChainedVoicePipeline:
             self._taps[key] = tap
         return tap
 
+    def _speech_allowed(self, session: ChainedSession, owner: asyncio.Task | None) -> bool:
+        return (self._sessions.get(session.session_id) is session
+                and session._turn_task is owner
+                and not session._cancelled and not session._output_interrupted)
+
     async def _speech_consumer(
-        self, session: ChainedSession, queue: asyncio.Queue
+        self, session: ChainedSession, queue: asyncio.Queue, owner: asyncio.Task | None
     ) -> None:
         """Synthesise queued sentences in order and emit their audio.
 
@@ -735,16 +800,18 @@ class ChainedVoicePipeline:
                 chunk = await queue.get()
                 if chunk is None:
                     break
+                if not self._speech_allowed(session, owner):
+                    break
                 if not chunk.strip():
                     continue
                 if not spoke:
                     spoke = True
                     await self._set_state(session, VoiceState.SPEAKING)
-                await self._speak_chunk(session, chunk)
+                await self._speak_chunk(session, chunk, owner)
         except asyncio.CancelledError:
             raise
         finally:
-            if spoke and not session._cancelled:
+            if spoke and self._speech_allowed(session, owner):
                 # Sentinel close frame so the client knows the TTS turn
                 # is complete. data_b64="" matches the existing wire
                 # protocol (``queueAudioPlayback`` no-ops on empty /
@@ -752,6 +819,7 @@ class ChainedVoicePipeline:
                 await self._emit_audio_chunk(
                     session, "", chunk_index=session._audio_seq, is_final=True,
                     encoding=self._tts_encoding(session),
+                    owner=owner,
                 )
 
     def _tts_encoding(self, session: ChainedSession) -> str:
@@ -777,7 +845,7 @@ class ChainedVoicePipeline:
         except (TypeError, ValueError):
             return DEFAULT_TTS_SAMPLE_RATE
 
-    async def _speak_chunk(self, session: ChainedSession, text: str) -> None:
+    async def _speak_chunk(self, session: ChainedSession, text: str, owner: asyncio.Task | None) -> None:
         """Synthesise one sentence and emit it.
 
         PCM providers stream: every ``PCM_CHUNK_BYTES`` goes out as its
@@ -791,23 +859,29 @@ class ChainedVoicePipeline:
         """
         encoding = self._tts_encoding(session)
         sample_rate = self._tts_sample_rate(session)
+        if not self._speech_allowed(session, owner):
+            return
         try:
             if encoding == PCM_ENCODING:
                 buffer = bytearray()
                 async for audio_chunk in session.tts_provider.synthesize(text):
+                    if not self._speech_allowed(session, owner):
+                        return
                     if not audio_chunk:
                         continue
                     buffer.extend(audio_chunk)
                     while len(buffer) >= PCM_CHUNK_BYTES:
                         frame = bytes(buffer[:PCM_CHUNK_BYTES])
                         del buffer[:PCM_CHUNK_BYTES]
-                        await self._emit_pcm(session, frame, sample_rate)
+                        await self._emit_pcm(session, frame, sample_rate, owner)
                 if buffer:
-                    await self._emit_pcm(session, bytes(buffer), sample_rate)
+                    await self._emit_pcm(session, bytes(buffer), sample_rate, owner)
                 return
 
             buffer = bytearray()
             async for audio_chunk in session.tts_provider.synthesize(text):
+                if not self._speech_allowed(session, owner):
+                    return
                 buffer.extend(audio_chunk)
             if buffer:
                 session._audio_seq += 1
@@ -818,6 +892,7 @@ class ChainedVoicePipeline:
                     is_final=False,
                     encoding=encoding,
                     sample_rate=sample_rate,
+                    owner=owner,
                 )
         except asyncio.CancelledError:
             raise
@@ -826,7 +901,7 @@ class ChainedVoicePipeline:
             raise
 
     async def _emit_pcm(
-        self, session: ChainedSession, frame: bytes, sample_rate: int
+        self, session: ChainedSession, frame: bytes, sample_rate: int, owner: asyncio.Task | None
     ) -> None:
         session._audio_seq += 1
         await self._emit_audio_chunk(
@@ -836,6 +911,7 @@ class ChainedVoicePipeline:
             is_final=False,
             encoding=PCM_ENCODING,
             sample_rate=sample_rate,
+            owner=owner,
         )
 
     def _extract_last_response(self, session: ChainedSession) -> str:
@@ -855,15 +931,39 @@ class ChainedVoicePipeline:
 
     # -- barge-in ----------------------------------------------------
 
+    async def interrupt_output(self, session_id: str, *, reason: str = "user_interrupt") -> bool:
+        """Stop current speech without cancelling or replaying agent work.
+
+        Local suppression is immediate even if a provider yields another
+        chunk after cancellation. This is not confirmation of remote audio
+        deletion or rollback of any command's external effects.
+        """
+        session = self._sessions.get(session_id)
+        if session is None or session._output_interrupted:
+            return False
+        task = session._turn_task
+        if task is None or task.done():
+            return False
+        session._output_interrupted = True
+        speaker = session._speech_task
+        if speaker is not None and not speaker.done():
+            speaker.cancel()
+        await self._emit_frame(session, {
+            "type": "voice_cancel",
+            "payload": {"reason": reason, "mode": "chained", "scope": "speech",
+                        "drop_pending_audio": True, "agent_task_cancel_requested": False},
+        })
+        await self._set_state(session, VoiceState.LISTENING)
+        return True
+
     async def cancel(self, session_id: str, *, reason: str = "user_interrupt") -> bool:
-        """Stop the in-flight turn. Returns True if there was one.
+        """Explicitly cancel the in-flight command/turn, without asserting rollback.
 
         Cancels the turn task, which takes the LLM call, the sentence
         queue and the in-flight synthesis with it, then tells the
-        client to drop whatever audio it has already buffered. Without
-        that last frame the user keeps hearing the old answer for as
-        long as the client had queued ahead, which is exactly the
-        experience barge-in exists to remove.
+        client to drop buffered audio. Use ``interrupt_output`` for
+        speech-only barge-in. Already-started external effects remain
+        uncertain; this method cannot undo them.
 
         Safe to call on an idle session, an unknown session, or twice.
         """
@@ -874,7 +974,10 @@ class ChainedVoicePipeline:
         task = session._turn_task
         had_turn = task is not None and not task.done()
         session._cancelled = True
+        session._queued_flush = False
+        session._queued_source = ""
         session._turn_task = None
+        self._cancel_silence_timer(session)
         if task is not None and not task.done():
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError, Exception):
@@ -945,8 +1048,11 @@ class ChainedVoicePipeline:
         is_final: bool,
         encoding: str = "mp3",
         sample_rate: int = DEFAULT_TTS_SAMPLE_RATE,
+        owner: asyncio.Task | None = None,
     ) -> None:
         """Emit a TTS audio chunk frame to the phone."""
+        if not self._speech_allowed(session, owner):
+            return
         await self._emit_frame(session, {
             "type": "audio_chunk",
             "payload": {
@@ -959,7 +1065,7 @@ class ChainedVoicePipeline:
         })
 
     async def _emit_frame(self, session: ChainedSession, frame: dict) -> None:
-        if session.send_frame:
+        if self._sessions.get(session.session_id) is session and session.send_frame:
             await session.send_frame(session.session_id, frame)
 
     # -- teardown ----------------------------------------------------
@@ -969,6 +1075,8 @@ class ChainedVoicePipeline:
         session = self._sessions.pop(session_id, None)
         if not session:
             return
+        session._queued_flush = False
+        session._queued_source = ""
 
         # Disarm the timer first so it can't fire a flush against a
         # provider we are about to close.

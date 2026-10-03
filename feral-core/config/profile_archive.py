@@ -141,22 +141,79 @@ def _snapshot(roots: dict[str, Path], limits: ArchiveLimits
         raise ProfileArchiveError("Profile is unavailable or changed during snapshot") from error
 
 
+def _check_default_layout(roots: dict[str, Path]) -> None:
+    """Refuse omitted legacy storage; never expand a caller's chosen roots.
+
+    Capability grants, pairing and other runtime stores still use FERAL_HOME
+    or ~/.feral independently of the loader's XDG config/data selection.
+    An uncovered nonempty root cannot be assumed irrelevant to a cold backup.
+    This checks absence/emptiness only, without reading any omitted payload.
+    """
+    override = os.environ.get("FERAL_HOME")
+    if override == "":
+        # Some legacy stores treat '' as cwd; the loader and other stores
+        # fall back to ~/.feral. Neither root alone proves complete coverage.
+        raise ProfileArchiveError("Default storage layout is ambiguous with empty FERAL_HOME")
+    legacy = Path(override if override is not None else Path.home() / ".feral").absolute()
+    try:
+        info = legacy.lstat()
+    except FileNotFoundError:
+        return
+    except (OSError, RuntimeError) as error:
+        raise ProfileArchiveError("Legacy runtime storage coverage cannot be verified") from error
+    if not stat.S_ISDIR(info.st_mode):
+        raise ProfileArchiveError("Legacy runtime storage must be a nonsymlink directory")
+    try:
+        resolved = legacy.resolve()
+    except (OSError, RuntimeError) as error:
+        raise ProfileArchiveError("Legacy runtime storage coverage cannot be verified") from error
+    if any(resolved == root or root in resolved.parents for root in roots.values()):
+        return
+    try:
+        descriptor = os.open(legacy, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        try:
+            if _identity(os.fstat(descriptor)) != _identity(info):
+                raise ProfileArchiveError("Legacy runtime storage changed during coverage check")
+            if _identity(legacy.lstat()) != _identity(info):
+                raise ProfileArchiveError("Legacy runtime storage changed during coverage check")
+            with os.scandir(descriptor) as entries:
+                if next(entries, None) is not None:
+                    raise ProfileArchiveError(
+                        "Default profile roots omit legacy runtime storage; "
+                        "explicit roots select only a partial cold snapshot"
+                    )
+            if _identity(os.fstat(descriptor)) != _identity(info):
+                raise ProfileArchiveError("Legacy runtime storage changed during coverage check")
+            if _identity(legacy.lstat()) != _identity(info):
+                raise ProfileArchiveError("Legacy runtime storage changed during coverage check")
+        finally:
+            os.close(descriptor)
+    except OSError as error:
+        raise ProfileArchiveError("Legacy runtime storage coverage cannot be verified") from error
+
+
 def create_archive(destination: Path, *, offline: bool = False,
                    config_root: Path | None = None, data_root: Path | None = None,
                    limits: ArchiveLimits = ArchiveLimits()) -> dict:
-    """Archive both actual roots without mutating source files or exporting keys.
+    """Archive selected roots without mutating source files or exporting keys.
 
     `offline=True` is a caller precondition, not inferred process quiescence.
     The full regular-file set includes SQLite WAL/SHM and encrypted artifacts.
     Hashes and file/directory identities detect changes during the cold copy.
+    Default selection refuses uncovered legacy runtime storage. Explicit roots
+    are a caller-selected snapshot, not proof of full deployment coverage.
+    Native OS preferences and keychain entries are outside this format.
     """
     _offline(offline)
     limits.validate()
+    default_selection = config_root is None or data_root is None
     if config_root is None or data_root is None:
         from config.loader import feral_data_home, feral_home
         config_root = feral_home() if config_root is None else config_root
         data_root = feral_data_home() if data_root is None else data_root
     roots, aliases = _roots(config_root, data_root)
+    if default_selection:
+        _check_default_layout(roots)
     destination = Path(destination).absolute()
     if destination.exists() or destination.is_symlink():
         raise ProfileArchiveError("Archive destination already exists")
@@ -207,10 +264,13 @@ def create_archive(destination: Path, *, offline: bool = False,
             os.fsync(output.fileno())
         if _snapshot(roots, limits) != (files, directories):
             raise ProfileArchiveError("Profile changed during snapshot")
+        if default_selection:
+            _check_default_layout(roots)
         # Hard-link publication is exclusive, unlike replace/rename over a file.
         os.link(staging, destination)
         return {"status": "completed", "files": len(files),
                 "bytes": sum(item.size for item in files.values()),
+                "coverage": "selected_roots_only", "native_preferences_included": False,
                 "os_keys_included": False, "credentials_portable": False}
     except (OSError, zipfile.BadZipFile) as error:
         raise ProfileArchiveError("Archive creation could not be completed") from error
@@ -346,6 +406,7 @@ def restore_archive(archive_path: Path, *, config_root: Path, data_root: Path,
         return {"status": "completed", "files": len(manifest["files"]),
                 "bytes": sum(item["size"] for item in manifest["files"].values()),
                 "runtime_started": False, "os_keys_included": False,
+                "coverage": "selected_roots_only", "native_preferences_included": False,
                 "credentials_portable": False}
     except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as error:
         for root, identity in reversed(list(owned.items())):

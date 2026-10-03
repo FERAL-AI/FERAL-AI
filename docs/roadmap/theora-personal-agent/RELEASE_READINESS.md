@@ -1,23 +1,30 @@
 # Theora / FERAL full-product release readiness
 
-Latest published source is `2d6839ab49cc570959cc3b9057181b0b6c3eba3e`.
+Latest published source is `61550e74fbe806305034ccfad28bc96c6953a9d7`.
 The completion wave implements explicit interrupted-context recovery with a
 native durable journal, reviewed cloud setup and offline profile archives.
-Integrated local backend checks: 570 passed. Current PR native checks passed;
+Integrated earlier local backend checks: 570 passed. Current PR native checks passed;
 the unchanged type ratchet passed with 811 diagnostics against baseline 812.
-The full backend CI has one attributable failure: optional vault setup status
-returned 503; 12,749 other tests passed, 83 skipped, coverage 74.88%.
-That status-contract correction passed the unchanged real route sweep locally
-and needs corrected-head CI. No overall CI success is claimed for 2d6839.
+Full backend CI passed: **12,754 tests, 83 skipped, 74.89% coverage**.
+The optional vault-status correction passed the unchanged real route sweep.
+The earlier failed 2d6839 run remains historical evidence.
 
-Assembled **9.31/build2026100205** contains that exact source: all 484 production
+Assembled **9.32/build2026100206** contains that exact source: all 484 production
 Python files match; build, strict ad-hoc signature and bounded runtime audit
 passed. Actual packaged backend Stop/recovery/restart/real local-model recall
-passed with an explicit empty-tool disposable profile, no replay, four terminal
-receipts and clean owned-process shutdown. Two failed attempts are retained.
-Actual 9.31 GUI remains blocked by the Computer Use native-pipe failure.
-[Candidate evidence](NATIVE_9_31_ACCEPTANCE.md).
+passed with zero tools at both startups in the disposable profile, no replay,
+four terminal receipts and clean owned-process shutdown. Prior 9.31 failed
+attempts are retained. Post-run signature/hash/source comparison passed.
+Actual 9.32 GUI remains blocked by the Computer Use native-pipe failure.
+[Candidate evidence](NATIVE_9_32_ACCEPTANCE.md).
 [Completion evidence](COMPLETION_WAVE_EVIDENCE.md).
+
+The next source wave repairs speech-only interruption/overlapping utterance
+admission and default archive coverage. Parent combined **279 tests passed**;
+exact new-head CI and a later candidate remain required. These corrections are
+not present in the immutable 9.32 artifact. Native preferences migration,
+voice attempt/output protocol and actual audio remain open rather than inferred
+from these bounded source checks.
 
 ## Earlier source and candidate checkpoints
 

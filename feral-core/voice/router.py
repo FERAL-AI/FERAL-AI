@@ -2343,7 +2343,7 @@ class VoiceRouter:
             return None
 
     async def cancel_chained_response(self, session_id: str) -> bool:
-        """Barge-in for the chained pipeline. Returns True if a turn was cut.
+        """Interrupt chained speech without cancelling the agent command.
 
         The counterpart to ``RealtimeSession.cancel_response`` /
         ``GeminiSession.cancel_response``, which is what
@@ -2363,7 +2363,7 @@ class VoiceRouter:
         if chained is None:
             return False
         try:
-            return bool(await chained.cancel(session_id, reason="user_interrupt"))
+            return bool(await chained.interrupt_output(session_id, reason="user_interrupt"))
         except Exception:
             logger.warning(
                 "Chained barge-in failed for session %s", session_id[:8],

@@ -8,20 +8,21 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 ## Current status at a glance
 
 - Review branch: [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-  Latest published source is `2d6839ab49cc570959cc3b9057181b0b6c3eba3e`; verify
+  Latest published source is `61550e74fbe806305034ccfad28bc96c6953a9d7`; verify
   current remote tip before resuming. Main remains `452a01255`; no merge or release.
 - Exact-head PR verification: native workflow and mypy ratchet passed; remote
   mypy 811 against unchanged 812 baseline matches the frozen local diagnostics.
-  Full backend failed one optional status route: 12,749 passed, one failed,
-  83 skipped, 74.88% coverage. No overall CI success is claimed. The route fix
-  has 24 passing focused tests including the unchanged actual route sweep.
-- Packaged **9.31/build2026100205** contains exact source `2d6839ab4`.
+  Full backend passed **12,754 tests, 83 skipped, 74.89% coverage**, including the
+  unchanged authenticated route sweep. SDK, web, docs and naming checks passed.
+- Packaged **9.32/build2026100206** contains exact source `61550e74f`.
   Build/signature/runtime/source checks passed. Actual disposable packaged-backend
   Stop → explicit recovery → local-model recall → restart → recall passed.
   Foreign/stale recovery refused; four terminal receipts and zero tool executions;
   no cancelled task replay; both owned processes/listeners stopped cleanly.
-  Two earlier failed attempts remain preserved. See
-  [candidate acceptance](NATIVE_9_31_ACCEPTANCE.md).
+  Both startup inventories exposed zero tools from the empty installed fixtures.
+  Strict signature, hash and all 484 source comparisons passed after the run.
+  Earlier 9.31 failed attempts remain preserved. See
+  [candidate acceptance](NATIVE_9_32_ACCEPTANCE.md).
   Native GUI acceptance remains blocked by Computer Use native-pipe startup failure.
 - Integrated: timestamp/ACP/connector repairs, validated extension reloads with
   cancellation/registry-owner fencing, redacted errors, strict explicit approval
@@ -37,18 +38,21 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   19 warnings in18.99s. Frozen full mypy:811 diagnostics versus812 baseline,
   zero added/seven removed against d215; the current PR type ratchet also passed.
   See [completion evidence](COMPLETION_WAVE_EVIDENCE.md).
-- Remaining release gates include corrected-head required CI, current GUI acceptance,
+- Remaining release gates include new-wave required CI, current GUI acceptance,
   migration/upgrade, signed distribution and clean-machine installation. Account,
   physical-device, Linux and broader feature acceptance remain separate gates.
-- Active: the four recovery/cloud/archive/type integration commits are published.
-  Follow-up optional-status, browser startup and bounded native voice fixes are
-  frozen and integrated: 386 backend tests, voice37/configuration45/vault33,
-  linked26 groups and production typecheck passed. Fresh full mypy remains811,
-  zero diagnostic changes on1,273 unchanged inputs. Parent owns publication,
-  exact-source9.32 assembly and corrected-head CI. See
-  [hardening evidence](NATIVE_CONTRACT_HARDENING_EVIDENCE.md).
-  The preserved9.31 candidate remains unchanged during subsequent integration.
-  Its recovery probe passed with an explicit disposable empty-tool fixture;
+- Active: optional-status/browser/native voice hardening is published in61550e7.
+  Later chained output-only interruption, overlapping utterance admission and
+  default archive coverage are frozen for integration: worker120 voice tests,
+  159 archive-related tests; parent combined279 passed/71 warnings/13.25s.
+  Whole-core Ruff passes; full mypy811 has zero added/removed diagnostics versus
+  verified61550. All1,274 measured inputs stayed unchanged; digest
+  `593f3723fdcfc98929f0ad4e1d78edfe89d4c10c62cbe50daa78dfb05e991e80`.
+  Parent owns evidence/Git publication; a worker prepares a disposable live web
+  test without replacing tracked assets. See [voice evidence](VOICE_OUTPUT_INTERRUPTION_EVIDENCE.md)
+  and [archive evidence](PROFILE_ARCHIVE_COVERAGE_EVIDENCE.md).
+  Candidate9.32 remains unchanged and excludes these later source corrections.
+  Its recovery probe passed with a disposable empty-tool fixture;
   it does not certify tool-enabled tasks, voice, cloud accounts or GUI operation.
   Gen-UI expansion is deferred; coding-engine expansion follows dependable setup,
   recovery, voice and data continuity. Keep the candidate frozen
@@ -79,10 +83,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Published2d6839ab4; actual9.31 packaged recovery passed and artifact preserved. Later optional-status/browser/voice corrections pass integrated checks; read actual HEAD/remote and corrected-source CI |
+| Current checkpoint | Published61550e74f CI green; actual9.32 packaged recovery passed. Voice/archive follow-up passes279 integrated tests and unchanged811 diagnostics; read actual HEAD/remote for publication |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | Parent latest df reports4.0GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
+| Disk observation | Parent latest df reports4.5GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update

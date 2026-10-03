@@ -6,19 +6,19 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Published `2d6839ab4` adds reviewed cloud setup, bounded offline archives and
+- Published `61550e74f` includes reviewed cloud setup, bounded offline archives and
   explicit saved-context recovery with a native durable journal. Local combined
   backend: 570 passed. Remote native checks and the unchanged type ratchet pass
-  (811 against 812). Full backend CI failed one optional status route while
-  12,749 passed; the correction passes the unchanged real route sweep locally.
-  Overall corrected-head CI is still required.
-- Exact-source 9.31 passed assembly/signature/runtime/source comparison and the
+  (811 against 812). Full backend CI passed12,754 tests/83 skipped/74.89% coverage,
+  including the unchanged real route sweep. Later voice/archive source repairs
+  pass279 integrated tests and unchanged811 diagnostics; new-head CI remains required.
+- Exact-source 9.32 passed assembly/signature/runtime/source comparison and the
   actual packaged-backend Stop/recovery/real local-model recall/restart journey.
   Zero recorded tool executions, no cancelled task replay, exact foreign/stale
   refusal and clean owned shutdown were verified in disposable profiles.
   Current GUI, signed fresh-cloud operation, migration and real voice acceptance
   remain open. See [completion evidence](COMPLETION_WAVE_EVIDENCE.md) and
-  [9.31 acceptance](NATIVE_9_31_ACCEPTANCE.md).
+  [9.32 acceptance](NATIVE_9_32_ACCEPTANCE.md).
 
 ### Preceding integration checkpoints
 

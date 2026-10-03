@@ -1,4 +1,5 @@
 """Cold snapshots and restore boundaries, using disposable profiles only."""
+import asyncio
 import hashlib
 import json
 import os
@@ -8,6 +9,7 @@ import stat
 import subprocess
 import sys
 import zipfile
+from uuid import uuid4
 
 import pytest
 
@@ -15,6 +17,301 @@ from config import profile_archive as module
 from config.profile_archive import ArchiveLimits, ProfileArchiveError, create_archive, restore_archive
 
 pytestmark = pytest.mark.no_auto_feral_home
+
+
+@pytest.fixture
+def archive_patch(restore_process_env):
+    # Close this local patch context before the process-environment guard reads it.
+    with pytest.MonkeyPatch.context() as patch:
+        yield patch
+
+
+def _xdg_profile(tmp_path, archive_patch):
+    """Actual loader defaults and legacy readers, with no personal-home access."""
+    from config.loader import feral_data_home, feral_home
+    home = tmp_path / "synthetic-user"
+    home.mkdir()
+    archive_patch.setattr(Path, "home", classmethod(lambda cls: home))
+    archive_patch.delenv("FERAL_HOME", raising=False)
+    archive_patch.delenv("FERAL_DATA_HOME", raising=False)
+    archive_patch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+    archive_patch.setenv("XDG_DATA_HOME", str(tmp_path / "xdg-data"))
+    config, data = feral_home(), feral_data_home()
+    config.mkdir(parents=True)
+    data.mkdir(parents=True)
+    (config / "settings.json").write_text('{"llm":{"max_tokens":111}}')
+    return config, data, home / ".feral"
+
+
+@pytest.mark.parametrize("partial_default", [False, True])
+def test_default_refuses_omitted_actual_capability_denial_before_copy(
+    tmp_path, archive_patch, partial_default,
+):
+    from security.capability_grants import CapabilityGrantStore
+    config, _, legacy = _xdg_profile(tmp_path, archive_patch)
+    grants = CapabilityGrantStore()
+    grants.set_grant("synthetic-device", "camera", False)
+    assert grants.is_granted("synthetic-device", "camera") is False
+    database = legacy / "capability_grants.db"
+    original = database.read_bytes()
+    archive_patch.setattr(module, "_snapshot", lambda *args: pytest.fail("Must refuse before copy"))
+    destination = tmp_path / "refused.zip"
+    options = {"config_root": config} if partial_default else {}
+    with pytest.raises(ProfileArchiveError, match="omit legacy runtime storage"):
+        create_archive(destination, offline=True, **options)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".feral-archive-*"))
+    assert database.read_bytes() == original
+    assert CapabilityGrantStore().is_granted("synthetic-device", "camera") is False
+
+
+@pytest.mark.parametrize("legacy_state", ["absent", "empty"])
+def test_xdg_defaults_without_legacy_data_round_trip_settings(tmp_path, archive_patch, legacy_state):
+    from config.loader import ConfigLoader
+    config, data, legacy = _xdg_profile(tmp_path, archive_patch)
+    if legacy_state == "empty":
+        legacy.mkdir()
+    archive = tmp_path / "xdg.zip"
+    receipt = create_archive(archive, offline=True)
+    assert receipt["coverage"] == "selected_roots_only"
+    assert receipt["native_preferences_included"] is False
+    target_config, target_data = tmp_path / "new-config" / "feral", tmp_path / "new-data" / "feral"
+    target_config.parent.mkdir()
+    target_data.parent.mkdir()
+    restore_archive(archive, config_root=target_config, data_root=target_data, offline=True)
+    # The restore selects explicit roots; the reader uses the corresponding XDG layout.
+    archive_patch.setenv("XDG_CONFIG_HOME", str(target_config.parent))
+    archive_patch.setenv("XDG_DATA_HOME", str(target_data.parent))
+    # Read exactly the restored settings through the existing loader, without a vault.
+    reader = ConfigLoader(project_dir=tmp_path / "no-project")
+    assert reader.user_home == target_config and reader.data_home == target_data
+    settings = reader.discover(load_credentials=False)
+    assert settings["llm"]["max_tokens"] == 111
+    assert (config / "settings.json").exists() and data.is_dir()
+
+
+@pytest.mark.parametrize("kind", ["symlink", "dangling-symlink", "file", "inaccessible"])
+def test_uninspectable_uncovered_legacy_default_fails_closed(tmp_path, archive_patch, kind):
+    _, _, legacy = _xdg_profile(tmp_path, archive_patch)
+    if kind == "file":
+        legacy.write_text("synthetic-only")
+    elif kind in {"symlink", "dangling-symlink"}:
+        target = tmp_path / "link-target"
+        if kind == "symlink":
+            target.mkdir()
+        legacy.symlink_to(target, target_is_directory=True)
+    else:
+        legacy.mkdir()
+        original_open = os.open
+
+        def inaccessible(path, *args, **kwargs):
+            if Path(path) == legacy:
+                raise PermissionError("synthetic private exception")
+            return original_open(path, *args, **kwargs)
+
+        archive_patch.setattr(os, "open", inaccessible)
+    with pytest.raises(ProfileArchiveError, match="Legacy runtime storage") as error:
+        create_archive(tmp_path / "refused.zip", offline=True)
+    assert "synthetic private exception" not in str(error.value)
+    assert not (tmp_path / "refused.zip").exists()
+    assert not list(tmp_path.glob(".feral-archive-*"))
+
+
+def test_new_uncovered_legacy_entry_during_copy_prevents_publication(tmp_path, archive_patch):
+    _, _, legacy = _xdg_profile(tmp_path, archive_patch)
+    legacy.mkdir()
+    original = module._snapshot
+    calls = 0
+
+    def snapshot_then_add(roots, limits):
+        nonlocal calls
+        result = original(roots, limits)
+        calls += 1
+        if calls == 2:
+            (legacy / "unknown-runtime-artifact").write_text("synthetic-only")
+        return result
+
+    archive_patch.setattr(module, "_snapshot", snapshot_then_add)
+    with pytest.raises(ProfileArchiveError, match="omit legacy runtime storage"):
+        create_archive(tmp_path / "changed.zip", offline=True)
+    assert not (tmp_path / "changed.zip").exists()
+    assert not list(tmp_path.glob(".feral-archive-*"))
+
+
+def test_explicit_roots_remain_a_partial_snapshot_without_legacy_inspection(tmp_path, archive_patch):
+    config, data, legacy = _xdg_profile(tmp_path, archive_patch)
+    legacy.mkdir()
+    (legacy / "not-selected").write_text("synthetic-unselected")
+    archive_patch.setattr(module, "_check_default_layout", lambda *args: pytest.fail("Explicit selection"))
+    receipt = create_archive(tmp_path / "partial.zip", config_root=config, data_root=data, offline=True)
+    assert receipt["coverage"] == "selected_roots_only"
+    assert receipt["native_preferences_included"] is False
+    with zipfile.ZipFile(tmp_path / "partial.zip") as archive:
+        assert not any("not-selected" in name for name in archive.namelist())
+
+
+def test_cli_default_omission_is_typed_redacted_and_unpublished(tmp_path, archive_patch):
+    from security.capability_grants import CapabilityGrantStore
+    _, _, legacy = _xdg_profile(tmp_path, archive_patch)
+    CapabilityGrantStore().set_grant("synthetic-device-private", "camera", False)
+    original = (legacy / "capability_grants.db").read_bytes()
+    command = (
+        "import sys; from pathlib import Path; "
+        "synthetic_home=Path(sys.argv.pop(1)); Path.home=classmethod(lambda cls: synthetic_home); "
+        "from config.profile_archive import main; raise SystemExit(main())"
+    )
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", command, str(legacy.parent),
+         "backup", str(tmp_path / "cli-refused.zip"), "--offline"],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 2
+    assert "omit legacy runtime storage" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "synthetic-device-private" not in result.stdout + result.stderr
+    assert not result.stdout and not (tmp_path / "cli-refused.zip").exists()
+    assert (legacy / "capability_grants.db").read_bytes() == original
+
+
+def test_empty_feral_home_does_not_conceal_two_runtime_defaults(tmp_path, archive_patch):
+    _xdg_profile(tmp_path, archive_patch)
+    archive_patch.setenv("FERAL_HOME", "")
+    archive_patch.setattr(module, "_snapshot", lambda *args: pytest.fail("Must refuse before copy"))
+    with pytest.raises(ProfileArchiveError, match="ambiguous with empty FERAL_HOME"):
+        create_archive(tmp_path / "empty-override.zip", offline=True)
+    assert not (tmp_path / "empty-override.zip").exists()
+
+
+def test_omitted_legacy_refusal_preserves_an_existing_archive(tmp_path, archive_patch):
+    _, _, legacy = _xdg_profile(tmp_path, archive_patch)
+    legacy.mkdir()
+    (legacy / "unrecognized-artifact").write_text("synthetic-only")
+    destination = tmp_path / "historical.zip"
+    destination.write_bytes(b"synthetic-historical-archive")
+    with pytest.raises(ProfileArchiveError, match="omit legacy runtime storage"):
+        create_archive(destination, offline=True)
+    assert destination.read_bytes() == b"synthetic-historical-archive"
+    assert not list(tmp_path.glob(".feral-archive-*"))
+
+
+def test_legacy_root_contained_by_explicit_config_is_not_omitted(tmp_path, archive_patch):
+    from security.capability_grants import CapabilityGrantStore
+    _, data, legacy = _xdg_profile(tmp_path, archive_patch)
+    CapabilityGrantStore().set_grant("synthetic-device", "camera", False)
+    archive = tmp_path / "contained.zip"
+    create_archive(archive, config_root=legacy.parent, offline=True)
+    with zipfile.ZipFile(archive) as snapshot:
+        assert "config/.feral/capability_grants.db" in snapshot.namelist()
+    assert data.is_dir()
+
+
+def test_unresolvable_legacy_root_is_a_typed_refusal(tmp_path, archive_patch):
+    _, _, legacy = _xdg_profile(tmp_path, archive_patch)
+    legacy.mkdir()
+    original = Path.resolve
+
+    def unresolvable(path, *args, **kwargs):
+        if path == legacy:
+            raise RuntimeError("synthetic private symlink-loop detail")
+        return original(path, *args, **kwargs)
+
+    archive_patch.setattr(Path, "resolve", unresolvable)
+    with pytest.raises(ProfileArchiveError, match="coverage cannot be verified") as error:
+        create_archive(tmp_path / "unresolvable.zip", offline=True)
+    assert "synthetic private" not in str(error.value)
+    assert not (tmp_path / "unresolvable.zip").exists()
+
+
+def test_native_feral_home_round_trip_actual_readers_and_fences(tmp_path, archive_patch):
+    from config.loader import ConfigLoader, feral_data_home, feral_home
+    from memory.runtime_session_checkpoint import CheckpointStatus, encode_context
+    from memory.store import MemoryStore
+    from security.capability_grants import CapabilityGrantStore
+    from security.sandbox_policy import SandboxPolicy
+
+    native = tmp_path / "native-home"
+    native.mkdir()
+    archive_patch.setenv("FERAL_HOME", str(native))
+    archive_patch.setenv("FERAL_DATA_HOME", str(native / "data"))
+    archive_patch.setenv("FERAL_EMBED_PROVIDER", "hash")
+    archive_patch.setenv("FERAL_NATIVE_DEFER_VAULT", "1")
+    assert feral_home() == feral_data_home() == native  # Actual loader precedence.
+    (native / "settings.json").write_text('{"llm":{"max_tokens":111}}')
+    (native / "data").mkdir()
+    (native / "data" / "synthetic-artifact").write_text("included-regular-file")
+    grants = CapabilityGrantStore()
+    grants.set_grant("synthetic-device", "camera", False)
+    workspace = tmp_path / "synthetic-workspace"
+    workspace.mkdir()
+    assert SandboxPolicy.load_default().grant_folder(str(workspace), "read")["ok"] is True
+    sid = "thread-" + str(uuid4())
+    history = [{"role": "user", "content": "Synthetic fact: amber 47"},
+               {"role": "assistant", "content": "Recorded synthetic fact."}]
+
+    async def seed():
+        store = MemoryStore()
+        try:
+            assert Path(store.db_path) == native / "memory.db"
+            initialized = await store.runtime_checkpoint_initialize_empty(sid)
+            assert initialized.record is not None
+            pending = await store.runtime_checkpoint_begin(
+                sid, attempt_id=str(uuid4()), expected=initialized.record.fence,
+            )
+            assert pending.record is not None
+            committed = await store.runtime_checkpoint_commit(
+                pending.record.fence, encode_context(history, []),
+            )
+            assert committed.record is not None
+            await store.conversation_save(sid, history, title="Synthetic archive thread")
+            await store.conversation_rename(sid, "Synthetic custom title")
+            await store.conversation_set_pinned(sid, True)
+            note = await store.save("Synthetic amber note", tags=["synthetic"])
+            await store.knowledge_store("Synthetic subject", "color", "amber")
+            await store.wiki_upsert_page(
+                page_id="synthetic-page", title="Synthetic wiki", kind="topic",
+                body_markdown="Synthetic amber wiki", source_refs=[],
+            )
+            return committed.record.fence, note["id"]
+        finally:
+            await store.aclose()
+
+    fence, note_id = asyncio.run(seed())
+    original = hashlib.sha256((native / "memory.db").read_bytes()).digest()
+    archive = tmp_path / "native.zip"
+    receipt = create_archive(archive, offline=True)
+    target = tmp_path / "restored-native"
+    restored = restore_archive(archive, config_root=target, data_root=target, offline=True)
+    assert receipt["coverage"] == restored["coverage"] == "selected_roots_only"
+    assert restored["runtime_started"] is False
+    assert hashlib.sha256((native / "memory.db").read_bytes()).digest() == original
+    assert (target / "data" / "synthetic-artifact").read_text() == "included-regular-file"
+    archive_patch.setenv("FERAL_HOME", str(target))
+    archive_patch.setenv("FERAL_DATA_HOME", str(target / "data"))
+    assert CapabilityGrantStore().is_granted("synthetic-device", "camera") is False
+    assert SandboxPolicy.load_default().list_grants()[0]["mode"] == "read"
+    settings = ConfigLoader(project_dir=tmp_path / "no-project").discover(load_credentials=False)
+    assert settings["llm"]["max_tokens"] == 111
+
+    async def read_restored():
+        store = MemoryStore()
+        try:
+            assert Path(store.db_path) == target / "memory.db"
+            notes = await store.list_recent()
+            assert any(note["id"] == note_id and note["content"] == "Synthetic amber note" for note in notes)
+            conversation = await store.conversation_get(sid)
+            assert conversation["messages"] == history
+            assert conversation["pinned"] is True and conversation["title_custom"] is True
+            assert conversation["title"] == "Synthetic custom title"
+            assert (await store.knowledge_query("Synthetic subject", "color"))[0]["object"] == "amber"
+            assert (await store.wiki_get_page("synthetic-page"))["body_markdown"] == "Synthetic amber wiki"
+            checkpoint = await store.runtime_checkpoint_read(sid)
+            assert checkpoint.status == CheckpointStatus.READY
+            assert checkpoint.record.fence == fence
+            assert checkpoint.record.context.history() == history
+        finally:
+            await store.aclose()
+
+    asyncio.run(read_restored())
 
 
 @pytest.fixture
@@ -101,10 +398,11 @@ def test_committed_sqlite_wal_is_preserved_not_just_main_database(tmp_path, prof
         connection.close()
 
 
-def test_actual_default_helpers_are_used_without_invented_data_home(tmp_path, profile, monkeypatch):
+def test_actual_default_helpers_are_used_without_invented_data_home(tmp_path, profile, archive_patch):
     from config import loader
-    monkeypatch.setattr(loader, "feral_home", lambda: profile[0])
-    monkeypatch.setattr(loader, "feral_data_home", lambda: profile[1])
+    archive_patch.setenv("FERAL_HOME", str(profile[0]))
+    archive_patch.setattr(loader, "feral_home", lambda: profile[0])
+    archive_patch.setattr(loader, "feral_data_home", lambda: profile[1])
     archive = tmp_path / "default.zip"
     create_archive(archive, offline=True)
     with zipfile.ZipFile(archive) as snapshot:

@@ -14,17 +14,17 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Published source `2d6839ab49cc570959cc3b9057181b0b6c3eba3e` is in
+Published source `61550e74fbe806305034ccfad28bc96c6953a9d7` is in
 [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-Native workflow and the unchanged type ratchet passed; mypy 811 against 812.
-Full backend CI failed only optional vault status: 12,749 passed, one failed,
-83 skipped, 74.88% coverage. The source correction passes the unchanged actual
-route sweep locally; new-head verification is required.
-Packaged 9.31 contains exact 2d6839 source. Its actual isolated Stop → recovery →
-real local-model recall → restart → recall journey passed without task replay.
+Full backend CI passed: 12,754 tests, 83 skipped, 74.89% coverage. Native,
+web and SDK checks passed; the unchanged type ratchet passed at 811 against 812.
+Packaged 9.32 contains exact 61550e7 source. Its actual isolated Stop → recovery →
+real local-model recall → restart → recall journey passed without task replay,
+with zero tools at initial boot and restart. Strict signature, hash and all 484
+production-source comparisons passed again after the journey.
 GUI acceptance remains blocked by Computer Use native-pipe startup failure.
 See [completion evidence](COMPLETION_WAVE_EVIDENCE.md) and
-[candidate acceptance](NATIVE_9_31_ACCEPTANCE.md). Earlier artifacts and failed
+[candidate acceptance](NATIVE_9_32_ACCEPTANCE.md). Earlier artifacts and failed
 runs below remain historical evidence.
 
 ## Active completion wave
@@ -36,10 +36,10 @@ No speculative calendar deadline or source-only completion claim closes a gate.
 
 | Owner | Exclusive workstream | Required outcome |
 |---|---|---|
-| Context/acceptance worker | Completed recovery source and actual packaged probe | Backend Stop/recovery/restart recall passed; durable native journal fixture checks passed; actual GUI remains separate |
-| Voice worker | NativeVoiceFeature/Configuration and owned tests | Reproduced pre-ACK media, missing session/wrong provider and foreign configuration-origin gaps; bounded fixes and focused verification; managed voice guard remains until checkpoint/attempt authority exists |
-| Integration worker | Optional vault status and browser boot registration/tests | Passive unsupported status answers without initialization authority; preserve valid installed empty browser manifest instead of reinstating fallback tools |
-| Parent | Shared integration, native vault compatibility fixture, evidence/Git and final assembly | Freeze tested source, publish coherent commits, verify corrected-head CI, assemble an exact-source candidate and perform enabled app journeys |
+| Voice worker | Chained pipeline/router and interruption/VAD tests | Speech interruption preserves running command; overlapping endpoint admits next buffered utterance once after success; Stop/failure/close discard admission. 120 focused tests passed; managed voice guard remains |
+| Data worker | Archive coverage preflight and actual-reader tests; then isolated live web acceptance | Default archives refuse omitted legacy grants/storage; native layout roundtrip verified. 159 related tests passed; real web run uses isolated assets/profile |
+| Verification worker | Whole-core frozen typing/lint, then exact-head remote checks | Compare exact diagnostics and input hashes; no baseline relaxation; source edits remain frozen during checks |
+| Parent | Shared integration, evidence/Git and candidate acceptance | Combined voice/archive 279 tests passed; record exact 9.32 evidence, publish coherent repairs and keep installed GUI/signing/migration gates separate |
 
 Each completed workstream moves to the next ready card. Physical device,
 account and signed-distribution dependencies must not stall independent source
