@@ -6,11 +6,13 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Published `55a99aba` includes reviewed cloud setup, bounded offline archives and
+- Published `7f818da08` includes reviewed cloud setup, bounded offline archives and
   explicit saved-context recovery with a native durable journal. Local combined
   backend: 570 passed. Remote native checks and the unchanged type ratchet pass
-  (811 against 812). Full backend CI passed12,783 tests/83 skipped/74.93% coverage,
-  including the unchanged real route sweep. Current startup/engine/recognition
+  (remote808 exactly matches frozen local against baseline812). Prior55a99 full
+  backend passed12,783/83 skipped/74.93%. Exact7f backend failed3 fixtures/one setup
+  race;12,867 tests passed/83 skipped/75.10%. Corrections pass132 plus ambient16
+  tests; full repaired CI remains required. Current startup/engine/recognition
   repairs pass their targeted integration and native checks; frozen typing808 has
   zero added/three removed versus55a99. New-head CI remains required. See
   [startup evidence](VOICE_STARTUP_OWNERSHIP_EVIDENCE.md).

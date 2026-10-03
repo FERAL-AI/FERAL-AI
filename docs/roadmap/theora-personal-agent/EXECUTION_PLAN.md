@@ -14,10 +14,12 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Published source `55a99aba7e1b83663ab3cb200ab05d2cd9fc8d3b` is in
+Published source `7f818da08139952b1698644469e7016563512cd5` is in
 [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-Full backend CI passed: 12,783 tests, 83 skipped, 74.93% coverage. Native,
-web and SDK checks passed; the unchanged type ratchet passed at 811 against 812.
+Prior55a99 full backend passed12,783/83 skipped/74.93%. Exact7f native/web/SDK/type
+checks pass (808 matches frozen local); backend failed3 fixtures/one setup race
+with12,867 passed/83 skipped/75.10%. Fixture corrections132 plus ambient16 tests
+pass; full repaired CI remains required.
 Packaged 9.32 contains exact 61550e7 source. Its actual isolated Stop → recovery →
 real local-model recall → restart → recall journey passed without task replay,
 with zero tools at initial boot and restart. Strict signature, hash and all 484

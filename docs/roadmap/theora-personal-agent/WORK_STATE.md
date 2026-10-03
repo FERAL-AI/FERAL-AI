@@ -8,12 +8,15 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 ## Current status at a glance
 
 - Review branch: [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-  Latest published source is `55a99aba7e1b83663ab3cb200ab05d2cd9fc8d3b`; verify
+  Latest published source is `7f818da08139952b1698644469e7016563512cd5`; verify
   current remote tip before resuming. Main remains `452a01255`; no merge or release.
-- Exact-head PR verification: native workflow and mypy ratchet passed; remote
-  mypy 811 against unchanged 812 baseline matches the frozen local diagnostics.
-  Full backend passed **12,783 tests, 83 skipped, 74.93% coverage**, including the
-  unchanged authenticated route sweep. SDK, web, docs and naming checks passed.
+- Exact7f PR verification: native, SDK, web, docs and naming passed. Remote mypy808
+  matches all frozen local diagnostics against the unchanged812 count baseline.
+  Backend failed:12,867 passed/3 failed/83 skipped/one setup error,75.10% coverage.
+  Two fixtures omitted real connection/session ownership; corrections pass132
+  focused tests. The setup sys.modules iteration now snapshots before iterating;
+  the affected ambient suite passes16 tests. New full CI remains required.
+  Prior55a99 CI passed12,783/83 skipped/74.93%; do not apply it to7f.
 - Packaged **9.32/build2026100206** contains exact source `61550e74f`.
   Build/signature/runtime/source checks passed. Actual disposable packaged-backend
   Stop → explicit recovery → local-model recall → restart → recall passed.
@@ -57,7 +60,10 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   all1,278 inputs stayed unchanged, digest
   `94d837e9582b9f875a7d4d96329ad22eef583439c6b45cfe84eddf592ef3da21`.
   [Startup/ownership evidence](VOICE_STARTUP_OWNERSHIP_EVIDENCE.md).
-  Candidate9.33/build2026100207 is reserved; assembly and exact-head CI are next.
+  Candidate9.33/build2026100207 is assembled at exact7f:485 production files match;
+  strict signature/runtime audit passed. Actual attempt2 completed Stop/recovery/
+  real local-model recall but restart exceeded100s readiness, so acceptance failed.
+  Attempt1 was sandbox-denied; both records remain. No retry weakens the deadline.
   A live browser run passed60 checks but failed copied-source integrity; do not
   certify it. The worker reruns from an exact tracked, read-only source snapshot.
   Candidate9.32 remains unchanged and excludes these later source corrections.
@@ -92,10 +98,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Published55a99aba CI green; actual9.32 packaged recovery passed and preserved. Startup/ownership wave frozen with808 diagnostics/zero added; new publication and9.33 assembly next |
+| Current checkpoint | Published7f818da native/web/SDK/type checks pass; backend failed3 fixtures/one setup race. Corrections132+16 tests pass; full rerun next.9.33 actual recovery restart acceptance incomplete |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | Parent latest df reports1.1GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
+| Disk observation | Latest2.9GiB free after five inspected completed-test mypy caches removed(~225MiB); logs/profiles/models/artifacts retained. Availability fluctuates; no disk-caused app crash established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update

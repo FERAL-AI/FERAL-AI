@@ -79,9 +79,23 @@ interruption/turn signals but no equivalent wire response ID; local epochs canno
 identify every arbitrarily delayed unmarked packet. Already executed external
 effects cannot be rolled back by suppressing an obsolete callback.
 
+Exact publication `7f818da08139952b1698644469e7016563512cd5` passed native,
+web/SDK and typing checks (remote808 exactly matches local). Backend CI run
+`37102142116` failed with12,867 passed/3 failed/83 skipped/one setup error and
+75.10% coverage. Two fixtures lacked the actual connected/owner state now required;
+their corrections pass132 focused tests without changing production guards.
+The module guard now copies sys.modules before iteration to avoid background
+import mutation; the affected ambient suite passes16 tests. Full repaired CI is
+still required. These later fixture results do not erase the failed publication.
+
 Candidate 9.32 contains `61550e74f`, excludes this wave and remains preserved at
-`/private/tmp/feral-candidate-9-32-preserved.app`. Candidate 9.33 is reserved for
-the newly committed wave; it is not yet assembled or accepted at this checkpoint.
+`/private/tmp/feral-candidate-9-32-preserved.app`. Candidate9.33/build2026100207 is
+assembled from exact7f, with485 production files matching, strict ad-hoc signature
+and runtime audit passed. ExecutableSHA256
+`c54b8ec05159ccf236bd27e5dd79e927539cc13d7ffe102d192cc2316801058e`.
+Actual attempt2 reached Stop/recovery/real local-model recall but failed restart
+readiness at100s; cause remains unresolved. Attempt1 was sandbox-denied. Both
+disposable records are retained;9.33 is not accepted by a partial journey.
 Computer Use still fails native-pipe startup, so current GUI/audio acceptance is
 open. Signing, clean installation, upgrade and physical-device gates remain open.
 

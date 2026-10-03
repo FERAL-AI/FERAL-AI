@@ -635,11 +635,12 @@ async def test_gateway_refused_attachment_cannot_opt_out_via_legacy_send_or_muta
     orch = SimpleNamespace(_context_checkpoints=coordinator, conversation_history=history,
                            handle_command_stream=AsyncMock(), handle_ui_event=AsyncMock())
     voice = SimpleNamespace(set_session_voice_mode=Mock(), stop_session_voice=AsyncMock(), handle_audio_from_client=AsyncMock())
-    state = SimpleNamespace(memory=activation_store, orchestrator=orch, voice_router=voice)
+    state = SimpleNamespace(memory=activation_store, orchestrator=orch, voice_router=voice, sessions={})
     registry = MethodRegistry()
     register_core_methods(registry, state)
     send = AsyncMock()
     session = GatewaySession("refused", SimpleNamespace(send_json=send), registry)
+    state.sessions["refused"] = session._ws
     session.metadata["runtime_context_readiness"] = lambda: coordinator.readiness(attachment.token)
     session.metadata["context_checkpoint_requested"] = requested
     capability = await registry.get("chat.capabilities")("refused", {}, session)

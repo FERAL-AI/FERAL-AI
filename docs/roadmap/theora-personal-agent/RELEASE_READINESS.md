@@ -1,11 +1,14 @@
 # Theora / FERAL full-product release readiness
 
-Latest published source is `55a99aba7e1b83663ab3cb200ab05d2cd9fc8d3b`.
+Latest published source is `7f818da08139952b1698644469e7016563512cd5`.
 The completion wave implements explicit interrupted-context recovery with a
 native durable journal, reviewed cloud setup and offline profile archives.
 Integrated earlier local backend checks: 570 passed. Current PR native checks passed;
 the unchanged type ratchet passed with 811 diagnostics against baseline 812.
-Full backend CI passed: **12,783 tests, 83 skipped, 74.93% coverage**.
+Prior55a99 full backend CI passed: **12,783 tests, 83 skipped, 74.93% coverage**.
+Exact7f backend failed12,867 passed/3 failed/83 skipped/one setup error;75.10%.
+Native/web/SDK/type checks passed. Precise fixture repairs pass132 tests; module
+snapshot correction's affected suite passes16. New full CI is required.
 The optional vault-status correction passed the unchanged real route sweep.
 The earlier failed 2d6839 run remains historical evidence.
 
@@ -26,7 +29,9 @@ recognition readiness and native chained audio handling. Engine285/2 skipped,
 configuration156/2 skipped, recognition57 and native44 assertions/typecheck passed;
 counts overlap. Mypy808 has zero added/three removed versus55a99, with stable inputs.
 [Startup/ownership evidence](VOICE_STARTUP_OWNERSHIP_EVIDENCE.md).
-Candidate9.33 assembly and new-head CI are next. These corrections are excluded
+Candidate9.33 assembled from7f passes485-file source/signature/runtime checks;
+actual recovery attempt2 failed restart readiness after Stop/recovery/model recall.
+New repaired CI and complete candidate acceptance are next. These corrections are excluded
 from preserved9.32. A60-check live browser run failed copied-source integrity and
 is rerunning; it is not certified acceptance. Native preference migration,
 voice attempt/output protocol and actual audio remain open.
