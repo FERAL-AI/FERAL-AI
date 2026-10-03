@@ -1,10 +1,28 @@
 # User request coverage and next implementation work
 
-Reconciled October 2, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
+Reconciled October 3, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
 
 The detailed contracts and acceptance work packages remain in [release readiness](RELEASE_READINESS.md), the [native inventory](../../../desktop-native/FEATURE_PARITY.md) and the [iOS handoff](IOS_AGENT_HANDOFF.md). The implementation branch is published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310); publication is not a release or a passing acceptance matrix.
 
 ## Current verified boundary
+
+- Published `b009395f349652bba20ae1dfe6acc762fa3a65d7`: backend12,871/83 skipped/
+  75.10%, web1,363/172 files, native and mypy808 count gates pass. Generated-asset
+  coherence failed; the local rebuild passes its contract check and awaits push.
+- Actual frozen7f browser run passes61 tests with unchanged source inventory,
+  loaded-module provenance and clean shutdown. Bounded exclusions remain explicit
+  in [browser evidence](LIVE_WEB_TRACKED_ACCEPTANCE_20261003.md). Exact7f packaged
+  9.33 recovery/restart also passes and the artifact is preserved.
+- Local attempt-v1/preference/layout changes are not published. A real registered
+  voice-pipeline reproduction exposed writer-lock deadlock/control starvation
+  after the earlier passing integration checks; repair and new verification are
+  active. Native archive controller/UI and managed-context voice are not yet
+  accepted. Current GUI/audio remains blocked by Computer Use.
+- Gen-UI expansion is deferred. Additional coding-engine expansion follows
+  dependable cloud/local setup, recovery, voice and data continuity. Existing
+  runtime, memory, tools and developer interfaces remain the foundation.
+
+### Earlier checkpoint records
 
 - Published `86a8b54ed` includes reviewed cloud setup, bounded offline archives and
   explicit saved-context recovery with a native durable journal. Local combined

@@ -1,5 +1,24 @@
 # Theora / FERAL full-product release readiness
 
+Current published source is **`b009395f349652bba20ae1dfe6acc762fa3a65d7`**.
+Its backend CI passes12,871 tests/83 skipped/75.10%, web passes1,363 tests/172
+files, and native/mypy count gates pass. The sole executed CI failure is generated
+asset coherence; regenerated assets pass locally and await publication.
+Actual frozen7f browser acceptance passes all61 checks with unchanged sources,
+module provenance and clean shutdown. [Browser evidence](LIVE_WEB_TRACKED_ACCEPTANCE_20261003.md).
+Exact7f packaged9.33 passed recovery/restart and is preserved with verified
+source/hash/signature. These results do not certify native GUI/audio, cloud-account
+operation, clean installation, signed distribution or Linux/iOS acceptance.
+
+The local attempt/preference/layout wave is **not published**. Its earlier
+457-test integration and unchanged808 typing measurement preceded a confirmed
+registered voice final-audio deadlock/control-starvation defect. That defect is
+being repaired before the wave is frozen and reverified. Native archive controls
+are in development; managed-context voice remains refused. The current work and
+remaining gates are recorded in [WORK_STATE](WORK_STATE.md).
+
+## Earlier checkpoint records
+
 Latest published source is `86a8b54ed273642da40776e75609f5a45a197924`.
 The completion wave implements explicit interrupted-context recovery with a
 native durable journal, reviewed cloud setup and offline profile archives.

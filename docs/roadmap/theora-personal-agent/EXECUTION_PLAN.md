@@ -1,6 +1,6 @@
 # FERAL app completion: executable plan
 
-Reconciled October 2, 2026 by three parallel source/research audits and the parent integration audit. This supersedes the dependency order in older planning prose where it would require rebuilding existing sessions, memory or workflows before packaging the supported local system. It does not supersede their safety or acceptance contracts.
+Reconciled October 3, 2026 by parallel source/research audits and the parent integration audit. This supersedes the dependency order in older planning prose where it would require rebuilding existing sessions, memory or workflows before packaging the supported local system. It does not supersede their safety or acceptance contracts.
 
 ## Starting point and scope
 
@@ -13,6 +13,24 @@ The supported baseline is a single-user local installation. Account-isolated hos
 The existing installed app and personal data stay intact while the native candidate is isolated. Migration must be explicit and reversible. Source implementations, fixture results, actual app/account/device outcomes and distribution acceptance are separate columns in the evidence ledger.
 
 ## Current verification checkpoint
+
+Published `b009395f349652bba20ae1dfe6acc762fa3a65d7` passes exact-head backend
+12,871/83 skipped/75.10%, web1,363/172 files, native and mypy808 count gates.
+Generated asset coherence is the sole executed failing job; local regenerated
+assets pass their contract check and await publication. Frozen7f actual browser
+acceptance passed all61 checks with source/provenance/clean-shutdown evidence.
+Immutable9.33 passed packaged recovery/restart and is preserved. Current GUI/audio
+acceptance remains blocked by Computer Use, not an observed new app crash.
+See [current checkpoint](WORK_STATE.md) and
+[full browser evidence](LIVE_WEB_TRACKED_ACCEPTANCE_20261003.md).
+
+Local voice attempt/preference/layout integration passed457/1 skipped before a
+registered real-pipeline reproduction exposed final-audio writer-lock deadlock
+and response-control starvation. Repair that defect before freezing, rerunning
+affected checks and publishing this wave. Keep managed-context voice refused until
+the existing turn manager/coordinator is integrated in the actual child task.
+
+### Earlier checkpoint
 
 Published source `86a8b54ed273642da40776e75609f5a45a197924` is in
 [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
@@ -45,10 +63,10 @@ No speculative calendar deadline or source-only completion claim closes a gate.
 
 | Owner | Exclusive workstream | Required outcome |
 |---|---|---|
-| Preference/archive worker | Native portable preference component and existing profile archive attachment | Cross-language canonical bytes, primary/avatar identity, fresh-root restore and explicit reviewed apply; no credential import or task replay |
-| Browser worker | Isolated actual-backend full61 verification | Focused4 passed with source/provenance/clean shutdown; full61 fresh tracked run active after earlier integrity/ENOSPC failures |
-| Voice/CI worker | Attempt-v1 lifecycle correlation in registered REST/gateway/router/engine paths | Exact captured attempt on ACK/media/control, strict ownership/no legacy downgrade/replay, scoped tests then frozen full typing |
-| Parent | Native attempt integration, web hydration correction, docs/Git and artifact acceptance | Native55 attempt assertions and web201 shell tests pass.9.33 exact7f packaged recovery passed; integration/full CI and GUI/signing/migration gates remain |
+| Preference/archive worker | Two new native archive controller/test files | Actual CLI backup/restore, exact runtime quiescence, reviewed fresh-root preference apply and failure/cancellation tests; parent owns UI wiring |
+| Distribution worker | Read-only install/update/Linux audit after completed full61 browser acceptance | Reuse existing staging and smoke checks; identify the smallest executable missing distribution card before editing |
+| Voice/CI worker | Existing attempt files plus narrow chained-pipeline admission seam | Reproduce then remove registered final-audio deadlock; mute/interrupt stay responsive during work; exact cancellation/foreign producer protection; fresh verification |
+| Parent | Native integration, generated assets, docs/Git and artifact acceptance | Review frozen worker changes, run combined checks, publish coherent source and assemble exact-source next candidate; retain GUI/signing/migration gates |
 
 Each completed workstream moves to the next ready card. Physical device,
 account and signed-distribution dependencies must not stall independent source

@@ -18,6 +18,12 @@ with no reported issues. Bundled Python3.11.15, SQLite3.53.1/FTS5 and OpenCode1.
 passed runtime probes. All485 production Python files match the frozen source.
 Post-journey executable hash, strict signature and all485 source comparisons passed.
 
+October3 preservation: the exact app was copied to
+`/private/tmp/feral-candidate-9-33-preserved.app` before any new assembly.
+The copy independently passed strict deep signature, the same executable hash
+and all485 source comparisons. The canonical build path may hold a later
+candidate after this checkpoint; use the preserved artifact for9.33 identity.
+
 ## Actual journey
 
 Fresh disposable attempt3 passed, without increasing the existing100-second

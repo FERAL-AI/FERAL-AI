@@ -1,11 +1,50 @@
 # FERAL completion checkpoint
 
-Updated October 2, 2026. Parent/integrator owns this file. Reconcile it with actual
+Updated October 3, 2026. Parent/integrator owns this file. Reconcile it with actual
 Git, CI and processes after resuming; it is a checkpoint, not a live process lock.
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
 ## Current status at a glance
+
+- **Current published source:** `b009395f349652bba20ae1dfe6acc762fa3a65d7`,
+  [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310), unmerged.
+  Main remains `452a012557d06274063b72546433257b4694d611`.
+  Exact-head backend CI passed **12,871 tests / 83 skipped / 75.10% coverage**;
+  web passed **1,363 tests / 172 files**; native and the unchanged mypy count gate
+  passed (808 diagnostics, not zero type errors). The sole executed failing job
+  was generated web-asset coherence. The assets have been rebuilt locally and
+  their contract check passes; that repair has not yet been published.
+- **Actual full browser acceptance:** all **61 tests passed** against the frozen
+  `7f818da08139952b1698644469e7016563512cd5` snapshot. All 1,127 tracked
+  source entries stayed unchanged, loaded-module provenance matched, and owned
+  processes/listener stopped cleanly. The walk excludes unsafe controls; ten
+  Skills controls exceeded its cap, and five clicks had no verified visible
+  effect. [Full browser evidence](LIVE_WEB_TRACKED_ACCEPTANCE_20261003.md).
+- **Latest packaged candidate:** 9.33/build2026100207, exact `7f818da` source.
+  Packaged local-model recovery/restart passed, with all 485 production files,
+  executable hash and strict ad-hoc signature unchanged. A verified copy is
+  preserved at `/private/tmp/feral-candidate-9-33-preserved.app`.
+  [9.33 evidence](NATIVE_9_33_ACCEPTANCE.md). This candidate excludes the local
+  attempt/preference/layout changes below. Actual Mac GUI/audio acceptance is
+  still unavailable because Computer Use cannot start its native pipe.
+- **Local work, not published or release-certified:** attempt-v1 voice identity,
+  portable native preferences, archive attachment and explicit profile layout.
+  Before the liveness repair, combined checks passed 457 tests / 1 skipped;
+  frozen full typing remained 808 with zero diagnostic changes. A registered
+  real-pipeline/coordinator reproduction then confirmed that final audio can
+  deadlock on the history writer lock and starve mute/interrupt controls.
+  The voice worker is repairing this before publication; the earlier checks do
+  not close that defect. Managed saved-context voice remains refused pending its
+  separately verified coordinator/receipt adapter.
+- **Active ownership:** voice worker owns the bounded media/control liveness
+  repair; archive worker owns two new native controller/test files; distribution
+  worker is auditing existing install/update/Linux paths. Parent owns integration,
+  native wiring, documentation, Git and new-candidate verification. No overlapping
+  source ownership. Gen-UI expansion is deferred; additional coding-engine work
+  follows dependable setup, voice and data continuity.
+
+### Earlier checkpoint records
 
 - Review branch: [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
   Latest published source is `86a8b54ed273642da40776e75609f5a45a197924`; verify
