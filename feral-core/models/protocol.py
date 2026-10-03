@@ -11,6 +11,7 @@ from pydantic import AliasChoices, BaseModel, Field, field_validator, model_vali
 from typing import Optional, Literal, Any, Self, Callable
 from uuid import UUID, uuid4
 from time import time
+import unicodedata
 
 HUP_VERSION = "1.4.0"
 
@@ -1076,6 +1077,47 @@ class ChatTurnAcceptedPayload(BaseModel):
     replayed: bool = False
 
 
+class ChatTurnContextCheckpoint(BaseModel):
+    """Historical exact committed context; never current playback authority."""
+    model_config = {"extra": "forbid"}
+    contract_version: Literal[1]
+    session_id: str = Field(..., min_length=1, max_length=1024)
+    generation: str = Field(..., min_length=36, max_length=36)
+    revision: int = Field(..., strict=True, ge=1, lt=2**63 - 1)
+    attempt_id: str = Field(..., min_length=36, max_length=36)
+    durable: Literal[True]
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_contract(cls, value: object) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported committed context contract")
+        return value
+
+    @field_validator("durable", mode="before")
+    @classmethod
+    def exact_durability(cls, value: object) -> bool:
+        if value is not True:
+            raise ValueError("Committed context must be durable")
+        return True
+
+    @field_validator("generation", "attempt_id", mode="before")
+    @classmethod
+    def canonical_uuid(cls, value: object) -> str:
+        if not isinstance(value, str) or len(value) != 36 or str(UUID(value)) != value:
+            raise ValueError("Committed context identity must be a lowercase UUID")
+        return value
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def canonical_session(cls, value: object) -> str:
+        if (not isinstance(value, str) or not value or len(value) > 1024
+                or value.strip() != value
+                or any(unicodedata.category(char) == "Cc" for char in value)):
+            raise ValueError("Invalid committed context session")
+        return value
+
+
 class ChatTurnTerminalPayload(BaseModel):
     contract_version: Literal[1] = 1
     request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
@@ -1087,6 +1129,22 @@ class ChatTurnTerminalPayload(BaseModel):
     approval_request_ids: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     durable: Literal[True] = True
     replayed: bool = False
+    context_checkpoint: ChatTurnContextCheckpoint | None = None
+
+    @model_validator(mode="after")
+    def committed_context_matches_terminal(self) -> Self:
+        if self.context_checkpoint is not None:
+            if (self.context_checkpoint.session_id != self.session_id
+                    or self.processing_outcome not in {"completed", "awaiting_approval", "refused"}):
+                raise ValueError("Committed context does not match this terminal")
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_absent_context(self, handler: Callable[[object], dict]) -> dict:
+        serialized = handler(self)
+        if serialized.get("context_checkpoint") is None:
+            serialized.pop("context_checkpoint", None)
+        return serialized
 
 
 class TextResponsePayload(BaseModel):

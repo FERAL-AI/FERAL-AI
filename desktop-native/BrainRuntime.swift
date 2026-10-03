@@ -48,6 +48,18 @@ import Darwin
         let line = "native_runtime_health code=" + code + " duration_ms=" + String(Int(min(duration * 1000, 86_400_000))) + " process_running=" + String(child?.isRunning == true) + "\n"
         try? logHandle.write(contentsOf: Data(line.utf8))
     }
+    private enum StartupPhase: String {
+        case processRunEntered = "process_run_entered", processRunReturned = "process_run_returned"
+        case initialHealthBegin = "initial_health_begin", initialHealthResponse = "initial_health_response", initialHealthError = "initial_health_error"
+        case ownedVerifyBegin = "owned_verify_begin", ownedVerifyReturned = "owned_verify_returned"
+    }
+    private func recordStartup(_ owner: NativeRuntimeOwnership, phase: StartupPhase, attempt: Int = 0, code: String = "none") {
+        let codes = ["none", "verified", "unverified", "matching_instance", "foreign_instance", "missing_instance", "http_failure",
+                     "timeout", "connection_unavailable", "connection_lost", "network_unavailable", "local_transport_policy_refused", "transport_other"]
+        guard ownership == owner, (0...120).contains(attempt), codes.contains(code), let logHandle else { return }
+        let line = "native_runtime_startup phase=" + phase.rawValue + " attempt=" + String(attempt) + " code=" + code + " process_running=" + String(child?.isRunning == true) + "\n"
+        try? logHandle.write(contentsOf: Data(line.utf8))
+    }
     var healthWarning: String? { health.healthWarning }
     var serviceReachable: Bool { health.serviceReachable && child?.isRunning == true }
     var isReady: Bool { health.availableForActions && child?.isRunning == true }
@@ -136,7 +148,9 @@ import Darwin
             }
         }
         progress("Starting your local agent…")
+        recordStartup(owner, phase: .processRunEntered)
         try process.run()
+        recordStartup(owner, phase: .processRunReturned)
         health.didLaunch(owner)
         let config = URLSessionConfiguration.ephemeral
         config.timeoutIntervalForRequest = 2
@@ -153,10 +167,24 @@ import Darwin
                 let status = process.terminationStatus
                 throw NativeFailure("The local agent exited (code \(status)).\n\(tail)")
             }
-            if let (_, response) = try? await session.data(from: baseURL.appendingPathComponent("health")),
-               let http = response as? HTTPURLResponse, http.statusCode == 200,
-               http.value(forHTTPHeaderField: "X-Feral-Desktop-Instance") == identity, process.isRunning {
-                guard await health.verifyNow(), ownership == owner, !stopRequested, !Task.isCancelled else { throw NativeFailure("The owned runtime health identity changed at startup.") }
+            recordStartup(owner, phase: .initialHealthBegin, attempt: attempt)
+            var initialHealthVerified = false
+            do {
+                let (_, response) = try await session.data(from: baseURL.appendingPathComponent("health"))
+                let http = response as? HTTPURLResponse
+                let header = http?.value(forHTTPHeaderField: "X-Feral-Desktop-Instance")
+                let code = http?.statusCode != 200 ? "http_failure" : (header == nil ? "missing_instance" : (header == identity ? "matching_instance" : "foreign_instance"))
+                recordStartup(owner, phase: .initialHealthResponse, attempt: attempt, code: code)
+                initialHealthVerified = http?.statusCode == 200 && header == identity && process.isRunning
+            } catch {
+                let code = (error as? URLError)?.code == .appTransportSecurityRequiresSecureConnection ? "local_transport_policy_refused" : (NativeRuntimeProbeDiagnostics.transportCode(error) ?? "transport_other")
+                recordStartup(owner, phase: .initialHealthError, attempt: attempt, code: code)
+            }
+            if initialHealthVerified {
+                recordStartup(owner, phase: .ownedVerifyBegin, attempt: attempt)
+                let verified = await health.verifyNow()
+                recordStartup(owner, phase: .ownedVerifyReturned, attempt: attempt, code: verified ? "verified" : "unverified")
+                guard verified, ownership == owner, !stopRequested, !Task.isCancelled else { throw NativeFailure("The owned runtime health identity changed at startup.") }
                 health.beginMonitoring()
                 progress(health.availableForActions ? "Ready on this Mac" : "Local service connected. Full agent startup is paused; use Security for recovery.")
                 return

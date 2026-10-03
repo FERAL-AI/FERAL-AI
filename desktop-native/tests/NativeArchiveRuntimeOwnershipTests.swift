@@ -86,6 +86,10 @@ import Darwin
         guard let canonical = realpath(root, nil) else { throw NativeFailure("Fixture root is unavailable.") }
         defer { free(canonical) }
         guard String(cString: canonical) == root else { throw NativeFailure("Fixture root was redirected.") }
+        guard let policy = Bundle.main.object(forInfoDictionaryKey: "NSAppTransportSecurity") as? [String: Any],
+              policy.count == 1, policy["NSAllowsLocalNetworking"] as? Bool == true else {
+            throw NativeFailure("The disposable fixture requires the actual app local-network policy.")
+        }
         phaseRoot = URL(fileURLWithPath: root, isDirectory: true)
         try checkpoint("fixture validated; preparing actual BrainRuntime")
         let runtime = BrainRuntime(); var events: [NativeRuntimeHealthEvent] = [], progress: [String] = []

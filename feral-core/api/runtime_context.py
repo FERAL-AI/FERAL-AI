@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
-from collections.abc import AsyncIterator, Mapping
+from collections.abc import AsyncIterator, Callable, Mapping
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING
 
@@ -13,6 +13,7 @@ from agents.runtime_context_checkpoint import (
     RuntimeContextCoordinator,
     RuntimeContextError,
     RuntimeContextReadiness,
+    RuntimeContextScopeReceipt,
 )
 from memory.runtime_session_checkpoint import validate_session_id
 from starlette.websockets import WebSocket
@@ -47,14 +48,29 @@ def session_query(query: Mapping[str, str], primary: str) -> tuple[str, bool, in
 
 
 @asynccontextmanager
-async def prepared_scope(state: BrainState, session_id: str) -> AsyncIterator[None]:
+async def prepared_scope(state: BrainState, session_id: str, *,
+                         attachment: RuntimeContextAttachment | None = None,
+                         current_owner: Callable[[], bool] | None = None
+                         ) -> AsyncIterator[RuntimeContextScopeReceipt | None]:
     """Keep preparation and the one command in the same exact task and SID lock."""
     coordinator = coordinator_for(state)
     if coordinator is None:
-        yield
+        if attachment is not None:
+            raise RuntimeContextError("context_unavailable")
+        yield None
+    elif attachment is not None:
+        if attachment.token.session_id != session_id or current_owner is None:
+            raise RuntimeContextError("context_attachment_invalid")
+        store = state.memory
+        def owner_current() -> bool:
+            return (coordinator_for(state) is coordinator and state.memory is store
+                    and current_owner() is True)
+        async with coordinator.attached_write_scope(attachment.token, expected_store=store,
+                current_owner=owner_current, command_handoff=True) as receipt:
+            yield receipt
     else:
-        async with coordinator.write_scope(session_id, command_handoff=True):
-            yield
+        async with coordinator.write_scope(session_id, command_handoff=True) as receipt:
+            yield receipt
 
 
 async def attachment_readiness(coordinator: RuntimeContextCoordinator,

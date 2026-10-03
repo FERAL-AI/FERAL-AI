@@ -6,9 +6,13 @@ Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` 
 `4eded179e2060c226739511fc53f5a8bde0eaa16`. Assembly, strict ad-hoc signature,
 51 compiled native input comparisons and487 packaged Python comparisons pass.
 Actual offline backup/restore and production readers pass with synthetic data;
-actual local-model recovery is active. General CI passes13,013 backend tests,
-while separate native Process-fixture and Linux payload checks fail and are being
-corrected. GUI/audio and all distribution gates remain open.
+actual local-model recovery has no completed9.34 receipt. Newer published f41
+general CI and corrected Linux package checks pass; its native startup fixture
+still times out. Local provider-review integration passes21 groups/33 assertions;
+committed-turn broader checks pass567 tests and unchanged812 full mypy diagnostics.
+Those source changes are not in9.34. Computer Use inventory now succeeds and
+isolated actual Mac journeys take priority. GUI/audio and distribution gates
+remain open; further Linux and Gen-UI engineering is deferred.
 [9.34 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_34_ACCEPTANCE.md).
 
 **Preceding verified artifact:2026.9.33/build2026100207**, exact source

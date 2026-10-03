@@ -27,7 +27,7 @@ from api.runtime_context import (
     require_attachment_ready,
     session_query,
 )
-from agents.runtime_context_checkpoint import RuntimeContextError
+from agents.runtime_context_checkpoint import RuntimeContextAttachment, RuntimeContextError, RuntimeContextScopeReceipt
 
 from fastapi import (
     FastAPI,
@@ -2194,6 +2194,7 @@ async def _prepare_chat_turn_context(
     raw_context: dict | None,
     attachments: list[dict] | None = None,
     source_node: str | None = None,
+    scope_receipt: RuntimeContextScopeReceipt | None = None,
 ) -> tuple[str, dict, str]:
     """Build the (refined_text, ctx, user_msg_text) triple that the
     orchestrator should be invoked with.
@@ -2213,6 +2214,8 @@ async def _prepare_chat_turn_context(
     Returns:
         ``(refined_text, ctx, user_msg_text)``.
     """
+    if scope_receipt is not None:
+        scope_receipt.assert_current()
     user_msg_text = text
     ctx: dict = dict(raw_context or {})
     if attachments:
@@ -2254,12 +2257,16 @@ async def _prepare_chat_turn_context(
             history = state.memory.working_get(session_id) or []
         except Exception:
             history = []
+        if scope_receipt is not None:
+            scope_receipt.assert_current()
         envelope = await _refine_prompt(
             text,
             llm=getattr(state.orchestrator, "llm", None),
             device_target_hint=ctx.get("device_target"),
             history=history,
         )
+        if scope_receipt is not None:
+            scope_receipt.assert_current()
         if envelope.refined_text:
             refined_text = envelope.refined_text
         if envelope.device_target and "device_target" not in ctx:
@@ -2267,6 +2274,8 @@ async def _prepare_chat_turn_context(
         ctx["refinement"] = envelope.model_dump()
     except Exception as exc:
         logger.debug("PromptRefiner skipped: %s", exc)
+    if scope_receipt is not None:
+        scope_receipt.assert_current()
 
     if attachments:
         from memory.attachment_context import attachment_model_context
@@ -2307,6 +2316,7 @@ def _build_chat_turn_runner(
     refined_text: str,
     ctx: dict,
     tracked: bool = False,
+    scope_receipt: RuntimeContextScopeReceipt | None = None,
 ) -> "Coroutine[object, object, str | None]":
     """Construct the coroutine that drives ``handle_command_stream``
     plus the optional skill-gen detection. Identical between WebUI
@@ -2314,13 +2324,19 @@ def _build_chat_turn_runner(
     """
 
     async def send_progress(message: FeralMessage) -> None:
+        if scope_receipt is not None:
+            scope_receipt.assert_current()
         if tracked:
             from agents.chat_turns import correlate_progress
             message = correlate_progress(session_id, message)
         await ws.send_json(message.model_dump())
+        if scope_receipt is not None:
+            scope_receipt.assert_current()
 
     async def _run() -> str | None:
         try:
+            if scope_receipt is not None:
+                scope_receipt.assert_current()
             if state.orchestrator is None:
                 return None
             result = await state.orchestrator.handle_command_stream(
@@ -2328,14 +2344,20 @@ def _build_chat_turn_runner(
                 text=refined_text,
                 context=ctx,
             )
+            if scope_receipt is not None:
+                scope_receipt.assert_current()
             if state.skill_gen:
                 history = state.memory.working_get(session_id) or []
                 need = await state.skill_gen.detect_unmet_need(history)
+                if scope_receipt is not None:
+                    scope_receipt.assert_current()
                 if need:
                     manifest = await state.skill_gen.generate_skill(
                         capability=need.get("capability", ""),
                         service=need.get("service", ""),
                     )
+                    if scope_receipt is not None:
+                        scope_receipt.assert_current()
                     if manifest:
                         await send_progress(
                             FeralMessage(
@@ -2384,20 +2406,24 @@ def _build_chat_turn_runner(
 
 
 async def _submit_tracked_chat_turn(*, ws, session_id: str, request_id: str,
-                                    text: str, raw_context=None, attachments=None, emit=None):
+                                    text: str, raw_context=None, attachments=None, emit=None,
+                                    attachment: RuntimeContextAttachment | None = None):
     """Reuse the existing preparation/runner under a committed receipt."""
-    from agents.chat_turns import get_chat_turn_manager
+    from agents.chat_turns import CommittedChatResult, get_chat_turn_manager
     if emit is None:
         async def emit(kind, payload):
             await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type=kind, payload=payload).model_dump())
 
     async def run():
-        async with prepared_scope(state, session_id):
+        async with prepared_scope(state, session_id, attachment=attachment,
+                current_owner=lambda: state.sessions.get(session_id) is ws) as scope_receipt:
             refined_text, ctx, _ = await _prepare_chat_turn_context(
                 session_id=session_id, text=text, raw_context=raw_context, attachments=attachments or [],
+                scope_receipt=scope_receipt,
             )
-            return await _build_chat_turn_runner(ws=ws, session_id=session_id,
-                                                 refined_text=refined_text, ctx=ctx, tracked=True)
+            result = await _build_chat_turn_runner(ws=ws, session_id=session_id,
+                refined_text=refined_text, ctx=ctx, tracked=True, scope_receipt=scope_receipt)
+        return CommittedChatResult(result, scope_receipt) if attachment is not None and scope_receipt is not None else result
 
     return await get_chat_turn_manager(state).submit(
         owner=ws, session_id=session_id, request_id=request_id,
@@ -2513,7 +2539,8 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
             command = TextCommandPayload.model_validate(params)
             return await _submit_tracked_chat_turn(ws=ws, session_id=session_id, request_id=request_id,
                                                    text=command.text, raw_context=command.context,
-                                                   attachments=[a.model_dump() for a in command.attachments or []], emit=emit)
+                                                   attachments=[a.model_dump() for a in command.attachments or []], emit=emit,
+                                                   attachment=attachment)
 
         gw_session.metadata["tracked_chat_send"] = gateway_submit
         if coordinator is not None and attachment is not None:
@@ -2625,7 +2652,8 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                         from agents.chat_turns import ChatTurnError
                         try:
                             await _submit_tracked_chat_turn(ws=ws, session_id=session_id, request_id=msg.msg_id,
-                                                           text=payload.text, raw_context=payload.context, attachments=attachments)
+                                                           text=payload.text, raw_context=payload.context, attachments=attachments,
+                                                           attachment=attachment)
                         except ChatTurnError as exc:
                             await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="error",
                                                           payload={"code": exc.code, "message": "The tracked turn was not accepted; inspect its receipt before retrying.",

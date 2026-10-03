@@ -56,9 +56,10 @@ harness remain preserved; production checkpoint code was unchanged.
   its worker was waiting for command approval. A new resource-bounded probe is
   prepared with the existing acceptance deadlines and isolated resources;
   actual launch and completion must be recorded separately.
-- Current GUI/file-picker/preferences-application and microphone/speaker
-  acceptance are unavailable because Computer Use cannot initialize its native
-  pipe. The tool failure is not evidence of an app crash.
+- Computer Use inventory now succeeds after its earlier native-pipe failure.
+  Isolated actual GUI journeys can resume. File-picker/preferences-application
+  and microphone/speaker acceptance still require completed results; tool
+  availability alone is not app acceptance.
 - Managed saved-context voice remains refused pending its tracked-turn adapter.
 - Candidate-source native and Linux CI failed. Newer source `f41c204fe` passes
   general CI and the corrected Linux desktop package workflow. Its native Process

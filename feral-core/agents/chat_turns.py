@@ -15,6 +15,8 @@ from typing import TYPE_CHECKING, Callable
 from uuid import UUID, uuid4
 
 from security.agent_turn_lease import spawn_agent_turn
+from agents.runtime_context_checkpoint import RuntimeContextScopeReceipt
+from memory.runtime_session_checkpoint import CheckpointFence
 
 if TYPE_CHECKING:
     from models.protocol import FeralMessage
@@ -50,6 +52,31 @@ class TurnAudit:
     budget_exceeded: bool = False
     refused: bool = False
     approval_request_ids: list[str] = field(default_factory=list)
+    context_receipt: RuntimeContextScopeReceipt | None = None
+    context_checkpoint: dict | None = None
+
+
+@dataclass(frozen=True)
+class CommittedChatResult:
+    """Trusted runner result; the scope itself is the exact commit authority."""
+    text: str | None
+    scope: RuntimeContextScopeReceipt
+
+    def checkpoint(self, session_id: str) -> dict | None:
+        if self.text is not None and type(self.text) is not str:
+            raise ChatTurnError("chat_turn_context_invalid")
+        if type(self.scope) is not RuntimeContextScopeReceipt:
+            raise ChatTurnError("chat_turn_context_invalid")
+        fence = self.scope.committed_fence
+        if fence is None:
+            return None  # An explicitly legacy scope never invents a checkpoint.
+        if type(fence) is not CheckpointFence or fence.session_id != session_id:
+            raise ChatTurnError("chat_turn_context_invalid")
+        # Revalidate even a trusted object whose fields were altered externally.
+        CheckpointFence(fence.session_id, fence.generation, fence.revision, fence.attempt_id)
+        return {"contract_version": 1, "session_id": fence.session_id,
+                "generation": fence.generation, "revision": fence.revision,
+                "attempt_id": fence.attempt_id, "durable": True}
 
 
 _audit: ContextVar[TurnAudit | None] = ContextVar("feral_tracked_chat_turn", default=None)
@@ -197,6 +224,8 @@ class ChatTurnManager:
                        final_text=audit.final_text if outcome in {"completed", "awaiting_approval", "refused"} else "",
                        action_outcome="unknown" if outcome == "outcome_unknown" or (outcome == "cancelled" and audit.began) else "not_asserted",
                        approval_request_ids=audit.approval_request_ids[:128])
+        if outcome in {"completed", "awaiting_approval", "refused"} and audit.context_checkpoint is not None:
+            receipt["context_checkpoint"] = dict(audit.context_checkpoint)
         return receipt
 
     async def _run(self, live: LiveTurn, accepted: dict, run, emit):
@@ -210,6 +239,10 @@ class ChatTurnManager:
             if not updated:
                 return
             value = await run()
+            if isinstance(value, CommittedChatResult):
+                audit.context_checkpoint = value.checkpoint(audit.session_id)
+                audit.context_receipt = value.scope
+                value = value.text
             if audit.cancel_requested:
                 outcome = "cancelled"
             elif audit.error:
@@ -237,11 +270,25 @@ class ChatTurnManager:
         if audit.closed:
             return
         audit.closed = True
+        if audit.context_receipt is not None:
+            try:
+                audit.context_receipt.assert_current()
+            except (Exception, asyncio.CancelledError):
+                outcome = "outcome_unknown" if audit.began else "failed"
+                audit.context_checkpoint = None
         terminal = self._terminal(accepted, outcome, audit)
         try:
             committed = await self._store.chat_turn_update(session_id=audit.session_id, turn_id=audit.turn_id,
                                                            status="terminal", receipt=terminal)
             if committed:
+                if audit.context_checkpoint is not None and "context_checkpoint" in terminal:
+                    try:
+                        audit.context_receipt.assert_current()
+                    except (Exception, asyncio.CancelledError):
+                        # The immutable receipt remains historical evidence. A
+                        # superseded attachment cannot receive it as live media
+                        # authority. Status reconciliation never replays work.
+                        return
                 for _owner, subscriber in list(live.subscribers.values()):
                     if id(_owner) in live.terminal_notified:
                         continue

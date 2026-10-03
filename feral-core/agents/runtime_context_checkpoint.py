@@ -87,6 +87,27 @@ class RuntimeContextAttachment:
     readiness: RuntimeContextReadiness
 
 
+class RuntimeContextScopeReceipt:
+    """An operation-local commit, never a lookup of the SID's latest fence."""
+    def __init__(self, task: asyncio.Task, guard: Callable[[], None] | None):
+        self._task = task
+        self._guard = guard
+        self._committed: CheckpointFence | None = None
+
+    def assert_current(self) -> None:
+        if asyncio.current_task() is not self._task:
+            raise RuntimeContextError("context_scope_owner_invalid")
+        if self._task.cancelling():
+            raise asyncio.CancelledError("Cancelled context scope")
+        if self._guard is not None:
+            self._guard()
+
+    @property
+    def committed_fence(self) -> CheckpointFence | None:
+        self.assert_current()
+        return self._committed
+
+
 @dataclass
 class _OwnedScope:
     task: asyncio.Task[object]
@@ -469,13 +490,19 @@ class RuntimeContextCoordinator:
                 if token is not None:
                     self._owner.reset(token)
 
-    async def _restore_locked(self, session_id: str) -> CheckpointFence | None:
+    async def _restore_locked(self, session_id: str, *, guard: Callable[[], None] | None = None) -> CheckpointFence | None:
+        if guard is not None:
+            guard()
         read = await self.store.runtime_checkpoint_read(session_id)
+        if guard is not None:
+            guard()
         cached = self._fences.get(session_id)
         if read.status == CheckpointStatus.ABSENT:
             if cached is not None or self.history.get(session_id) or self.store.working_get(session_id, limit=1):
                 raise RuntimeContextError("unmanaged_runtime_context")
             ui = await self.store.conversation_get(session_id)
+            if guard is not None:
+                guard()
             if ui is not None and ui.get("messages"):
                 raise RuntimeContextError("legacy_context_unavailable")
             return None
@@ -497,7 +524,38 @@ class RuntimeContextCoordinator:
         return record.fence
 
     @asynccontextmanager
-    async def write_scope(self, session_id: str, *, command_handoff: bool = False) -> AsyncIterator[None]:
+    async def write_scope(self, session_id: str, *, command_handoff: bool = False) -> AsyncIterator[RuntimeContextScopeReceipt]:
+        async with self._write_scope(session_id, command_handoff=command_handoff) as receipt:
+            yield receipt
+
+    @asynccontextmanager
+    async def attached_write_scope(self, token: RuntimeContextAttachmentToken, *, expected_store: MemoryStore,
+                                   current_owner: Callable[[], bool], command_handoff: bool = False
+                                   ) -> AsyncIterator[RuntimeContextScopeReceipt]:
+        """Bind preparation to a captured attachment and trusted synchronous owner."""
+        task = asyncio.current_task()
+
+        def guard() -> None:
+            if asyncio.current_task() is not task:
+                raise RuntimeContextError("context_scope_owner_invalid")
+            if self.store is not expected_store or current_owner() is not True:
+                raise RuntimeContextError("context_attachment_superseded")
+            if token not in self._attachments:
+                raise RuntimeContextError("context_attachment_invalid")
+            refusal = self._attachment_refusals.get(token)
+            if refusal is not None:
+                raise RuntimeContextError(f"context_{refusal.state.value}")
+
+        guard()
+        existing = token in self._attachment_managed or self.known_managed(token.session_id)
+        async with self._write_scope(token.session_id, command_handoff=command_handoff,
+                guard=guard, require_existing=existing) as receipt:
+            yield receipt
+
+    @asynccontextmanager
+    async def _write_scope(self, session_id: str, *, command_handoff: bool = False,
+                           guard: Callable[[], None] | None = None,
+                           require_existing: bool = False) -> AsyncIterator[RuntimeContextScopeReceipt]:
         """Fence before preparation; allow at most one explicit same-task command.
 
         A child task inheriting the context variable owns no scope. Any nested
@@ -511,33 +569,47 @@ class RuntimeContextCoordinator:
         owner = self._owner.get()
         if owner is not None and owner.task is task:
             raise RuntimeContextError("nested_context_writer")
+        receipt = RuntimeContextScopeReceipt(task, guard)
+        receipt.assert_current()
         # Bound retained SID locks without evicting a held/queued lock. Failed
         # identities retain their slot for this coordinator's lifetime too.
         if not self.legacy_passthrough:
             self._reserve_managed(session_id)
         async with self._writer_registration(session_id), self.lock_for(session_id):
-            if self.legacy_passthrough and not await self.is_managed(session_id):
+            receipt.assert_current()
+            legacy = self.legacy_passthrough and not await self.is_managed(session_id)
+            receipt.assert_current()
+            if legacy:
+                if guard is not None and any(t.session_id == session_id for t in self._attachment_managed):
+                    raise RuntimeContextError("context_unavailable")
                 token = self._owner.set(_OwnedScope(task, session_id, command_handoff))
                 try:
-                    yield
+                    yield receipt
+                    receipt.assert_current()
                 finally:
                     self._owner.reset(token)
                 return
             self._reserve_managed(session_id)
-            expected = await self._restore_locked(session_id)
+            expected = await self._restore_locked(session_id, guard=receipt.assert_current)
+            receipt.assert_current()
+            if require_existing and expected is None:
+                raise RuntimeContextError("context_unavailable")
             started = await self.store.runtime_checkpoint_begin(session_id, attempt_id=str(uuid4()), expected=expected)
+            receipt.assert_current()
             if started.status != CheckpointStatus.APPLIED or started.record is None:
                 raise RuntimeContextError(f"checkpoint_{started.status.value}")
             pending = started.record.fence
             self._fences[session_id] = pending
             token = self._owner.set(_OwnedScope(task, session_id, command_handoff))
             try:
-                yield
+                yield receipt
+                receipt.assert_current()
                 try:
                     context = encode_context(self.history.get(session_id, []), self.store.working_get(session_id, limit=50),
                                              limits=self.store._runtime_checkpoint_limits,
                                              tool_image_call_ids=self.image_call_ids(session_id))
                     committed = await self.store.runtime_checkpoint_commit(pending, context)
+                    receipt.assert_current()
                 except asyncio.CancelledError:
                     raise
                 except Exception:
@@ -551,6 +623,7 @@ class RuntimeContextCoordinator:
                         or updated.attempt_id != pending.attempt_id or updated.revision != pending.revision + 1):
                     raise RuntimeContextError("checkpoint_commit_unverified", effects_may_have_occurred=True)
                 self._fences[session_id] = updated
+                receipt._committed = updated
             finally:
                 self._owner.reset(token)
 

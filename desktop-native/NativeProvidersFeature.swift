@@ -1,24 +1,33 @@
 import SwiftUI
 import Foundation
 
-struct NativeProviderChoice: Identifiable {
+struct NativeProviderChoice: Identifiable, Equatable {
     let id: String, name: String, defaultModel: String, defaultURL: String, note: String
     let needsKey: Bool, configured: Bool, chatReady: Bool
     let reachable: Bool?
 }
-struct NativeProviderKey: Identifiable {
+struct NativeProviderKey: Identifiable, Equatable {
     let id: String, fingerprint: String
     let active: Bool
     let probe: Bool?
 }
 enum NativeProviderOperation { case configure, activate, refreshModels, probe, addKey, activateKey(String), deleteKey(String), probeKey(String), resetCooldown }
 struct NativeProviderReview {
+    let id = UUID()
+    let createdUptime: TimeInterval
+    let origin: URL?
     let connection: UUID, provider: String, model: String, endpoint: String, fallbacks: [String], label: String, secret: String
     let operation: NativeProviderOperation
+    let config: [String: Any], descriptor: NativeProviderChoice?, keys: [NativeProviderKey]
+    let vault: [String: Any]
 }
 private struct ProviderFeatureError: LocalizedError { let message: String; var errorDescription: String? { message } }
 private func providerBool(_ value: Any?) -> Bool? {
     guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }; return number.boolValue
+}
+private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegate {
+    func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+    static func session() -> URLSession { let configuration = URLSessionConfiguration.ephemeral; configuration.timeoutIntervalForResource = 180; return URLSession(configuration: configuration, delegate: NativeProviderRedirectGuard(), delegateQueue: nil) }
 }
 
 @MainActor final class NativeProvidersModel: ObservableObject {
@@ -41,16 +50,19 @@ private func providerBool(_ value: Any?) -> Bool? {
     private var baseURL: URL?
     private var generation = UUID()
     private var cachedConfig: [String: Any] = [:]
+    private var cachedVault: [String: Any] = [:]
+    private var usedReviews = Set<UUID>()
+    private let uptime: () -> TimeInterval
     private let session: URLSession
-    init(baseURL: URL?, session: URLSession? = nil) { self.baseURL = baseURL; self.session = session ?? URLSession(configuration: .ephemeral) }
+    init(baseURL: URL?, session: URLSession? = nil, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) { self.baseURL = baseURL; self.session = session ?? NativeProviderRedirectGuard.session(); self.uptime = uptime }
     func configure(baseURL: URL?) {
         guard self.baseURL != baseURL else { return }; self.baseURL = baseURL; generation = UUID()
         providers = []; models = []; keys = []; selected = ""; activeProvider = ""; activeModel = ""; runtimeState = "Not confirmed"
-        model = ""; endpoint = ""; fallbacks = ""; cachedConfig = [:]; modelsSource = "Not loaded"; health = []; keysError = nil; error = nil; notice = nil; busy = false
+        model = ""; endpoint = ""; fallbacks = ""; cachedConfig = [:]; cachedVault = [:]; usedReviews = []; modelsSource = "Not loaded"; health = []; keysError = nil; error = nil; notice = nil; busy = false
     }
     private func request(_ path: String, method: String = "GET", body: [String: Any]? = nil, query: [URLQueryItem] = []) async throws -> [String: Any] {
         try Task.checkCancellation(); let started = generation
-        guard let baseURL, ["127.0.0.1", "localhost", "::1", "[::1]"].contains(baseURL.host ?? ""), baseURL.scheme == "http" || baseURL.scheme == "https" else { throw ProviderFeatureError(message: "Connect to the local agent to configure providers.") }
+        guard let baseURL, baseURL.user == nil, baseURL.password == nil, baseURL.query == nil, baseURL.fragment == nil, ["127.0.0.1", "localhost", "::1", "[::1]"].contains(baseURL.host ?? ""), baseURL.scheme == "http" || baseURL.scheme == "https" else { throw ProviderFeatureError(message: "Connect to the local agent to configure providers.") }
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
         components.path = path; components.queryItems = query.isEmpty ? nil : query
         guard let url = components.url else { throw ProviderFeatureError(message: "Invalid provider request.") }
@@ -61,7 +73,7 @@ private func providerBool(_ value: Any?) -> Bool? {
         catch { throw ProviderFeatureError(message: "Provider request could not be completed. Refresh to confirm state before retrying.") }
         try Task.checkCancellation()
         guard generation == started else { throw ProviderFeatureError(message: "Agent connection changed. Review again.") }
-        guard let http = response as? HTTPURLResponse else { throw ProviderFeatureError(message: "Invalid provider response.") }
+        guard data.count <= 524288, let http = response as? HTTPURLResponse, http.url == url else { throw ProviderFeatureError(message: "Invalid provider response.") }
         // Never render arbitrary backend diagnostics: credential routes can
         // echo submitted secrets in validation errors or upstream exceptions.
         guard (200..<300).contains(http.statusCode) else { throw ProviderFeatureError(message: "HTTP \(http.statusCode). Provider action is not confirmed. Refresh before retrying.") }
@@ -70,28 +82,59 @@ private func providerBool(_ value: Any?) -> Bool? {
         return value
     }
     private func safeID(_ value: String) throws -> String {
-        guard !value.isEmpty, value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.")).contains($0) }) else { throw ProviderFeatureError(message: "Invalid provider or key label. Use letters, numbers, dash, underscore or dot.") }; return value
+        guard !value.isEmpty, value.utf8.count <= 80, value.unicodeScalars.allSatisfy({ CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_.")).contains($0) }) else { throw ProviderFeatureError(message: "Invalid provider or key label. Use bounded letters, numbers, dash, underscore or dot.") }; return value
     }
     private func clean(_ value: String, secret: String = "") -> String { secret.isEmpty ? value : value.replacingOccurrences(of: secret, with: "[redacted]") }
+    private func configSnapshot(_ raw: [String: Any]) throws -> [String: Any] {
+        guard let provider = raw["provider"] as? String, let model = raw["model"] as? String,
+              let endpoint = raw["base_url"] as? String, let fallbacks = raw["fallback_providers"] as? [String],
+              provider.utf8.count <= 80, model.utf8.count <= 256, endpoint.utf8.count <= 2048, fallbacks.count <= 20 else { throw ProviderFeatureError(message: "Saved provider configuration is unsupported.") }
+        var result: [String: Any] = ["provider": provider, "model": model, "base_url": endpoint, "fallback_providers": fallbacks]
+        if raw["configured"] != nil { guard let configured = providerBool(raw["configured"]) else { throw ProviderFeatureError(message: "Saved credential presence is unsupported.") }; result["configured"] = configured }
+        return result
+    }
+    private func sameJSON(_ a: [String: Any], _ b: [String: Any]) -> Bool {
+        guard let x = try? JSONSerialization.data(withJSONObject: a, options: .sortedKeys), let y = try? JSONSerialization.data(withJSONObject: b, options: .sortedKeys) else { return false }; return x == y
+    }
+    private func decodeProviders(_ raw: [String: Any]) throws -> [NativeProviderChoice] {
+        guard let rows = raw["providers"] as? [[String: Any]], rows.count <= 100 else { throw ProviderFeatureError(message: "Provider catalog is incomplete.") }
+        var seen = Set<String>()
+        return try rows.map { row in
+            guard let id = row["id"] as? String, seen.insert(id).inserted else { throw ProviderFeatureError(message: "Invalid provider catalog entry.") }; _ = try safeID(id)
+            guard let needsKey = providerBool(row["requires_api_key"]), let configured = providerBool(row["configured"]), let ready = providerBool(row["chat_ready"]) else { throw ProviderFeatureError(message: "Provider catalog flags are unsupported.") }
+            return NativeProviderChoice(id: id, name: row["display_name"] as? String ?? id, defaultModel: row["default_model"] as? String ?? "", defaultURL: row["default_base_url"] as? String ?? "", note: row["stub_reason"] as? String ?? "", needsKey: needsKey, configured: configured, chatReady: ready, reachable: providerBool(row["reachable"]))
+        }
+    }
+    private func keySnapshot(_ raw: [String: Any]) throws -> [NativeProviderKey] {
+        guard let rows = raw["keys"] as? [[String: Any]], rows.count <= 100 else { throw ProviderFeatureError(message: "Key metadata is incomplete.") }; var seen = Set<String>()
+        return try rows.map { row in
+            guard let label = row["label"] as? String, seen.insert(label).inserted, let active = providerBool(row["is_active"]) else { throw ProviderFeatureError(message: "Invalid key metadata.") }; _ = try safeID(label)
+            return NativeProviderKey(id: label, fingerprint: row["fingerprint"] as? String ?? "", active: active, probe: providerBool(row["last_probe_ok"]))
+        }.sorted { $0.id < $1.id }
+    }
+    private func vaultSnapshot(_ raw: [String: Any]) throws -> [String: Any] {
+        guard let state = raw["state"] as? String, state.utf8.count <= 80, let available = providerBool(raw["credentials_available"]), let inFlight = providerBool(raw["in_flight"]) else { throw ProviderFeatureError(message: "Credential storage state is unsupported.") }
+        return ["state": state, "credentials_available": available, "in_flight": inFlight]
+    }
+    private func sameDraft(_ item: NativeProviderReview) -> Bool {
+        let age = uptime() - item.createdUptime
+        return item.connection == generation && item.origin == baseURL && item.provider == selected && item.model == model && item.endpoint == endpoint && item.fallbacks == fallbacks.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty } && age >= 0 && age <= 300
+    }
+    func canUse(_ item: NativeProviderReview) -> Bool { !busy && sameDraft(item) && !usedReviews.contains(item.id) && usedReviews.count < 1000 && !item.config.isEmpty && item.descriptor.map { providers.contains($0) } == true }
     func refresh(resetSelection: Bool = false) async {
         guard !busy else { return }
+        generation = UUID(); usedReviews = []
         if resetSelection {
-            generation = UUID(); selected = ""; model = ""; endpoint = ""; fallbacks = ""; cachedConfig = [:]
+            generation = UUID(); selected = ""; model = ""; endpoint = ""; fallbacks = ""; cachedConfig = [:]; cachedVault = [:]; usedReviews = []
             activeProvider = ""; activeModel = ""; runtimeState = "Not confirmed"; notice = nil
             models = []; keys = []; keysError = nil; modelsSource = "Not loaded"; health = []
         }
-        let started = generation; busy = true; error = nil
+        let started = generation; busy = true; error = nil; notice = nil
         defer { if started == generation { busy = false } }
         do {
             let list = try await request("/api/llm/providers")
-            guard let rows = list["providers"] as? [[String: Any]] else { throw ProviderFeatureError(message: "Provider catalog is incomplete.") }
-            var seen = Set<String>()
-            providers = try rows.map { row in
-                guard let id = row["id"] as? String, seen.insert(id).inserted else { throw ProviderFeatureError(message: "Invalid provider catalog entry.") }
-                _ = try safeID(id)
-                return NativeProviderChoice(id: id, name: row["display_name"] as? String ?? id, defaultModel: row["default_model"] as? String ?? "", defaultURL: row["default_base_url"] as? String ?? "", note: row["stub_reason"] as? String ?? "", needsKey: providerBool(row["requires_api_key"]) ?? true, configured: providerBool(row["configured"]) ?? false, chatReady: providerBool(row["chat_ready"]) ?? false, reachable: providerBool(row["reachable"]))
-            }
-            cachedConfig = try await request("/api/llm/config")
+            providers = try decodeProviders(list)
+            cachedConfig = try configSnapshot(await request("/api/llm/config"))
             activeProvider = cachedConfig["provider"] as? String ?? ""; activeModel = cachedConfig["model"] as? String ?? ""
             let status = try await request("/api/llm/status")
             runtimeState = providerBool(status["available"]).map { $0 ? "Runtime reports available" : "Runtime reports unavailable" } ?? "Not confirmed"
@@ -108,7 +151,7 @@ private func providerBool(_ value: Any?) -> Bool? {
             endpoint = ""; notice = "Saved endpoint contains embedded credentials or a query and was not displayed. Enter a clean endpoint before activating."
         }
         fallbacks = (cachedConfig["fallback_providers"] as? [String] ?? []).joined(separator: ", ")
-        models = []; keys = []; keysError = nil; modelsSource = "Not loaded"
+        models = []; keys = []; cachedVault = [:]; keysError = nil; modelsSource = "Not loaded"
     }
     private func loadHealth() async throws {
         let value = try await request("/api/llm/health")
@@ -125,6 +168,7 @@ private func providerBool(_ value: Any?) -> Bool? {
     }
     func select(_ id: String) async {
         guard !busy, providers.contains(where: { $0.id == id }) else { return }
+        generation = UUID(); usedReviews = []
         selected = id; applySelection(); let started = generation; busy = true; error = nil
         defer { if started == generation { busy = false } }
         do { try await loadDetails(id) } catch { if started == generation { self.error = error.localizedDescription } }
@@ -140,32 +184,52 @@ private func providerBool(_ value: Any?) -> Bool? {
         if providers.first(where: { $0.id == id })?.needsKey == true {
             do {
                 let result = try await request("/api/llm/providers/\(try safeID(id))/keys")
-                guard let entries = result["keys"] as? [[String: Any]] else { throw ProviderFeatureError(message: "Key metadata is incomplete.") }
-                var seen = Set<String>()
-                keys = try entries.map { entry in
-                    guard let label = entry["label"] as? String, seen.insert(label).inserted else { throw ProviderFeatureError(message: "Invalid key metadata.") }
-                    return NativeProviderKey(id: label, fingerprint: entry["fingerprint"] as? String ?? "", active: providerBool(entry["is_active"]) ?? false, probe: providerBool(entry["last_probe_ok"]))
-                }; keysError = nil
+                keys = try keySnapshot(result); keysError = nil
             } catch { if started == generation { keys = []; keysError = error.localizedDescription } }
         }
+        do { cachedVault = try vaultSnapshot(await request("/api/security/vault/status")) }
+        catch { if started == generation { cachedVault = [:]; notice = (notice.map { $0 + " " } ?? "") + "Credential storage status is unavailable. Credential-free local use remains available; key writes require a fresh authenticated storage readback." } }
     }
     func review(_ operation: NativeProviderOperation, label: String = "", secret: String = "") -> NativeProviderReview {
-        NativeProviderReview(connection: generation, provider: selected, model: model, endpoint: endpoint, fallbacks: fallbacks.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }, label: label, secret: secret, operation: operation)
+        NativeProviderReview(createdUptime: uptime(), origin: baseURL, connection: generation, provider: selected, model: model, endpoint: endpoint, fallbacks: fallbacks.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }, label: label, secret: secret, operation: operation, config: cachedConfig, descriptor: providers.first { $0.id == selected }, keys: keys, vault: cachedVault)
     }
     func execute(_ review: NativeProviderReview) async -> Bool {
-        guard !busy, review.connection == generation, review.provider == selected, providers.contains(where: { $0.id == selected }) else { error = "Provider or connection changed. Review the action again."; return false }
+        guard canUse(review), let descriptor = review.descriptor else { error = "Provider review changed, expired or was already used. Refresh and review the action again. No action was sent."; return false }
+        usedReviews.insert(review.id)
         let started = generation; busy = true; error = nil; notice = nil
         defer { if started == generation { busy = false } }
         var changed = false
+        var sent = false
         do {
             let id = try safeID(review.provider); let prefix = "/api/llm/providers/" + id
             if !review.endpoint.isEmpty {
                 guard let url = URLComponents(string: review.endpoint), ["http", "https"].contains(url.scheme ?? ""), url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { throw ProviderFeatureError(message: "Use an HTTP(S) endpoint without embedded credentials, query or fragment.") }
             }
+            if case .activate = review.operation {
+                guard !review.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ProviderFeatureError(message: "Choose or enter a model first.") }
+                guard review.fallbacks.allSatisfy({ fallback in providers.contains(where: { $0.id == fallback }) }) else { throw ProviderFeatureError(message: "Unknown fallback provider.") }
+            }
+            let freshConfig = try configSnapshot(await request("/api/llm/config"))
+            let freshProviders = try decodeProviders(await request("/api/llm/providers"))
+            guard sameDraft(review), sameJSON(freshConfig, review.config), freshProviders.first(where: { $0.id == id }) == descriptor else { throw ProviderFeatureError(message: "Saved provider settings or catalogue changed. Refresh and review again. No action was sent.") }
+            var requiresStorage = !review.secret.isEmpty
+            switch review.operation { case .addKey, .activateKey, .deleteKey: requiresStorage = true; default: break }
+            if descriptor.needsKey {
+                guard keysError == nil else { throw ProviderFeatureError(message: "Public key metadata is unavailable. Refresh before reviewing an action.") }
+                let freshKeys = try keySnapshot(await request(prefix + "/keys"))
+                guard freshKeys == review.keys else { throw ProviderFeatureError(message: "Public key metadata changed. Refresh and review again. No action was sent.") }
+            }
+            if descriptor.needsKey || requiresStorage {
+                let freshVault = try vaultSnapshot(await request("/api/security/vault/status"))
+                guard !review.vault.isEmpty, sameJSON(freshVault, review.vault) else { throw ProviderFeatureError(message: "Credential storage changed. Refresh and review again. No action was sent.") }
+                if requiresStorage { guard freshVault["state"] as? String == "ready", providerBool(freshVault["credentials_available"]) == true, providerBool(freshVault["in_flight"]) == false else { throw ProviderFeatureError(message: "Unlock existing encrypted credential storage before reviewing this write. No action was sent.") } }
+            }
+            try Task.checkCancellation()
+            guard sameDraft(review) else { throw ProviderFeatureError(message: "Provider review changed during verification. No action was sent.") }
             switch review.operation {
             case .configure:
                 var body: [String: Any] = ["base_url": review.endpoint]; if !review.secret.isEmpty { body["api_key"] = review.secret }
-                let value = try await request(prefix + "/configure", method: "POST", body: body)
+                sent = true; let value = try await request(prefix + "/configure", method: "POST", body: body)
                 guard providerBool(value["success"]) == true else { throw ProviderFeatureError(message: "Provider save was not confirmed.") }
                 changed = true
                 notice = "Provider configuration saved. Choose Activate to apply it to chat."
@@ -175,45 +239,49 @@ private func providerBool(_ value: Any?) -> Bool? {
                 guard review.fallbacks.allSatisfy({ fallback in providers.contains(where: { $0.id == fallback }) }) else { throw ProviderFeatureError(message: "Unknown fallback provider.") }
                 var body: [String: Any] = ["provider": id, "model": review.model, "base_url": review.endpoint, "fallback_providers": review.fallbacks]
                 if !review.secret.isEmpty { body["api_key"] = review.secret }
-                let value = try await request("/api/llm/config", method: "POST", body: body)
-                guard providerBool(value["success"]) == true, value["provider"] as? String == id else { throw ProviderFeatureError(message: "Provider activation was not confirmed.") }
+                sent = true; let value = try await request("/api/llm/config", method: "POST", body: body)
+                guard providerBool(value["success"]) == true, value["provider"] as? String == id, value["model"] as? String == review.model else { throw ProviderFeatureError(message: "Provider activation was not confirmed.") }
                 changed = true
                 let runtime = value["reconfigured"] as? [String: Any] ?? [:]
                 notice = providerBool(runtime["ok"]) == true && providerBool(runtime["available"]) == true ? "Configuration saved; runtime reports available." : "Configuration saved, but runtime activation or availability is not confirmed. Refresh status before chatting."
                 if let persisted = value["persisted"] as? [String: Any], providerBool(persisted["ok"]) == false { notice! += " Credential persistence failed." }
             case .refreshModels:
-                let value = try await request(prefix + "/models", query: [URLQueryItem(name: "live", value: "true"), URLQueryItem(name: "force", value: "true")])
+                sent = true; let value = try await request(prefix + "/models", query: [URLQueryItem(name: "live", value: "true"), URLQueryItem(name: "force", value: "true")])
                 guard let rows = value["models"] as? [[String: Any]] else { throw ProviderFeatureError(message: "Live model response is incomplete.") }
                 var modelIDs = Set<String>()
                 models = rows.compactMap { $0["id"] as? String }.filter { modelIDs.insert($0).inserted }; modelsSource = value["source"] as? String ?? "Unknown source"
                 notice = "Model list returned from \(modelsSource)."; if !(value["warning"] as? String ?? "").isEmpty { notice! += " Discovery failed; this may be cached or fallback data." }
             case .probe:
-                let value = try await request(prefix + "/probe", method: "POST", body: [:])
+                sent = true; let value = try await request(prefix + "/probe", method: "POST", body: [:])
                 notice = providerBool(value["reachable"]).map { $0 ? "Provider probe reports reachable. This is not proof every model supports chat." : "Provider probe reports unreachable." } ?? "Probe did not report reachability."
             case .addKey:
                 _ = try safeID(review.label); guard !review.secret.isEmpty else { throw ProviderFeatureError(message: "Enter a key to save.") }
-                let value = try await request(prefix + "/keys", method: "POST", body: ["label": review.label, "api_key": review.secret, "set_active": false])
+                sent = true; let value = try await request(prefix + "/keys", method: "POST", body: ["label": review.label, "api_key": review.secret, "set_active": false])
                 guard providerBool(value["success"]) == true else { throw ProviderFeatureError(message: "Key save was not confirmed.") }; notice = "Labeled key saved without activating or probing it."
             case .activateKey(let label):
                 guard keys.contains(where: { $0.id == label }) else { throw ProviderFeatureError(message: "Refresh key metadata before selecting it.") }
-                let value = try await request(prefix + "/keys/active", method: "POST", body: ["label": label])
+                sent = true; let value = try await request(prefix + "/keys/active", method: "POST", body: ["label": label])
                 guard providerBool(value["success"]) == true, value["active_label"] as? String == label else { throw ProviderFeatureError(message: "Active key change was not confirmed.") }; changed = true; notice = "Active key label updated."
                 if let runtime = value["reconfigured"] as? [String: Any], providerBool(runtime["ok"]) != true { notice! += " Runtime reconfiguration is not confirmed." }
             case .deleteKey(let label):
                 guard keys.contains(where: { $0.id == label }) else { throw ProviderFeatureError(message: "Refresh key metadata before removing it.") }
-                let value = try await request(prefix + "/keys/\(try safeID(label))", method: "DELETE")
+                sent = true; let value = try await request(prefix + "/keys/\(try safeID(label))", method: "DELETE")
                 guard providerBool(value["success"]) == true else { throw ProviderFeatureError(message: "Key removal was not confirmed.") }; notice = "Labeled key removed. This does not revoke the upstream key. The runtime may retain its current credential and other legacy credentials may remain configured."; changed = true
             case .probeKey(let label):
                 guard keys.contains(where: { $0.id == label }) else { throw ProviderFeatureError(message: "Refresh key metadata before probing it.") }
-                let value = try await request(prefix + "/keys/\(try safeID(label))/probe", method: "POST", body: [:])
+                sent = true; let value = try await request(prefix + "/keys/\(try safeID(label))/probe", method: "POST", body: [:])
                 notice = providerBool(value["ok"]).map { $0 ? "Selected key probe passed." : "Selected key probe failed." } ?? "Key probe verdict is not confirmed."
             case .resetCooldown:
-                let value = try await request("/api/llm/cooldowns/reset", method: "POST", body: ["provider": id])
+                sent = true; let value = try await request("/api/llm/cooldowns/reset", method: "POST", body: ["provider": id])
                 guard providerBool(value["ok"]) == true else { throw ProviderFeatureError(message: "Cooldown reset was not confirmed.") }; notice = "Cooldown reset. The next request may retry; this does not fix credentials or billing."
             }
             notice = clean(notice ?? "", secret: review.secret)
             if changed {
-                cachedConfig = try await request("/api/llm/config")
+                cachedConfig = try configSnapshot(await request("/api/llm/config"))
+                if case .activate = review.operation {
+                    guard cachedConfig["provider"] as? String == id, cachedConfig["model"] as? String == review.model, cachedConfig["base_url"] as? String == review.endpoint, cachedConfig["fallback_providers"] as? [String] == review.fallbacks else { throw ProviderFeatureError(message: "Saved provider readback differs from the reviewed activation. No successful activation is claimed.") }
+                }
+                providers = try decodeProviders(await request("/api/llm/providers"))
                 activeProvider = cachedConfig["provider"] as? String ?? ""; activeModel = cachedConfig["model"] as? String ?? ""
                 let status = try await request("/api/llm/status")
                 runtimeState = providerBool(status["available"]).map { $0 ? "Runtime reports available" : "Runtime reports unavailable" } ?? "Not confirmed"
@@ -221,7 +289,7 @@ private func providerBool(_ value: Any?) -> Bool? {
                 try await loadHealth()
             }
             if started == generation { try await loadDetails(id) }
-        } catch { if started == generation { self.error = clean(error.localizedDescription, secret: review.secret) } }
+        } catch { changed = false; if started == generation { notice = nil; self.error = clean(error.localizedDescription, secret: review.secret) + (sent ? " The action may already have taken effect. Refresh saved state before preparing a new review; this review cannot be retried." : "") } }
         return started == generation && changed
     }
 }
@@ -290,9 +358,9 @@ struct NativeProvidersFeatureView: View {
             }.frame(width: 900, height: 760)
         }
         .confirmationDialog("Confirm provider action", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
-            if let review = confirmation { Button("Continue") { confirmation = nil; secret = ""; Task { if await model.execute(review) { onConfigurationChanged() } } }; Button("Cancel", role: .cancel) { confirmation = nil } }
+            if let review = confirmation { Button("Continue") { confirmation = nil; secret = ""; Task { if await model.execute(review) { onConfigurationChanged() } } }.disabled(!model.canUse(review)); Button("Cancel", role: .cancel) { confirmation = nil } }
         } message: {
-            if let review = confirmation { Text("Provider: \(review.provider)\nModel: \(review.model)\nEndpoint: \(review.endpoint.isEmpty ? "runtime default" : review.endpoint)\nFallbacks: \(review.fallbacks.joined(separator: ", "))\nKey label: \(review.label.isEmpty ? "none entered" : review.label)\n\(operationDescription(review.operation))") }
+            if let review = confirmation { Text("Local service: \(review.origin?.absoluteString ?? "unavailable")\nProvider: \(review.provider)\nModel: \(review.model)\nEndpoint: \(review.endpoint.isEmpty ? "runtime default" : review.endpoint)\nFallbacks: \(review.fallbacks.joined(separator: ", "))\nKey label: \(review.label.isEmpty ? "none entered" : review.label)\n\(operationDescription(review.operation))") }
         }
     }
     private func operationButton(_ title: String, _ operation: NativeProviderOperation) -> some View { Button(title) { confirmation = model.review(operation, label: label, secret: secret) }.disabled(model.busy || baseURL == nil) }

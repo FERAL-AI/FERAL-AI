@@ -9,6 +9,32 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ### Reconciled Mac-first status
 
+#### Latest integration and actual-app priority
+
+- The corrected checkpoint was published as `a2500a526`. Mac usability and
+  actual app journeys now lead execution; CI diagnosis proceeds in parallel and
+  is a release gate rather than a dependency for every independent feature.
+- Computer Use inventory succeeded again after the previous native-pipe failure.
+  Actual GUI acceptance can resume with an isolated profile; inventory success
+  is not a completed app test. Candidate9.34 remains immutable during that journey.
+- Provider-review integrated checks passed. Committed-turn broader integration
+  passed567 tests across28 suites with1,288 frozen inputs unchanged. Exact f41
+  versus working-source nonincremental mypy remains812 diagnostics, zero changes.
+  [Integration evidence](MAC_PROVIDER_CONTEXT_INTEGRATION_EVIDENCE.md).
+- The startup diagnostic repair passes the real Process fixture's original28
+  assertions/30s deadline, RuntimeHealth62 and lifeline2. The fixture now carries
+  the assembled app's local-network policy and retains bounded server/native/
+  passive-health phases. The old fixture also passed locally; remote root cause
+  remains unproven. No startup timeout was increased.
+- The fresh model wrapper refused before launch because its requested port was
+  occupied. The pre-existing Ollama catalog matches the cached acceptance model;
+  the worker neither created nor stopped that service. No recovery probe ran.
+  Root is preparing isolated actual GUI acceptance using that external service
+  with explicit ownership and no model download.
+- Next: integrate and publish the verified source, exercise actual Mac journeys,
+  repair observed failures, then complete managed voice. No further Linux or
+  Gen-UI engineering is assigned.
+
 - Published source is now `f41c204fea819f2a918d27f0715145ee9b99792d` in
   [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310); main remains unchanged.
   [General CI37134269808](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37134269808)
