@@ -1396,9 +1396,16 @@ class Orchestrator:
         sid = str(pending.get("session_id", "") or "")
         if session_id is not None and session_id != sid:
             return {"status": "session_mismatch", "request_id": request_id, "session_id": session_id, "pending_session_id": sid}
+        if approved and not self.tool_runner.pending_context_valid(pending):
+            return {"status": "stale_context", "request_id": request_id, "session_id": sid,
+                    "reason": "Interrupted context review requires a fresh request and approval."}
         if coordinator.owns_writer(sid):
             return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
         async with coordinator.write_scope(sid):
+            pending = self.tool_runner.get_pending(request_id)
+            if approved and pending is not None and not self.tool_runner.pending_context_valid(pending):
+                return {"status": "stale_context", "request_id": request_id, "session_id": sid,
+                        "reason": "Interrupted context review requires a fresh request and approval."}
             return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
 
     async def _resolve_tool_approval_request_impl(self, request_id: str, *, approved: bool,

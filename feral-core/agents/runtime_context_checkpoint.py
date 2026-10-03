@@ -6,6 +6,7 @@ manual writers are refused explicitly. The coordinator never replays a task.
 from __future__ import annotations
 
 import asyncio
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
 from contextlib import asynccontextmanager
 from contextvars import ContextVar
@@ -16,12 +17,14 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 from memory.runtime_session_checkpoint import (
-    CheckpointFence, CheckpointStatus, CheckpointValidationError,
+    CheckpointFence, CheckpointRecord, CheckpointStatus, CheckpointValidationError,
     encode_context, validate_session_id,
 )
 
 if TYPE_CHECKING:
     from memory.store import MemoryStore
+
+logger = logging.getLogger(__name__)
 
 
 class RuntimeContextError(RuntimeError):
@@ -55,6 +58,7 @@ class RuntimeContextReadiness:
     fence: CheckpointFence | None = None
     initialized: bool = False
     omissions: Mapping[str, int] = field(default_factory=lambda: MappingProxyType({}))
+    recovery_fence: CheckpointFence | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "omissions", MappingProxyType(dict(self.omissions)))
@@ -113,6 +117,7 @@ class RuntimeContextCoordinator:
         self._attachment_refusals: dict[RuntimeContextAttachmentToken, RuntimeContextReadiness] = {}
         self._writers: dict[str, int] = {}
         self._fences: dict[str, CheckpointFence | None] = {}
+        self._recoveries: set[asyncio.Task[RuntimeContextReadiness]] = set()
         self._owner: ContextVar[_OwnedScope | None] = ContextVar("runtime_context_owner", default=None)
 
     def lock_for(self, session_id: str) -> asyncio.Lock:
@@ -147,6 +152,120 @@ class RuntimeContextCoordinator:
 
     def has_writers(self, session_id: str) -> bool:
         return self._writers.get(session_id, 0) > 0
+
+    def review_generation(self, session_id: str) -> str | None:
+        """Trusted runtime generation only; never read a model-supplied field."""
+        fence = self._fences.get(session_id)
+        return fence.generation if fence is not None else None
+
+    def review_generation_valid(self, session_id: str, generation: object) -> bool:
+        if not self.known_managed(session_id):
+            return generation is None
+        current = self.review_generation(session_id)
+        return current is not None and isinstance(generation, str) and generation == current
+
+    def _publish_recovery_locked(self, session_id: str, record: CheckpointRecord) -> RuntimeContextReadiness:
+        """Publish verified private data; retain fail-closed fences on failure."""
+        if record.context is None:
+            raise RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True)
+        try:
+            self._reserve_managed(session_id)
+            self.history[session_id] = record.context.history()
+            self.store.working_replace(session_id, record.context.working())
+            self.clear_images(session_id)
+            self._fences[session_id] = record.fence
+            for token, refusal in tuple(self._attachment_refusals.items()):
+                if token.session_id == session_id and refusal.state == ContextReadinessState.IN_PROGRESS:
+                    self._attachment_refusals.pop(token, None)
+            for token in self._attachments:
+                if token.session_id == session_id:
+                    self._attachments[token] = False
+            return RuntimeContextReadiness(session_id, ContextReadinessState.READY, True, record.fence,
+                omissions=MappingProxyType({key: int(value) for key, value in record.context.omissions().items() if isinstance(value, int)}))
+        except RuntimeContextError:
+            raise
+        except Exception:
+            raise RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True) from None
+
+    async def recover(self, session_id: str, expected: CheckpointFence,
+                      *, active_turn: Callable[[], bool]) -> RuntimeContextReadiness:
+        """Recover one explicitly acknowledged SID under its existing writer lock.
+
+        Cancellation of the surface cannot interrupt commit/cache publication.
+        The retained operation restores data only; it never dispatches work.
+        """
+        if not isinstance(expected, CheckpointFence) or expected.session_id != session_id:
+            raise RuntimeContextError("context_recovery_session_mismatch")
+        if self.has_writers(session_id) or active_turn():
+            raise RuntimeContextError("context_recovery_busy")
+
+        async def recover_locked() -> RuntimeContextReadiness:
+            async with self.lock_for(session_id):
+                if self.has_writers(session_id) or active_turn():
+                    raise RuntimeContextError("context_recovery_busy")
+                try:
+                    current = await self.store.runtime_checkpoint_read(session_id)
+                    if current.status != CheckpointStatus.IN_PROGRESS:
+                        raise RuntimeContextError(f"context_recovery_{current.status.value}")
+                    cached = self._fences.get(session_id)
+                    if current.record is None or current.record.fence != expected or (cached is not None and cached != expected):
+                        raise RuntimeContextError("context_recovery_conflict")
+                    if self.has_writers(session_id) or active_turn():
+                        raise RuntimeContextError("context_recovery_busy")
+                    recovered = await self.store.runtime_checkpoint_recover(expected)
+                except asyncio.CancelledError:
+                    raise
+                except RuntimeContextError:
+                    raise
+                except Exception:
+                    raise RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True) from None
+                if recovered.status != CheckpointStatus.APPLIED or recovered.record is None or recovered.record.context is None:
+                    raise RuntimeContextError(f"context_recovery_{recovered.status.value}")
+                record = recovered.record
+                if (record.state != CheckpointStatus.READY or record.fence.session_id != session_id
+                        or record.fence.revision != expected.revision + 1
+                        or record.fence.generation == expected.generation or record.fence.attempt_id == expected.attempt_id):
+                    raise RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True)
+                return self._publish_recovery_locked(session_id, record)
+
+        task = asyncio.create_task(recover_locked())
+        self._recoveries.add(task)
+
+        def settled(completed: asyncio.Task[RuntimeContextReadiness]) -> None:
+            self._recoveries.discard(completed)
+            if not completed.cancelled():
+                failure = completed.exception()
+                if failure is not None:
+                    logger.warning("Runtime context recovery refused (%s)", type(failure).__name__)
+
+        task.add_done_callback(settled)
+        return await asyncio.shield(task)
+
+    async def recovery_status(self, session_id: str, expected: CheckpointFence) -> tuple[str, RuntimeContextReadiness]:
+        """Read the exact deterministic target; never retry recovery or a task."""
+        if expected.session_id != session_id:
+            raise RuntimeContextError("context_recovery_session_mismatch")
+        async with self.lock_for(session_id):
+            try:
+                read = await self.store.runtime_checkpoint_read(session_id)
+                target = self.store.runtime_checkpoint_recovery_fence(expected)
+            except Exception:
+                raise RuntimeContextError("context_recovery_unavailable") from None
+            if read.record is None:
+                raise RuntimeContextError(f"context_recovery_{read.status.value}")
+            fence = read.record.fence
+            if fence.generation != target.generation:
+                status = "not_recovered" if fence == expected and read.status == CheckpointStatus.IN_PROGRESS else "superseded"
+                return status, RuntimeContextReadiness(session_id, ContextReadinessState.CONFLICT, True)
+            if fence != target or read.status != CheckpointStatus.READY:
+                return "superseded", RuntimeContextReadiness(session_id, ContextReadinessState.CONFLICT, True)
+            cached = self._fences.get(session_id)
+            if cached != target and not self.has_writers(session_id):
+                if cached is not None and cached != expected:
+                    raise RuntimeContextError("context_recovery_conflict")
+                return "recovered", self._publish_recovery_locked(session_id, read.record)
+            readiness = await self._readiness_locked(session_id)
+            return "recovered", readiness
 
     @asynccontextmanager
     async def _writer_registration(self, session_id: str) -> AsyncIterator[None]:
@@ -198,7 +317,7 @@ class RuntimeContextCoordinator:
                 else:
                     result = RuntimeContextReadiness(session_id, ContextReadinessState.LEGACY, False)
                 if result.state not in {ContextReadinessState.READY, ContextReadinessState.LEGACY}:
-                    result = RuntimeContextReadiness(session_id, result.state, True)
+                    result = RuntimeContextReadiness(session_id, result.state, True, recovery_fence=result.recovery_fence)
                     self._attachment_refusals[token] = result
                 if result.managed:
                     self._attachment_managed.add(token)
@@ -225,7 +344,8 @@ class RuntimeContextCoordinator:
             states = {CheckpointStatus.IN_PROGRESS: ContextReadinessState.IN_PROGRESS,
                       CheckpointStatus.DELETED: ContextReadinessState.DELETED, CheckpointStatus.CORRUPT: ContextReadinessState.CORRUPT,
                       CheckpointStatus.UNSUPPORTED: ContextReadinessState.UNSUPPORTED}
-            return RuntimeContextReadiness(session_id, states.get(read.status, ContextReadinessState.UNAVAILABLE), True)
+            return RuntimeContextReadiness(session_id, states.get(read.status, ContextReadinessState.UNAVAILABLE), True,
+                recovery_fence=read.record.fence if read.status == CheckpointStatus.IN_PROGRESS and read.record is not None else None)
         cached = self._fences.get(session_id)
         if cached is not None and cached != read.record.fence:
             return RuntimeContextReadiness(session_id, ContextReadinessState.CONFLICT, True)

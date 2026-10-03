@@ -272,6 +272,10 @@ class ChatTurnManager:
             live.task.cancel()
         return {"status": "cancel_requested", "cancel_requested": True, "turn_id": turn_id, "request_id": request_id}
 
+    def has_active_session(self, session_id: str) -> bool:
+        """Include accepted/queued work until terminal settlement removes it."""
+        return any(sid == session_id for sid, _turn in self._live)
+
     async def status(self, *, session_id: str, turn_id: str = "", request_id: str = ""):
         if not (turn_id or request_id):
             raise ChatTurnError("chat_turn_invalid_request")

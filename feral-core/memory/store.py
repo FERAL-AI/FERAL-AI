@@ -1947,6 +1947,66 @@ class MemoryStore:
         finally:
             await self._release(conn)
 
+    @staticmethod
+    def runtime_checkpoint_recovery_fence(fence: CheckpointFence) -> CheckpointFence:
+        """Deterministic identity permits read-only lost-reply reconciliation."""
+        generation = str(uuid.uuid5(uuid.UUID(fence.generation),
+            json.dumps(["feral-context-recovery-v1", fence.session_id, fence.revision, fence.attempt_id], separators=(",", ":"))))
+        return CheckpointFence(fence.session_id, generation, fence.revision + 1,
+                               str(uuid.uuid5(uuid.UUID(generation), "feral-context-recovery-attempt-v1")))
+
+    async def runtime_checkpoint_recover(self, fence: CheckpointFence) -> CheckpointResult:
+        """Explicit CAS recovery of retained committed context, never task replay.
+
+        The lifecycle owner must first exclude live writers. Rotation fences
+        every late save and review from the interrupted generation. Pending
+        bytes remain private until this authenticated acknowledgement succeeds.
+        """
+        if not isinstance(fence, CheckpointFence):
+            return CheckpointResult(CheckpointStatus.INVALID)
+        conn = await self._conn()
+        try:
+            await conn.execute("BEGIN IMMEDIATE")
+            async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (fence.session_id,)) as cursor:
+                row = await cursor.fetchone()
+            current = self._runtime_checkpoint_record(row)
+            if current.status != CheckpointStatus.IN_PROGRESS:
+                await conn.rollback()
+                return current
+            if row is None or current.record is None or current.record.fence != fence or fence.revision >= 2**63 - 2:
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.CONFLICT)
+            previous = decode_context(row["payload_json"], limits=self._runtime_checkpoint_limits) if row["payload_json"] else encode_context([], [], limits=self._runtime_checkpoint_limits)
+            try:
+                context = encode_context(previous.history() + [{"role": "assistant", "content":
+                    "[Interrupted turn recovery] The preceding turn was interrupted. Its external actions may have occurred; "
+                    "their outcomes are unknown. Only previously committed context was restored. No task was replayed. "
+                    "Inspect the original messages and action receipts before taking another action; old reviews require fresh approval."}],
+                    previous.working(), limits=self._runtime_checkpoint_limits)
+            except CheckpointValidationError:
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.QUOTA)
+            async with conn.execute("SELECT COALESCE(SUM(length(CAST(payload_json AS BLOB))), 0) FROM runtime_session_checkpoints WHERE session_id != ?", (fence.session_id,)) as cursor:
+                total = await cursor.fetchone()
+            if total is None or total[0] + context.byte_count > self._runtime_checkpoint_limits.total_bytes:
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.QUOTA)
+            updated = self.runtime_checkpoint_recovery_fence(fence)
+            await conn.execute("UPDATE runtime_session_checkpoints SET generation = ?, revision = ?, attempt_id = ?, state = 'ready', payload_json = ?, payload_bytes = ?, updated_at = ? WHERE session_id = ?",
+                               (updated.generation, updated.revision, updated.attempt_id, context.encoded, context.byte_count, time.time(), fence.session_id))
+            async with conn.execute("SELECT * FROM runtime_session_checkpoints WHERE session_id = ?", (fence.session_id,)) as cursor:
+                verified = self._runtime_checkpoint_record(await cursor.fetchone())
+            if verified.status != CheckpointStatus.READY or verified.record is None or verified.record.fence != updated or verified.record.context != context:
+                await conn.rollback()
+                return CheckpointResult(CheckpointStatus.CONFLICT)
+            await conn.commit()
+            return CheckpointResult(CheckpointStatus.APPLIED, verified.record)
+        except BaseException:
+            await conn.rollback()
+            raise
+        finally:
+            await self._release(conn)
+
     async def runtime_checkpoint_delete(self, fence: CheckpointFence) -> CheckpointResult:
         """CAS tombstone, clear private context, fence late saves permanently."""
         conn = await self._conn()

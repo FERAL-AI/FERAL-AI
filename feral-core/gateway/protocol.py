@@ -13,7 +13,6 @@ Streaming uses events with incrementing seq numbers.
 
 from __future__ import annotations
 import asyncio
-import json
 import logging
 import time
 from typing import Callable, Awaitable, Optional, Any
@@ -21,8 +20,9 @@ from uuid import uuid4
 from contextlib import asynccontextmanager
 
 from agents.runtime_context_checkpoint import (
-    RuntimeContextError, RuntimeContextReadiness, legacy_context_mutation, runtime_coordinator,
+    RuntimeContextCoordinator, RuntimeContextError, RuntimeContextReadiness, legacy_context_mutation, runtime_coordinator,
 )
+from memory.runtime_session_checkpoint import CheckpointFence, CheckpointValidationError
 
 from config.loader import feral_home
 
@@ -244,18 +244,102 @@ def register_core_methods(registry: MethodRegistry, state):
         result: dict[str, object] = {"turn_contract_versions": [1] if supported else [], "durable_receipts": supported,
                   "whole_turn_terminal": supported, "session_id": session_id}
         lookup = session.metadata.get("runtime_context_readiness")
-        result.update({"context_checkpoint_versions": [], "context_ready": False, "context_state": "unavailable", "context_managed": False})
+        result.update({"context_checkpoint_versions": [], "context_recovery_versions": [], "context_ready": False, "context_state": "unavailable", "context_managed": False})
         if callable(lookup):
             readiness = await lookup()
             if isinstance(readiness, RuntimeContextReadiness) and readiness.session_id == session_id:
                 result.update({"context_checkpoint_versions": [1], "context_ready": readiness.ready,
                                "context_state": readiness.state.value, "context_managed": readiness.managed,
                                "managed_unsupported_paths": ["voice", "handoff", "reset", "compact", "snapshot", "branch", "restore", "delete"]})
+                if runtime_coordinator(state.orchestrator) is not None:
+                    result["context_recovery_versions"] = [1]
                 if readiness.ready and readiness.fence is not None:
-                    result["context_checkpoint"] = {"contract_version": 1, "session_id": session_id,
-                                                    "generation": readiness.fence.generation, "revision": readiness.fence.revision,
-                                                    "durable": True, "initialized": readiness.initialized,
-                                                    "omissions": dict(readiness.omissions)}
+                    checkpoint = public_checkpoint(readiness)
+                    checkpoint.pop("attempt_id")
+                    result["context_checkpoint"] = checkpoint
+                elif readiness.state.value == "in_progress" and readiness.recovery_fence is not None:
+                    result["context_recovery"] = {"contract_version": 1, "session_id": session_id,
+                        "generation": readiness.recovery_fence.generation, "revision": readiness.recovery_fence.revision,
+                        "attempt_id": readiness.recovery_fence.attempt_id, "state": "in_progress", "durable": True,
+                        "requires_unknown_effects_acknowledgement": True}
+        return result
+
+    def public_checkpoint(readiness: RuntimeContextReadiness) -> dict:
+        fence = readiness.fence
+        if not readiness.ready or fence is None:
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        return {"contract_version": 1, "session_id": readiness.session_id,
+                "generation": fence.generation, "revision": fence.revision, "attempt_id": fence.attempt_id,
+                "durable": True, "initialized": readiness.initialized, "omissions": dict(readiness.omissions)}
+
+    async def recovery_terms(session_id: str, params: dict, session: GatewaySession, *, acknowledge: bool) -> tuple[RuntimeContextCoordinator, CheckpointFence]:
+        keys = {"contract_version", "session_id", "generation", "revision", "attempt_id"}
+        if acknowledge:
+            keys.add("acknowledge_unknown_effects")
+        if not isinstance(params, dict) or set(params) != keys or type(params.get("contract_version")) is not int or params["contract_version"] != 1:
+            raise context_error(RuntimeContextError("context_recovery_invalid"))
+        if params.get("session_id") != session_id or session.session_id != session_id:
+            raise context_error(RuntimeContextError("context_recovery_session_mismatch"))
+        if acknowledge and params.get("acknowledge_unknown_effects") is not True:
+            raise context_error(RuntimeContextError("context_recovery_invalid"))
+        try:
+            fence = CheckpointFence(session_id, params["generation"], params["revision"], params["attempt_id"])
+        except CheckpointValidationError:
+            raise context_error(RuntimeContextError("context_recovery_invalid")) from None
+        lookup = session.metadata.get("runtime_context_readiness")
+        coordinator = runtime_coordinator(state.orchestrator)
+        if coordinator is None or not callable(lookup):
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        if acknowledge:
+            from agents.chat_turns import ChatTurnManager
+            manager = getattr(state, "chat_turns", None)
+            if coordinator.has_writers(session_id) or (isinstance(manager, ChatTurnManager) and manager.has_active_session(session_id)):
+                raise context_error(RuntimeContextError("context_recovery_busy"))
+        try:
+            readiness = await asyncio.wait_for(lookup(), timeout=10)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise context_error(RuntimeContextError("context_recovery_unavailable")) from None
+        if not isinstance(readiness, RuntimeContextReadiness) or readiness.session_id != session_id or not readiness.managed:
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        if runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store:
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        return coordinator, fence
+
+    @registry.method("session.context.recover")
+    async def context_recover(session_id: str, params: dict, session: GatewaySession):
+        from agents.chat_turns import ChatTurnManager
+        coordinator, fence = await recovery_terms(session_id, params, session, acknowledge=True)
+
+        def active_turn() -> bool:
+            manager = getattr(state, "chat_turns", None)
+            return (runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store
+                    or (isinstance(manager, ChatTurnManager) and manager.has_active_session(session_id)))
+
+        try:
+            ready = await coordinator.recover(session_id, fence, active_turn=active_turn)
+        except RuntimeContextError as exc:
+            raise context_error(exc) from None
+        if runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store:
+            raise context_error(RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True))
+        return {"contract_version": 1, "session_id": session_id, "status": "recovered", "context_ready": True,
+                "durable": True, "replayed": False, "action_outcome": "unknown", "context_checkpoint": public_checkpoint(ready)}
+
+    @registry.method("session.context.recoveryStatus")
+    async def context_recovery_status(session_id: str, params: dict, session: GatewaySession):
+        coordinator, fence = await recovery_terms(session_id, params, session, acknowledge=False)
+        try:
+            status, readiness = await coordinator.recovery_status(session_id, fence)
+        except RuntimeContextError as exc:
+            raise context_error(exc) from None
+        if runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store:
+            raise context_error(RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True))
+        result: dict[str, object] = {"contract_version": 1, "session_id": session_id, "status": status,
+                  "recovered": status == "recovered", "context_ready": status == "recovered" and readiness.ready,
+                  "durable": True, "replayed": False, "action_outcome": "unknown"}
+        if status == "recovered" and readiness.ready:
+            result["context_checkpoint"] = public_checkpoint(readiness)
         return result
 
     @registry.method("chat.send")

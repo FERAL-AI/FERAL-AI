@@ -518,6 +518,13 @@ class ToolRunner:
             if taskflows is None or not taskflows.approved_dispatch_allowed(exact.pending):
                 raise RuntimeError("Workflow approval dispatch is no longer active")
 
+    def pending_context_valid(self, pending: dict) -> bool:
+        from agents.runtime_context_checkpoint import runtime_coordinator
+        coordinator = runtime_coordinator(self._orch)
+        if coordinator is None:
+            return True
+        return coordinator.review_generation_valid(str(pending.get("session_id", "")), pending.get("context_generation"))
+
     def enforce_executor_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket") -> Optional[dict]:
         """Recheck policy at executor entry using one trusted admission, if issued."""
         surface = current_context().surface or surface
@@ -630,6 +637,7 @@ class ToolRunner:
                 pending.get("session_id") == session_id
                 and pending.get("tool_name") == tool_name
                 and pending.get("args") == args
+                and self.pending_context_valid(pending)
             ):
                 return pending
 
@@ -651,6 +659,10 @@ class ToolRunner:
             # the resolver and without leaking internal types.
             "policy_sources": dict(decision.sources),
         }
+        from agents.runtime_context_checkpoint import runtime_coordinator
+        coordinator = runtime_coordinator(self._orch)
+        if coordinator is not None and coordinator.known_managed(session_id):
+            pending["context_generation"] = coordinator.review_generation(session_id)
         self._pending_approvals[request_id] = pending
         logger.info(f"Approval required ({self._autonomy_mode}): {tool_name} → request_id={request_id}")
         return pending
@@ -768,7 +780,7 @@ class ToolRunner:
                         exact_once: bool = False) -> Optional[dict]:
         """Approve a pending request; returns tool_name + args for re-execution."""
         pending = self._pending_approvals.get(request_id)
-        if pending is None:
+        if pending is None or not self.pending_context_valid(pending):
             return None
         if session_id and pending.get("session_id") != session_id:
             return None
