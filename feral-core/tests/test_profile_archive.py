@@ -439,6 +439,291 @@ def test_explicit_offline_precondition_cannot_be_truthy_coercion(tmp_path, profi
     assert not (tmp_path / "no.zip").exists()
 
 
+def _native_attachment(tmp_path, profile):
+    primary, avatar = "fixture-session", b"disposable-avatar"
+    (profile[0] / "avatars").mkdir()
+    (profile[0] / "avatars" / "pet.png").write_bytes(avatar)
+    (profile[0] / "native-context-recovery.json").write_text(
+        '{"fixture":"recovery-journal"}'
+    )
+    body = {
+        "format_version": 1,
+        "primary_session_id": primary,
+        "preferences": {
+            "displayName": "Féral 👓",
+            "avatarChoice": "imported",
+            "onboarded": True,
+            "native.savedContextModes.v1": {primary: ["fixture-chat"]},
+            "feral.native.selectedConversation."
+            + primary.encode().hex(): "fixture-chat",
+        },
+        "avatar": {
+            "relative_path": "avatars/pet.png",
+            "bytes": len(avatar),
+            "sha256": hashlib.sha256(avatar).hexdigest(),
+        },
+    }
+    payload = json.dumps(
+        body, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    ).encode()
+    path = tmp_path / "explicit-native-snapshot.json"
+    path.write_bytes(payload)
+    return module.NativePreferenceAttachment(
+        path, profile[0], profile[1], primary, hashlib.sha256(payload).hexdigest()
+    ), payload
+
+
+def test_native_attachment_round_trip_inventory_and_inspectable_snapshot(
+    tmp_path, profile
+):
+    attachment, payload = _native_attachment(tmp_path, profile)
+    archive = tmp_path / "native-attached.zip"
+    created = create_archive(
+        archive,
+        offline=True,
+        config_root=profile[0],
+        data_root=profile[1],
+        native_preferences=attachment,
+    )
+    assert (
+        created["native_preferences_included"] is True
+        and created["preferences_applied"] is False
+    )
+    with zipfile.ZipFile(archive) as container:
+        manifest = json.loads(container.read("manifest.json"))
+        assert manifest["format_version"] == 1
+        assert (
+            manifest["files"][module.RESERVED_ENTRY]["sha256"]
+            == hashlib.sha256(payload).hexdigest()
+        )
+        assert container.read(module.RESERVED_ENTRY) == payload
+        assert str(tmp_path) not in json.dumps(manifest)
+    config, data = tmp_path / "restored-c", tmp_path / "restored-d"
+    restored = restore_archive(
+        archive,
+        offline=True,
+        config_root=config,
+        data_root=data,
+        native_primary_session_id="fixture-session",
+    )
+    assert (
+        restored["native_preferences_included"] is True
+        and restored["preferences_applied"] is False
+    )
+    assert (
+        restored["runtime_started"] is False and restored["os_keys_included"] is False
+    )
+    assert Path(restored["native_preferences_path"]).read_bytes() == payload
+    assert (
+        config / "native-context-recovery.json"
+    ).read_text() == '{"fixture":"recovery-journal"}'
+    assert (data / "primary_session_id").read_text() == "fixture-session"
+    assert attachment.snapshot_path.read_bytes() == payload
+    assert not (profile[0] / ".feral-native-preferences.v1.json").exists()
+
+
+@pytest.mark.parametrize("primary", [None, "foreign-primary"])
+def test_native_archive_requires_reviewed_primary_before_creating_roots(
+    tmp_path, profile, primary
+):
+    attachment, _ = _native_attachment(tmp_path, profile)
+    archive = _backup(tmp_path, profile, native_preferences=attachment)
+    config, data = tmp_path / "refused-c", tmp_path / "refused-d"
+    with pytest.raises(ProfileArchiveError, match="reviewed primary"):
+        restore_archive(
+            archive,
+            offline=True,
+            config_root=config,
+            data_root=data,
+            native_primary_session_id=primary,
+        )
+    assert not config.exists() and not data.exists()
+
+
+@pytest.mark.parametrize(
+    "binding",
+    [
+        "config",
+        "data",
+        "primary",
+        "sha",
+        "avatar",
+        "actual_primary",
+        "missing_primary",
+        "collision",
+        "source_inside",
+    ],
+)
+def test_native_bad_binding_never_publishes(tmp_path, profile, binding):
+    from dataclasses import replace
+
+    attachment, payload = _native_attachment(tmp_path, profile)
+    if binding == "config":
+        attachment = replace(attachment, config_root=tmp_path)
+    elif binding == "data":
+        attachment = replace(attachment, data_root=profile[0])
+    elif binding == "primary":
+        attachment = replace(attachment, primary_session_id="foreign-primary")
+    elif binding == "sha":
+        attachment = replace(attachment, snapshot_sha256="0" * 64)
+    elif binding == "avatar":
+        (profile[0] / "avatars" / "pet.png").write_bytes(b"changed avatar")
+    elif binding == "actual_primary":
+        (profile[1] / "primary_session_id").write_text("foreign-actual-primary")
+    elif binding == "missing_primary":
+        (profile[1] / "primary_session_id").unlink()
+    elif binding == "collision":
+        (profile[0] / ".feral-native-preferences.v1.json").write_text(
+            "preserve existing"
+        )
+    else:
+        path = profile[0] / "exported.json"
+        path.write_bytes(payload)
+        attachment = replace(attachment, snapshot_path=path)
+    destination = tmp_path / "refused.zip"
+    with pytest.raises(ProfileArchiveError):
+        create_archive(
+            destination,
+            offline=True,
+            config_root=profile[0],
+            data_root=profile[1],
+            native_preferences=attachment,
+        )
+    assert not destination.exists() and not list(tmp_path.glob(".feral-archive-*"))
+    assert attachment.snapshot_path.read_bytes() == payload
+
+
+@pytest.mark.parametrize("changed", ["snapshot", "primary", "avatar"])
+def test_native_input_drift_refuses_publication(
+    tmp_path, profile, monkeypatch, changed
+):
+    attachment, _ = _native_attachment(tmp_path, profile)
+    original, calls = module._snapshot, 0
+
+    def drifting(roots, limits):
+        nonlocal calls
+        result = original(roots, limits)
+        calls += 1
+        if calls == 2:
+            if changed == "snapshot":
+                attachment.snapshot_path.write_bytes(b"changed private fixture")
+            elif changed == "primary":
+                (profile[1] / "primary_session_id").write_text("changed-primary")
+            else:
+                (profile[0] / "avatars" / "pet.png").write_bytes(b"changed image")
+        return result
+
+    monkeypatch.setattr(module, "_snapshot", drifting)
+    destination = tmp_path / "drift.zip"
+    with pytest.raises(ProfileArchiveError):
+        create_archive(
+            destination,
+            offline=True,
+            config_root=profile[0],
+            data_root=profile[1],
+            native_preferences=attachment,
+        )
+    assert not destination.exists() and not list(tmp_path.glob(".feral-archive-*"))
+
+
+@pytest.mark.parametrize(
+    "malformed", ["credential", "avatar", "actual_primary", "metadata", "missing_entry"]
+)
+def test_native_archive_semantic_refusal_precedes_root_creation(
+    tmp_path, profile, malformed
+):
+    attachment, _ = _native_attachment(tmp_path, profile)
+    archive = _backup(tmp_path, profile, native_preferences=attachment)
+    invalid = tmp_path / "invalid-native.zip"
+
+    def mutate(manifest, files):
+        if malformed == "metadata":
+            manifest["native_preferences"]["format_version"] = 2
+            return
+        if malformed == "missing_entry":
+            files.pop(module.RESERVED_ENTRY)
+            manifest["files"].pop(module.RESERVED_ENTRY)
+            return
+        name = module.RESERVED_ENTRY
+        body = json.loads(files[name])
+        if malformed == "credential":
+            body["preferences"]["api_key"] = "fixture-private-sentinel"
+        elif malformed == "avatar":
+            body["avatar"]["sha256"] = "0" * 64
+        else:
+            name = "data/primary_session_id"
+            files[name] = b"foreign-actual-primary"
+        if malformed != "actual_primary":
+            files[name] = json.dumps(
+                body, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+            ).encode()
+        manifest["files"][name]["sha256"] = hashlib.sha256(files[name]).hexdigest()
+        manifest["files"][name]["size"] = len(files[name])
+
+    _rewrite(archive, invalid, mutate)
+    config, data = tmp_path / "invalid-c", tmp_path / "invalid-d"
+    with pytest.raises(ProfileArchiveError) as error:
+        restore_archive(
+            invalid,
+            offline=True,
+            config_root=config,
+            data_root=data,
+            native_primary_session_id="fixture-session",
+        )
+    assert not config.exists() and not data.exists()
+    assert "fixture-private-sentinel" not in str(error.value)
+
+
+def test_native_cli_explicit_round_trip_and_missing_binding(tmp_path, profile):
+    attachment, _ = _native_attachment(tmp_path, profile)
+    archive = tmp_path / "native-cli.zip"
+    command = [
+        sys.executable,
+        "-m",
+        "config.profile_archive",
+        "backup",
+        str(archive),
+        "--offline",
+        "--config-root",
+        str(profile[0]),
+        "--data-root",
+        str(profile[1]),
+        "--native-preferences",
+        str(attachment.snapshot_path),
+        "--primary-session-id",
+        "fixture-session",
+        "--native-preferences-sha256",
+        attachment.snapshot_sha256,
+    ]
+    result = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert json.loads(result.stdout)["preferences_applied"] is False
+    restore = [
+        sys.executable,
+        "-m",
+        "config.profile_archive",
+        "restore",
+        str(archive),
+        "--offline",
+        "--config-root",
+        str(tmp_path / "cli-restored-c"),
+        "--data-root",
+        str(tmp_path / "cli-restored-d"),
+    ]
+    refused = subprocess.run(restore, capture_output=True, text=True, timeout=30)
+    assert refused.returncode == 2 and "Traceback" not in refused.stderr
+    completed = subprocess.run(
+        restore + ["--primary-session-id", "fixture-session"],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    assert json.loads(completed.stdout)["runtime_started"] is False
+    incomplete = subprocess.run(
+        command[:-2], capture_output=True, text=True, timeout=30
+    )
+    assert incomplete.returncode == 2 and "Traceback" not in incomplete.stderr
 def test_existing_archive_and_profile_are_never_overwritten(tmp_path, profile):
     archive = _backup(tmp_path, profile)
     original = archive.read_bytes()
@@ -464,11 +749,11 @@ def test_source_nonregular_entries_fail_without_archive(tmp_path, profile, kind)
     assert not (tmp_path / "profile.zip").exists()
 
 
-def test_nested_roots_and_in_profile_destination_are_rejected(tmp_path, profile):
+def test_inverse_nested_roots_and_in_profile_destination_are_rejected(tmp_path, profile):
     nested = profile[0] / "nested"
     nested.mkdir()
     with pytest.raises(ProfileArchiveError, match="overlap"):
-        _backup(tmp_path, (profile[0], nested))
+        _backup(tmp_path, (nested, profile[0]))
     with pytest.raises(ProfileArchiveError, match="outside"):
         create_archive(profile[0] / "backup.zip", config_root=profile[0], data_root=profile[1], offline=True)
 
@@ -655,3 +940,370 @@ def test_standalone_cli_requires_offline_option(tmp_path, profile):
     assert result.returncode == 2
     assert "--offline" in result.stderr
     assert not (tmp_path / "no.zip").exists()
+
+
+def _native_default_layout(tmp_path):
+    """BrainRuntime sets FERAL_DATA_HOME to FERAL_HOME/data by default."""
+    config = tmp_path / "native-home"
+    data = config / "data"
+    data.mkdir(parents=True)
+    (config / "settings.json").write_text('{"llm":{"max_tokens":111}}')
+    (data / "primary_session_id").write_text("fixture-session")
+    (data / "runtime.bin").write_bytes(b"synthetic-runtime-data")
+    (data / "empty").mkdir()
+    # An unrelated config-level file must never substitute for actual data identity.
+    (config / "primary_session_id").write_text("foreign-config-primary")
+    return config, data
+
+
+def test_native_default_nested_layout_archives_once_and_restores_existing_loader(
+    tmp_path,
+    archive_patch,
+):
+    from config.loader import ConfigLoader, feral_data_home, feral_home
+
+    config, data = _native_default_layout(tmp_path)
+    archive_patch.setenv("FERAL_HOME", str(config))
+    archive_patch.setenv("FERAL_DATA_HOME", str(data))
+    # The native launcher sets both variables, but the current loader prioritizes
+    # FERAL_HOME and does not consume FERAL_DATA_HOME. Explicit archive bindings
+    # must preserve the reviewed nested directory without changing that reader.
+    assert feral_home() == config and feral_data_home() == config
+    archive = tmp_path / "nested-default.zip"
+    receipt = create_archive(archive, offline=True, config_root=config, data_root=data)
+    with zipfile.ZipFile(archive) as container:
+        manifest = json.loads(container.read("manifest.json"))
+        assert manifest["roots"] == {"config": "config", "data": "config"}
+        assert manifest["nested_roots"] == {
+            "data": {"parent": "config", "relative_path": "data"},
+        }
+        assert "config/data/empty" in manifest["directories"]
+        assert set(manifest["files"]) == {
+            "config/settings.json",
+            "config/primary_session_id",
+            "config/data/primary_session_id",
+            "config/data/runtime.bin",
+        }
+        assert receipt["bytes"] == sum(
+            len(container.read(name)) for name in manifest["files"]
+        )
+        assert receipt["files"] == len(manifest["files"]) == 4
+    restored = tmp_path / "restored-native-home"
+    result = restore_archive(
+        archive,
+        offline=True,
+        config_root=restored,
+        data_root=restored / "data",
+    )
+    assert result["runtime_started"] is False
+    assert (restored / "data" / "runtime.bin").read_bytes() == b"synthetic-runtime-data"
+    assert (restored / "data" / "empty").is_dir()
+    archive_patch.setenv("FERAL_HOME", str(restored))
+    archive_patch.setenv("FERAL_DATA_HOME", str(restored / "data"))
+    reader = ConfigLoader(project_dir=tmp_path / "no-project")
+    assert reader.user_home == restored and reader.data_home == restored
+    assert reader.discover(load_credentials=False)["llm"]["max_tokens"] == 111
+    assert (data / "runtime.bin").read_bytes() == b"synthetic-runtime-data"
+
+
+def test_native_attachment_nested_layout_binds_actual_data_primary(tmp_path):
+    profile = _native_default_layout(tmp_path)
+    attachment, payload = _native_attachment(tmp_path, profile)
+    archive = _backup(tmp_path, profile, native_preferences=attachment)
+    restored = tmp_path / "nested-attached-restore"
+    receipt = restore_archive(
+        archive,
+        offline=True,
+        config_root=restored,
+        data_root=restored / "data",
+        native_primary_session_id="fixture-session",
+    )
+    assert Path(receipt["native_preferences_path"]).read_bytes() == payload
+    assert receipt["native_primary_session_id"] == "fixture-session"
+    assert (
+        receipt["preferences_applied"] is False and receipt["runtime_started"] is False
+    )
+    assert (restored / "data" / "primary_session_id").read_text() == "fixture-session"
+    assert (restored / "primary_session_id").read_text() == "foreign-config-primary"
+    assert (restored / "avatars" / "pet.png").read_bytes() == b"disposable-avatar"
+
+
+@pytest.mark.parametrize("target", ["same", "split", "different_nested"])
+def test_nested_archive_refuses_layout_change_before_root_creation(tmp_path, target):
+    profile = _native_default_layout(tmp_path)
+    archive = _backup(tmp_path, profile)
+    config = tmp_path / "refused-layout"
+    data = (
+        config
+        if target == "same"
+        else tmp_path / "split-data"
+        if target == "split"
+        else config / "other-data"
+    )
+    with pytest.raises(ProfileArchiveError, match="layout"):
+        restore_archive(archive, offline=True, config_root=config, data_root=data)
+    assert not config.exists() and not data.exists()
+
+
+def test_nested_archive_preserves_deeper_data_offset_and_counts_once(tmp_path):
+    config, original_data = _native_default_layout(tmp_path)
+    data = config / "runtime" / "data"
+    data.parent.mkdir()
+    original_data.rename(data)
+    archive = _backup(tmp_path, (config, data), limits=ArchiveLimits(max_entries=8))
+    with zipfile.ZipFile(archive) as container:
+        manifest = json.loads(container.read("manifest.json"))
+        assert manifest["nested_roots"]["data"]["relative_path"] == "runtime/data"
+        assert "config/runtime/data/primary_session_id" in manifest["files"]
+        assert "config/runtime" in manifest["directories"]
+        assert "config/runtime/data" in manifest["directories"]
+    restored = tmp_path / "deep-restore"
+    restore_archive(
+        archive,
+        offline=True,
+        config_root=restored,
+        data_root=restored / "runtime" / "data",
+    )
+    assert (restored / "runtime" / "data" / "empty").is_dir()
+    with pytest.raises(ProfileArchiveError, match="bound"):
+        create_archive(
+            tmp_path / "small.zip",
+            config_root=config,
+            data_root=data,
+            offline=True,
+            limits=ArchiveLimits(max_entries=7),
+        )
+    assert not (tmp_path / "small.zip").exists()
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "foreign_review",
+        "actual_primary",
+        "missing_primary",
+        "avatar",
+        "data_redirect",
+    ],
+)
+def test_nested_native_attachment_refuses_bad_binding_without_publication(
+    tmp_path, mutation
+):
+    from dataclasses import replace
+
+    profile = _native_default_layout(tmp_path)
+    attachment, _ = _native_attachment(tmp_path, profile)
+    if mutation == "foreign_review":
+        attachment = replace(attachment, data_root=profile[0])
+    elif mutation == "actual_primary":
+        (profile[0] / "primary_session_id").write_text("fixture-session")
+        (profile[1] / "primary_session_id").write_text("foreign-data-primary")
+    elif mutation == "missing_primary":
+        (profile[0] / "primary_session_id").write_text("fixture-session")
+        (profile[1] / "primary_session_id").unlink()
+    elif mutation == "avatar":
+        (profile[0] / "avatars" / "pet.png").write_bytes(b"changed-avatar")
+    else:
+        moved = tmp_path / "moved-data"
+        profile[1].rename(moved)
+        profile[1].symlink_to(moved, target_is_directory=True)
+    with pytest.raises(ProfileArchiveError):
+        _backup(tmp_path, profile, native_preferences=attachment)
+    assert not (tmp_path / "profile.zip").exists()
+    assert not list(tmp_path.glob(".feral-archive-*"))
+
+
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        None,
+        [],
+        {},
+        {"data": "data"},
+        {"data": {"parent": "data", "relative_path": "data"}},
+        {"data": {"parent": "config", "relative_path": "data", "extra": True}},
+        {"data": {"parent": "config", "relative_path": "../data"}},
+        {"data": {"parent": "config", "relative_path": "/data"}},
+        {"data": {"parent": "config", "relative_path": "data/"}},
+        {"data": {"parent": "config", "relative_path": "a" * 513}},
+        {"data": {"parent": "config", "relative_path": "/".join(["a"] * 17)}},
+        {"data": {"parent": "config", "relative_path": "missing-directory"}},
+        {"data": {"parent": "config", "relative_path": "settings.json"}},
+    ],
+)
+def test_malformed_nested_descriptor_refuses_before_new_roots(tmp_path, malformed):
+    profile = _native_default_layout(tmp_path)
+    archive = _backup(tmp_path, profile)
+    invalid = tmp_path / "malformed-nested.zip"
+    _rewrite(
+        archive,
+        invalid,
+        lambda manifest, files: manifest.update(nested_roots=malformed),
+    )
+    config = tmp_path / "malformed-restore"
+    with pytest.raises(ProfileArchiveError):
+        restore_archive(
+            invalid, offline=True, config_root=config, data_root=config / "data"
+        )
+    assert not config.exists()
+
+
+def test_duplicate_nested_descriptor_refuses_before_new_roots(tmp_path):
+    profile = _native_default_layout(tmp_path)
+    archive = _backup(tmp_path, profile)
+    invalid = tmp_path / "duplicate-nested.zip"
+    with zipfile.ZipFile(archive) as source, zipfile.ZipFile(invalid, "w") as target:
+        for item in source.infolist():
+            payload = source.read(item.filename)
+            if item.filename == "manifest.json":
+                manifest = json.loads(payload)
+                payload = json.dumps(manifest, separators=(",", ":")).encode()
+                payload = payload.replace(
+                    b'"parent":"config"', b'"parent":"config","parent":"config"', 1
+                )
+            target.writestr(item, payload)
+    config = tmp_path / "duplicate-restore"
+    with pytest.raises(ProfileArchiveError, match="Duplicate"):
+        restore_archive(
+            invalid, offline=True, config_root=config, data_root=config / "data"
+        )
+    assert not config.exists()
+
+
+def test_missing_nested_data_directory_never_publishes(tmp_path):
+    config = tmp_path / "no-data-home"
+    config.mkdir()
+    (config / "settings.json").write_text("{}")
+    with pytest.raises(ProfileArchiveError, match="missing"):
+        _backup(tmp_path, (config, config / "data"))
+    assert not (tmp_path / "profile.zip").exists()
+
+
+def test_nested_archive_rejects_source_and_restore_ancestor_redirects(tmp_path):
+    config, data = _native_default_layout(tmp_path)
+    archive = _backup(tmp_path, (config, data))
+    alias = tmp_path / "ancestor-alias"
+    alias.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(ProfileArchiveError, match="redirect"):
+        create_archive(
+            tmp_path / "alias.zip",
+            offline=True,
+            config_root=alias / config.name,
+            data_root=alias / config.name / "data",
+        )
+    assert not (tmp_path / "alias.zip").exists()
+    with pytest.raises(ProfileArchiveError, match="redirect"):
+        restore_archive(
+            archive,
+            offline=True,
+            config_root=alias / "refused-root",
+            data_root=alias / "refused-root" / "data",
+        )
+    assert not (tmp_path / "refused-root").exists()
+
+
+def test_nested_native_archive_cannot_redirect_primary_to_config_level(tmp_path):
+    profile = _native_default_layout(tmp_path)
+    attachment, _ = _native_attachment(tmp_path, profile)
+    archive = _backup(tmp_path, profile, native_preferences=attachment)
+    invalid = tmp_path / "wrong-nested-primary.zip"
+
+    def mutate(manifest, files):
+        name = "config/data/primary_session_id"
+        files[name] = b"foreign-data-primary"
+        manifest["files"][name]["size"] = len(files[name])
+        manifest["files"][name]["sha256"] = hashlib.sha256(files[name]).hexdigest()
+        # A matching config-level identity still must not override data identity.
+        name = "config/primary_session_id"
+        files[name] = b"fixture-session"
+        manifest["files"][name]["size"] = len(files[name])
+        manifest["files"][name]["sha256"] = hashlib.sha256(files[name]).hexdigest()
+
+    _rewrite(archive, invalid, mutate)
+    restored = tmp_path / "foreign-data-restore"
+    with pytest.raises(ProfileArchiveError, match="actual profile primary"):
+        restore_archive(
+            invalid,
+            offline=True,
+            config_root=restored,
+            data_root=restored / "data",
+            native_primary_session_id="fixture-session",
+        )
+    assert not restored.exists()
+
+
+def test_nested_native_cli_roundtrip_preserves_reviewed_data_directory(tmp_path):
+    profile = _native_default_layout(tmp_path)
+    attachment, payload = _native_attachment(tmp_path, profile)
+    archive = tmp_path / "nested-cli.zip"
+    command = [
+        sys.executable,
+        "-m",
+        "config.profile_archive",
+        "backup",
+        str(archive),
+        "--offline",
+        "--config-root",
+        str(profile[0]),
+        "--data-root",
+        str(profile[1]),
+        "--native-preferences",
+        str(attachment.snapshot_path),
+        "--native-preferences-sha256",
+        attachment.snapshot_sha256,
+        "--primary-session-id",
+        "fixture-session",
+    ]
+    backed_up = subprocess.run(command, capture_output=True, text=True, timeout=30)
+    assert backed_up.returncode == 0, backed_up.stderr
+    assert json.loads(backed_up.stdout)["native_preferences_included"] is True
+    restored = tmp_path / "cli-nested-restore"
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-m",
+            "config.profile_archive",
+            "restore",
+            str(archive),
+            "--offline",
+            "--config-root",
+            str(restored),
+            "--data-root",
+            str(restored / "data"),
+            "--primary-session-id",
+            "fixture-session",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stderr
+    receipt = json.loads(completed.stdout)
+    assert Path(receipt["native_preferences_path"]).read_bytes() == payload
+    assert (restored / "data" / "primary_session_id").read_text() == "fixture-session"
+    assert (
+        receipt["preferences_applied"] is False and receipt["runtime_started"] is False
+    )
+
+
+@pytest.mark.parametrize("mutation", ["missing_descriptor", "split_alias"])
+def test_nested_layout_metadata_cannot_collapse_or_duplicate_inventory(
+    tmp_path, mutation
+):
+    profile = _native_default_layout(tmp_path)
+    archive = _backup(tmp_path, profile)
+    invalid = tmp_path / "collapsed-layout.zip"
+
+    def mutate(manifest, files):
+        if mutation == "missing_descriptor":
+            manifest.pop("nested_roots")
+        else:
+            manifest["roots"]["data"] = "data"
+
+    _rewrite(archive, invalid, mutate)
+    restored = tmp_path / "collapsed-restore"
+    with pytest.raises(ProfileArchiveError, match="layout|single parent"):
+        restore_archive(
+            invalid, offline=True, config_root=restored, data_root=restored / "data"
+        )
+    assert not restored.exists()

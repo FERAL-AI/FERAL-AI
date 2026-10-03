@@ -741,6 +741,22 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             try expect(ordered.count == 2 && (ordered.last?["messages"] as? [[String: Any]])?.count == 2, "serialized latest save retains both replies instead of older overwrite")
             print("PASS shutdown incomplete reply flush and serialized saves")
             WireProtocol.reset()
+            WireProtocol.lock.lock(); WireProtocol.delayedPath = "/api/conversations/save"; WireProtocol.lock.unlock()
+            let stopping = model()
+            stopping.messages = [NativeMessage(id: "final-save", role: "user", text: "Retain this record")]
+            let finalSave = Task { await stopping.flushConversationForShutdown() }
+            while WireProtocol.bodies("/api/conversations/save").isEmpty { await Task.yield() }
+            try expect(stopping.ready && stopping.effectsPaused && stopping.featureBaseURL == nil && stopping.securityBaseURL == nil && stopping.chatToolsHostBusy, "final save retains transport readiness but revokes feature and contextual action admission")
+            await stopping.startCoding("Must not execute")
+            await stopping.grantWorkspace("/private/tmp/must-not-grant")
+            _ = await stopping.prepareCoding()
+            await stopping.saveSettings()
+            try expect(WireProtocol.bodies("/api/coding/tasks").isEmpty && WireProtocol.bodies("/api/coding/workspaces").isEmpty && WireProtocol.bodies("/api/coding/provider").isEmpty && WireProtocol.bodies("/api/llm/config").isEmpty, "no coding grant, task, provider or settings mutation dispatches during final-save await")
+            let saveConfirmed = await finalSave.value
+            try expect(saveConfirmed, "narrow final-save authority still verifies exact conversation receipt")
+            try expect(WireProtocol.bodies("/api/conversations/save").count == 1, "shutdown bypass admits only one exact final save")
+            print("PASS shutdown action fence during delayed final save")
+            WireProtocol.reset()
             let healthOwner = NativeRuntimeOwnership(generation: UUID(), instanceID: "owned-fixture", baseURL: URL(string: "http://127.0.0.1:9465")!, processIdentity: UUID())
             var currentHealthOwner = healthOwner
             let dying = model(runtimeOwner: { currentHealthOwner })
@@ -780,7 +796,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             try await trackedChatTests()
             try await contextCheckpointTests()
             try await contextRecoveryTests()
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 26 groups; mocked HTTP/wire only, no engine/model execution")
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 27 groups; mocked HTTP/wire only, no engine/model execution")
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)
             exit(1)

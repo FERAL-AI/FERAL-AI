@@ -1,6 +1,7 @@
 import SwiftUI
 import AVFoundation
 import Foundation
+import CoreFoundation
 
 private struct NativeVoiceFailure: LocalizedError { let message: String; var errorDescription: String? { message } }
 
@@ -160,6 +161,8 @@ struct NativeVoiceTranscript: Identifiable {
     private var requestedProvider = ""
     private var providerDegraded = false
     private var awaitingInterrupt = false
+    private var voiceAttemptID: String?
+    private var interruptRequestID: String?
     private var maySend: Bool { connected && sessionID != nil && ["active", "degraded"].contains(state) && captureRunning && !muted && !privacyRefused }
     init(sendFrame: @escaping ([String: Any]) async throws -> Void, audio: NativeVoiceAudioIO? = nil) { self.sendFrame = sendFrame; self.audio = audio ?? NativeAVVoiceIO() }
     func configureConnection(sessionID: String?, connected: Bool) {
@@ -172,11 +175,23 @@ struct NativeVoiceTranscript: Identifiable {
         transcripts = []; acknowledgedProvider = nil; reportedProvider = nil; fallbackProvider = nil; muted = false; privacyRefused = false; error = nil
         if hadSession { diagnostic = "The conversation or connection changed. Voice stopped; start again when ready." }
     }
-    private func frame(_ type: String, _ payload: [String: Any]) -> [String: Any] { ["type": type, "hop": "client", "session_id": sessionID ?? "", "payload": payload] }
+    private func frame(_ type: String, _ payload: [String: Any]) -> [String: Any] {
+        var bound = payload
+        if let voiceAttemptID { bound["voice_attempt_version"] = 1; bound["voice_attempt_id"] = voiceAttemptID }
+        return ["type": type, "hop": "client", "session_id": sessionID ?? "", "payload": bound]
+    }
+    private func matchesAttempt(_ payload: [String: Any]) -> Bool {
+        guard let voiceAttemptID, payload["voice_attempt_id"] as? String == voiceAttemptID,
+              let version = payload["voice_attempt_version"] as? NSNumber,
+              CFGetTypeID(version) != CFBooleanGetTypeID(),
+              !["f", "d"].contains(String(cString: version.objCType)), version.int64Value == 1 else { return false }
+        return true
+    }
     func start(mode: String, provider: String) async {
         guard connected, sessionID != nil, state == "off" || state == "ended", ["realtime", "chained"].contains(mode), !provider.isEmpty else { error = "Connect to a conversation before starting voice."; return }
         cleanup(); error = nil; diagnostic = nil; transcripts = []; acknowledgedProvider = nil; reportedProvider = nil; fallbackProvider = nil; privacyRefused = false; muted = false
         requestedMode = mode; requestedProvider = provider; providerDegraded = false; state = "authorizing"
+        voiceAttemptID = UUID().uuidString.lowercased()
         let current = generation
         guard await audio.authorize() else { if current == generation { state = "ended"; error = "Microphone access is unavailable. Check the app's microphone permission and try Start again." }; return }
         guard current == generation, connected else { return }
@@ -201,7 +216,7 @@ struct NativeVoiceTranscript: Identifiable {
     private func cleanup() {
         generation = UUID(); acknowledgmentDeadline?.cancel(); acknowledgmentDeadline = nil; interruptDeadline?.cancel(); interruptDeadline = nil; sending?.cancel(); sending = nil
         audio.shutdown(); captureRunning = false; pcmBuffer = Data(); ingress = []; chunkIndex = 0
-        awaitingInterrupt = false
+        awaitingInterrupt = false; voiceAttemptID = nil; interruptRequestID = nil
         flushPlayback(); ttsIndex = -1
     }
     private func fail(_ message: String) { cleanup(); state = "ended"; phase = "error"; error = message }
@@ -217,17 +232,18 @@ struct NativeVoiceTranscript: Identifiable {
         flushPlayback(); phase = "listening"
         diagnostic = "Queued playback stopped locally. Requesting remote response cancellation…"
         awaitingInterrupt = true
+        let requestID = UUID().uuidString.lowercased(); interruptRequestID = requestID
         let current = generation
         do {
-            try await sendFrame(frame("voice_interrupt", [:]))
-            guard generation == current, awaitingInterrupt else { return }
+            try await sendFrame(frame("voice_interrupt", ["voice_request_id": requestID]))
+            guard generation == current, awaitingInterrupt, interruptRequestID == requestID else { return }
             interruptDeadline?.cancel()
             interruptDeadline = Task { [weak self] in
                 try? await Task.sleep(nanoseconds: 5_000_000_000)
-                guard !Task.isCancelled, let self, self.generation == current else { return }
+                guard !Task.isCancelled, let self, self.generation == current, self.interruptRequestID == requestID else { return }
                 self.diagnostic = "Queued playback stopped locally; remote cancellation was not acknowledged."
             }
-        } catch { if generation == current { diagnostic = "Queued playback stopped locally; the cancellation request could not be sent." } }
+        } catch { if generation == current, interruptRequestID == requestID { diagnostic = "Queued playback stopped locally; the cancellation request could not be sent." } }
     }
     private func flushPlayback() {
         playbackGeneration = UUID(); outputQueue = []; queuedOutputBytes = 0; playing = false; assistantSpeaking = false; audio.clearPlayback()
@@ -258,6 +274,9 @@ struct NativeVoiceTranscript: Identifiable {
     func handle(frame: [String: Any]) async {
         guard connected, let sessionID, frame["session_id"] as? String == sessionID, !["off", "ended", "authorizing"].contains(state) else { return }
         let type = frame["type"] as? String ?? "", payload = frame["payload"] as? [String: Any] ?? [:]
+        // A SID survives Stop/Start. Only the identity sent by this Start may
+        // authorize capture or publish media/status; never infer it from arrival.
+        guard matchesAttempt(payload) else { return }
         // Status may precede configuration acknowledgment. Media never may:
         // queued frames from an earlier run must not play while a new run waits.
         if ["voice_state", "transcript", "speech_started", "audio_response", "audio_delta", "tts_chunk", "audio_chunk", "voice_cancel"].contains(type) {
@@ -265,7 +284,9 @@ struct NativeVoiceTranscript: Identifiable {
         }
         switch type {
         case "voice_interrupt_ack":
-            guard awaitingInterrupt else { return }; awaitingInterrupt = false
+            guard awaitingInterrupt, let interruptRequestID,
+                  payload["voice_request_id"] as? String == interruptRequestID else { return }
+            awaitingInterrupt = false; self.interruptRequestID = nil
             interruptDeadline?.cancel(); interruptDeadline = nil
             let status = payload["status"] as? String ?? "unknown"
             if payload["cancel_requested"] as? Bool == true && status == "requested" {

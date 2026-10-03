@@ -57,7 +57,7 @@ private func providerBool(_ value: Any?) -> Bool? {
         var request = URLRequest(url: url); request.httpMethod = method; request.timeoutInterval = 180
         if let body { request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONSerialization.data(withJSONObject: body) }
         let data: Data; let response: URLResponse
-        do { (data, response) = try await session.data(for: request) }
+        do { (data, response) = try await session.feralLocalData(for: request) }
         catch { throw ProviderFeatureError(message: "Provider request could not be completed. Refresh to confirm state before retrying.") }
         try Task.checkCancellation()
         guard generation == started else { throw ProviderFeatureError(message: "Agent connection changed. Review again.") }

@@ -25,6 +25,7 @@ if TYPE_CHECKING:
     from memory.store import MemoryStore
 
 logger = logging.getLogger(__name__)
+LEGACY_MEDIA_READ_TIMEOUT_SECONDS = 10.0
 
 
 class RuntimeContextError(RuntimeError):
@@ -380,6 +381,35 @@ class RuntimeContextCoordinator:
                 raise
             except Exception:
                 return RuntimeContextReadiness(token.session_id, ContextReadinessState.UNAVAILABLE, True)
+
+    async def established_legacy_media_readiness(self, token: RuntimeContextAttachmentToken) -> RuntimeContextReadiness:
+        """Read-only legacy media gate, independent of an active history writer."""
+        def refusal() -> RuntimeContextReadiness | None:
+            if token not in self._attachments:
+                raise RuntimeContextError("context_attachment_invalid")
+            refused = self._attachment_refusals.get(token)
+            if refused is not None:
+                return refused
+            if token in self._attachment_managed or self.known_managed(token.session_id):
+                return RuntimeContextReadiness(token.session_id, ContextReadinessState.UNAVAILABLE, True)
+            return None
+        rejected = refusal()
+        if rejected is not None:
+            return rejected
+        store = self.store
+        try:
+            read = await asyncio.wait_for(store.runtime_checkpoint_read(token.session_id), timeout=LEGACY_MEDIA_READ_TIMEOUT_SECONDS)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            refusal()  # Detached/refused attachments cannot become permissive on failure.
+            return RuntimeContextReadiness(token.session_id, ContextReadinessState.UNAVAILABLE, True)
+        rejected = refusal()
+        if rejected is not None:
+            return rejected
+        if self.store is not store or read.status != CheckpointStatus.ABSENT:
+            return RuntimeContextReadiness(token.session_id, ContextReadinessState.UNAVAILABLE, True)
+        return RuntimeContextReadiness(token.session_id, ContextReadinessState.LEGACY, False)
 
     async def detach(self, token: RuntimeContextAttachmentToken, *, clear_legacy: bool = False) -> bool:
         if token not in self._attachments:

@@ -86,7 +86,7 @@ private final class NativeRecoveryRedirectGuard: NSObject, URLSessionTaskDelegat
             let config = URLSessionConfiguration.ephemeral; config.timeoutIntervalForRequest = 15; config.timeoutIntervalForResource = 30
             let session = URLSession(configuration: config, delegate: NativeRecoveryRedirectGuard(), delegateQueue: nil)
             self.transport = { request in
-                let (data, response) = try await session.data(for: request)
+                let (data, response) = try await session.feralLocalData(for: request)
                 guard let http = response as? HTTPURLResponse else { throw NativeSessionRecoveryFailure("The local recovery response was unavailable.") }
                 return (data, http)
             }

@@ -85,6 +85,18 @@ async def require_attachment_ready(coordinator: RuntimeContextCoordinator | None
         raise RuntimeContextError(f"context_{readiness.state.value}")
 
 
+async def established_legacy_media_readiness(state: BrainState, coordinator: RuntimeContextCoordinator,
+                                           attachment: RuntimeContextAttachment) -> RuntimeContextReadiness:
+    if attachment.readiness.managed:
+        raise RuntimeContextError("managed_voice_unsupported")
+    if coordinator_for(state) is not coordinator or state.memory is not coordinator.store:
+        raise RuntimeContextError("context_unavailable")
+    ready = await coordinator.established_legacy_media_readiness(attachment.token)
+    if coordinator_for(state) is not coordinator or state.memory is not coordinator.store:
+        raise RuntimeContextError("context_unavailable")
+    return ready
+
+
 async def close_surface(state: BrainState, *, ws: WebSocket, session_id: str,
                         chat_tasks: set[asyncio.Task], coordinator: RuntimeContextCoordinator | None,
                         attachment: RuntimeContextAttachment | None, legacy_attached: bool) -> None:

@@ -161,7 +161,7 @@ struct NativeSurfaceClient {
         guard let url = components.url else { throw NativeSurfaceFailure("Invalid surface request.") }
         var request = URLRequest(url:url);request.httpMethod = body == nil ? "GET" : "POST"
         if let body = body { guard JSONSerialization.isValidJSONObject(body) else{throw NativeSurfaceFailure("The app request body is not valid JSON. No request was sent.")};request.httpBody = try JSONSerialization.data(withJSONObject:body);request.setValue("application/json",forHTTPHeaderField:"Content-Type") }
-        let (data,response) = try await session.data(for:request)
+        let (data,response) = try await session.feralLocalData(for:request)
         guard data.count <= 1048576,let http = response as? HTTPURLResponse,(200..<300).contains(http.statusCode),let value = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any],value["error"] == nil,NativeSurfaceWire.bool(value["success"]) != false else { throw NativeSurfaceFailure("The local app request failed or returned an unreadable receipt. Private service details are withheld.") }
         return value
     }

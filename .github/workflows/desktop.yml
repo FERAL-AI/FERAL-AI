@@ -1,36 +1,108 @@
 name: Desktop Build
-# The desktop app (Tauri + Rust + WebView2/WebKit/GTK) is an experimental
-# distribution path. It is NOT part of the install-from-PyPI story and is
-# not uploaded as a release asset yet (needs Apple Developer ID + Windows
-# Authenticode + Tauri updater keypair first — TAURI_SIGNING_PRIVATE_KEY,
-# TAURI_SIGNING_PRIVATE_KEY_PASSWORD, APPLE_CERT_P12, APPLE_CERT_PW,
-# WINDOWS_CERT_P12, WINDOWS_CERT_PW).
-#
-# Previously this workflow also ran on every PR touching desktop/**. That
-# burned ~30 runner-min per desktop-adjacent PR for a build whose artifacts
-# we never ship, so the pull_request trigger was removed in 2026.4.18-dev.
-# Re-add the `pull_request: paths: ['desktop/**']` trigger the day Apple
-# Developer ID + Windows Authenticode certs land in repo secrets.
+# Unsigned CI artifacts, not release signing/notarization or native GUI acceptance.
+# Unsupported Windows/musl/Linux arm64 profiles refuse staging before downloads.
 on:
+  pull_request:
+    paths:
+      - 'desktop/**'
+      - '.tools/opencode/package*.json'
+      - '.python-pin'
+      - 'feral-core/**'
+      - 'feral-client-v2/**'
+      - 'sdk/python/**'
+      - 'scripts/ensure_uv.sh'
+      - 'scripts/build_webui_v2.sh'
+      - 'scripts/desktop_bundle_smoke.py'
+      - 'scripts/linux_desktop_bundle_smoke.py'
+      - 'scripts/tests/test_desktop_bundle_platform.py'
+      - 'scripts/tests/test_linux_desktop_bundle_smoke.py'
+      - '.github/workflows/desktop.yml'
   workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 jobs:
-  build:
-    strategy:
-      matrix:
-        platform: [macos-latest, ubuntu-latest, windows-latest]
-    runs-on: ${{ matrix.platform }}
+  linux-bundle:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+      - name: Pure platform and payload contract tests
+        run: |
+          python3 -m unittest discover -s scripts/tests -p test_desktop_bundle_platform.py -v
+          python3 -m unittest discover -s scripts/tests -p test_linux_desktop_bundle_smoke.py -v
+          bash -n desktop/scripts/stage_bundle.sh
+          python3 desktop/scripts/bundle_platform.py --select-host
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Install Linux desktop build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev libssl-dev rsync
+      - name: Install locked client, shell and platform runtime dependencies
+        run: |
+          npm ci --prefix feral-client-v2
+          npm ci --prefix desktop
+          npm ci --ignore-scripts --prefix .tools/opencode
+          python3 desktop/scripts/bundle_platform.py --validate-package .tools/opencode/node_modules/opencode-linux-x64-baseline
+      - name: Build the existing Tauri Debian bundle
+        working-directory: desktop
+        run: npm run tauri build -- --bundles deb
+      - name: Extract and verify the actual relocated Debian payload
+        run: |
+          set -euo pipefail
+          mapfile -t packages < <(find desktop/src-tauri/target/release/bundle/deb -maxdepth 1 -name '*.deb' -type f)
+          test "${#packages[@]}" -eq 1
+          test "$(dpkg-deb --field "${packages[0]}" Architecture)" = amd64
+          expected_version="$(python3 -c 'import json; print(json.load(open("desktop/src-tauri/tauri.conf.json"))["version"])')"
+          test "$(dpkg-deb --field "${packages[0]}" Version)" = "$expected_version"
+          test "$(df --output=avail -B1 "$RUNNER_TEMP" | tail -1)" -ge 2147483648
+          extracted="$(mktemp -d "$RUNNER_TEMP/feral-deb-extracted-XXXXXX")"
+          dpkg-deb --extract "${packages[0]}" "$extracted"
+          python3 scripts/linux_desktop_bundle_smoke.py --extracted-root "$extracted" --work-parent "$RUNNER_TEMP" --python-pin .python-pin --timeout 90
+          sha256sum "${packages[0]}" > desktop/src-tauri/target/release/bundle/deb/SHA256SUMS
+      - name: Preserve bounded smoke evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-desktop-smoke-evidence
+          path: |
+            ${{ runner.temp }}/feral-linux-bundle-smoke-*/receipt.json
+            ${{ runner.temp }}/feral-linux-bundle-smoke-*/runtime-probe.json
+            ${{ runner.temp }}/feral-linux-bundle-smoke-*/brain.log
+          if-no-files-found: ignore
+          retention-days: 7
+      - name: Upload verified unsigned Linux CI package
+        uses: actions/upload-artifact@v4
+        with:
+          name: feral-linux-x86_64-unsigned-ci
+          path: |
+            desktop/src-tauri/target/release/bundle/deb/*.deb
+            desktop/src-tauri/target/release/bundle/deb/SHA256SUMS
+          if-no-files-found: error
+          retention-days: 7
+  macos-build:
+    # Existing Darwin mappings remain available explicitly, without claiming a
+    # signed release or burning a macOS runner on every runtime-adjacent PR.
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: macos-latest
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - uses: dtolnay/rust-toolchain@stable
-      - name: Install Linux deps
-        if: matrix.platform == 'ubuntu-latest'
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y pkg-config libgtk-3-dev libwebkit2gtk-4.1-dev libayatana-appindicator3-dev librsvg2-dev
+      - run: |
+          npm ci --prefix feral-client-v2
+          npm ci --prefix desktop
+          npm ci --ignore-scripts --prefix .tools/opencode
       - working-directory: desktop
-        run: npm ci
-      - working-directory: desktop
-        run: npm run tauri build -- --debug
+        run: npm run tauri build -- --bundles app

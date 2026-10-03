@@ -48,7 +48,7 @@ final class NativeMemoryContextRedirectGuard: NSObject, URLSessionTaskDelegate {
             parts.path = "/api/memory/context"; parts.queryItems = [URLQueryItem(name: "limit", value: "20")]; parts.fragment = nil
             guard let url = parts.url else { throw MemoryContextFailure(message: "Invalid context inspector request.") }
             var request = URLRequest(url: url); request.httpMethod = "GET"; request.timeoutInterval = 30
-            let (data, response) = try await session.data(for: request); try Task.checkCancellation()
+            let (data, response) = try await session.feralLocalData(for: request); try Task.checkCancellation()
             guard generation == start else { return }
             guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), data.count <= 2 * 1024 * 1024, let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], value["error"] == nil, let count = memoryContextNumber(value["count"]), let rows = value["snapshots"] as? [[String: Any]], rows.count <= 20, count == Double(rows.count) else { throw MemoryContextFailure(message: "The context snapshot response is incomplete or exceeds its bounds.") }
             let parsed = try rows.enumerated().map { index, row -> NativeMemoryContextSnapshot in

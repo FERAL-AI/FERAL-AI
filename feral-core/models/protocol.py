@@ -7,9 +7,9 @@ This is the single source of truth for all message types.
 """
 
 from __future__ import annotations
-from pydantic import AliasChoices, BaseModel, Field, field_validator, ValidationInfo
-from typing import Optional, Literal, Any
-from uuid import uuid4
+from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator, model_serializer, ValidationInfo
+from typing import Optional, Literal, Any, Self, Callable
+from uuid import UUID, uuid4
 from time import time
 
 HUP_VERSION = "1.4.0"
@@ -207,7 +207,41 @@ class FeralMessage(BaseModel):
 # Payload Models — Client → Brain
 # ─────────────────────────────────────────────
 
-class AudioChunkPayload(BaseModel):
+class VoiceAttemptPayload(BaseModel):
+    """Optional negotiated client voice identity. Legacy frames omit both."""
+    voice_attempt_version: Literal[1] | None = None
+    voice_attempt_id: str | None = Field(default=None, max_length=36)
+
+    @model_serializer(mode="wrap")
+    def omit_absent_voice_identity(self, handler: Callable[[object], dict]) -> dict:
+        serialized = handler(self)
+        for name in ("voice_attempt_version", "voice_attempt_id", "voice_request_id"):
+            if serialized.get(name) is None:
+                serialized.pop(name, None)
+        return serialized
+
+    @field_validator("voice_attempt_version", mode="before")
+    @classmethod
+    def strict_voice_attempt_version(cls, value: object) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported voice attempt version")
+        return value
+
+    @field_validator("voice_attempt_id", mode="before")
+    @classmethod
+    def strict_voice_attempt_id(cls, value: object) -> str:
+        if not isinstance(value, str) or len(value) != 36 or str(UUID(value)) != value:
+            raise ValueError("Voice attempt must be a lowercase UUID")
+        return value
+
+    @model_validator(mode="after")
+    def paired_voice_attempt(self) -> Self:
+        if (self.voice_attempt_version is None) != (self.voice_attempt_id is None):
+            raise ValueError("Voice attempt identity requires both fields")
+        return self
+
+
+class AudioChunkPayload(VoiceAttemptPayload):
     """Streaming audio from client to brain.
 
     ``data_b64`` carries no decoded-size cap on purpose. The only documented
@@ -461,7 +495,7 @@ class VoiceSessionStartPayload(BaseModel):
     camera_linked: bool = False
 
 
-class VoiceInterruptPayload(BaseModel):
+class VoiceInterruptPayload(VoiceAttemptPayload):
     """Signal from phone to cut in-flight TTS on the active stream.
 
     ``stream_id`` used to be required, but in practice the phone UI
@@ -474,6 +508,18 @@ class VoiceInterruptPayload(BaseModel):
     """
     stream_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     reason: str = Field(default="user_interrupt", max_length=MAX_NAME_LEN)
+    voice_request_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("voice_request_id", mode="before")
+    @classmethod
+    def strict_voice_request_id(cls, value: object) -> str:
+        return VoiceAttemptPayload.strict_voice_attempt_id(value)
+
+    @model_validator(mode="after")
+    def v1_interrupt_request(self) -> Self:
+        if self.voice_attempt_id is not None and self.voice_request_id is None:
+            raise ValueError("Voice interruption requires request identity")
+        return self
 
 
 class GenUIPushActionPayload(BaseModel):
@@ -913,7 +959,7 @@ class SomaticStatePayload(BaseModel):
 ChatResponsePayload.model_rebuild()
 
 
-class TranscriptPayload(BaseModel):
+class TranscriptPayload(VoiceAttemptPayload):
     """Speech-to-text result.
 
     The ``role`` field disambiguates user-spoken text from
@@ -1008,7 +1054,7 @@ class SDUIPatchPayload(BaseModel):
     patches: list[dict]  # [{"path": "children.0.value", "op": "replace", "value": "new text"}]
 
 
-class TTSChunkPayload(BaseModel):
+class TTSChunkPayload(VoiceAttemptPayload):
     """Streaming audio from brain to client (text-to-speech).
 
     ``data_b64`` is brain-generated TTS output with no documented cap, so
@@ -1515,7 +1561,7 @@ class ConfirmationDecisionPayload(BaseModel):
 # Payload Models — Voice Pipeline
 # ─────────────────────────────────────────────
 
-class VoiceConfigPayload(BaseModel):
+class VoiceConfigPayload(VoiceAttemptPayload):
     """Client/node declares voice capabilities and selected mode."""
     node_id: str = Field(default="", max_length=MAX_ID_LEN)
     supports_realtime: bool = False
@@ -1525,7 +1571,25 @@ class VoiceConfigPayload(BaseModel):
     sample_rate: int = Field(default=24000, ge=1)
     encoding: str = Field(default="pcm16", max_length=32)
 
-class AudioResponsePayload(BaseModel):
+
+class VoiceConfigAckPayload(VoiceAttemptPayload):
+    mode: str = Field(default="", max_length=MAX_NAME_LEN)
+    provider: str = Field(default="", max_length=MAX_NAME_LEN)
+    status: Literal["ok", "error"]
+    code: str = Field(default="", max_length=MAX_NAME_LEN)
+    message: str = ""
+
+
+class VoiceInterruptAckPayload(VoiceInterruptPayload):
+    status: str = Field(default="", max_length=MAX_NAME_LEN)
+    cancel_requested: bool = False
+    session_preserved: bool = True
+
+
+class VoiceMutePayload(VoiceAttemptPayload):
+    muted: bool = False
+
+class AudioResponsePayload(VoiceAttemptPayload):
     """Brain sends audio back to a node (realtime TTS or Whisper TTS).
 
     ``data_b64`` is brain-generated audio with no documented cap, so none is
@@ -1536,7 +1600,7 @@ class AudioResponsePayload(BaseModel):
     sample_rate: int = Field(default=24000, ge=1)
     is_final: bool = False
 
-class VoiceStatusPayload(BaseModel):
+class VoiceStatusPayload(VoiceAttemptPayload):
     """Brain -> client voice subsystem health update.
 
     Emitted by the voice router when a realtime provider fails (e.g.
@@ -1912,6 +1976,9 @@ MESSAGE_TYPES = {
 
     # Voice Pipeline
     "voice_config": VoiceConfigPayload,
+    "voice_config_ack": VoiceConfigAckPayload,
+    "voice_interrupt_ack": VoiceInterruptAckPayload,
+    "voice_mute": VoiceMutePayload,
     "audio_response": AudioResponsePayload,
     "voice_status": VoiceStatusPayload,
     "vision_query": VisionQueryPayload,

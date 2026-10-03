@@ -48,7 +48,7 @@ struct NativeSpeechConfigurationReview: Identifiable { let id = UUID(); let gene
         guard let url = parts.url else { throw VoiceConfigurationFailure(message: "Invalid speech settings request.") }
         var req = URLRequest(url: url); req.httpMethod = method; req.timeoutInterval = 120
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: req); try Task.checkCancellation()
+        let (data, response) = try await session.feralLocalData(for: req); try Task.checkCancellation()
         guard start == generation else { throw VoiceConfigurationFailure(message: "Agent changed. Review again.") }
         guard let http = response as? HTTPURLResponse, http.url == req.url, (200..<300).contains(http.statusCode), let value = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw VoiceConfigurationFailure(message: "The speech settings request failed or returned unreadable state.") }
         if (value["error"] as? String)?.isEmpty == false || (!probeResult && (voiceConfigurationBool(value["ok"]) == false || voiceConfigurationBool(value["success"]) == false)) { throw VoiceConfigurationFailure(message: "The backend refused this speech settings request.") }

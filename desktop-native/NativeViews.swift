@@ -186,7 +186,7 @@ struct NativeRootView: View {
                         if !model.ready {
                             NativeStartupStatus(model: model, openSecurity: { selection = .security }).padding(12).frame(maxWidth: .infinity)
                         }
-                        switch selection ?? .chat {
+                        Group { switch selection ?? .chat {
                         case .home: NativeAmbientFeatureView(baseURL: model.featureBaseURL)
                         case .chat: NativeChatView(model: model)
                         case .voice:
@@ -231,7 +231,8 @@ struct NativeRootView: View {
                                 NativeSecurityFeatureView(baseURL: model.securityBaseURL).tabItem { Label("Permissions and cost", systemImage: "checkmark.shield") }
                             }
                         case .settings: NativeSettingsView(model: model, desktop: desktop)
-                        }
+                        } }.disabled(model.effectsPaused && (selection ?? .chat) != .settings)
+                            .id((selection ?? .chat) == .settings ? "settings" : model.localRuntimeGeneration.uuidString + String(model.effectsPaused))
                     }.frame(maxWidth: .infinity, maxHeight: .infinity)
                 }.navigationSplitViewStyle(.balanced)
                 .task(id: selection) { await refreshSelected() }
@@ -899,25 +900,32 @@ private struct NativeSettingsView: View {
             NativePageHeader(title: "Settings", subtitle: "Make FERAL feel like yours")
             ScrollView {
                 VStack(alignment: .leading, spacing: 26) {
+                    Group {
                     VStack(alignment: .leading, spacing: 14) { Text("Your companion").font(.headline); NativeAvatarPicker(model: model, compact: true) }
                     VStack(alignment: .leading, spacing: 8) { Text("Your name").font(.headline); TextField("Your name (optional)", text: $model.displayName).textFieldStyle(.roundedBorder) }
                     Button("Save profile") { model.saveProfile() }.buttonStyle(.borderedProminent)
                     Button("Continue provider setup…") { model.openProviderSetup() }
+                    }.disabled(model.effectsPaused)
                 Text("Manage models and credentials in AI Providers.").font(.caption).foregroundStyle(.secondary)
                     HStack {
                         Button("Speech settings…") { speechSettingsPresented = true }
                         Button("Accounts, channels and tools…") { integrationsPresented = true }
-                    }.disabled(!model.ready)
+                    }.disabled(!model.ready || model.effectsPaused)
                     Divider()
-                    NativeDesktopExperienceView(experience: desktop)
+                    NativeDesktopExperienceView(experience: desktop).disabled(model.effectsPaused)
+                    Divider()
+                    NativeProfileArchiveView(model: model, archive: model.profileArchive)
                     Divider()
                     NativeConfigurationFeatureView(baseURL: model.featureBaseURL)
+                        .id(model.localRuntimeGeneration).disabled(model.effectsPaused)
                 }.padding(28).frame(maxWidth: 650, alignment: .leading)
             }.frame(maxWidth: .infinity, alignment: .leading)
         }.sheet(isPresented: $speechSettingsPresented) {
             VStack { HStack { Text("Speech settings").font(.headline); Spacer(); Button("Done") { speechSettingsPresented = false } }.padding(); NativeVoiceConfigurationFeatureView(baseURL: model.featureBaseURL) }.frame(width: 820, height: 680)
         }.sheet(isPresented: $integrationsPresented) {
             VStack { HStack { Text("Accounts, channels and tools").font(.headline); Spacer(); Button("Done") { integrationsPresented = false } }.padding(); NativeIntegrationFeatureView(baseURL: model.featureBaseURL) }.frame(width: 820, height: 680)
+        }.onChange(of: model.effectsPaused) { paused in
+            if paused { speechSettingsPresented = false; integrationsPresented = false }
         }
     }
 }
@@ -969,7 +977,7 @@ private struct NativeStartupStatus: View {
             Text(model.startupStatus).foregroundStyle(.secondary)
             if model.serviceReachable && !model.ready, let openSecurity {
                 Button("Open Security", action: openSecurity)
-            } else if !model.busy && model.error != nil {
+            } else if !model.busy && model.error != nil && !model.profileArchivePaused {
                 Button("Retry") { Task { await model.start() } }.accessibilityLabel("Retry starting FERAL")
             }
         }.font(.callout)

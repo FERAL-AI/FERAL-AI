@@ -17,6 +17,7 @@ from typing import Optional, Callable, Awaitable, ParamSpec, TypeVar
 from uuid import uuid4
 
 from agents.tool_display import tool_feedback_text
+from bridges.client_voice_attempt import current_voice_attempt, voice_attempt_payload, voice_attempt_scope
 from skills.call_context import bind_context
 from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
@@ -79,6 +80,7 @@ class GeminiRealtimeSession:
         self._recv_task: Optional[asyncio.Task] = None
         self._retired = False
         self._callback_guard: Callable[[], bool] | None = None
+        self._voice_attempt = current_voice_attempt(session_id)
         self._callback_tasks: set[asyncio.Task] = set()
         self._output_epoch = 0
 
@@ -412,6 +414,8 @@ class GeminiRealtimeProxy:
         if owner is not None and (owner.session_id != session_id or self._sessions.get(session_id) is not owner or owner._retired):
             raise asyncio.CancelledError("Retired voice callback")
         response = _CALLBACK_RESPONSE.get()
+        if owner is not None and owner._voice_attempt is not None and not owner._voice_attempt.current():
+            raise asyncio.CancelledError("Retired voice attempt")
         if owner is not None and response is not None and response[0] is owner and response[1] != owner._output_epoch:
             raise asyncio.CancelledError("Retired voice response")
 
@@ -431,7 +435,8 @@ class GeminiRealtimeProxy:
                 owner._callback_tasks.add(task)
             try:
                 self._assert_callback_owner(owner.session_id)
-                result = await callback(*args, **kwargs)
+                with voice_attempt_scope(owner._voice_attempt):
+                    result = await callback(*args, **kwargs)
                 self._assert_callback_owner(owner.session_id)
                 return result
             finally:
@@ -665,7 +670,7 @@ class GeminiRealtimeProxy:
                 session_id=session_id,
                 hop="brain",
                 type="transcript",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
             self._assert_callback_owner(session_id)
@@ -673,7 +678,7 @@ class GeminiRealtimeProxy:
         if self._send_to_node:
             await self._send_to_node(gs.node_id, {
                 "type": "transcript",
-                "payload": payload,
+                "payload": voice_attempt_payload(payload, current_voice_attempt(session_id)),
             })
             self._assert_callback_owner(session_id)
 
@@ -690,12 +695,12 @@ class GeminiRealtimeProxy:
             from models.protocol import FeralMessage
             msg = FeralMessage(
                 session_id=session_id, hop="brain", type="audio_response",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
             self._assert_callback_owner(session_id)
         elif self._send_to_node:
-            await self._send_to_node(gs.node_id, {"type": "audio_response", "payload": payload})
+            await self._send_to_node(gs.node_id, {"type": "audio_response", "payload": voice_attempt_payload(payload, current_voice_attempt(session_id))})
             self._assert_callback_owner(session_id)
 
     async def _handle_transcript(self, session_id: str, text: str, is_partial: bool):
@@ -840,12 +845,12 @@ class GeminiRealtimeProxy:
             from models.protocol import FeralMessage
             msg = FeralMessage(
                 session_id=session_id, hop="brain", type="transcript",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
             self._assert_callback_owner(session_id)
         elif self._send_to_node:
-            await self._send_to_node(gs.node_id, {"type": "transcript", "payload": payload})
+            await self._send_to_node(gs.node_id, {"type": "transcript", "payload": voice_attempt_payload(payload, current_voice_attempt(session_id))})
             self._assert_callback_owner(session_id)
 
     async def _refresh_memory_context(self, session_id: str, query: str) -> None:
@@ -1100,14 +1105,14 @@ class GeminiRealtimeProxy:
                 session_id=session_id,
                 hop="brain",
                 type="speech_started",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
             self._assert_callback_owner(session_id)
             return
         if self._send_to_node:
             await self._send_to_node(gs.node_id, {
-                "type": "speech_started", "payload": payload,
+                "type": "speech_started", "payload": voice_attempt_payload(payload, current_voice_attempt(session_id)),
             })
             self._assert_callback_owner(session_id)
 

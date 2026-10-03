@@ -32,7 +32,7 @@ struct NativeIntegrationClient {
         var request = URLRequest(url:url);request.httpMethod = method
         if let body = body { request.httpBody = try JSONSerialization.data(withJSONObject:body);request.setValue("application/json",forHTTPHeaderField:"Content-Type") }
         let data:Data,response:URLResponse
-        do { (data,response) = try await session.data(for:request) } catch { throw NativeIntegrationError("The local integration request could not finish. Check the service and retry.") }
+        do { (data,response) = try await session.feralLocalData(for:request) } catch { throw NativeIntegrationError("The local integration request could not finish. Check the service and retry.") }
         guard let http = response as? HTTPURLResponse,(200..<300).contains(http.statusCode) else { throw NativeIntegrationError("Integration request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0)). No successful change is established.") }
         guard let value = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else { throw NativeIntegrationError("Unreadable integration response.") }
         if let error = value["error"] as? String,!error.isEmpty { throw NativeIntegrationError("The backend reported an integration failure. No successful change is established.") }

@@ -190,7 +190,7 @@ private final class NativeHardwareRedirectGuard: NSObject, URLSessionTaskDelegat
         else {
             let config = URLSessionConfiguration.ephemeral; config.timeoutIntervalForRequest = 40; config.timeoutIntervalForResource = 50
             let session = URLSession(configuration: config, delegate: NativeHardwareRedirectGuard(), delegateQueue: nil)
-            self.transport = { request in let (data, response) = try await session.data(for: request); guard let http = response as? HTTPURLResponse else { throw NativeHardwareFailure("Hardware response unavailable.") }; return (data, http) }
+            self.transport = { request in let (data, response) = try await session.feralLocalData(for: request); guard let http = response as? HTTPURLResponse else { throw NativeHardwareFailure("Hardware response unavailable.") }; return (data, http) }
         }
     }
     var available: Bool { baseURL != nil }

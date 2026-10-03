@@ -2,7 +2,22 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
-**Current artifact checkpoint:2026.9.30/build2026100204**, frozen source
+**Current verified artifact:2026.9.33/build2026100207**, exact source
+`7f818da08139952b1698644469e7016563512cd5`. Packaged local-model recovery and
+restart passed with485 unchanged production Python files, executable hash and
+strict ad-hoc signature; its verified copy is preserved.
+[9.33 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_33_ACCEPTANCE.md).
+Published `ec1c301` passes all executed CI jobs, including generated assets.
+Frozen later source adds Settings backup/restore, portable native preferences,
+exact reviewed runtime shutdown and voice-attempt identity/liveness repairs.
+Combined backend455, archive/preference/layout280/71/87 and genuine Process-owner28
+checks pass; production typecheck passes. These changes await exact-source9.34
+assembly and actual GUI/audio acceptance. Managed saved-context voice remains
+refused. No inventory row is release-certified.
+[Archive evidence](../docs/roadmap/theora-personal-agent/NATIVE_PROFILE_ARCHIVE_EVIDENCE.md)
+and [current work](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+
+**Historical artifact checkpoint:2026.9.30/build2026100204**, frozen source
 `dd69c7bf5175517966a363591fa8137782358535`. All482 packaged production Python
 files matched that source; bundle audit and strict ad-hoc signature checks passed.
 Actual isolated packaged-backend replies, saved-context restart and cancellation

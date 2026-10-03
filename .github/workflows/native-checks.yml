@@ -4,6 +4,8 @@ on:
   pull_request:
     paths:
       - 'desktop-native/**'
+      - 'feral-core/config/profile_archive.py'
+      - 'feral-core/config/native_preference_snapshot.py'
       - 'scripts/check_native_bundle.py'
       - 'scripts/tests/test_check_native_bundle.py'
       - 'scripts/check_packaged_core.py'
@@ -13,6 +15,8 @@ on:
     branches: [main]
     paths:
       - 'desktop-native/**'
+      - 'feral-core/config/profile_archive.py'
+      - 'feral-core/config/native_preference_snapshot.py'
       - 'scripts/check_native_bundle.py'
       - 'scripts/tests/test_check_native_bundle.py'
       - 'scripts/check_packaged_core.py'
@@ -41,12 +45,19 @@ jobs:
       - name: Typecheck actual app entry and production sources
         working-directory: desktop-native
         run: bash build.sh --typecheck
+      - name: Create isolated stdlib interpreter for offline archive fixtures
+        run: |
+          python -m venv --without-pip .venv
+          PYTHONPATH=feral-core .venv/bin/python -S -m config.profile_archive --help
       - name: Native feature, linked-model and desktop checks
         working-directory: desktop-native
         run: bash test_features.sh
       - name: Real child-process lifeline checks
         working-directory: desktop-native
         run: python -m unittest -v test_native_lifeline.py
+      - name: Exact runtime archive ownership and replacement checks
+        working-directory: desktop-native
+        run: ../.venv/bin/python acceptance/archive_runtime_owner_fixture.py
       - name: Bundle-audit regression checks
         run: python -m unittest discover -s scripts/tests -p test_check_native_bundle.py -v
       - name: Frozen-runtime source comparison checks

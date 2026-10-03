@@ -151,7 +151,7 @@ private enum KnowledgeFolderCapture {
         var request = URLRequest(url: url); request.timeoutInterval = 120
         if let body { request.httpMethod = "POST"; request.httpBody = try JSONSerialization.data(withJSONObject: body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
         if let multipart, let boundary { request.httpMethod = "POST"; request.httpBody = multipart; request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: request); try Task.checkCancellation()
+        let (data, response) = try await session.feralLocalData(for: request); try Task.checkCancellation()
         guard generation == start else { throw KnowledgeFailure(message: "Agent changed. Review again.") }
         guard let response = response as? HTTPURLResponse, (200..<300).contains(response.statusCode), data.count <= 4_194_304, let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], value["error"] == nil else { throw KnowledgeFailure(message: "The backend refused the request or returned unreadable knowledge state.") }
         return value

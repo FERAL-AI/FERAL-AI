@@ -9,6 +9,8 @@ Routes audio based on source capabilities and provider config:
 
 from __future__ import annotations
 from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
+from bridges.client_voice_attempt import assert_voice_attempt_current, current_voice_attempt, require_voice_producer, voice_attempt_payload
+import asyncio
 import logging
 import os
 import time
@@ -253,6 +255,8 @@ class VoiceRouter:
         self._node_voice_config: dict[str, dict] = {}
         self._node_session_map: dict[str, str] = {}
         self._session_voice_mode: dict[str, str] = {}
+        from bridges.client_voice_attempt import VoiceAttemptLedger
+        self._client_voice_attempts: dict[str, VoiceAttemptLedger] = {}
 
         # node_id -> HUP node_type ("phone", "glasses", "desktop", ...).
         # Drives the surface-aware default provider chain; see
@@ -822,7 +826,15 @@ class VoiceRouter:
             return
 
         if provider == "openai":
+            voice_attempt = current_voice_attempt(session_id)
+            assert_voice_attempt_current(voice_attempt)
+            if voice_attempt is not None:
+                selected = self._realtime.get_session(client_node)
+                if selected is not None:
+                    require_voice_producer(voice_attempt, selected)
             rs = await self._live_realtime_session(client_node)
+            if rs is not None:
+                require_voice_producer(voice_attempt, rs)
             if not rs:
                 rs = await self._realtime.start_session(
                     session_id,
@@ -831,7 +843,9 @@ class VoiceRouter:
                     input_sample_rate=sample_rate or 24000,
                 )
             if rs and rs.connected:
+                require_voice_producer(voice_attempt, rs)
                 await rs.send_audio(audio_b64)
+                assert_voice_attempt_current(voice_attempt)
             return
 
         # --- Subagent B: chained pipeline audio routing (client) ---
@@ -875,10 +889,15 @@ class VoiceRouter:
 
     async def _checkpoint_legacy_handle_gemini_client(self, session_id: str, client_node: str, audio_b64: str):
         gs = self._gemini.get_session(client_node)
+        voice_attempt = current_voice_attempt(session_id)
+        if gs is not None:
+            require_voice_producer(voice_attempt, gs)
         if not gs:
             gs = await self._gemini.start_session(session_id, client_node)
         if gs and gs.connected:
+            require_voice_producer(voice_attempt, gs)
             await gs.send_audio(audio_b64)
+            assert_voice_attempt_current(voice_attempt)
 
     async def handle_audio_for_gemini(
         self,
@@ -942,6 +961,8 @@ class VoiceRouter:
         """Classic STT → Orchestrator → TTS flow."""
         if not self._audio:
             return
+        voice_attempt = current_voice_attempt(session_id)
+        assert_voice_attempt_current(voice_attempt)
 
         transcript = await self._audio.process_audio_chunk(
             session_id=session_id,
@@ -951,6 +972,7 @@ class VoiceRouter:
             encoding=encoding,
             sample_rate=sample_rate,
         )
+        assert_voice_attempt_current(voice_attempt)
 
         if not transcript:
             return
@@ -979,15 +1001,17 @@ class VoiceRouter:
         if self._send_to_session:
             msg = FeralMessage(
                 session_id=session_id, hop="brain", type="transcript",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
+            assert_voice_attempt_current(voice_attempt)
 
         if source_node_id and self._send_to_node:
             await self._send_to_node(source_node_id, {
                 "type": "transcript",
-                "payload": payload,
+                "payload": voice_attempt_payload(payload, current_voice_attempt(session_id)),
             })
+            assert_voice_attempt_current(voice_attempt)
 
         if self._memory:
             self._memory.working_push(session_id, {
@@ -1003,23 +1027,27 @@ class VoiceRouter:
                 text=transcript,
                 context={"source": "voice", "node_id": source_node_id} if source_node_id else {"source": "voice"},
             )
+            assert_voice_attempt_current(voice_attempt)
 
             tts_text = self._get_last_assistant_text(session_id)
             if tts_text and self._audio:
                 chunks = await self._audio.synthesize_speech(tts_text)
+                assert_voice_attempt_current(voice_attempt)
                 if chunks:
                     for chunk in chunks:
                         tts_msg = FeralMessage(
                             session_id=session_id, hop="brain", type="tts_chunk",
-                            payload=chunk,
+                            payload=voice_attempt_payload(chunk, current_voice_attempt(session_id)),
                         )
                         if self._send_to_session:
                             await self._send_to_session(session_id, tts_msg)
+                            assert_voice_attempt_current(voice_attempt)
                         if source_node_id and self._send_to_node:
                             await self._send_to_node(source_node_id, {
                                 "type": "tts_chunk",
-                                "payload": chunk,
+                                "payload": voice_attempt_payload(chunk, current_voice_attempt(session_id)),
                             })
+                            assert_voice_attempt_current(voice_attempt)
 
     def _get_last_assistant_text(self, session_id: str) -> str:
         """Pull the latest assistant response from working memory for TTS."""
@@ -1708,7 +1736,8 @@ class VoiceRouter:
         # the newest frame, so a degraded banner that omitted ``muted``
         # would silently flip the UI back to "listening" over a
         # microphone the brain is still refusing to read.
-        meta = {**meta, "muted": self.is_session_muted(session_id)}
+        voice_attempt = current_voice_attempt(session_id)
+        meta = voice_attempt_payload({**meta, "muted": self.is_session_muted(session_id)}, voice_attempt)
         try:
             payload = VoiceStatusPayload(**meta).model_dump()
         except Exception:
@@ -1723,6 +1752,7 @@ class VoiceRouter:
         if self._send_to_session:
             try:
                 await self._send_to_session(session_id, msg)
+                assert_voice_attempt_current(voice_attempt)
                 sent = True
             except Exception:
                 logger.debug("voice_status session emit failed", exc_info=True)
@@ -1733,6 +1763,7 @@ class VoiceRouter:
                         await self._send_to_node(node_id, {
                             "type": "voice_status", "payload": payload,
                         })
+                        assert_voice_attempt_current(voice_attempt)
                         sent = True
                     except Exception:
                         logger.debug(
@@ -1756,9 +1787,12 @@ class VoiceRouter:
             return False
         if not self._audio:
             return False
+        voice_attempt = current_voice_attempt(session_id)
+        assert_voice_attempt_current(voice_attempt)
 
         try:
             chunks = await self._audio.synthesize_speech(text[:1000])
+            assert_voice_attempt_current(voice_attempt)
         except Exception:
             logger.exception("Fallback TTS synth failed for session=%s", session_id[:8])
             chunks = None
@@ -1776,11 +1810,12 @@ class VoiceRouter:
         for chunk in chunks:
             tts_msg = FeralMessage(
                 session_id=session_id, hop="brain", type="tts_chunk",
-                payload=chunk,
+                payload=voice_attempt_payload(chunk, current_voice_attempt(session_id)),
             )
             if self._send_to_session:
                 try:
                     await self._send_to_session(session_id, tts_msg)
+                    assert_voice_attempt_current(voice_attempt)
                     delivered = True
                 except Exception:
                     logger.debug("tts_chunk session emit failed", exc_info=True)
@@ -1790,8 +1825,9 @@ class VoiceRouter:
                 if self._send_to_node:
                     try:
                         await self._send_to_node(node_id, {
-                            "type": "tts_chunk", "payload": chunk,
+                            "type": "tts_chunk", "payload": voice_attempt_payload(chunk, current_voice_attempt(session_id)),
                         })
+                        assert_voice_attempt_current(voice_attempt)
                         delivered = True
                     except Exception:
                         logger.debug("tts_chunk node emit failed", exc_info=True)
@@ -1801,24 +1837,52 @@ class VoiceRouter:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def stop_session_voice(self, session_id: str):
+    async def stop_session_voice(self, session_id: str, *, expected_attempt=None, fenced: bool = False):
         """Stop realtime voice for a web client session."""
         client_node = f"webclient_{session_id[:8]}"
+        admitted = current_voice_attempt(session_id) if fenced else None
+
+        def check(producer=None):
+            if not fenced:
+                return
+            if admitted is not None and not (admitted.current() or (admitted.active
+                    and admitted.lifecycle_pending and admitted.owner_current() and admitted.ledger_current())):
+                from bridges.client_voice_attempt import VoiceAttemptError
+                raise VoiceAttemptError("voice_attempt_superseded")
+            if producer is not None and (getattr(producer, "session_id", None) != session_id
+                                         or getattr(producer, "_voice_attempt", None) is not expected_attempt):
+                from bridges.client_voice_attempt import VoiceAttemptError
+                raise VoiceAttemptError("voice_producer_superseded")
 
         if self._gemini:
             gsid = self._gemini._node_to_session.get(client_node)
             if gsid:
+                check(self._gemini.get_session(client_node))
                 await self._gemini.stop_session(gsid)
+                check()
 
         if self._realtime:
             sid_for_node = self._realtime._node_to_session.get(client_node)
             if sid_for_node:
+                check(self._realtime.get_session(client_node))
                 await self._realtime.stop_session(sid_for_node)
+                check()
 
         # --- Subagent B: close chained session ---
         if hasattr(self, "_chained") and self._chained:
+            check(self._chained.get_session(session_id))
             await self._chained.close_session(session_id)
+            check()
         # --- end Subagent B ---
+
+        if fenced:
+            for proxy in (self._gemini, self._realtime):
+                if proxy is not None and proxy.get_session(client_node) is not None:
+                    from bridges.client_voice_attempt import VoiceAttemptError
+                    raise VoiceAttemptError("voice_producer_superseded")
+            if getattr(self, "_chained", None) is not None and self._chained.get_session(session_id) is not None:
+                from bridges.client_voice_attempt import VoiceAttemptError
+                raise VoiceAttemptError("voice_producer_superseded")
 
         self._session_voice_mode.pop(session_id, None)
         self._session_degraded.pop(session_id, None)
@@ -2279,6 +2343,8 @@ class VoiceRouter:
             return None
 
         send_fn = self._send_to_session
+        from bridges.client_voice_attempt import current_voice_attempt, voice_attempt_payload
+        voice_attempt = current_voice_attempt(session_id)
 
         async def _send_frame(sid, frame):
             if send_fn:
@@ -2287,9 +2353,11 @@ class VoiceRouter:
                     session_id=sid,
                     hop="brain",
                     type=frame["type"],
-                    payload=frame.get("payload", {}),
+                    payload=voice_attempt_payload(frame.get("payload", {}), voice_attempt),
                 )
                 await send_fn(sid, msg)
+                if voice_attempt is not None and not voice_attempt.current():
+                    raise asyncio.CancelledError("Retired voice attempt")
 
         pipeline = self._chained
         try:
@@ -2300,6 +2368,7 @@ class VoiceRouter:
                 llm_handle=self._orchestrator,
                 send_frame=_send_frame,
                 sample_rate=stt_sample_rate,
+                voice_attempt=voice_attempt,
             )
         except BaseException:
             # A partial open is attributable only through the providers
@@ -2311,6 +2380,9 @@ class VoiceRouter:
             raise
         if self._chained is not pipeline or pipeline.get_session(session_id) is not session:
             return None
+        # The actual producer also owns the immutable closure captured above.
+        # Metadata lets v1 controls refuse an unrelated direct replacement.
+        setattr(session, "_voice_attempt", voice_attempt)
         self._session_voice_mode[session_id] = "chained"
         return session
 
@@ -2374,6 +2446,10 @@ class VoiceRouter:
         chained = getattr(self, "_chained", None)
         if chained is None:
             return False
+        voice_attempt = current_voice_attempt(session_id)
+        selected = chained.get_session(session_id)
+        if selected is not None:
+            require_voice_producer(voice_attempt, selected)
         try:
             return bool(await chained.interrupt_output(session_id, reason="user_interrupt"))
         except Exception:
@@ -2403,6 +2479,9 @@ class VoiceRouter:
         """Route audio into the chained pipeline for a session."""
         if not hasattr(self, "_chained") or self._chained is None:
             return
+        voice_attempt = current_voice_attempt(session_id)
+        selected = self._chained.get_session(session_id)
+        require_voice_producer(voice_attempt, selected)
         await self._chained.handle_audio(
             session_id=session_id,
             audio_b64=audio_b64,

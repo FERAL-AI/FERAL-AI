@@ -61,6 +61,7 @@ from typing import Any, Awaitable, Callable
 from voice.stt_providers import STTProvider, TranscriptFragment
 from voice.transcript_filter import should_commit_user_transcript
 from voice.tts_providers import TTSProvider
+from bridges.client_voice_attempt import VoiceAttemptBinding, VoiceAttemptError
 
 logger = logging.getLogger("feral.voice.chained_pipeline")
 
@@ -115,6 +116,7 @@ class ChainedSession:
     state: VoiceState = VoiceState.IDLE
     send_frame: Callable[[str, dict], Awaitable[None]] | None = None
     sample_rate: int = 24000
+    _voice_attempt: VoiceAttemptBinding | None = field(default=None, repr=False)
     _audio_buffer: bytearray = field(default_factory=bytearray)
     # Consumes ``stt_provider.open_stream()``. Was declared but never
     # assigned (only ever cancelled), which meant ``open_stream`` was
@@ -226,6 +228,7 @@ class ChainedVoicePipeline:
         llm_handle: Any,
         send_frame: Callable[[str, dict], Awaitable[None]] | None = None,
         sample_rate: int = 24000,
+        voice_attempt: VoiceAttemptBinding | None = None,
     ) -> ChainedSession:
         """Create a new chained voice session.
 
@@ -265,6 +268,7 @@ class ChainedVoicePipeline:
             llm_handle=llm_handle,
             send_frame=send_frame,
             sample_rate=int(sample_rate or 24000),
+            _voice_attempt=voice_attempt,
         )
         session._endpointer = self._build_endpointer(session)
         self._sessions[session_id] = session
@@ -336,16 +340,35 @@ class ChainedVoicePipeline:
             logger.warning("handle_audio: no session %s", session_id[:8])
             return
 
+        await self.handle_audio_for_session(session, audio_b64, chunk_index, is_final, wait_for_turn=True)
+
+    def _require_owned_session(self, session: ChainedSession, *, lifecycle: bool = False) -> None:
+        binding = session._voice_attempt
+        owned = binding is None or binding.current() or (lifecycle and binding.active
+            and binding.lifecycle_pending and binding.owner_current() and binding.ledger_current())
+        if (self._sessions.get(session.session_id) is not session
+                or not owned):
+            raise VoiceAttemptError("voice_producer_superseded")
+
+    async def handle_audio_for_session(self, session: ChainedSession, audio_b64: str,
+                                       chunk_index: int = 0, is_final: bool = False,
+                                       *, wait_for_turn: bool = False) -> None:
+        """Admit bytes to this exact producer; retained turns own their work."""
+        self._require_owned_session(session)
+
         audio_bytes = base64.b64decode(audio_b64)
         session._chunk_count += 1
 
         if session.state == VoiceState.IDLE:
             await self._set_state(session, VoiceState.LISTENING)
+            self._require_owned_session(session)
 
         await session.stt_provider.send_audio(audio_bytes)
+        self._require_owned_session(session)
 
         session._last_audio_ts = time.monotonic()
         vad_ended = await self._feed_vad(session, audio_bytes)
+        self._require_owned_session(session)
 
         # The silence timer stays armed even when the VAD is live, as a
         # backstop rather than the primary endpointer. It has to: the
@@ -366,7 +389,7 @@ class ChainedVoicePipeline:
             session._silence_task = asyncio.create_task(self._silence_timer(session))
 
         if is_final:
-            await self._drive_turn(session, wait=True, source="client_is_final")
+            await self._drive_turn(session, wait=wait_for_turn, source="client_is_final")
         elif vad_ended:
             # Must not block the audio pump: the client keeps sending
             # while we answer, and awaiting the turn here would stall
@@ -411,7 +434,8 @@ class ChainedVoicePipeline:
                         "Barge-in on session %s (%s)",
                         session.session_id[:8], session.state.value,
                     )
-                    await self.interrupt_output(session.session_id, reason="barge_in")
+                    await self.interrupt_output(session.session_id, reason="barge_in", expected_session=session)
+                    self._require_owned_session(session)
             elif event == VadEvent.SPEECH_END:
                 session._vad_speaking = False
                 ended = True
@@ -571,11 +595,14 @@ class ChainedVoicePipeline:
         session.last_turn_started = time.monotonic()
         self._cancel_silence_timer(session)
         try:
+            self._require_owned_session(session)
             await self._set_state(session, VoiceState.PROCESSING)
+            self._require_owned_session(session)
 
             await session.stt_provider.flush()
 
             transcript = await self._collect_transcript(session)
+            self._require_owned_session(session)
 
             if not transcript.strip():
                 logger.debug("Empty transcript, returning to idle")
@@ -680,6 +707,7 @@ class ChainedVoicePipeline:
         if not session.llm_handle:
             logger.warning("No LLM handle for session %s", session.session_id[:8])
             return ""
+        self._require_owned_session(session)
 
         from voice.llm_stream_tap import DeltaCollector
         from voice.sentence_stream import SentenceAccumulator, split_sentences
@@ -800,6 +828,7 @@ class ChainedVoicePipeline:
     def _speech_allowed(self, session: ChainedSession, owner: asyncio.Task | None) -> bool:
         return (self._sessions.get(session.session_id) is session
                 and session._turn_task is owner
+                and (session._voice_attempt is None or session._voice_attempt.current())
                 and not session._cancelled and not session._output_interrupted)
 
     async def _speech_consumer(
@@ -948,7 +977,8 @@ class ChainedVoicePipeline:
 
     # -- barge-in ----------------------------------------------------
 
-    async def interrupt_output(self, session_id: str, *, reason: str = "user_interrupt") -> bool:
+    async def interrupt_output(self, session_id: str, *, reason: str = "user_interrupt",
+                               expected_session: ChainedSession | None = None) -> bool:
         """Stop current speech without cancelling or replaying agent work.
 
         Local suppression is immediate even if a provider yields another
@@ -956,8 +986,11 @@ class ChainedVoicePipeline:
         deletion or rollback of any command's external effects.
         """
         session = self._sessions.get(session_id)
+        if expected_session is not None and session is not expected_session:
+            raise VoiceAttemptError("voice_producer_superseded")
         if session is None or session._output_interrupted:
             return False
+        self._require_owned_session(session)
         task = session._turn_task
         if task is None or task.done():
             return False
@@ -970,8 +1003,23 @@ class ChainedVoicePipeline:
             "payload": {"reason": reason, "mode": "chained", "scope": "speech",
                         "drop_pending_audio": True, "agent_task_cancel_requested": False},
         })
+        self._require_owned_session(session)
         await self._set_state(session, VoiceState.LISTENING)
         return True
+
+    def request_owned_turn_cancel(self, session: ChainedSession) -> asyncio.Task | None:
+        """Request this producer's exact turn cancellation before writer admission."""
+        self._require_owned_session(session, lifecycle=True)
+        task = session._turn_task
+        if task is None or task.done():
+            return None
+        already_requested = session._cancelled
+        session._cancelled = True
+        session._queued_flush = False
+        session._queued_source = ""
+        if not already_requested:
+            task.cancel()
+        return task
 
     async def cancel(self, session_id: str, *, reason: str = "user_interrupt") -> bool:
         """Explicitly cancel the in-flight command/turn, without asserting rollback.

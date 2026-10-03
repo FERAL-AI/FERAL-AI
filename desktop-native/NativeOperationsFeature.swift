@@ -74,7 +74,7 @@ final class OperationsRedirectGuard: NSObject, URLSessionTaskDelegate {
         guard let url = components.url else { throw OperationsFailure(message: "Invalid operation request.") }
         var req = URLRequest(url: url); req.httpMethod = method; req.timeoutInterval = 180
         if let body { req.setValue("application/json", forHTTPHeaderField: "Content-Type"); req.httpBody = try JSONSerialization.data(withJSONObject: body) }
-        let (data, response) = try await session.data(for: req); try Task.checkCancellation()
+        let (data, response) = try await session.feralLocalData(for: req); try Task.checkCancellation()
         guard started == generation else { throw OperationsFailure(message: "Agent connection changed. Review again.") }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw OperationsFailure(message: "The request failed. Refresh to confirm state before retrying.") }
         guard let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw OperationsFailure(message: "The agent response is incomplete.") }

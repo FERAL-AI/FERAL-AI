@@ -59,7 +59,7 @@ struct NativeAgentClient {
         guard let url = components.url else { throw NativeAgentFailure("Invalid specialist request.") }
         var request = URLRequest(url:url);request.httpMethod = method
         if let body = body { request.httpBody = try JSONSerialization.data(withJSONObject:body);request.setValue("application/json",forHTTPHeaderField:"Content-Type") }
-        let (data,response) = try await session.data(for:request)
+        let (data,response) = try await session.feralLocalData(for:request)
         guard let http = response as? HTTPURLResponse,(200..<300).contains(http.statusCode) else { throw NativeAgentFailure("Specialist request failed (HTTP \((response as? HTTPURLResponse)?.statusCode ?? 0)). Details withheld because they can contain private prompts.") }
         guard let value = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else { throw NativeAgentFailure("The specialist service returned invalid JSON.") }
         guard value["error"] == nil, NativeAgentWire.bool(value["success"]) != false else { throw NativeAgentFailure("The service did not confirm this specialist action.") }

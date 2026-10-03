@@ -67,7 +67,7 @@ final class NativeSecurityRedirectGuard: NSObject, URLSessionTaskDelegate {
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!; components.path = path; components.queryItems = query.isEmpty ? nil : query
         var request = URLRequest(url: components.url!); request.httpMethod = method
         if let body { request.setValue("application/json", forHTTPHeaderField: "Content-Type"); request.httpBody = try JSONSerialization.data(withJSONObject: body) }
-        let (bytes, response) = try await session.data(for: request)
+        let (bytes, response) = try await session.feralLocalData(for: request)
         try Task.checkCancellation(); guard current == generation else { throw CancellationError() }
         guard let object = try JSONSerialization.jsonObject(with: bytes) as? [String: Any] else { throw SecurityFeatureFailure(message: "The security response is unreadable.") }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw SecurityFeatureFailure(message: object["detail"] as? String ?? (object["detail"] as? [String: Any])?["message"] as? String ?? "The agent refused this security request.") }

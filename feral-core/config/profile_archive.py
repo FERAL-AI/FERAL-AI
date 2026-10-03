@@ -14,6 +14,12 @@ import stat
 import tempfile
 from dataclasses import dataclass
 import zipfile
+from collections.abc import Collection
+
+from config.native_preference_snapshot import (
+    MAX_SNAPSHOT_BYTES, RESERVED_ENTRY, NativePreferenceSnapshot,
+    NativePreferenceSnapshotError, valid_digest, valid_id, validate_snapshot,
+)
 
 
 class ProfileArchiveError(ValueError):
@@ -43,6 +49,16 @@ class _File:
     identity: tuple[int, int, int, int, int]
 
 
+@dataclass(frozen=True)
+class NativePreferenceAttachment:
+    """Reviewed explicit bindings; no identity/root is inferred from the payload."""
+    snapshot_path: Path
+    config_root: Path
+    data_root: Path
+    primary_session_id: str
+    snapshot_sha256: str
+
+
 _MANIFEST = "manifest.json"
 _CHUNK = 65_536
 
@@ -68,17 +84,60 @@ def _name(value: object) -> str:
     return value
 
 
-def _roots(config_root: Path, data_root: Path) -> tuple[dict[str, Path], dict[str, str]]:
+def _nested_layout(value: object) -> dict[str, dict[str, str]]:
+    if (not isinstance(value, dict) or set(value) != {"data"}
+            or not isinstance(value["data"], dict)
+            or set(value["data"]) != {"parent", "relative_path"}
+            or value["data"]["parent"] != "config"):
+        raise ProfileArchiveError("Invalid nested root layout")
+    relative = value["data"]["relative_path"]
+    if (not isinstance(relative, str) or not relative
+            or len(relative.encode("utf-8")) > 512
+            or len(PurePosixPath(relative).parts) > 16):
+        raise ProfileArchiveError("Invalid bounded nested root layout")
+    _name("config/" + relative)
+    return {"data": {"parent": "config", "relative_path": relative}}
+
+
+def _roots(config_root: Path, data_root: Path
+           ) -> tuple[dict[str, Path], dict[str, str], dict[str, dict[str, str]] | None]:
     raw = {"config": Path(config_root).absolute(), "data": Path(data_root).absolute()}
     if any(path.is_symlink() for path in raw.values()):
         raise ProfileArchiveError("Profile roots cannot be symlinks")
     paths = {key: path.resolve() for key, path in raw.items()}
+    if any(raw[key] != path for key, path in paths.items()):
+        raise ProfileArchiveError("Profile root ancestors cannot redirect through symlinks")
     if paths["config"] == paths["data"]:
-        return {"config": paths["config"]}, {"config": "config", "data": "config"}
-    if (paths["config"] in paths["data"].parents
-            or paths["data"] in paths["config"].parents):
+        return {"config": paths["config"]}, {"config": "config", "data": "config"}, None
+    if paths["config"] in paths["data"].parents:
+        nested = _nested_layout({"data": {"parent": "config",
+            "relative_path": paths["data"].relative_to(paths["config"]).as_posix()}})
+        # Inventory the parent exactly once; data is an explicitly bound offset.
+        return {"config": paths["config"]}, {"config": "config", "data": "config"}, nested
+    if paths["data"] in paths["config"].parents:
         raise ProfileArchiveError("Profile roots cannot overlap")
-    return paths, {"config": "config", "data": "data"}
+    return paths, {"config": "config", "data": "data"}, None
+
+
+def _selected_root(roots: dict[str, Path], aliases: dict[str, str],
+                   nested: dict[str, dict[str, str]] | None, label: str) -> Path:
+    selected = roots[aliases[label]]
+    if label == "data" and nested is not None:
+        selected /= nested["data"]["relative_path"]
+    return selected
+
+
+def _primary_entry(aliases: dict[str, str], nested: dict[str, dict[str, str]] | None) -> str:
+    prefix = aliases["data"]
+    if nested is not None:
+        prefix += "/" + nested["data"]["relative_path"]
+    return prefix + "/primary_session_id"
+
+
+def _require_nested_directory(nested: dict[str, dict[str, str]] | None,
+                              directories: Collection[str]) -> None:
+    if nested is not None and "config/" + nested["data"]["relative_path"] not in directories:
+        raise ProfileArchiveError("Nested data root is missing from directory inventory")
 
 
 def _read_file(path: Path, limit: int) -> _File:
@@ -141,6 +200,115 @@ def _snapshot(roots: dict[str, Path], limits: ArchiveLimits
         raise ProfileArchiveError("Profile is unavailable or changed during snapshot") from error
 
 
+def _read_native_attachment(attachment: NativePreferenceAttachment, roots: dict[str, Path],
+                            aliases: dict[str, str], nested: dict[str, dict[str, str]] | None
+                            ) -> tuple[NativePreferenceSnapshot, _File]:
+    try:
+        if (not isinstance(attachment, NativePreferenceAttachment)
+                or not valid_digest(attachment.snapshot_sha256) or not valid_id(attachment.primary_session_id)):
+            raise ProfileArchiveError("Invalid reviewed native preference attachment")
+        for label, reviewed in (("config", attachment.config_root), ("data", attachment.data_root)):
+            path = Path(reviewed).absolute()
+            if path != path.resolve() or path != _selected_root(roots, aliases, nested, label):
+                raise ProfileArchiveError("Native preference reviewed roots do not match")
+        path = Path(attachment.snapshot_path).absolute()
+        if path != path.resolve():
+            raise ProfileArchiveError("Native preference snapshot cannot be redirected")
+        if any(path == root or root in path.parents for root in roots.values()):
+            raise ProfileArchiveError("Native preference input must be outside selected profile roots")
+        item = _read_file(path, MAX_SNAPSHOT_BYTES)
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            if _identity(os.fstat(stream.fileno())) != item.identity:
+                raise ProfileArchiveError("Native preference snapshot changed")
+            payload = stream.read(MAX_SNAPSHOT_BYTES + 1)
+            if _identity(os.fstat(stream.fileno())) != item.identity:
+                raise ProfileArchiveError("Native preference snapshot changed")
+        if (_identity(path.lstat()) != item.identity or item.digest != attachment.snapshot_sha256
+                or hashlib.sha256(payload).hexdigest() != item.digest):
+            raise ProfileArchiveError("Native preference snapshot changed or differs from review")
+        return validate_snapshot(payload, attachment.primary_session_id), item
+    except (OSError, NativePreferenceSnapshotError) as error:
+        raise ProfileArchiveError("Native preference attachment could not be verified") from error
+
+
+def _native_primary_bytes(payload: bytes, snapshot: NativePreferenceSnapshot) -> None:
+    try:
+        primary = payload.decode("utf-8").strip()
+    except UnicodeError as error:
+        raise ProfileArchiveError("Native preference profile primary cannot be verified") from error
+    if len(payload) > 1024 or not valid_id(primary) or primary != snapshot.primary_session_id:
+        raise ProfileArchiveError("Native preference snapshot differs from actual profile primary")
+
+
+def _native_source_primary(snapshot: NativePreferenceSnapshot, roots: dict[str, Path],
+                           aliases: dict[str, str], nested: dict[str, dict[str, str]] | None,
+                           files: dict[str, _File]) -> None:
+    name = _primary_entry(aliases, nested)
+    item = files.get(name)
+    if item is None or item.size > 1024:
+        raise ProfileArchiveError("Native preferences require a persisted primary installation")
+    path = _selected_root(roots, aliases, nested, "data") / "primary_session_id"
+    try:
+        descriptor = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+        with os.fdopen(descriptor, "rb") as stream:
+            if _identity(os.fstat(stream.fileno())) != item.identity:
+                raise ProfileArchiveError("Profile primary changed during snapshot")
+            payload = stream.read(1025)
+            if _identity(os.fstat(stream.fileno())) != item.identity:
+                raise ProfileArchiveError("Profile primary changed during snapshot")
+        if hashlib.sha256(payload).hexdigest() != item.digest:
+            raise ProfileArchiveError("Profile primary changed during snapshot")
+        _native_primary_bytes(payload, snapshot)
+    except OSError as error:
+        raise ProfileArchiveError("Native preference profile primary cannot be verified") from error
+
+
+def _native_avatar_inventory(snapshot: NativePreferenceSnapshot, files: dict) -> None:
+    if snapshot.avatar is None:
+        return
+    item = files.get("config/" + snapshot.avatar.relative_path)
+    size = item.size if isinstance(item, _File) else item.get("size") if isinstance(item, dict) else None
+    digest = item.digest if isinstance(item, _File) else item.get("sha256") if isinstance(item, dict) else None
+    if size != snapshot.avatar.size or digest != snapshot.avatar.sha256:
+        raise ProfileArchiveError("Native avatar does not match selected profile inventory")
+
+
+def _native_source_avatar(snapshot: NativePreferenceSnapshot, roots: dict[str, Path], files: dict[str, _File]) -> None:
+    if snapshot.avatar is not None:
+        try:
+            observed = _read_file(roots["config"] / snapshot.avatar.relative_path, snapshot.avatar.size)
+        except OSError as error:
+            raise ProfileArchiveError("Native avatar changed before publication") from error
+        if observed != files["config/" + snapshot.avatar.relative_path]:
+            raise ProfileArchiveError("Native avatar changed before publication")
+
+
+def _native_metadata(archive: zipfile.ZipFile, manifest: dict, primary: str | None) -> NativePreferenceSnapshot | None:
+    if "native_preferences" not in manifest:
+        return None
+    metadata = manifest["native_preferences"]
+    if (not isinstance(metadata, dict) or set(metadata) != {"format_version", "entry", "primary_session_id"}
+            or type(metadata["format_version"]) is not int or metadata["format_version"] != 1
+            or metadata["entry"] != RESERVED_ENTRY or not valid_id(metadata["primary_session_id"])
+            or primary != metadata["primary_session_id"]):
+        raise ProfileArchiveError("Native preference archive requires its exact reviewed primary installation")
+    item = manifest["files"].get(RESERVED_ENTRY)
+    if not isinstance(item, dict) or item["size"] > MAX_SNAPSHOT_BYTES or item["mode"] != 0o600:
+        raise ProfileArchiveError("Invalid native preference archive entry")
+    try:
+        snapshot = validate_snapshot(archive.read(RESERVED_ENTRY), metadata["primary_session_id"])
+    except NativePreferenceSnapshotError as error:
+        raise ProfileArchiveError("Native preference archive payload could not be verified") from error
+    _native_avatar_inventory(snapshot, manifest["files"])
+    primary_entry = _primary_entry(manifest["roots"], manifest.get("nested_roots"))
+    primary_item = manifest["files"].get(primary_entry)
+    if not isinstance(primary_item, dict) or primary_item["size"] > 1024:
+        raise ProfileArchiveError("Native preferences require an archived primary installation")
+    _native_primary_bytes(archive.read(primary_entry), snapshot)
+    return snapshot
+
+
 def _check_default_layout(roots: dict[str, Path]) -> None:
     """Refuse omitted legacy storage; never expand a caller's chosen roots.
 
@@ -194,7 +362,8 @@ def _check_default_layout(roots: dict[str, Path]) -> None:
 
 def create_archive(destination: Path, *, offline: bool = False,
                    config_root: Path | None = None, data_root: Path | None = None,
-                   limits: ArchiveLimits = ArchiveLimits()) -> dict:
+                   limits: ArchiveLimits = ArchiveLimits(),
+                   native_preferences: NativePreferenceAttachment | None = None) -> dict:
     """Archive selected roots without mutating source files or exporting keys.
 
     `offline=True` is a caller precondition, not inferred process quiescence.
@@ -202,7 +371,8 @@ def create_archive(destination: Path, *, offline: bool = False,
     Hashes and file/directory identities detect changes during the cold copy.
     Default selection refuses uncovered legacy runtime storage. Explicit roots
     are a caller-selected snapshot, not proof of full deployment coverage.
-    Native OS preferences and keychain entries are outside this format.
+    OS defaults are never read. A separately reviewed native snapshot may be
+    attached explicitly; OS keys and credential portability remain excluded.
     """
     _offline(offline)
     limits.validate()
@@ -211,7 +381,13 @@ def create_archive(destination: Path, *, offline: bool = False,
         from config.loader import feral_data_home, feral_home
         config_root = feral_home() if config_root is None else config_root
         data_root = feral_data_home() if data_root is None else data_root
-    roots, aliases = _roots(config_root, data_root)
+    roots, aliases, nested = _roots(config_root, data_root)
+    native = None
+    native_item = None
+    if native_preferences is not None:
+        if default_selection:
+            raise ProfileArchiveError("Native preferences require explicit reviewed config and data roots")
+        native, native_item = _read_native_attachment(native_preferences, roots, aliases, nested)
     if default_selection:
         _check_default_layout(roots)
     destination = Path(destination).absolute()
@@ -220,7 +396,19 @@ def create_archive(destination: Path, *, offline: bool = False,
     parent = destination.parent.resolve()
     if any(parent == root or root in parent.parents for root in roots.values()):
         raise ProfileArchiveError("Archive destination must be outside profile roots")
-    files, directories = _snapshot(roots, limits)
+    source_files, directories = _snapshot(roots, limits)
+    _require_nested_directory(nested, directories)
+    files = dict(source_files)
+    if native is not None and native_item is not None:
+        if RESERVED_ENTRY in files or RESERVED_ENTRY in directories:
+            raise ProfileArchiveError("Reserved native preference entry already exists")
+        _native_avatar_inventory(native, files)
+        _native_source_primary(native, roots, aliases, nested, source_files)
+        files[RESERVED_ENTRY] = _File(len(native.payload), native.sha256, 0o600, native_item.identity)
+        if (len(files) + len(directories) > limits.max_entries
+                or sum(item.size for item in files.values()) > limits.max_total_bytes
+                or len(native.payload) > limits.max_file_bytes):
+            raise ProfileArchiveError("Native preference attachment exceeds archive bounds")
     manifest = {
         "format_version": 1, "offline_required": True, "roots": aliases,
         "os_keys_included": False, "credentials_portable": False,
@@ -228,6 +416,11 @@ def create_archive(destination: Path, *, offline: bool = False,
                   for name, item in files.items()},
         "directories": sorted(name for name in directories if name not in roots),
     }
+    if nested is not None:
+        manifest["nested_roots"] = nested
+    if native is not None:
+        manifest["native_preferences"] = {"format_version": 1, "entry": RESERVED_ENTRY,
+                                          "primary_session_id": native.primary_session_id}
     encoded = json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode()
     if len(encoded) > limits.max_manifest_bytes:
         raise ProfileArchiveError("Archive manifest exceeds bound")
@@ -246,6 +439,9 @@ def create_archive(destination: Path, *, offline: bool = False,
                     info = zipfile.ZipInfo(name)
                     info.external_attr = (stat.S_IFREG | item.mode) << 16
                     info.compress_type = zipfile.ZIP_DEFLATED
+                    if native is not None and name == RESERVED_ENTRY:
+                        archive.writestr(info, native.payload)
+                        continue
                     digest = hashlib.sha256()
                     size = 0
                     fd = os.open(source, os.O_RDONLY | os.O_NOFOLLOW)
@@ -262,16 +458,25 @@ def create_archive(destination: Path, *, offline: bool = False,
                             raise ProfileArchiveError("Profile changed during snapshot")
             output.flush()
             os.fsync(output.fileno())
-        if _snapshot(roots, limits) != (files, directories):
+        if _snapshot(roots, limits) != (source_files, directories):
             raise ProfileArchiveError("Profile changed during snapshot")
+        if native is not None and native_preferences is not None:
+            if _read_native_attachment(native_preferences, roots, aliases, nested) != (native, native_item):
+                raise ProfileArchiveError("Native preference attachment changed before publication")
+            _native_source_primary(native, roots, aliases, nested, source_files)
+            _native_source_avatar(native, roots, source_files)
         if default_selection:
             _check_default_layout(roots)
         # Hard-link publication is exclusive, unlike replace/rename over a file.
         os.link(staging, destination)
-        return {"status": "completed", "files": len(files),
+        receipt = {"status": "completed", "files": len(files),
                 "bytes": sum(item.size for item in files.values()),
-                "coverage": "selected_roots_only", "native_preferences_included": False,
+                "coverage": "selected_roots_only", "native_preferences_included": native is not None,
                 "os_keys_included": False, "credentials_portable": False}
+        if native is not None:
+            receipt.update(native_preferences_entry=RESERVED_ENTRY, native_preferences_sha256=native.sha256,
+                           native_primary_session_id=native.primary_session_id, preferences_applied=False)
+        return receipt
     except (OSError, zipfile.BadZipFile) as error:
         raise ProfileArchiveError("Archive creation could not be completed") from error
     finally:
@@ -306,6 +511,9 @@ def _validate(archive: zipfile.ZipFile, limits: ArchiveLimits) -> dict:
     roots = manifest.get("roots")
     if roots not in ({"config": "config", "data": "config"}, {"config": "config", "data": "data"}):
         raise ProfileArchiveError("Invalid root mapping")
+    nested = _nested_layout(manifest["nested_roots"]) if "nested_roots" in manifest else None
+    if nested is not None and roots != {"config": "config", "data": "config"}:
+        raise ProfileArchiveError("Nested roots require a single parent inventory")
     files, directories = manifest.get("files"), manifest.get("directories")
     if not isinstance(files, dict) or not isinstance(directories, list):
         raise ProfileArchiveError("Invalid archive inventory")
@@ -323,6 +531,7 @@ def _validate(archive: zipfile.ZipFile, limits: ArchiveLimits) -> dict:
         _name(name)
         if any(parent.as_posix() in files for parent in PurePosixPath(name).parents):
             raise ProfileArchiveError("Archive file conflicts with a parent directory")
+    _require_nested_directory(nested, seen)
     total = 0
     for name, item in files.items():
         _name(name)
@@ -354,15 +563,16 @@ def _validate(archive: zipfile.ZipFile, limits: ArchiveLimits) -> dict:
 
 
 def restore_archive(archive_path: Path, *, config_root: Path, data_root: Path,
-                    offline: bool = False, limits: ArchiveLimits = ArchiveLimits()) -> dict:
+                    offline: bool = False, limits: ArchiveLimits = ArchiveLimits(),
+                    native_primary_session_id: str | None = None) -> dict:
     """Restore verified bytes to new roots only; do not start or activate them.
 
-    Same-root/split-root layout is preserved. This is not cross-machine key
+    Same-root/split-root/nested-data layout is preserved. This is not cross-machine key
     recovery or a migration that activates existing pairing/grant identities.
     """
     _offline(offline)
     limits.validate()
-    roots, aliases = _roots(config_root, data_root)
+    roots, aliases, nested = _roots(config_root, data_root)
     if any(root.exists() or root.is_symlink() for root in roots.values()):
         raise ProfileArchiveError("Restore destinations must not exist")
     owned: dict[Path, tuple[int, int]] = {}
@@ -378,7 +588,8 @@ def restore_archive(archive_path: Path, *, config_root: Path, data_root: Path,
             if _identity(os.fstat(source_archive.fileno())) != archive_identity:
                 raise ProfileArchiveError("Archive changed before restore")
             manifest = _validate(archive, limits)
-            if aliases != manifest["roots"]:
+            native = _native_metadata(archive, manifest, native_primary_session_id)
+            if aliases != manifest["roots"] or nested != manifest.get("nested_roots"):
                 raise ProfileArchiveError("Restore must preserve root layout")
             for root in roots.values():
                 root.mkdir(mode=0o700)
@@ -403,11 +614,16 @@ def restore_archive(archive_path: Path, *, config_root: Path, data_root: Path,
                     raise ProfileArchiveError("Archive changed during restore")
             if _identity(os.fstat(source_archive.fileno())) != archive_identity:
                 raise ProfileArchiveError("Archive changed during restore")
-        return {"status": "completed", "files": len(manifest["files"]),
+        receipt = {"status": "completed", "files": len(manifest["files"]),
                 "bytes": sum(item["size"] for item in manifest["files"].values()),
                 "runtime_started": False, "os_keys_included": False,
-                "coverage": "selected_roots_only", "native_preferences_included": False,
+                "coverage": "selected_roots_only", "native_preferences_included": native is not None,
                 "credentials_portable": False}
+        if native is not None:
+            receipt.update(native_preferences_path=str(roots["config"] / RESERVED_ENTRY.split("/", 1)[1]),
+                           native_preferences_sha256=native.sha256, native_primary_session_id=native.primary_session_id,
+                           preferences_applied=False)
+        return receipt
     except (OSError, ValueError, zipfile.BadZipFile, RuntimeError) as error:
         for root, identity in reversed(list(owned.items())):
             if root.exists() and not root.is_symlink():
@@ -430,6 +646,9 @@ def main() -> int:
     backup.add_argument("destination", type=Path)
     backup.add_argument("--config-root", type=Path)
     backup.add_argument("--data-root", type=Path)
+    backup.add_argument("--native-preferences", type=Path)
+    backup.add_argument("--native-preferences-sha256")
+    backup.add_argument("--primary-session-id")
     backup.add_argument("--offline", action="store_true", required=True,
                         help="Confirm that every writer for both profile roots is stopped")
     restore = commands.add_parser("restore")
@@ -437,14 +656,25 @@ def main() -> int:
     restore.add_argument("--config-root", type=Path, required=True)
     restore.add_argument("--data-root", type=Path, required=True)
     restore.add_argument("--offline", action="store_true", required=True)
+    restore.add_argument("--primary-session-id")
     args = parser.parse_args()
     try:
         if args.command == "backup":
+            native = None
+            supplied = (args.native_preferences, args.native_preferences_sha256, args.primary_session_id)
+            if any(item is not None for item in supplied):
+                if (any(item is None for item in supplied) or args.config_root is None
+                        or args.data_root is None):
+                    raise ProfileArchiveError("Native preferences require snapshot, SHA256, primary and both explicit roots")
+                native = NativePreferenceAttachment(args.native_preferences, args.config_root, args.data_root,
+                                                    args.primary_session_id, args.native_preferences_sha256)
             result = create_archive(args.destination, offline=args.offline,
-                                    config_root=args.config_root, data_root=args.data_root)
+                                    config_root=args.config_root, data_root=args.data_root,
+                                    native_preferences=native)
         else:
             result = restore_archive(args.archive, offline=args.offline,
-                                     config_root=args.config_root, data_root=args.data_root)
+                                     config_root=args.config_root, data_root=args.data_root,
+                                     native_primary_session_id=args.primary_session_id)
     except ProfileArchiveError as error:
         print(str(error), file=sys.stderr)
         return 2

@@ -41,11 +41,20 @@ the final source; subsequent changes require renewed staging and acceptance.
 
 The existing feature-rich web client and desktop shell remain in `feral-client-v2` and `desktop`. No web routes or Settings sections were deleted to create this preview. The installed FERAL app has not been replaced. See [FEATURE_PARITY.md](FEATURE_PARITY.md) for all 44 web route patterns and 16 Settings sections, concrete API actions, missing native controls and migration gates. [MIGRATION_PLAN.md](MIGRATION_PLAN.md) tracks the remaining full-app milestones.
 
+Settings now includes reviewed offline backup/restore for the verified local
+installation. It saves the visible conversation, stops the exact owned runtime,
+and calls the existing archive CLI. Restore creates a fresh folder and preference
+domain; applying the restored preferences is a separate review. It does not
+activate that copy. Restarting the original profile is an explicit action.
+Credentials and OS permissions are excluded. Controller, reader and real child-
+process checks pass; the packaged file-picker/host journey remains unverified.
+See [archive evidence](../docs/roadmap/theora-personal-agent/NATIVE_PROFILE_ARCHIVE_EVIDENCE.md).
+
 ## Isolation and first launch
 
 - Bundle: `build/FERAL Native Preview.app`; identifier `ai.feral.native.preview`.
 - Default backend data: `~/.feral-native-preview`, with data beneath its `data` directory. Default preferences suite: `ai.feral.native.preview`.
-- `FERAL_HOME`, `FERAL_DATA_HOME`, `FERAL_NATIVE_PREFS_SUITE` and `FERAL_PORT` can explicitly override test paths/port. Avoid pointing preview overrides at the full app's data. There is no automatic full-app memory/settings migration.
+- `FERAL_HOME`, `FERAL_NATIVE_PREFS_SUITE` and `FERAL_PORT` can explicitly override test paths/port. Native config and data both follow the backend's existing `FERAL_HOME` policy. An explicit `FERAL_DATA_HOME` must match that root; a differing value is refused rather than silently ignored. Profile paths and ancestors are validated before creation. Avoid pointing test overrides at another deployment's data. There is no automatic profile activation or data relocation.
 - First launch starts with avatar selection: the supplied bundled portrait, a neutral orb, or a photo imported through the native file chooser. Imported photos are copied into the preview's avatar directory. The name is optional.
 - The backend is deferred until the user selects **Continue** after choosing an avatar. A previously onboarded preview starts its backend on launch. The next step configures a running local AI service and an installed model; this preview does not supply full cloud-provider/credential setup.
 

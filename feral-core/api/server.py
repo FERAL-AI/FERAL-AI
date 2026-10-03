@@ -20,6 +20,7 @@ from uuid import uuid4
 
 from api.runtime_context import (
     attachment_readiness,
+    established_legacy_media_readiness,
     close_surface,
     coordinator_for,
     prepared_scope,
@@ -2519,6 +2520,9 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
             async def current_readiness():
                 return await attachment_readiness(coordinator, attachment)
             gw_session.metadata["runtime_context_readiness"] = current_readiness
+            async def current_voice_readiness():
+                return await established_legacy_media_readiness(state, coordinator, attachment)
+            gw_session.metadata["runtime_context_voice_readiness"] = current_voice_readiness
             gw_session.metadata["context_checkpoint_requested"] = checkpoint_version is not None
 
         # Lane 08 WS9 — track in-flight orchestrator tasks per WS so the
@@ -2638,24 +2642,29 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                     ))
 
                 elif msg.type == "voice_mute":
-                    if state.voice_router:
-                        await state.voice_router.set_session_muted(
-                            session_id,
-                            bool(raw.get("payload", {}).get("muted")),
-                            source="web",
-                        )
+                    from bridges.client_voice_attempt import VoiceAttemptError, voice_attempt_error_identity
+                    from bridges.client_voice_control import mute_client_voice
+                    params = raw.get("payload", {})
+                    try:
+                        await mute_client_voice(state, session_id, ws, params)
+                    except VoiceAttemptError as exc:
+                        await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="voice_status",
+                            payload={"state": "unavailable", "reason": exc.code,
+                                     **voice_attempt_error_identity(params)}).model_dump())
 
                 elif msg.type == "voice_config":
                     from bridges.client_voice_configuration import configure_client_voice, ClientVoiceConfigurationError
 
                     vcfg = raw.get("payload", {})
+                    from bridges.client_voice_attempt import current_voice_attempt, voice_attempt_payload, voice_attempt_error_identity
                     mode = vcfg.get("mode", "realtime")
                     provider = vcfg.get("provider", "openai")
-                    if mode != "disabled":
+                    async def _voice_readiness():
                         await require_attachment_ready(coordinator, attachment, checkpoint_version)
                         if attachment is not None and attachment.readiness.managed:
                             raise RuntimeContextError("managed_voice_unsupported")
                     async def _start_direct_gemini():
+                        voice_attempt = current_voice_attempt(session_id)
                         system_prompt = ""
                         if state.identity_workspace:
                             try:
@@ -2680,12 +2689,12 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                                         session_id=sid,
                                         hop="brain",
                                         type="audio_response",
-                                        payload={
+                                        payload=voice_attempt_payload({
                                             "data_b64": b64,
                                             "encoding": "pcm16",
                                             "sample_rate": 24000,
                                             "is_final": is_done,
-                                        },
+                                        }, voice_attempt),
                                     ).model_dump()
                                 )
                             except Exception:
@@ -2698,11 +2707,11 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                                         session_id=sid,
                                         hop="brain",
                                         type="transcript",
-                                        payload={
+                                        payload=voice_attempt_payload({
                                             "text": text,
                                             "role": "assistant",
                                             "is_partial": is_partial,
-                                        },
+                                        }, voice_attempt),
                                     ).model_dump()
                                 )
                             except Exception:
@@ -2720,11 +2729,12 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                         configured = await configure_client_voice(
                             state, session_id, ws, vcfg,
                             start_realtime=_start_direct_gemini if provider == "gemini" and mode == "realtime" and state.gemini_proxy else None,
+                            readiness_guard=_voice_readiness if mode != "disabled" else None,
                         )
                     except ClientVoiceConfigurationError as exc:
                         await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="voice_config_ack",
                             payload={"mode": mode, "provider": provider, "status": "error", "code": exc.code,
-                                     "message": str(exc)}).model_dump())
+                                     "message": str(exc), **voice_attempt_error_identity(vcfg)}).model_dump())
                         continue
 
                     await ws.send_json(
@@ -2738,46 +2748,48 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                     logger.info(f"Web client voice mode: {mode} (provider: {provider})")
 
                 elif msg.type == "voice_interrupt":
-                    from bridges.client_voice_control import interrupt_client_voice
+                    from bridges.client_voice_attempt import VoiceAttemptError, voice_attempt_error_identity
+                    from bridges.client_voice_control import interrupt_client_voice_attempt
+                    params = raw.get("payload", {})
+                    try:
+                        result = await interrupt_client_voice_attempt(state, session_id, ws, params)
+                    except VoiceAttemptError as exc:
+                        status = "superseded" if exc.code == "voice_owner_superseded" and "voice_attempt_version" not in params else exc.code
+                        result = {"status": status, "cancel_requested": False, "session_preserved": True,
+                                  **voice_attempt_error_identity(params)}
+                        # Only canonical validated request identity can be echoed.
+                        from models.protocol import VoiceInterruptPayload
+                        try:
+                            interrupted = VoiceInterruptPayload(**params)
+                            if interrupted.voice_request_id is not None:
+                                result["voice_request_id"] = interrupted.voice_request_id
+                        except ValueError:
+                            pass
+                    await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="voice_interrupt_ack", payload=result).model_dump())
 
-                    if state.sessions.get(session_id) is not ws:
-                        result = {
-                            "status": "superseded",
-                            "cancel_requested": False,
-                            "session_preserved": True,
-                        }
-                    else:
-                        result = await interrupt_client_voice(state, session_id)
-                    await ws.send_json(
-                        FeralMessage(
-                            session_id=session_id,
-                            hop="brain",
-                            type="voice_interrupt_ack",
-                            payload=result,
-                        ).model_dump()
-                    )
-
-                elif msg.type == "audio_chunk" and isinstance(
-                    payload, AudioChunkPayload
-                ):
-                    await require_attachment_ready(coordinator, attachment, checkpoint_version)
-                    if attachment is not None and attachment.readiness.managed:
-                        raise RuntimeContextError("managed_voice_unsupported")
-                    if state.gemini_proxy and state.gemini_proxy.has_session(
-                        session_id
-                    ):
-                        await state.gemini_proxy.relay_audio(
-                            session_id, payload.data_b64
-                        )
-                    elif state.voice_router:
-                        await state.voice_router.handle_audio_from_client(
-                            session_id=session_id,
-                            audio_b64=payload.data_b64,
-                            chunk_index=payload.chunk_index,
-                            is_final=payload.is_final,
-                            encoding=payload.encoding or "pcm16",
-                            sample_rate=payload.sample_rate or 24000,
-                        )
+                elif msg.type == "audio_chunk" and isinstance(payload, AudioChunkPayload):
+                    from bridges.client_voice_attempt import (VoiceAttemptError, voice_attempt_error_identity,
+                        require_voice_attempt, require_client_voice_producers, client_voice_producers)
+                    from bridges.client_voice_control import handle_client_voice_audio
+                    params = raw.get("payload", {})
+                    try:
+                        binding = require_voice_attempt(state, session_id, ws, params)
+                        if (binding is not None and coordinator is not None and attachment is not None
+                                and checkpoint_version is None
+                                and any(producer is not None for producer in client_voice_producers(state, session_id))):
+                            require_client_voice_producers(state, session_id, binding)
+                            ready = await established_legacy_media_readiness(state, coordinator, attachment)
+                            if ready.managed or ready.state.value != "legacy":
+                                raise RuntimeContextError(f"context_{ready.state.value}")
+                        else:
+                            await require_attachment_ready(coordinator, attachment, checkpoint_version)
+                            if attachment is not None and attachment.readiness.managed:
+                                raise RuntimeContextError("managed_voice_unsupported")
+                        await handle_client_voice_audio(state, session_id, ws, params)
+                    except VoiceAttemptError as exc:
+                        await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="voice_status",
+                            payload={"state": "unavailable", "reason": exc.code,
+                                     **voice_attempt_error_identity(params)}).model_dump())
 
                 elif msg.type == "ui_event" and isinstance(payload, UIEventPayload):
                     await require_attachment_ready(coordinator, attachment, checkpoint_version)
@@ -2919,6 +2931,8 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
         except Exception:
             logger.debug("Failed client surface was already closed")
     finally:
+        from bridges.client_voice_attempt import release_voice_attempt
+        release_voice_attempt(state, session_id, ws)
         await close_surface(state, ws=ws, session_id=session_id, chat_tasks=chat_tasks,
                             coordinator=coordinator, attachment=attachment,
                             legacy_attached=legacy_attached)

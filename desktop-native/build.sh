@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 sources=(
-  BrainRuntime.swift APIModel.swift NativeViews.swift NativeHealthFeature.swift
+  BrainRuntime.swift NativeProfileLayoutFeature.swift NativeLocalActionGate.swift APIModel.swift NativeViews.swift NativeHealthFeature.swift
   NativeHealthHistoryFeature.swift NativeRuntimeHealthFeature.swift NativeMemoryFeature.swift
   NativeOversightFeature.swift NativeConversationFeature.swift NativeContextCheckpointFeature.swift NativeProvidersFeature.swift
   NativeConfigurationFeature.swift NativeAttachmentFeature.swift NativeOperationsFeature.swift
@@ -13,7 +13,8 @@ sources=(
   NativeRichChatFeature.swift NativeAmbientFeature.swift NativeAgentFeature.swift
   NativeKnowledgeFeature.swift NativeMemoryContextFeature.swift NativeAutomationFeature.swift
   NativeAppSurfaceFeature.swift NativeAppConfirmationFeature.swift NativeProviderRoutingFeature.swift
-  NativeSurfaceUpdateFeature.swift NativeSessionRecoveryFeature.swift NativeDesktopExperience.swift
+  NativeSurfaceUpdateFeature.swift NativeSessionRecoveryFeature.swift NativePreferenceArchiveFeature.swift
+  NativeProfileArchiveFeature.swift NativeProfileArchiveView.swift NativeDesktopExperience.swift
   NativeDesktopHost.swift NativeRichText.swift NativePlainTextEditor.swift NativeReviewSummary.swift
   NativeErrorPresentation.swift NativeApp.swift
 )

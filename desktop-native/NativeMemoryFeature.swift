@@ -112,7 +112,7 @@ struct NativeMemoryClient {
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.feralLocalData(for: request)
         let object = try? JSONSerialization.jsonObject(with: data)
         guard let http = response as? HTTPURLResponse else { throw NativeMemoryFailure("The memory service did not return an HTTP response.") }
         let dict = object as? [String: Any]

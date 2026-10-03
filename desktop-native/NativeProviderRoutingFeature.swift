@@ -48,7 +48,7 @@ struct NativeRoutingReview: Identifiable {
         guard let url = parts.url else { throw RoutingFailure(message: "Invalid routing request.") }
         var req = URLRequest(url: url); req.timeoutInterval = 180
         if let body { req.httpMethod = "POST"; req.httpBody = try routingJSON(body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: req); try Task.checkCancellation()
+        let (data, response) = try await session.feralLocalData(for: req); try Task.checkCancellation()
         guard start == generation else { throw RoutingFailure(message: "Agent changed. Review again.") }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), data.count <= 2 * 1024 * 1024, let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], value["error"] == nil, routingBool(value["ok"]) != false, routingBool(value["success"]) != false else { throw RoutingFailure(message: "The backend refused this request or returned unreadable routing state.") }
         return value

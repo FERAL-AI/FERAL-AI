@@ -7,10 +7,15 @@ import Darwin
     private var lifeline: Pipe?
     private(set) var baseURL = URL(string: "http://127.0.0.1:9465")!
     private(set) var logURL: URL?
+    private(set) var profileConfigRoot: URL?
+    private(set) var profileDataRoot: URL?
     private var identity = UUID().uuidString
     private var lifecycleBusy = false
     private var stopRequested = false
     private(set) var ownership: NativeRuntimeOwnership?
+    // A cleared owner alone is not proof that its exact Process was retired.
+    // Keep the completed stop identity until a new launch begins.
+    private var quiescedOwnership: NativeRuntimeOwnership?
     var onHealthEvent: ((NativeRuntimeHealthEvent) -> Void)?
     private lazy var health = NativeRuntimeHealthCoordinator(probe: { [weak self] owner in
         guard let self, self.ownership == owner else { throw NativeFailure("The owned runtime changed before probing.") }
@@ -47,6 +52,20 @@ import Darwin
     var serviceReachable: Bool { health.serviceReachable && child?.isRunning == true }
     var isReady: Bool { health.availableForActions && child?.isRunning == true }
     func isCurrent(_ owner: NativeRuntimeOwnership) -> Bool { ownership == owner }
+    func isQuiesced(_ owner: NativeRuntimeOwnership) -> Bool {
+        quiescedOwnership == owner && ownership == nil && child == nil && !lifecycleBusy
+    }
+    func stop(ifOwnedBy owner: NativeRuntimeOwnership) async throws {
+        guard !lifecycleBusy, ownership == owner, child != nil else {
+            throw NativeFailure("The reviewed local runtime changed before shutdown.")
+        }
+        lifecycleBusy = true; stopRequested = true
+        defer { lifecycleBusy = false }
+        await retireCapturedRuntime()
+        guard quiescedOwnership == owner, ownership == nil, child == nil else {
+            throw NativeFailure("Shutdown of the reviewed local runtime was not confirmed.")
+        }
+    }
     func sleep() { health.sleep() }
     func wake() async { _ = await health.wake() }
 
@@ -58,6 +77,7 @@ import Darwin
         defer { lifecycleBusy = false }
         if child != nil { await retireCapturedRuntime() }
         do {
+        quiescedOwnership = nil
         identity = UUID().uuidString
         guard let resources = Bundle.main.resourceURL else { throw NativeFailure("The app resources are missing.") }
         let python = resources.appendingPathComponent("python/bin/python3")
@@ -66,10 +86,14 @@ import Darwin
         guard FileManager.default.isExecutableFile(atPath: python.path), FileManager.default.fileExists(atPath: core.appendingPathComponent("api/server.py").path) else {
             throw NativeFailure("The bundled backend is missing. Reinstall the complete app.")
         }
-        var env = ProcessInfo.processInfo.environment
-        let home = env["FERAL_HOME"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".feral-native-preview")
-        env["FERAL_HOME"] = home.path
-        if env["FERAL_DATA_HOME"] == nil { env["FERAL_DATA_HOME"] = home.appendingPathComponent("data").path }
+        let layout = try NativeProfileLayoutFeature.resolve(
+            environment: ProcessInfo.processInfo.environment,
+            userHome: FileManager.default.homeDirectoryForCurrentUser,
+            inspect: nativeProfilePathKind)
+        var env = layout.backendEnvironment
+        let home = layout.configRoot
+        profileConfigRoot = layout.configRoot
+        profileDataRoot = layout.dataRoot
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         logURL = home.appendingPathComponent("native-desktop.log")
         FileManager.default.createFile(atPath: logURL!.path, contents: nil)
@@ -176,6 +200,7 @@ import Darwin
         }
         if process.isRunning, pid > 0 { kill(-pid, SIGKILL) }
         if process.isRunning { process.waitUntilExit() }
+        guard !process.isRunning else { return }
         try? capturedLog?.close()
         try? capturedPipe?.fileHandleForWriting.close()
         try? capturedPipe?.fileHandleForReading.close()
@@ -183,12 +208,25 @@ import Darwin
         logHandle = nil; lifeline = nil; child = nil
         if let owner { _ = health.completeStop(owner) }
         ownership = nil
+        quiescedOwnership = owner
     }
 
 }
 
 private final class BrainHealthRedirectGuard: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse, newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) { completionHandler(nil) }
+}
+
+private func nativeProfilePathKind(_ url: URL) -> NativeProfilePathKind {
+    var metadata = stat()
+    guard lstat(url.path, &metadata) == 0 else {
+        return errno == ENOENT ? .missing : .unavailable
+    }
+    switch metadata.st_mode & S_IFMT {
+    case S_IFDIR: return .directory
+    case S_IFLNK: return .symbolicLink
+    default: return .other
+    }
 }
 
 private func availablePort() throws -> UInt16 {

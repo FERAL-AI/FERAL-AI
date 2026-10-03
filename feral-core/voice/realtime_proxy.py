@@ -31,6 +31,7 @@ from contextvars import ContextVar
 from typing import Optional, Callable, Awaitable, Any, ParamSpec, TypeVar
 
 from agents.tool_display import tool_feedback_text
+from bridges.client_voice_attempt import current_voice_attempt, voice_attempt_payload, voice_attempt_scope
 from agents.tool_list import (
     OPENAI_TOOL_HARD_LIMIT,
     cap_tools_with_pins,
@@ -210,6 +211,7 @@ class RealtimeSession:
         self._response_epoch = 0
         self._retired = False
         self._callback_guard: Callable[[], bool] | None = None
+        self._voice_attempt = current_voice_attempt(session_id)
         self._callback_tasks: set[asyncio.Task] = set()
         self._on_error = on_error
         self._on_conversation_item = on_conversation_item
@@ -1064,6 +1066,8 @@ class RealtimeProxy:
         if owner is not None and (owner.session_id != session_id or self._sessions.get(session_id) is not owner or owner._retired):
             raise asyncio.CancelledError("Retired voice callback")
         response = _CALLBACK_RESPONSE.get()
+        if owner is not None and owner._voice_attempt is not None and not owner._voice_attempt.current():
+            raise asyncio.CancelledError("Retired voice attempt")
         if owner is not None and response is not None and response[0] is owner and response[1] != owner._response_epoch:
             raise asyncio.CancelledError("Retired voice response")
 
@@ -1084,7 +1088,8 @@ class RealtimeProxy:
                 owner._callback_tasks.add(task)
             try:
                 self._assert_callback_owner(owner.session_id)
-                result = await callback(*args, **kwargs)
+                with voice_attempt_scope(owner._voice_attempt):
+                    result = await callback(*args, **kwargs)
                 self._assert_callback_owner(owner.session_id)
                 return result
             finally:
@@ -1443,6 +1448,8 @@ class RealtimeProxy:
             ).model_dump(),
         )
 
+        msg.payload = voice_attempt_payload(msg.payload, current_voice_attempt(session_id))
+
         if rs.node_id.startswith("webclient_") and self._send_to_session:
             await self._send_to_session(session_id, msg)
             self._assert_callback_owner(session_id)
@@ -1481,12 +1488,12 @@ class RealtimeProxy:
                 from models.protocol import FeralMessage
                 msg = FeralMessage(
                     session_id=session_id, hop="brain", type="audio_response",
-                    payload=payload,
+                    payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
                 )
                 await self._send_to_session(session_id, msg)
                 self._assert_callback_owner(session_id)
             elif self._send_to_node:
-                await self._send_to_node(rs.node_id, {"type": "audio_response", "payload": payload})
+                await self._send_to_node(rs.node_id, {"type": "audio_response", "payload": voice_attempt_payload(payload, current_voice_attempt(session_id))})
                 self._assert_callback_owner(session_id)
         except (RuntimeError, ConnectionError) as exc:
             # Most likely the downstream WS is gone. Tear down the
@@ -1853,7 +1860,7 @@ class RealtimeProxy:
             if is_web_client and self._send_to_session:
                 msg = FeralMessage(
                     session_id=session_id, hop="brain", type="transcript",
-                    payload=payload,
+                    payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
                 )
                 await self._send_to_session(session_id, msg)
                 self._assert_callback_owner(session_id)
@@ -1866,7 +1873,7 @@ class RealtimeProxy:
                 # client did, for the same conversation.
                 msg = FeralMessage(
                     session_id=session_id, hop="brain", type="transcript",
-                    payload=payload,
+                    payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
                 )
                 await self._send_to_node(rs.node_id, msg.model_dump(mode="json"))
                 self._assert_callback_owner(session_id)
@@ -2199,7 +2206,7 @@ class RealtimeProxy:
                 session_id=session_id,
                 hop="brain",
                 type="speech_started",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
             self._assert_callback_owner(session_id)
@@ -2208,7 +2215,7 @@ class RealtimeProxy:
         if self._send_to_node:
             await self._send_to_node(rs.node_id, {
                 "type": "speech_started",
-                "payload": payload,
+                "payload": voice_attempt_payload(payload, current_voice_attempt(session_id)),
             })
             self._assert_callback_owner(session_id)
 

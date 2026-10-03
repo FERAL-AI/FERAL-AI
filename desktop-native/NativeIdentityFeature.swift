@@ -46,7 +46,7 @@ final class NativeSelfRedirectGuard: NSObject, URLSessionTaskDelegate {
   c.path = path; c.query = nil; c.fragment = nil; guard let url = c.url else { throw SelfFailure(message:"Invalid identity request.") }
   var req = URLRequest(url:url); req.httpMethod = method; req.timeoutInterval = 60
   if let body { req.httpBody = try JSONSerialization.data(withJSONObject:body); req.setValue("application/json",forHTTPHeaderField:"Content-Type") }
-  let (data,response) = try await session.data(for:req); try Task.checkCancellation(); guard generation == started else { throw SelfFailure(message:"Agent connection changed. Refresh and review again.") }
+  let (data,response) = try await session.feralLocalData(for:req); try Task.checkCancellation(); guard generation == started else { throw SelfFailure(message:"Agent connection changed. Refresh and review again.") }
   guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), let object = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else { throw SelfFailure(message:"The agent did not confirm this request. Refresh before retrying.") }
   if let message = object["error"] as? String, !message.isEmpty { throw SelfFailure(message:"The agent reported an identity operation failure.") }; return object
  }

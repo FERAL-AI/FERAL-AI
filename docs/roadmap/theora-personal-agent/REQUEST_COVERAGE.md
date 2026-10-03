@@ -6,18 +6,21 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Published `b009395f349652bba20ae1dfe6acc762fa3a65d7`: backend12,871/83 skipped/
-  75.10%, web1,363/172 files, native and mypy808 count gates pass. Generated-asset
-  coherence failed; the local rebuild passes its contract check and awaits push.
+- Published `ec1c301fade5301fa604b29333612f5fa094b075`: backend12,871/83 skipped/
+  75.10%, web/native/mypy808 count gates and generated-asset coherence pass.
+  All executed jobs succeeded; opt-in/main-only jobs were skipped.
 - Actual frozen7f browser run passes61 tests with unchanged source inventory,
   loaded-module provenance and clean shutdown. Bounded exclusions remain explicit
   in [browser evidence](LIVE_WEB_TRACKED_ACCEPTANCE_20261003.md). Exact7f packaged
   9.33 recovery/restart also passes and the artifact is preserved.
-- Local attempt-v1/preference/layout changes are not published. A real registered
-  voice-pipeline reproduction exposed writer-lock deadlock/control starvation
-  after the earlier passing integration checks; repair and new verification are
-  active. Native archive controller/UI and managed-context voice are not yet
-  accepted. Current GUI/audio remains blocked by Computer Use.
+- Frozen attempt-v1/preference/archive/layout integration passes455 backend tests
+  including the registered voice writer-lock/control-starvation repair. Typing
+  stays808 with1,284 unchanged inputs; native archive/preference/layout passes
+  280/71/87 assertions and genuine Process ownership28. Linux selector/smoke unit
+  checks pass20; actual package CI is pending. Publication and exact-source9.34
+  assembly are next. Archive UI/NativeModel host and actual microphone/speaker
+  behavior remain open. Managed saved-context voice remains refused pending its
+  tracked-turn/checkpoint adapter. Current GUI/audio remains blocked by Computer Use.
 - Gen-UI expansion is deferred. Additional coding-engine expansion follows
   dependable cloud/local setup, recovery, voice and data continuity. Existing
   runtime, memory, tools and developer interfaces remain the foundation.

@@ -74,7 +74,7 @@ struct NativeCapabilityInstall {
         guard let url = components.url else { throw CapabilitiesFailure(message: "Invalid local request.") }
         var req = URLRequest(url: url); req.httpMethod = method; req.timeoutInterval = 180
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: req); try Task.checkCancellation()
+        let (data, response) = try await session.feralLocalData(for: req); try Task.checkCancellation()
         guard generation == start else { throw CapabilitiesFailure(message: "Agent changed. Review again.") }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), let value = try? JSONSerialization.jsonObject(with: data) else { throw CapabilitiesFailure(message: "Local request failed. Refresh to confirm state before retrying.") }
         if let object = value as? [String: Any], capabilitiesBool(object["ok"]) == false || capabilitiesBool(object["success"]) == false || (object["error"] as? String)?.isEmpty == false { throw CapabilitiesFailure(message: "The backend refused or could not confirm this operation.") }

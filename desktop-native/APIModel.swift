@@ -9,6 +9,10 @@ import CoreFoundation
     @Published var error: String?
     @Published var chatError: String?
     @Published private(set) var runtimeHealthWarning: String?
+    @Published private(set) var profileArchivePaused = false
+    @Published private(set) var profileArchiveError: String?
+    private var profileArchiveStoppedOwner: NativeRuntimeOwnership?
+    private var profileArchiveTask: Task<Void, Never>?
     @Published private(set) var recoveryStatus = "Shared conversation recovery has not been verified."
     @Published var startupStatus = "Starting your local agent…"
     @Published var isSending = false
@@ -107,29 +111,114 @@ import CoreFoundation
         !switchingConversation && id != conversationID && !contextRequired(id)
     }
     private func updateVoiceReadiness() {
-        voice.configureConnection(sessionID: conversationID, connected: ready && chatTurns.ready && contextState.permitsSubmission && !contextManaged && !contextSetupPending)
+        voice.configureConnection(sessionID: conversationID, connected: !effectsPaused && ready && chatTurns.ready && contextState.permitsSubmission && !contextManaged && !contextSetupPending)
     }
 
-    private lazy var recovery = NativeSessionRecoveryModel(preferences: prefs, transport: { [session] request in
-        let (data, response) = try await session.data(for: request)
+    private lazy var recovery = NativeSessionRecoveryModel(preferences: prefs, transport: { [weak self] request in
+        guard let self, !self.effectsPaused else { throw NativeFailure("Local session recovery is paused while the profile stops.") }
+        let (data, response) = try await self.session.data(for: request)
+        guard !self.effectsPaused else { throw NativeFailure("The local profile stopped during session recovery.") }
         guard let http = response as? HTTPURLResponse else { throw NativeFailure("Local session recovery was unavailable.") }
         return (data, http)
     })
     private let prefs: UserDefaults
+    private let preferenceSuiteName: String?
     private let contextRecoveryJournalURL: URL?
     private let preferencesUnavailable: Bool
     private let session: URLSession
     private let transportDelegate = NativeLocalSessionDelegate()
     lazy var voice = NativeVoiceEngine(sendFrame: { [weak self] frame in
-        guard let self, !self.preferencesUnavailable, self.ready, !self.switchingConversation, !self.contextManaged, !self.contextSetupPending,
+        guard let self, !self.preferencesUnavailable, !self.effectsPaused, self.ready, !self.switchingConversation, !self.contextManaged, !self.contextSetupPending,
               self.contextState.permitsSubmission, let socket = self.socket, socket.state == .running,
               frame["session_id"] as? String == self.conversationID else { throw NativeFailure("Voice is disconnected or the conversation changed.") }
         let data = try JSONSerialization.data(withJSONObject: frame)
         try await socket.send(.string(String(decoding: data, as: UTF8.self)))
     })
+    lazy var profileArchive = NativeProfileArchiveFeature(
+        allowedDestinations: Set(NativeDestination.allCases.map(\.rawValue)),
+        ownerStatus: { [weak self] owner in
+            guard let self else { return .superseded }
+            if self.runtime.isCurrent(owner) { return .current }
+            return self.runtime.isQuiesced(owner) ? .quiesced : .superseded
+        }, quiesce: { [weak self] owner in
+            guard let self else { throw NativeProfileArchiveFailure.changed }
+            try await self.quiesceForProfileArchive(owner)
+        }, executor: { command in
+            try await NativeProfileArchiveProcessExecutor.bundled().execute(command)
+        })
+    var canPrepareProfileArchive: Bool {
+        !preferencesUnavailable && preferenceSuiteName != nil && ready && !busy && !connecting
+            && !chatMutationBusy && !codingBusy && !contextSetupPending && contextState.canSaveDisplay
+            && runtime.ownership != nil
+            && !profileArchivePaused && !profileArchive.busy
+    }
+    func profileArchiveScope() throws -> NativeProfileArchiveScope {
+        guard canPrepareProfileArchive, let owner = runtime.ownership,
+              let config = runtime.profileConfigRoot, let data = runtime.profileDataRoot,
+              let primary = recovery.primarySessionID, let suite = preferenceSuiteName else {
+            throw NativeFailure("Connect the local agent and finish active chat, voice or coding work before reviewing a profile archive.")
+        }
+        return NativeProfileArchiveScope(configRoot: config, dataRoot: data, defaults: prefs,
+            suiteName: suite, primarySessionID: primary, runtimeOwner: owner)
+    }
+    private func quiesceForProfileArchive(_ owner: NativeRuntimeOwnership) async throws {
+        guard canPrepareProfileArchive || profileArchive.busy,
+              !shuttingDown, runtime.isCurrent(owner), !chatMutationBusy, !codingBusy,
+              !connecting, !busy, !contextSetupPending, contextState.canSaveDisplay else {
+            throw NativeProfileArchiveFailure.changed
+        }
+        try NativeLocalActionGate.shared.pause(origin: owner.baseURL)
+        profileArchivePaused = true
+        voice.configureConnection(sessionID: nil, connected: false)
+        recovery.configure(baseURL: nil, connectionID: nil)
+        let saved = await flushConversationForShutdown()
+        richChat.configure(sessionID: nil, connectionID: nil)
+        responseDeadline?.cancel(); codingPoll?.cancel(); contextDeadline?.cancel()
+        capabilityDeadline?.cancel(); statusDeadline?.cancel()
+        do {
+            try await runtime.stop(ifOwnedBy: owner)
+        } catch {
+            // The selected runtime must not silently resume after an uncertain stop.
+            ready = false; serviceReachable = false
+            startupStatus = "Profile shutdown was not confirmed. Inspect the local runtime before continuing."
+            throw error
+        }
+        guard runtime.isQuiesced(owner) else { throw NativeProfileArchiveFailure.unconfirmed }
+        profileArchiveStoppedOwner = owner
+        runtimeRevision = UUID(); socketGeneration = UUID()
+        recovery.configure(baseURL: nil, connectionID: nil)
+        ready = false; serviceReachable = false; runtimeHealthWarning = nil
+        startupStatus = "Your original profile is stopped for backup or restore."
+        guard saved else {
+            throw NativeFailure("The visible conversation could not be saved. The original profile is stopped; no archive was dispatched. Restart it and verify the conversation before trying again.")
+        }
+    }
+    var canResumeOriginalProfile: Bool {
+        guard let owner = profileArchiveStoppedOwner else { return false }
+        return profileArchivePaused && runtime.isQuiesced(owner) && !profileArchive.busy
+            && profileArchive.review == nil && profileArchive.applyReview == nil
+            && profileArchive.phase != .unconfirmed
+    }
+    func resumeOriginalProfile() async {
+        guard canResumeOriginalProfile else { return }
+        profileArchiveStoppedOwner = nil; profileArchivePaused = false; shuttingDown = false
+        await start()
+    }
+    func performProfileArchive(_ operation: @escaping @MainActor () async throws -> Void) {
+        guard profileArchiveTask == nil else { return }
+        profileArchiveError = nil
+        profileArchiveTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.profileArchiveTask = nil }
+            do { try await operation() }
+            catch { self.profileArchiveError = error.localizedDescription }
+        }
+    }
 
-    var featureBaseURL: URL? { !preferencesUnavailable && ready ? runtime.baseURL : nil }
-    var securityBaseURL: URL? { !preferencesUnavailable && (serviceReachable || ready) ? runtime.baseURL : nil }
+    var effectsPaused: Bool { shuttingDown || profileArchivePaused }
+    var localRuntimeGeneration: UUID { runtimeRevision }
+    var featureBaseURL: URL? { !preferencesUnavailable && !effectsPaused && ready ? runtime.baseURL : nil }
+    var securityBaseURL: URL? { !preferencesUnavailable && !effectsPaused && (serviceReachable || ready) ? runtime.baseURL : nil }
     var activeConversationID: String { conversationID }
     // App REST dispatch can run agent turns without Chat turn IDs. Give it
     // a distinct scope so late app replies cannot complete an active Chat turn.
@@ -137,7 +226,7 @@ import CoreFoundation
     var chatMutationBusy: Bool { shuttingDown || isSending || switchingConversation || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
     // Applying the reviewed saved point owns its own operation lock. Its
     // thread transition must not invalidate that same review mid-callback.
-    var chatToolsHostBusy: Bool { isSending || (switchingConversation && !applyingSnapshotHistory) || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
+    var chatToolsHostBusy: Bool { effectsPaused || isSending || (switchingConversation && !applyingSnapshotHistory) || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
 
     func restoreThread(_ thread: [String: Any]) throws {
         guard let id = thread["id"] as? String, !id.isEmpty,
@@ -163,9 +252,12 @@ import CoreFoundation
     }
 
     init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, recoveryJournalURL: URL? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil,
-         preferencesResolver: (() -> UserDefaults?)? = nil, chatSender: (([String:Any]) async throws -> Void)? = nil) {
+         preferencesResolver: (() -> UserDefaults?)? = nil, chatSender: (([String:Any]) async throws -> Void)? = nil,
+         preferenceSuite: String? = nil) {
         injectedRuntimeOwner = runtimeOwner
         injectedChatSender = chatSender
+        preferenceSuiteName = preferenceSuite ?? ((preferences != nil || preferencesResolver != nil) ? nil :
+            (ProcessInfo.processInfo.environment["FERAL_NATIVE_PREFS_SUITE"] ?? "ai.feral.native.preview"))
         if let recoveryJournalURL { contextRecoveryJournalURL = recoveryJournalURL }
         else if preferences != nil || preferencesResolver != nil { contextRecoveryJournalURL = nil }
         else {
@@ -293,8 +385,11 @@ import CoreFoundation
         }
     }
 
-    private func request(_ path: String, body: [String: Any]? = nil, allowMissingConversation: Bool = false) async throws -> Any {
+    private func request(_ path: String, body: [String: Any]? = nil, allowMissingConversation: Bool = false,
+                         shutdownSave: Bool = false) async throws -> Any {
         guard preferencesPermitEffects() else { throw NativeFailure("Local preferences are unavailable; startup and profile changes are paused.") }
+        let permitsFinalSave = shutdownSave && path == "/api/conversations/save" && body != nil
+        guard !effectsPaused || permitsFinalSave else { throw NativeFailure("The local profile is stopping or stopped. Finish the archive review or restart the original profile before another action.") }
         guard ready else { throw NativeFailure("The local agent is not ready yet.") }
         let owner = runtimeRevision, origin = runtime.baseURL
         var req = URLRequest(url: URL(string: path, relativeTo: origin)!)
@@ -304,7 +399,7 @@ import CoreFoundation
             req.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
         let (data, response) = try await session.data(for: req)
-        guard ready, owner == runtimeRevision, origin == runtime.baseURL else { throw NativeFailure("The local connection changed during this request. Earlier actions may have taken effect; inspect before retrying.") }
+        guard ready, !effectsPaused || permitsFinalSave, owner == runtimeRevision, origin == runtime.baseURL else { throw NativeFailure("The local connection changed during this request. Earlier actions may have taken effect; inspect before retrying.") }
         let value = try JSONSerialization.jsonObject(with: data)
         let dict = value as? [String: Any] ?? [:]
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -329,6 +424,7 @@ import CoreFoundation
                 if !serviceReachable { error = "The owned local service was not verified." }
                 return
             }
+            try NativeLocalActionGate.shared.activate(origin: runtime.baseURL)
             ready = true
             if let config = try await request("/api/llm/config") as? [String: Any] {
                 endpoint = config["base_url"] as? String ?? ""
@@ -778,7 +874,7 @@ import CoreFoundation
 
     func respondToChatPermission(_ response: NativeRichPermissionResponse) async throws {
         guard preferencesPermitEffects() else { throw NativeFailure("Local preferences are unavailable; startup and profile changes are paused.") }
-        guard ready, !switchingConversation, response.sessionID == conversationID,
+        guard ready, !effectsPaused, !switchingConversation, response.sessionID == conversationID,
               response.connectionID == socketGeneration, let socket, socket.state == .running,
               richChat.permissions.contains(where: { $0.id == response.requestID && $0.session == conversationID && $0.supported && !$0.expired && $0.state == "responding" }) else {
             throw NativeFailure("The permission request or connection changed. Reconnect and request access again.")
@@ -796,7 +892,7 @@ import CoreFoundation
 
     func uploadAttachments(_ urls: [URL]) async {
         guard preferencesPermitEffects() else { return }
-        guard ready, !uploadingAttachments, !isSending, !switchingConversation else { return }
+        guard ready, !effectsPaused, !uploadingAttachments, !isSending, !switchingConversation else { return }
         uploadingAttachments = true; attachmentError = nil
         let revision = conversationRevision
         defer { uploadingAttachments = false }
@@ -1004,7 +1100,7 @@ import CoreFoundation
         pendingAttachments = []; attachmentError = nil; chatError = nil; error = nil
         await connectChat()
     }
-    @discardableResult private func persistConversation() async -> Bool {
+    @discardableResult private func persistConversation(shutdownSave: Bool = false) async -> Bool {
         let id = conversationID
         guard !id.isEmpty, !deletedConversationIDs.contains(id) else { return false }
         guard !contextSetupPending, contextState.canSaveDisplay else { return false }
@@ -1013,7 +1109,7 @@ import CoreFoundation
             _ = await previous?.value
             guard let self, self.ready, owner == self.runtimeRevision, !self.deletedConversationIDs.contains(id) else { return false }
             do {
-                guard let receipt = try await self.request("/api/conversations/save", body: ["id": id, "messages": rows]) as? [String: Any], receipt["id"] as? String == id,let count = receipt["message_count"] as? NSNumber,CFGetTypeID(count) != CFBooleanGetTypeID(),["c","s","i","l","q","C","S","I","L","Q"].contains(String(cString:count.objCType)),count.intValue == rows.count else { throw NativeFailure("The saved conversation acknowledgement did not match its ID and exact message count.") }
+                guard let receipt = try await self.request("/api/conversations/save", body: ["id": id, "messages": rows], shutdownSave: shutdownSave) as? [String: Any], receipt["id"] as? String == id,let count = receipt["message_count"] as? NSNumber,CFGetTypeID(count) != CFBooleanGetTypeID(),["c","s","i","l","q","C","S","I","L","Q"].contains(String(cString:count.objCType)),count.intValue == rows.count else { throw NativeFailure("The saved conversation acknowledgement did not match its ID and exact message count.") }
                 return true
             } catch { if owner == self.runtimeRevision, id == self.conversationID { self.error = "Conversation could not be saved: \(error.localizedDescription)" };return false }
         }
@@ -1048,11 +1144,11 @@ import CoreFoundation
     // Clearing a local sheet must never mark backend setup complete.
     func completeProviderSetup() { showProviderSetup = false }
     func saveProfile() {
-        guard preferencesPermitEffects() else { return }
+        guard preferencesPermitEffects(), !effectsPaused else { return }
         prefs.set(displayName, forKey: "displayName"); prefs.set(avatarChoice, forKey: "avatarChoice"); prefs.set(importedAvatarPath, forKey: "importedAvatarPath")
     }
     func importAvatar(_ url: URL) {
-        guard preferencesPermitEffects() else { return }
+        guard preferencesPermitEffects(), !effectsPaused else { return }
         let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
             guard NSImage(contentsOf: url) != nil else { throw NativeFailure("Choose a supported image file.") }
@@ -1191,7 +1287,7 @@ import CoreFoundation
         catch { self.error = error.localizedDescription }
     }
     // Snapshot visible partial output honestly before terminating the owned backend.
-    func flushConversationForShutdown() async {
+    @discardableResult func flushConversationForShutdown() async -> Bool {
         shuttingDown = true
         receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
         archiveRichTurn()
@@ -1200,9 +1296,16 @@ import CoreFoundation
             messages[index].metadata["deliveryError"] = "The app closed before this reply completed."
         }
         if chatTurns.isTracked { markTrackedUnknown("The app closed before the whole-turn receipt. Check the stored request status after reopening; it has not been retried.") } else { finishResponse() }
-        await persistConversation()
+        return await persistConversation(shutdownSave: true)
     }
     func shutdown() async {
+        shuttingDown = true
+        if let owner = runtime.ownership {
+            do { try NativeLocalActionGate.shared.pause(origin: owner.baseURL) }
+            catch { profileArchiveError = "Local action admission could not be closed; the owned runtime will be stopped." }
+        }
+        profileArchiveTask?.cancel()
+        await profileArchiveTask?.value
         if let workspaceCenter { for token in workspaceObservers { workspaceCenter.removeObserver(token) } }
         workspaceObservers = []; workspaceCenter = nil
         await flushConversationForShutdown()

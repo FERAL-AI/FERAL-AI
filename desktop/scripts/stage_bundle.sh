@@ -53,27 +53,20 @@ die() {
     exit 1
 }
 
+# Refuse unsupported platform profiles and incorrect cached executables before
+# downloading uv, creating output directories or changing staged resources.
+# python3 is a build-time verifier, never a user's selected runtime interpreter.
+PLATFORM_HELPER="$HERE/bundle_platform.py"
+OPENCODE_PACKAGE="$(python3 "$PLATFORM_HELPER" --select-host)" \
+    || die "Unsupported or unverifiable desktop build platform."
+OPENCODE_ROOT="$REPO_ROOT/.tools/opencode/node_modules/$OPENCODE_PACKAGE"
+OPENCODE_SOURCE="$OPENCODE_ROOT/bin/opencode"
+python3 "$PLATFORM_HELPER" --validate-package "$OPENCODE_ROOT" \
+    || die "Install the pinned platform package with npm ci --ignore-scripts --prefix .tools/opencode first."
+
 UV="$(bash "$REPO_ROOT/scripts/ensure_uv.sh")"
-# ensure_uv.sh logs to stderr and prints one path on stdout. If that
-# contract ever changes, every later use of "$UV" turns into a confusing
-# "command not found" attributed to the wrong step.
-[ -x "$UV" ] || die "scripts/ensure_uv.sh did not yield an executable uv (got: '$UV')."
-
+[ -x "$UV" ] || die "scripts/ensure_uv.sh did not yield an executable uv."
 mkdir -p "$RESOURCES"
-
-# Ship the pinned native coding engine, not the npm launcher (which needs a
-# separately installed Node). Install it into this workspace first with
-# npm install --prefix .tools/opencode opencode-ai@1.18.10 --no-audit --no-fund.
-# Architecture must match the desktop payload; universal builds require both
-# payload architectures and are deliberately rejected here.
-case "$(uname -s)-$(uname -m)" in
-    Darwin-arm64) OPENCODE_PACKAGE=opencode-darwin-arm64 ;;
-    Darwin-x86_64) OPENCODE_PACKAGE=opencode-darwin-x64 ;;
-    *) die "This desktop staging profile currently supports macOS only." ;;
-esac
-OPENCODE_SOURCE="$REPO_ROOT/.tools/opencode/node_modules/$OPENCODE_PACKAGE/bin/opencode"
-[ -x "$OPENCODE_SOURCE" ] || die "Missing pinned OpenCode binary at $OPENCODE_SOURCE. Install opencode-ai@1.18.10 into .tools/opencode first."
-[ "$("$OPENCODE_SOURCE" --version)" = "1.18.10" ] || die "The coding engine must be OpenCode 1.18.10."
 mkdir -p "$RESOURCES/opencode/bin"
 cp "$OPENCODE_SOURCE" "$RESOURCES/opencode/bin/opencode"
 cp "$REPO_ROOT/.tools/opencode/node_modules/opencode-ai/LICENSE" "$RESOURCES/opencode/LICENSE"

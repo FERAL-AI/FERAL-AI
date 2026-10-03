@@ -58,7 +58,7 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
         var req = URLRequest(url:url);req.httpMethod = method
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject:body);req.setValue("application/json",forHTTPHeaderField:"Content-Type") }
         let data:Data,response:URLResponse
-        do { (data,response) = try await session.data(for:req) } catch { throw NativeAutomationError("Local automation request did not finish.") }
+        do { (data,response) = try await session.feralLocalData(for:req) } catch { throw NativeAutomationError("Local automation request did not finish.") }
         guard let http = response as? HTTPURLResponse,(200..<300).contains(http.statusCode),let value = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any],value["error"] == nil || value["error"] is NSNull,NativeAutomationWire.bool(value["success"]) != false,NativeAutomationWire.bool(value["ok"]) != false else { throw NativeAutomationError("Automation response did not establish success. Private backend details are withheld.") }
         return value
     }

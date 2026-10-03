@@ -88,7 +88,7 @@ private func oversightBool(_ value: Any?) -> Bool? {
             request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.feralLocalData(for: request)
         try Task.checkCancellation()
         guard generation == started else { throw OversightFailure(message: "The agent connection changed. Refresh and review again.") }
         guard let http = response as? HTTPURLResponse else { throw OversightFailure(message: "The agent returned an invalid HTTP response.") }

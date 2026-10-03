@@ -14,21 +14,23 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Published `b009395f349652bba20ae1dfe6acc762fa3a65d7` passes exact-head backend
-12,871/83 skipped/75.10%, web1,363/172 files, native and mypy808 count gates.
-Generated asset coherence is the sole executed failing job; local regenerated
-assets pass their contract check and await publication. Frozen7f actual browser
+Published `ec1c301fade5301fa604b29333612f5fa094b075` passes exact-head backend
+12,871/83 skipped/75.10%, web, native and mypy808 count gates. Generated asset
+coherence now passes; all executed jobs succeeded. Frozen7f actual browser
 acceptance passed all61 checks with source/provenance/clean-shutdown evidence.
 Immutable9.33 passed packaged recovery/restart and is preserved. Current GUI/audio
 acceptance remains blocked by Computer Use, not an observed new app crash.
 See [current checkpoint](WORK_STATE.md) and
 [full browser evidence](LIVE_WEB_TRACKED_ACCEPTANCE_20261003.md).
 
-Local voice attempt/preference/layout integration passed457/1 skipped before a
-registered real-pipeline reproduction exposed final-audio writer-lock deadlock
-and response-control starvation. Repair that defect before freezing, rerunning
-affected checks and publishing this wave. Keep managed-context voice refused until
-the existing turn manager/coordinator is integrated in the actual child task.
+Frozen voice/preference/archive/layout integration now passes455 backend tests
+including the registered final-audio writer-lock deadlock/control-starvation
+repair. Full typing stays808 with all1,284 inputs unchanged. Native archive,
+preferences and layout pass280/71/87 assertions; genuine Process ownership passes28.
+Linux selector/smoke checks pass20; actual Linux package CI remains required.
+Publish this reviewed wave and assemble exact-source9.34 before new production
+mutations. Keep managed-context voice refused until the existing turn manager/
+coordinator is integrated in the actual child task.
 
 ### Earlier checkpoint
 
@@ -63,10 +65,10 @@ No speculative calendar deadline or source-only completion claim closes a gate.
 
 | Owner | Exclusive workstream | Required outcome |
 |---|---|---|
-| Preference/archive worker | Two new native archive controller/test files | Actual CLI backup/restore, exact runtime quiescence, reviewed fresh-root preference apply and failure/cancellation tests; parent owns UI wiring |
-| Distribution worker | Read-only install/update/Linux audit after completed full61 browser acceptance | Reuse existing staging and smoke checks; identify the smallest executable missing distribution card before editing |
-| Voice/CI worker | Existing attempt files plus narrow chained-pipeline admission seam | Reproduce then remove registered final-audio deadlock; mute/interrupt stay responsive during work; exact cancellation/foreign producer protection; fresh verification |
-| Parent | Native integration, generated assets, docs/Git and artifact acceptance | Review frozen worker changes, run combined checks, publish coherent source and assemble exact-source next candidate; retain GUI/signing/migration gates |
+| Native reviewer | Read-only native archive host/runtime/UI and CI review | Report regressions before publication;280 controller and28 genuine Process assertions already pass; GUI and actual NativeModel archive-host acceptance remain open |
+| Distribution reviewer | Read-only Linux staging/workflow/smoke review |20 unit checks pass; actual Debian payload build/relocation/smoke must run on the new head; bundled-update guard is the next independent source card |
+| Voice reviewer | Read-only frozen attempt/liveness review |455 combined backend tests include the repaired registered deadlock; managed chained-voice turn/checkpoint adapter is the next coordinated source card |
+| Parent | Native integration, docs/Git and artifact acceptance | Publish reviewed source, run exact-head CI and assemble9.34; freeze sources during packaging and retain GUI/signing/migration gates |
 
 Each completed workstream moves to the next ready card. Physical device,
 account and signed-distribution dependencies must not stall independent source

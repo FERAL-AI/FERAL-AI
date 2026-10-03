@@ -565,27 +565,58 @@ def register_core_methods(registry: MethodRegistry, state):
         from bridges.client_voice_configuration import configure_client_voice, ClientVoiceConfigurationError
 
         mode = params.get("mode", "realtime")
-        if mode != "disabled":
+        async def readiness():
             await attachment_guard(session_id, session, unsupported="voice")
         try:
-            return await configure_client_voice(state, session_id, session._ws, params)
+            return await configure_client_voice(state, session_id, session._ws, params,
+                readiness_guard=readiness if mode != "disabled" else None)
         except ClientVoiceConfigurationError as exc:
             raise GatewayError(exc.code, str(exc)) from None
 
     @registry.method("voice.audio")
     async def voice_audio(session_id: str, params: dict, session: GatewaySession):
-        await attachment_guard(session_id, session, unsupported="voice")
-        audio_b64 = params.get("data_b64", "")
-        if state.voice_router and audio_b64:
-            await state.voice_router.handle_audio_from_client(
-                session_id=session_id,
-                audio_b64=audio_b64,
-                chunk_index=params.get("chunk_index", 0),
-                is_final=params.get("is_final", False),
-                encoding=params.get("encoding", "pcm16"),
-                sample_rate=params.get("sample_rate", 24000),
-            )
-        return {"received": True}
+        from bridges.client_voice_attempt import (VoiceAttemptError, client_voice_producers,
+            require_voice_attempt, require_client_voice_producers)
+        from bridges.client_voice_control import handle_client_voice_audio
+        try:
+            binding = require_voice_attempt(state, session_id, session._ws, params)
+            media_lookup = session.metadata.get("runtime_context_voice_readiness")
+            if (binding is not None and any(producer is not None for producer in client_voice_producers(state, session_id))
+                    and callable(media_lookup) and session.metadata.get("context_checkpoint_requested") is not True):
+                require_client_voice_producers(state, session_id, binding)
+                try:
+                    ready = await asyncio.wait_for(media_lookup(), timeout=10)
+                except asyncio.TimeoutError:
+                    raise context_error(RuntimeContextError("context_unavailable")) from None
+                if not isinstance(ready, RuntimeContextReadiness) or ready.session_id != session_id:
+                    raise context_error(RuntimeContextError("context_unavailable"))
+                if ready.managed or ready.state.value != "legacy":
+                    raise context_error(RuntimeContextError(f"context_{ready.state.value}"))
+            else:
+                await attachment_guard(session_id, session, unsupported="voice")
+            return await handle_client_voice_audio(state, session_id, session._ws, params)
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
+        except RuntimeContextError as exc:
+            raise context_error(exc) from None
+
+    @registry.method("voice.mute")
+    async def voice_mute(session_id: str, params: dict, session: GatewaySession):
+        from bridges.client_voice_attempt import VoiceAttemptError
+        from bridges.client_voice_control import mute_client_voice
+        try:
+            return await mute_client_voice(state, session_id, session._ws, params)
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
+
+    @registry.method("voice.interrupt")
+    async def voice_interrupt(session_id: str, params: dict, session: GatewaySession):
+        from bridges.client_voice_attempt import VoiceAttemptError
+        from bridges.client_voice_control import interrupt_client_voice_attempt
+        try:
+            return await interrupt_client_voice_attempt(state, session_id, session._ws, params)
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
 
     @registry.method("memory.search")
     async def memory_search(session_id: str, params: dict, session: GatewaySession):

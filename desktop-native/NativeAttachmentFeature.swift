@@ -73,7 +73,7 @@ enum NativeAttachmentWire {
         request.httpMethod = "POST"
         request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
         request.httpBody = multipart(data: bytes, filename: file.lastPathComponent, contentType: mime, boundary: boundary)
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.feralLocalData(for: request)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any],
               let http = response as? HTTPURLResponse else { throw Failure(message: "The attachment response was unreadable.") }
         guard (200..<300).contains(http.statusCode) else {

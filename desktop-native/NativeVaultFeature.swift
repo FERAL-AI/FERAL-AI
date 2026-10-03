@@ -54,7 +54,7 @@ private final class NativeVaultRedirectGuard:NSObject,URLSessionTaskDelegate {
     private func request(_ base:URL,path:String,body:[String:Any]?=nil)async throws->[String:Any] {
         var request=URLRequest(url:try NativeVaultWire.url(base,path:path));request.httpMethod=body==nil ? "GET" : "POST"
         if let body=body{guard JSONSerialization.isValidJSONObject(body) else{throw NativeVaultFailure("Invalid vault request body.")};request.httpBody=try JSONSerialization.data(withJSONObject:body);request.setValue("application/json",forHTTPHeaderField:"Content-Type")}
-        let (data,response)=try await session.data(for:request)
+        let (data,response)=try await session.feralLocalData(for:request)
         guard data.count<=16384,let http=response as? HTTPURLResponse,http.url==request.url,(200..<300).contains(http.statusCode),let raw=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],raw["error"]==nil else{throw NativeVaultFailure("The vault request was not acknowledged. Private service details are withheld.")};return raw
     }
     func refresh()async {
@@ -146,7 +146,7 @@ extension NativeVaultWire {
     private func request(_ base:URL,path:String,body:[String:Any]?=nil)async throws->[String:Any]{
         var req=URLRequest(url:try NativeVaultWire.url(base,path:path));req.httpMethod=body==nil ? "GET" : "POST"
         if let body=body{req.httpBody=try JSONSerialization.data(withJSONObject:body);req.setValue("application/json",forHTTPHeaderField:"Content-Type")}
-        let (data,response)=try await session.data(for:req)
+        let (data,response)=try await session.feralLocalData(for:req)
         guard data.count<=16384,let http=response as? HTTPURLResponse,http.url==req.url,let raw=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else{throw NativeVaultFailure("Agent continuation response is unconfirmed. Private service details are withheld.")}
         if !(200..<300).contains(http.statusCode){
             if let detail=raw["detail"] as? [String:Any],detail["code"] as? String=="bootstrap_config_requires_update"{throw NativeVaultFailure("Current settings require automatic model or phone-bridge changes, or contain pending account authorization records. Resolve that configuration before reviewing continuation. No startup was sent.")}

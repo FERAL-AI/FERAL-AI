@@ -39,7 +39,7 @@ private struct NativeConfigurationFailure: LocalizedError {
             request.httpMethod = "POST"; request.setValue("application/json", forHTTPHeaderField: "Content-Type")
             request.httpBody = try JSONSerialization.data(withJSONObject: body)
         }
-        let (data, response) = try await session.data(for: request)
+        let (data, response) = try await session.feralLocalData(for: request)
         guard let object = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw NativeConfigurationFailure(message: "The agent returned an unreadable settings response.") }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
             let detail = object["detail"] as? String ?? (object["detail"] as? [String: Any])?["message"] as? String

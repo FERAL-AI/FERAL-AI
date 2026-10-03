@@ -50,7 +50,7 @@ private final class NativeVaultSetupRedirectGuard:NSObject,URLSessionTaskDelegat
     private func request(_ base:URL,path:String,body:[String:Any]?=nil)async throws->[String:Any] {
         var req=URLRequest(url:try NativeVaultWire.url(base,path:path));req.httpMethod=body==nil ? "GET" : "POST"
         if let body{req.httpBody=try JSONSerialization.data(withJSONObject:body);req.setValue("application/json",forHTTPHeaderField:"Content-Type")}
-        let (data,response)=try await session.data(for:req)
+        let (data,response)=try await session.feralLocalData(for:req)
         guard data.count<=16384,let http=response as? HTTPURLResponse,http.url==req.url,(200..<300).contains(http.statusCode),let raw=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],raw["error"]==nil else{throw NativeVaultFailure("Credential setup response could not be verified. Private service details are withheld.")};return raw
     }
     func refresh()async {

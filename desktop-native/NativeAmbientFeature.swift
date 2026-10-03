@@ -42,7 +42,7 @@ struct NativeAmbientContext: Identifiable { let id: String, session: String, que
         guard let url = parts.url else { throw AmbientFailure(message: "Invalid local ambient request.") }
         var req = URLRequest(url: url); req.httpMethod = method; req.timeoutInterval = 60
         if let body { req.httpBody = try JSONSerialization.data(withJSONObject: body); req.setValue("application/json", forHTTPHeaderField: "Content-Type") }
-        let (data, response) = try await session.data(for: req); try Task.checkCancellation()
+        let (data, response) = try await session.feralLocalData(for: req); try Task.checkCancellation()
         guard generation == start else { throw AmbientFailure(message: "The agent connection changed. Review again.") }
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode), let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw AmbientFailure(message: "The local agent returned unavailable or malformed ambient state.") }
         if value["error"] != nil && !(value["error"] is NSNull) || ambientBool(value["success"]) == false || ambientBool(value["ok"]) == false { throw AmbientFailure(message: "The backend could not confirm this ambient action. Error details are withheld.") }

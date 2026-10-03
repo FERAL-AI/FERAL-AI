@@ -7,14 +7,15 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-- **Current published source:** `b009395f349652bba20ae1dfe6acc762fa3a65d7`,
+- **Current published source before this integration:** `ec1c301fade5301fa604b29333612f5fa094b075`,
   [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310), unmerged.
   Main remains `452a012557d06274063b72546433257b4694d611`.
   Exact-head backend CI passed **12,871 tests / 83 skipped / 75.10% coverage**;
-  web passed **1,363 tests / 172 files**; native and the unchanged mypy count gate
-  passed (808 diagnostics, not zero type errors). The sole executed failing job
-  was generated web-asset coherence. The assets have been rebuilt locally and
-  their contract check passes; that repair has not yet been published.
+  web, native and the unchanged mypy count gate passed (808 diagnostics, not
+  zero type errors). Generated web-asset coherence now passes too. All executed
+  jobs in CI run37125909725 and native run37125909767 succeeded. Opt-in live-brain
+  and main-only jobs were skipped. The full CI result belongs to this source;
+  the integration below requires its own exact-head run.
 - **Actual full browser acceptance:** all **61 tests passed** against the frozen
   `7f818da08139952b1698644469e7016563512cd5` snapshot. All 1,127 tracked
   source entries stayed unchanged, loaded-module provenance matched, and owned
@@ -26,23 +27,43 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   executable hash and strict ad-hoc signature unchanged. A verified copy is
   preserved at `/private/tmp/feral-candidate-9-33-preserved.app`.
   [9.33 evidence](NATIVE_9_33_ACCEPTANCE.md). This candidate excludes the local
-  attempt/preference/layout changes below. Actual Mac GUI/audio acceptance is
+  attempt/preference/archive/layout changes below. Actual Mac GUI/audio acceptance is
   still unavailable because Computer Use cannot start its native pipe.
-- **Local work, not published or release-certified:** attempt-v1 voice identity,
-  portable native preferences, archive attachment and explicit profile layout.
-  Before the liveness repair, combined checks passed 457 tests / 1 skipped;
-  frozen full typing remained 808 with zero diagnostic changes. A registered
-  real-pipeline/coordinator reproduction then confirmed that final audio can
-  deadlock on the history writer lock and starve mute/interrupt controls.
-  The voice worker is repairing this before publication; the earlier checks do
-  not close that defect. Managed saved-context voice remains refused pending its
-  separately verified coordinator/receipt adapter.
-- **Active ownership:** voice worker owns the bounded media/control liveness
-  repair; archive worker owns two new native controller/test files; distribution
-  worker is auditing existing install/update/Linux paths. Parent owns integration,
-  native wiring, documentation, Git and new-candidate verification. No overlapping
-  source ownership. Gen-UI expansion is deferred; additional coding-engine work
-  follows dependable setup, voice and data continuity.
+- **Frozen integration for publication:** attempt-v1 voice identity and bounded
+  media/control liveness repair; portable native preferences and reviewed offline
+  backup/restore; exact native runtime quiescence and explicit profile layout;
+  Linux x86_64/glibc payload staging and executable package CI.
+  Combined backend checks pass **455 tests**. Frozen full typing remains **808**
+  with zero diagnostic changes and all **1,284 inputs unchanged**, digest
+  `102f1cef34c100fa25eedb6424d97fc68c745df170351fcdef6747fb89d69973`.
+  Native archive/preference/layout checks pass **280/71/87 assertions**; genuine
+  Process-backed ownership checks pass **28**. Linux selector/smoke unit checks
+  pass **20**, but the actual Linux package has not yet run. Production native
+  typecheck passes. Earlier passing checks preceded the reproduced deadlock;
+  the current checks include its repair. Managed saved-context voice remains
+  refused pending the separately verified turn-manager/checkpoint adapter.
+  See [integration evidence](VOICE_ATTEMPT_PREFERENCE_INTEGRATION_EVIDENCE.md),
+  [archive evidence](NATIVE_PROFILE_ARCHIVE_EVIDENCE.md) and
+  [Linux evidence](LINUX_DESKTOP_PAYLOAD_EVIDENCE.md).
+- **Final native correction verified:** the retained-client reproduction dispatched
+  one POST before repair and zero after pause or same-address replacement with
+  the shared HTTP epoch guard. Gate34, Agent42, Workflow83, Integration80,
+  Configuration checks, archive280 and voice55 pass in the final integrated
+  runner, plus27 mocked model groups/desktop39/error5. Complete production
+  typecheck passes. The private exact final-save path remains available while
+  all new native actions are fenced. [Admission evidence](NATIVE_ACTION_ADMISSION_EVIDENCE.md).
+- **Active ownership:** worker sources and parent native wiring are frozen and
+  reviewed. Other workers prepared bounded disposable packaged archive and
+  recovery probes. Parent now publishes the coherent wave and assembles exact
+  source9.34/build2026100301; 9.34 is not yet built. Staging completed with cached
+  CPython3.11.15/SQLite3.53.1/FTS5, OpenCode1.18.10, v2 assets and Python SDK import
+  containment. New-head CI and actual bundled probes remain required. Computer
+  Use was retried after restoring documentation and still reports its native-pipe
+  startup failure; no current GUI/audio certification is available.
+  Gen-UI expansion is deferred; additional coding-engine work follows dependable
+  setup, voice and data continuity. Next ready implementation cards are the
+  bundled-update guard and managed chained-voice adapter, with native identity
+  contracts settled before overlapping source edits.
 
 ### Earlier checkpoint records
 
@@ -152,10 +173,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Published86a8b54 backend12,871/native/type passed; web failed post-unmount. Shell correction passes201 tests, full new CI required.9.33 exact7f actual packaged recovery/restart passed; browser full61/attempt/prefs wave active |
+| Current checkpoint | Publishedec1c301 all executedCI passed; backend12,871/83 skipped/75.10%. Exact7f9.33 packaged recovery/restart and actual browser61 passed. Frozen backend455/type808 verified; native retained-client admission repair and9.34 assembly next |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | Latest3.2GiB free; five inspected completed-test mypy caches removed(~225MiB), logs/profiles/models/artifacts retained. Availability fluctuates; no disk-caused app crash established |
+| Disk observation | Latest2.2GiB free; five inspected completed-test mypy caches removed(~225MiB), logs/profiles/models/artifacts retained. Availability fluctuates; reuse staged runtime and caches during packaging; no disk-caused app crash established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update
@@ -459,7 +480,7 @@ as containing every later source commit or completing the populated-profile matr
 - **TYPE-01A:** precise vault/bootstrap review/loop/Future typing; **116 passed / 7 warnings**, focused mypy clean in three files. Full Ubuntu ratchet remains required. [Evidence](TYPE_RATCHET_EVIDENCE.md).
 - Parent preserved failed initial collection/default-home and fixture-import-order runs; corrected disposable-profile combined run passed. Ruff/diff checks passed on these slices. No baseline or authorization assertions were relaxed.
 
-## Current parallel wave and ownership
+## Historical parallel wave and ownership
 
 | Worker | Exclusive scope | Active work |
 |---|---|---|

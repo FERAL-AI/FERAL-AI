@@ -55,7 +55,7 @@ struct NativeWorkflowClient {
         guard let url = components.url else { throw NativeWorkflowFailure("Invalid workflow request.") }
         var request = URLRequest(url:url); request.httpMethod = method; request.timeoutInterval = 180
         if let body = body { request.httpBody = try JSONSerialization.data(withJSONObject:body); request.setValue("application/json",forHTTPHeaderField:"Content-Type") }
-        let (data,response) = try await session.data(for:request)
+        let (data,response) = try await session.feralLocalData(for:request)
         let value = (try? JSONSerialization.jsonObject(with:data)) as? [String:Any]
         guard let http = response as? HTTPURLResponse,(200..<300).contains(http.statusCode) else { throw NativeWorkflowFailure("Workflow request failed (\((response as? HTTPURLResponse)?.statusCode ?? 0)): \(value?["error"] ?? value?["detail"] ?? "No valid response")") }
         guard let value = value else { throw NativeWorkflowFailure("The workflow service returned invalid JSON.") }
