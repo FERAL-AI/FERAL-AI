@@ -1519,7 +1519,8 @@ class VoiceConfigPayload(BaseModel):
     """Client/node declares voice capabilities and selected mode."""
     node_id: str = Field(default="", max_length=MAX_ID_LEN)
     supports_realtime: bool = False
-    mode: Literal["realtime", "whisper", "auto", "disabled"] = "auto"
+    mode: Literal["realtime", "chained", "whisper", "auto", "disabled"] = "auto"
+    provider: str = Field(default="openai", max_length=MAX_NAME_LEN)
     preferred_model: str = Field(default="", max_length=MAX_NAME_LEN)
     sample_rate: int = Field(default=24000, ge=1)
     encoding: str = Field(default="pcm16", max_length=32)

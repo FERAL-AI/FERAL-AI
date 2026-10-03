@@ -2646,6 +2646,8 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                         )
 
                 elif msg.type == "voice_config":
+                    from bridges.client_voice_configuration import configure_client_voice, ClientVoiceConfigurationError
+
                     vcfg = raw.get("payload", {})
                     mode = vcfg.get("mode", "realtime")
                     provider = vcfg.get("provider", "openai")
@@ -2653,16 +2655,7 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                         await require_attachment_ready(coordinator, attachment, checkpoint_version)
                         if attachment is not None and attachment.readiness.managed:
                             raise RuntimeContextError("managed_voice_unsupported")
-                    if state.voice_router:
-                        state.voice_router.set_session_voice_mode(session_id, mode)
-                        if mode == "disabled":
-                            await state.voice_router.stop_session_voice(session_id)
-
-                    if (
-                        provider == "gemini"
-                        and mode == "realtime"
-                        and state.gemini_proxy
-                    ):
+                    async def _start_direct_gemini():
                         system_prompt = ""
                         if state.identity_workspace:
                             try:
@@ -2715,7 +2708,7 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                             except Exception:
                                 pass
 
-                        await state.gemini_proxy.start_session(
+                        return await state.gemini_proxy.start_session(
                             session_id=session_id,
                             node_id="web",
                             system_prompt=system_prompt,
@@ -2723,16 +2716,23 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                             on_transcript=_gemini_transcript_cb,
                         )
 
+                    try:
+                        configured = await configure_client_voice(
+                            state, session_id, ws, vcfg,
+                            start_realtime=_start_direct_gemini if provider == "gemini" and mode == "realtime" and state.gemini_proxy else None,
+                        )
+                    except ClientVoiceConfigurationError as exc:
+                        await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="voice_config_ack",
+                            payload={"mode": mode, "provider": provider, "status": "error", "code": exc.code,
+                                     "message": str(exc)}).model_dump())
+                        continue
+
                     await ws.send_json(
                         FeralMessage(
                             session_id=session_id,
                             hop="brain",
                             type="voice_config_ack",
-                            payload={
-                                "mode": mode,
-                                "provider": provider,
-                                "status": "ok",
-                            },
+                            payload=configured,
                         ).model_dump()
                     )
                     logger.info(f"Web client voice mode: {mode} (provider: {provider})")

@@ -2291,14 +2291,26 @@ class VoiceRouter:
                 )
                 await send_fn(sid, msg)
 
-        session = await self._chained.open_session(
-            session_id=session_id,
-            stt_provider=stt_provider,
-            tts_provider=tts_provider_inst,
-            llm_handle=self._orchestrator,
-            send_frame=_send_frame,
-            sample_rate=stt_sample_rate,
-        )
+        pipeline = self._chained
+        try:
+            session = await pipeline.open_session(
+                session_id=session_id,
+                stt_provider=stt_provider,
+                tts_provider=tts_provider_inst,
+                llm_handle=self._orchestrator,
+                send_frame=_send_frame,
+                sample_rate=stt_sample_rate,
+            )
+        except BaseException:
+            # A partial open is attributable only through the providers
+            # created by this invocation. A replacement must survive.
+            current = pipeline.get_session(session_id)
+            if (current is not None and getattr(current, "stt_provider", None) is stt_provider
+                    and getattr(current, "tts_provider", None) is tts_provider_inst):
+                await pipeline.close_session(session_id)
+            raise
+        if self._chained is not pipeline or pipeline.get_session(session_id) is not session:
+            return None
         self._session_voice_mode[session_id] = "chained"
         return session
 

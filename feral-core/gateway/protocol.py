@@ -562,14 +562,15 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("voice.config")
     async def voice_config(session_id: str, params: dict, session: GatewaySession):
+        from bridges.client_voice_configuration import configure_client_voice, ClientVoiceConfigurationError
+
         mode = params.get("mode", "realtime")
         if mode != "disabled":
             await attachment_guard(session_id, session, unsupported="voice")
-        if state.voice_router:
-            state.voice_router.set_session_voice_mode(session_id, mode)
-            if mode == "disabled":
-                await state.voice_router.stop_session_voice(session_id)
-        return {"mode": mode, "status": "ok"}
+        try:
+            return await configure_client_voice(state, session_id, session._ws, params)
+        except ClientVoiceConfigurationError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
 
     @registry.method("voice.audio")
     async def voice_audio(session_id: str, params: dict, session: GatewaySession):

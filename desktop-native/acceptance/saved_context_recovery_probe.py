@@ -1,4 +1,4 @@
-"""One-shot 9.31 or 9.32 packaged-backend Stop/recovery/restart acceptance.
+"""One-shot known-candidate packaged-backend Stop/recovery/restart acceptance.
 
 Fresh synthetic storage only; no GUI, accounts, model downloads, or task replay.
 Requires the coordinator's exact immutable source/executable identity. Existing
@@ -30,6 +30,7 @@ DEFAULT_ROOT = ROOT
 APP = Path(__file__).resolve().parents[1] / 'build/FERAL Native Preview.app'
 DEFAULT_APP = APP
 PRESERVED_31_APP = Path('/private/tmp/feral-candidate-9-31-preserved.app')
+PRESERVED_32_APP = Path('/private/tmp/feral-candidate-9-32-preserved.app')
 MANIFEST = Path('/private/tmp/feral-candidate-9-31-manifest.json')
 CANDIDATE_VERSION = '31'
 CANDIDATES = {
@@ -38,6 +39,9 @@ CANDIDATES = {
     '32': {'version': '2026.9.32', 'build': '2026100206',
            'root': Path('/private/tmp/feral-native-9-32-recovery-20261002'),
            'manifest': Path('/private/tmp/feral-candidate-9-32-manifest.json')},
+    '33': {'version': '2026.9.33', 'build': '2026100207',
+           'root': Path('/private/tmp/feral-native-9-33-recovery-20261002'),
+           'manifest': Path('/private/tmp/feral-candidate-9-33-manifest.json')},
 }
 FACT = 'JADE-COMPASS-853'
 CANCELLED_MARKER = 'CANCELLED-SYNTHETIC-DO-NOT-REPLAY-982'
@@ -63,9 +67,13 @@ def select_candidate(version, app, attempt_root):
     global APP, MANIFEST, ROOT, CANDIDATE_VERSION
     require(version in CANDIDATES, 'Unsupported candidate version')
     path = Path(app)
-    allowed = {DEFAULT_APP, PRESERVED_31_APP} if version == '31' else {DEFAULT_APP}
+    allowed = {DEFAULT_APP}
+    if version == '31':
+        allowed.add(PRESERVED_31_APP)
+    elif version == '32':
+        allowed.add(PRESERVED_32_APP)
     require(path in allowed and path.is_absolute() and path.resolve() == path and not path.is_symlink(),
-            'Candidate app must be the canonical build, or the known preserved app for 9.31 only')
+            'Candidate app must be the canonical build or its version-matching known preserved app')
     config = CANDIDATES[version]
     root = fresh_attempt_root(attempt_root if attempt_root is not None else str(config['root']), version)
     APP, MANIFEST, ROOT, CANDIDATE_VERSION = path, config['manifest'], root, version
@@ -525,10 +533,10 @@ async def journey(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     identity_arguments(parser)
-    parser.add_argument('--candidate-version', choices=('31', '32'), default='31',
+    parser.add_argument('--candidate-version', choices=tuple(CANDIDATES), default='31',
         help='Exact known version/build and manifest; defaults to historical 9.31')
     parser.add_argument('--candidate-app', default=str(DEFAULT_APP),
-        help='Canonical build app, or /private/tmp/feral-candidate-9-31-preserved.app for version 31 only')
+        help='Canonical build app, or the known preserved app for version 31 or 32')
     parser.add_argument('--attempt-root',
         help='New canonical version-matching recovery root or bounded -attempt-<suffix> sibling; no reuse/reset')
     args = parser.parse_args()

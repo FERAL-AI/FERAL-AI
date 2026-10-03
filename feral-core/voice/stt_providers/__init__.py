@@ -50,6 +50,15 @@ class STTProvider(abc.ABC):
     is called (or ``flush()`` for explicit end-of-utterance).
     """
 
+    async def prepare(self) -> None:
+        """Prepare ingress before capture is acknowledged.
+
+        Buffered providers already accept audio into their own buffers.
+        Streaming providers override this to complete their transport setup.
+        Preparation is not verification of transcription/model quality.
+        """
+        pass
+
     @abc.abstractmethod
     async def open_stream(self) -> AsyncIterator[TranscriptFragment]:
         """Open a recognition stream and yield transcript fragments."""

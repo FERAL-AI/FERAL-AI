@@ -1,15 +1,15 @@
 # Theora / FERAL full-product release readiness
 
-Latest published source is `61550e74fbe806305034ccfad28bc96c6953a9d7`.
+Latest published source is `55a99aba7e1b83663ab3cb200ab05d2cd9fc8d3b`.
 The completion wave implements explicit interrupted-context recovery with a
 native durable journal, reviewed cloud setup and offline profile archives.
 Integrated earlier local backend checks: 570 passed. Current PR native checks passed;
 the unchanged type ratchet passed with 811 diagnostics against baseline 812.
-Full backend CI passed: **12,754 tests, 83 skipped, 74.89% coverage**.
+Full backend CI passed: **12,783 tests, 83 skipped, 74.93% coverage**.
 The optional vault-status correction passed the unchanged real route sweep.
 The earlier failed 2d6839 run remains historical evidence.
 
-Assembled **9.32/build2026100206** contains that exact source: all 484 production
+Assembled **9.32/build2026100206** contains `61550e74f`: all 484 production
 Python files match; build, strict ad-hoc signature and bounded runtime audit
 passed. Actual packaged backend Stop/recovery/restart/real local-model recall
 passed with zero tools at both startups in the disposable profile, no replay,
@@ -19,12 +19,17 @@ Actual 9.32 GUI remains blocked by the Computer Use native-pipe failure.
 [Candidate evidence](NATIVE_9_32_ACCEPTANCE.md).
 [Completion evidence](COMPLETION_WAVE_EVIDENCE.md).
 
-The next source wave repairs speech-only interruption/overlapping utterance
-admission and default archive coverage. Parent combined **279 tests passed**;
-exact new-head CI and a later candidate remain required. These corrections are
-not present in the immutable 9.32 artifact. Native preferences migration,
-voice attempt/output protocol and actual audio remain open rather than inferred
-from these bounded source checks.
+Published55a99 adds speech-only interruption/overlapping utterance admission
+and default archive coverage; parent combined279 tests passed before full CI.
+The next frozen wave adds owner-checked startup, engine callback fencing,
+recognition readiness and native chained audio handling. Engine285/2 skipped,
+configuration156/2 skipped, recognition57 and native44 assertions/typecheck passed;
+counts overlap. Mypy808 has zero added/three removed versus55a99, with stable inputs.
+[Startup/ownership evidence](VOICE_STARTUP_OWNERSHIP_EVIDENCE.md).
+Candidate9.33 assembly and new-head CI are next. These corrections are excluded
+from preserved9.32. A60-check live browser run failed copied-source integrity and
+is rerunning; it is not certified acceptance. Native preference migration,
+voice attempt/output protocol and actual audio remain open.
 
 ## Earlier source and candidate checkpoints
 

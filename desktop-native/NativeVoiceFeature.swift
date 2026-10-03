@@ -260,7 +260,7 @@ struct NativeVoiceTranscript: Identifiable {
         let type = frame["type"] as? String ?? "", payload = frame["payload"] as? [String: Any] ?? [:]
         // Status may precede configuration acknowledgment. Media never may:
         // queued frames from an earlier run must not play while a new run waits.
-        if ["voice_state", "transcript", "speech_started", "audio_response", "audio_delta", "tts_chunk"].contains(type) {
+        if ["voice_state", "transcript", "speech_started", "audio_response", "audio_delta", "tts_chunk", "audio_chunk", "voice_cancel"].contains(type) {
             guard captureRunning, ["active", "degraded"].contains(state) else { return }
         }
         switch type {
@@ -301,13 +301,23 @@ struct NativeVoiceTranscript: Identifiable {
             } else if id == nil, let index = transcripts.indices.last, transcripts[index].partial, transcripts[index].role == role { transcripts[index] = row }
             else { transcripts.append(row); if transcripts.count > 100 { transcripts.removeFirst(transcripts.count - 100) } }
         case "speech_started": flushPlayback(); phase = "listening"
-        case "audio_response", "audio_delta", "tts_chunk":
+        case "voice_cancel":
+            guard payload["drop_pending_audio"] as? Bool == true else { return }
+            flushPlayback(); phase = "listening"
+            diagnostic = "Queued speech stopped locally. The running task has its own cancellation controls."
+        case "audio_response", "audio_delta", "tts_chunk", "audio_chunk":
             do {
-                if type == "tts_chunk", let index = payload["chunk_index"] as? Int {
-                    guard index >= 0, index > ttsIndex else { throw NativeVoiceFailure(message: "A repeated or out-of-order speech chunk was refused.") }; ttsIndex = index
-                }
                 let final = payload["is_final"] as? Bool == true
-                let encoding = payload["encoding"] as? String ?? (type == "tts_chunk" ? "mp3" : "pcm16")
+                let sequenced = type == "tts_chunk" || type == "audio_chunk"
+                if sequenced {
+                    // Chained output closes with an empty sentinel at the last
+                    // emitted index; it must not replay that chunk's bytes.
+                    let emptyFinal = final && payload["data_b64"] as? String == ""
+                    if let index = payload["chunk_index"] as? Int {
+                        guard index >= 0, index > ttsIndex || (emptyFinal && index == ttsIndex) else { throw NativeVoiceFailure(message: "A repeated or out-of-order speech chunk was refused.") }; ttsIndex = index
+                    } else if type == "audio_chunk" { throw NativeVoiceFailure(message: "A chained speech chunk without ordering was refused.") }
+                }
+                let encoding = payload["encoding"] as? String ?? (sequenced ? "mp3" : "pcm16")
                 if let base64 = payload["data_b64"] as? String, !base64.isEmpty {
                     guard base64.count <= 2_800_000, let bytes = Data(base64Encoded: base64), bytes.count <= 2_000_000 else { throw NativeVoiceFailure(message: "Speech audio exceeded the local playback bound or was invalid.") }
                     guard ["pcm16", "mp3", "wav"].contains(encoding) else { throw NativeVoiceFailure(message: "The response audio format is unsupported.") }
@@ -316,7 +326,7 @@ struct NativeVoiceTranscript: Identifiable {
                     guard outputQueue.count < 32, queuedOutputBytes + bytes.count <= 4_000_000 else { throw NativeVoiceFailure(message: "Speech playback queue filled. Stop voice and try again.") }
                     outputQueue.append((bytes, encoding, rate)); queuedOutputBytes += bytes.count; assistantSpeaking = true; phase = "speaking"; pumpOutput()
                 }
-                if final { if type == "tts_chunk" { ttsIndex = -1 }; if !playing && outputQueue.isEmpty { assistantSpeaking = false; phase = "listening" } }
+                if final { if sequenced { ttsIndex = -1 }; if !playing && outputQueue.isEmpty { assistantSpeaking = false; phase = "listening" } }
             } catch { flushPlayback(); self.error = error.localizedDescription }
         default: break
         }

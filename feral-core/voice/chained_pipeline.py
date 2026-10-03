@@ -156,6 +156,9 @@ class ChainedSession:
     last_turn_started: float = 0.0
 
 
+STT_PREPARE_TIMEOUT_SECONDS = 10.0
+
+
 class ChainedVoicePipeline:
     """Manages chained STT->LLM->TTS voice sessions.
 
@@ -238,8 +241,22 @@ class ChainedVoicePipeline:
                 resamples from this, so a wrong value makes every
                 endpointing decision wrong.
         """
-        if session_id in self._sessions:
-            await self.close_session(session_id)
+        previous = self._sessions.get(session_id)
+        try:
+            prepare = getattr(stt_provider, "prepare", None)
+            if callable(prepare):
+                await asyncio.wait_for(prepare(), timeout=STT_PREPARE_TIMEOUT_SECONDS)
+            if self._sessions.get(session_id) is not previous:
+                raise RuntimeError("Recognition startup was superseded")
+            if previous is not None:
+                await self.close_session(session_id)
+                if session_id in self._sessions:
+                    raise RuntimeError("Recognition startup was superseded")
+        except BaseException:
+            # These providers have not been published; no SID lookup may
+            # attribute a concurrent replacement's resources to this call.
+            await asyncio.gather(stt_provider.close(), tts_provider.close(), return_exceptions=True)
+            raise
 
         session = ChainedSession(
             session_id=session_id,

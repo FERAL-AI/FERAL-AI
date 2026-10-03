@@ -12,7 +12,8 @@ import json
 import logging
 import os
 import time
-from typing import Optional, Callable
+from contextvars import ContextVar
+from typing import Optional, Callable, Awaitable, ParamSpec, TypeVar
 from uuid import uuid4
 
 from agents.tool_display import tool_feedback_text
@@ -21,6 +22,11 @@ from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
 
 logger = logging.getLogger("feral.voice.gemini")
+
+_CallbackArgs = ParamSpec("_CallbackArgs")
+_CallbackResult = TypeVar("_CallbackResult")
+_CALLBACK_OWNER: ContextVar["GeminiRealtimeSession | None"] = ContextVar("gemini_voice_callback_owner", default=None)
+_CALLBACK_RESPONSE: ContextVar["tuple[GeminiRealtimeSession, int] | None"] = ContextVar("gemini_voice_callback_response", default=None)
 
 GEMINI_WS_URL = (
     "wss://generativelanguage.googleapis.com/ws/"
@@ -71,6 +77,10 @@ class GeminiRealtimeSession:
         self._ws = None
         self._connected = False
         self._recv_task: Optional[asyncio.Task] = None
+        self._retired = False
+        self._callback_guard: Callable[[], bool] | None = None
+        self._callback_tasks: set[asyncio.Task] = set()
+        self._output_epoch = 0
 
     @property
     def connected(self) -> bool:
@@ -190,13 +200,21 @@ class GeminiRealtimeSession:
         })
 
     async def disconnect(self):
+        self._retired = True
+        self._output_epoch += 1
+        current = asyncio.current_task()
+        for task in tuple(self._callback_tasks):
+            if task is not current:
+                task.cancel()
         self._connected = False
-        if self._recv_task:
+        if self._recv_task and self._recv_task is not current:
             self._recv_task.cancel()
-            try:
-                await self._recv_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            done, _ = await asyncio.wait({self._recv_task}, timeout=1.0)
+            if done:
+                try:
+                    self._recv_task.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
         if self._ws:
             try:
                 await self._ws.close()
@@ -220,13 +238,24 @@ class GeminiRealtimeSession:
                     await self._handle_event(event)
                 except json.JSONDecodeError:
                     continue
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if not self._owns_callbacks() or (task is not None and task.cancelling()):
+                        raise
+                    continue
         except asyncio.CancelledError:
             return
         except Exception as e:
             logger.error(f"Gemini receive error: {e}")
             self._connected = False
 
+    def _owns_callbacks(self) -> bool:
+        return not self._retired and (self._callback_guard is None or self._callback_guard())
+
     async def _handle_event(self, event: dict):
+        if not self._owns_callbacks():
+            return
+        epoch = self._output_epoch
         if "setupComplete" in event:
             logger.info("Gemini setup complete")
             return
@@ -234,10 +263,14 @@ class GeminiRealtimeSession:
         server_content = event.get("serverContent")
         if server_content:
             await self._handle_server_content(server_content)
+            if not self._owns_callbacks() or epoch != self._output_epoch:
+                return
 
         tool_call = event.get("toolCall")
         if tool_call:
             await self._handle_tool_call_event(tool_call)
+            if not self._owns_callbacks() or epoch != self._output_epoch:
+                return
 
         if "error" in event:
             error = event["error"]
@@ -247,8 +280,23 @@ class GeminiRealtimeSession:
                 await self._on_error(self.session_id, msg)
 
     async def _handle_server_content(self, sc: dict):
+        # Gemini serverContent has no response ID. This epoch fences suspended
+        # work after a known interruption, not arbitrary unmarked late packets.
+        if sc.get("interrupted"):
+            self._output_epoch += 1
+            if self._on_speech_started:
+                await self._on_speech_started(self.session_id)
+            # Input transcription is independent user content, even when
+            # carried in the same serverContent envelope as interruption.
+            input_tx = sc.get("inputTranscription", {}).get("text")
+            if self._owns_callbacks() and input_tx and self._on_input_transcript:
+                await self._on_input_transcript(self.session_id, input_tx)
+            return
+        epoch = self._output_epoch
         parts = sc.get("modelTurn", {}).get("parts", [])
         for part in parts:
+            if not self._owns_callbacks() or epoch != self._output_epoch:
+                return
             if "inlineData" in part:
                 inline = part["inlineData"]
                 if inline.get("mimeType", "").startswith("audio/"):
@@ -258,26 +306,33 @@ class GeminiRealtimeSession:
                         )
 
         input_tx = sc.get("inputTranscription", {}).get("text")
+        if not self._owns_callbacks() or epoch != self._output_epoch:
+            return
         if input_tx and self._on_input_transcript:
             await self._on_input_transcript(self.session_id, input_tx)
 
         output_tx = sc.get("outputTranscription", {}).get("text")
+        if not self._owns_callbacks() or epoch != self._output_epoch:
+            return
         if output_tx and self._on_transcript:
             await self._on_transcript(self.session_id, output_tx, True)
 
         if sc.get("turnComplete"):
+            if not self._owns_callbacks() or epoch != self._output_epoch:
+                return
             if self._on_transcript:
                 await self._on_transcript(self.session_id, "", False)
             if self._on_audio_delta:
+                if not self._owns_callbacks() or epoch != self._output_epoch:
+                    return
                 await self._on_audio_delta(self.session_id, "", True)
 
-        if sc.get("interrupted"):
-            if self._on_speech_started:
-                await self._on_speech_started(self.session_id)
-
     async def _handle_tool_call_event(self, tool_call: dict):
+        epoch = self._output_epoch
         function_calls = tool_call.get("functionCalls", [])
         for fc in function_calls:
+            if not self._owns_callbacks() or epoch != self._output_epoch:
+                return
             name = fc.get("name", "")
             args = json.dumps(fc.get("args", {}))
             call_id = fc.get("id", str(uuid4())[:8])
@@ -286,6 +341,8 @@ class GeminiRealtimeSession:
                 result = await self._on_tool_call(
                     self.session_id, call_id, name, args,
                 )
+                if not self._owns_callbacks() or epoch != self._output_epoch:
+                    return
                 await self.send_tool_response([{
                     "name": name,
                     "id": call_id,
@@ -350,6 +407,46 @@ class GeminiRealtimeProxy:
         sid = self._node_to_session.get(node_id)
         return self._sessions.get(sid) if sid else None
 
+    def _assert_callback_owner(self, session_id: str) -> None:
+        owner = _CALLBACK_OWNER.get()
+        if owner is not None and (owner.session_id != session_id or self._sessions.get(session_id) is not owner or owner._retired):
+            raise asyncio.CancelledError("Retired voice callback")
+        response = _CALLBACK_RESPONSE.get()
+        if owner is not None and response is not None and response[0] is owner and response[1] != owner._output_epoch:
+            raise asyncio.CancelledError("Retired voice response")
+
+    def _bind_callback(
+        self, owner: GeminiRealtimeSession,
+        callback: Callable[_CallbackArgs, Awaitable[_CallbackResult]],
+        *, response_scoped: bool = False,
+    ) -> Callable[_CallbackArgs, Awaitable[_CallbackResult]]:
+        async def bound(*args: _CallbackArgs.args, **kwargs: _CallbackArgs.kwargs) -> _CallbackResult:
+            if not owner._owns_callbacks():
+                raise asyncio.CancelledError("Retired voice callback")
+            token = _CALLBACK_OWNER.set(owner)
+            response_token = _CALLBACK_RESPONSE.set((owner, owner._output_epoch) if response_scoped else None)
+            task = asyncio.current_task()
+            already_tracked = task in owner._callback_tasks if task is not None else False
+            if task is not None:
+                owner._callback_tasks.add(task)
+            try:
+                self._assert_callback_owner(owner.session_id)
+                result = await callback(*args, **kwargs)
+                self._assert_callback_owner(owner.session_id)
+                return result
+            finally:
+                if task is not None and not already_tracked:
+                    owner._callback_tasks.discard(task)
+                _CALLBACK_OWNER.reset(token)
+                _CALLBACK_RESPONSE.reset(response_token)
+        return bound
+
+    def _track_callback_task(self, task: asyncio.Task) -> None:
+        owner = _CALLBACK_OWNER.get()
+        if owner is not None:
+            owner._callback_tasks.add(task)
+            task.add_done_callback(owner._callback_tasks.discard)
+
     async def start_session(
         self,
         session_id: str,
@@ -396,8 +493,28 @@ class GeminiRealtimeProxy:
             on_error=on_error or self._handle_error,
         )
 
-        await gs.connect()
-        if not getattr(gs, 'connected', False) and not getattr(gs, '_ws', None):
+        gs._callback_guard = lambda: self._sessions.get(session_id) is gs
+        # Supplied application callbacks obey the same ownership contract as
+        # built-in memory, tool, audio and fallback handlers.
+        gs._on_audio_delta = self._bind_callback(gs, on_audio_delta or self._handle_audio_delta, response_scoped=True)
+        gs._on_transcript = self._bind_callback(gs, on_transcript or self._handle_transcript, response_scoped=True)
+        gs._on_input_transcript = self._bind_callback(gs, self._handle_input_transcript)
+        gs._on_tool_call = self._bind_callback(gs, on_tool_call or self._handle_tool_call, response_scoped=True)
+        gs._on_speech_started = self._bind_callback(gs, on_speech_started or self._handle_speech_started)
+        gs._on_error = self._bind_callback(gs, on_error or self._handle_error)
+        self._sessions[session_id] = gs
+        try:
+            await gs.connect()
+        except (asyncio.CancelledError, Exception):
+            if self._sessions.get(session_id) is gs:
+                self._sessions.pop(session_id)
+            await gs.disconnect()
+            raise
+        owns_start = self._sessions.get(session_id) is gs
+        if not owns_start or not getattr(gs, 'connected', False):
+            if owns_start:
+                self._sessions.pop(session_id)
+            await gs.disconnect()
             logger.warning("Gemini voice session failed to connect for %s", session_id)
             # Lane 05 : same connect-failure fan-out OpenAI got in
             # workstream 9 — emit a structured ``voice_status:
@@ -409,7 +526,7 @@ class GeminiRealtimeProxy:
             else:
                 reason = "gemini_live_connect"
                 detail = "Gemini Live WS handshake failed"
-            if self._fallback_router:
+            if owns_start and self._fallback_router:
                 try:
                     await self._fallback_router.handle_realtime_failure(
                         session_id=session_id,
@@ -422,13 +539,14 @@ class GeminiRealtimeProxy:
                         "Fallback router refused gemini connect failure"
                     )
             return None
-        self._sessions[session_id] = gs
         self._node_to_session[node_id] = session_id
 
         try:
             from api.state import state
             if state.orchestrator:
                 for sid in list(state.sessions.keys()):
+                    if self._sessions.get(session_id) is not gs:
+                        break
                     await state.orchestrator._emit_brain_event(sid, "voice_session", {
                         "active": True, "provider": "gemini", "session_id": session_id,
                     })
@@ -438,15 +556,20 @@ class GeminiRealtimeProxy:
         return gs
 
     async def stop_session(self, session_id: str):
+        self._assert_callback_owner(session_id)
         gs = self._sessions.pop(session_id, None)
         if gs:
             self._node_to_session.pop(gs.node_id, None)
             await gs.disconnect()
+            if session_id in self._sessions:
+                return
 
             try:
                 from api.state import state
                 if state.orchestrator:
                     for sid in list(state.sessions.keys()):
+                        if session_id in self._sessions:
+                            break
                         await state.orchestrator._emit_brain_event(sid, "voice_session", {
                             "active": False, "provider": "gemini", "session_id": session_id,
                         })
@@ -522,6 +645,7 @@ class GeminiRealtimeProxy:
         return tool_feedback_text(tool_name)
 
     async def _send_tool_feedback(self, session_id: str, text: str):
+        self._assert_callback_owner(session_id)
         if not text:
             return
         gs = self._sessions.get(session_id)
@@ -544,14 +668,17 @@ class GeminiRealtimeProxy:
                 payload=payload,
             )
             await self._send_to_session(session_id, msg)
+            self._assert_callback_owner(session_id)
             return
         if self._send_to_node:
             await self._send_to_node(gs.node_id, {
                 "type": "transcript",
                 "payload": payload,
             })
+            self._assert_callback_owner(session_id)
 
     async def _handle_audio_delta(self, session_id: str, audio_b64: str, is_done: bool):
+        self._assert_callback_owner(session_id)
         gs = self._sessions.get(session_id)
         if not gs:
             return
@@ -566,14 +693,19 @@ class GeminiRealtimeProxy:
                 payload=payload,
             )
             await self._send_to_session(session_id, msg)
+            self._assert_callback_owner(session_id)
         elif self._send_to_node:
             await self._send_to_node(gs.node_id, {"type": "audio_response", "payload": payload})
+            self._assert_callback_owner(session_id)
 
     async def _handle_transcript(self, session_id: str, text: str, is_partial: bool):
+        self._assert_callback_owner(session_id)
         async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            self._assert_callback_owner(session_id)
             return await self._checkpoint_legacy_handle_transcript(session_id=session_id, text=text, is_partial=is_partial)
 
     async def _checkpoint_legacy_handle_transcript(self, session_id: str, text: str, is_partial: bool):
+        self._assert_callback_owner(session_id)
         if not is_partial and text and self._memory:
             self._memory.working_push(session_id, {
                 "role": "assistant", "text": text[:300], "source": "gemini_realtime",
@@ -594,6 +726,7 @@ class GeminiRealtimeProxy:
                         source="voice_realtime_gemini",
                         title=f"Voice session {session_id[:8]}",
                     )
+                    self._assert_callback_owner(session_id)
             except Exception as exc:
                 logger.debug("gemini voice persistence skipped: %s", exc)
 
@@ -605,17 +738,21 @@ class GeminiRealtimeProxy:
         if not is_partial and text and self._orchestrator is not None:
             try:
                 await self._orchestrator.note_voice_assistant_turn(session_id, text)
+                self._assert_callback_owner(session_id)
             except Exception:
                 logger.exception(
                     "gemini: note_voice_assistant_turn failed (non-fatal)"
                 )
 
     async def _handle_input_transcript(self, session_id: str, text: str):
+        self._assert_callback_owner(session_id)
         async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            self._assert_callback_owner(session_id)
             return await self._checkpoint_legacy_handle_input_transcript(session_id=session_id, text=text)
 
     async def _checkpoint_legacy_handle_input_transcript(self, session_id: str, text: str):
         """Handle user-speech transcription returned by Gemini."""
+        self._assert_callback_owner(session_id)
         # Bug 3 (phantom commit gate): same blocklist the OpenAI
         # Realtime path applies — Gemini Live ALSO commits hallucinated
         # closers on trailing silence (mirrors whisper's training-set
@@ -637,6 +774,7 @@ class GeminiRealtimeProxy:
                         source="voice_realtime_gemini",
                         title=f"Voice session {session_id[:8]}",
                     )
+                    self._assert_callback_owner(session_id)
             except Exception as exc:
                 logger.debug("gemini voice input persistence skipped: %s", exc)
 
@@ -655,6 +793,7 @@ class GeminiRealtimeProxy:
                 hook_out = await self._orchestrator.note_voice_user_turn(
                     session_id, text, emit_temporal_timeline=True,
                 )
+                self._assert_callback_owner(session_id)
             except Exception:
                 logger.exception(
                     "gemini: note_voice_user_turn failed (non-fatal)"
@@ -666,6 +805,7 @@ class GeminiRealtimeProxy:
                 if gs_for_hint is not None:
                     try:
                         await gs_for_hint.send_text(context_hint)
+                        self._assert_callback_owner(session_id)
                     except Exception:
                         logger.debug(
                             "gemini: send_text for active-subject hint failed",
@@ -679,6 +819,7 @@ class GeminiRealtimeProxy:
                         self._refresh_memory_context(session_id, text),
                         name="gemini-memory-refresh",
                     )
+                    self._track_callback_task(_t)
                     self._bg_tasks.add(_t)
                     _t.add_done_callback(self._bg_tasks.discard)
             except Exception:
@@ -702,14 +843,17 @@ class GeminiRealtimeProxy:
                 payload=payload,
             )
             await self._send_to_session(session_id, msg)
+            self._assert_callback_owner(session_id)
         elif self._send_to_node:
             await self._send_to_node(gs.node_id, {"type": "transcript", "payload": payload})
+            self._assert_callback_owner(session_id)
 
     async def _refresh_memory_context(self, session_id: str, query: str) -> None:
         """Pull the freshest memory context relevant to ``query`` and
         inject it into the Gemini live session via ``send_text``. Mirror
         of ``RealtimeProxy._refresh_memory_context``. Background-only,
         never raises."""
+        self._assert_callback_owner(session_id)
         gs = self._sessions.get(session_id)
         if not gs or not self._memory:
             return
@@ -717,6 +861,7 @@ class GeminiRealtimeProxy:
             ctx = await self._memory.build_context_for_llm(
                 session_id, query=query, max_tokens_budget=600,
             )
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.debug(
                 "gemini: build_context_for_llm failed for refresh",
@@ -727,6 +872,7 @@ class GeminiRealtimeProxy:
             return
         try:
             await gs.send_text(f"[Memory Context — query: {query[:80]}]\n{ctx}")
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.debug(
                 "gemini: send_text for memory refresh failed",
@@ -752,13 +898,16 @@ class GeminiRealtimeProxy:
             return None
 
     async def _handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
+        self._assert_callback_owner(session_id)
         try:
             async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+                self._assert_callback_owner(session_id)
                 return await self._checkpoint_legacy_handle_tool_call(session_id=session_id, call_id=call_id, name=name, arguments=arguments)
         except RuntimeContextError as exc:
             return json.dumps({"success": False, "error": "Managed realtime tools are unavailable", "code": exc.code})
 
     async def _checkpoint_legacy_handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
+        self._assert_callback_owner(session_id)
         if not self._skill_executor or not self._skill_registry:
             return json.dumps({"error": "No skill executor"})
         try:
@@ -776,6 +925,7 @@ class GeminiRealtimeProxy:
         if not endpoint:
             return json.dumps({"error": f"Endpoint not found: {endpoint_id}"})
         await self._send_tool_feedback(session_id, self._tool_feedback_text(name))
+        self._assert_callback_owner(session_id)
 
         # PR9: see realtime_proxy._handle_tool_call — emit the chat
         # trace envelopes so voice tools render in the v2 ToolTrace.
@@ -784,6 +934,7 @@ class GeminiRealtimeProxy:
         if self._orchestrator is not None:
             try:
                 await self._orchestrator._emit_tool_start(session_id, tool_call)
+                self._assert_callback_owner(session_id)
             except Exception:
                 logger.exception("gemini voice tool_start emit failed")
 
@@ -806,6 +957,7 @@ class GeminiRealtimeProxy:
                 call_id=call_id,
             ):
                 result = await self._skill_executor.execute(name, args, skill, endpoint)
+                self._assert_callback_owner(session_id)
 
         if self._orchestrator is not None:
             latency_ms = (time.time() - t0) * 1000.0
@@ -813,6 +965,7 @@ class GeminiRealtimeProxy:
                 await self._orchestrator._emit_tool_result(
                     session_id, tool_call, result, latency_ms,
                 )
+                self._assert_callback_owner(session_id)
             except Exception:
                 logger.exception("gemini voice tool_result emit failed")
 
@@ -822,6 +975,7 @@ class GeminiRealtimeProxy:
         # ``RealtimeProxy._record_voice_tool_episode`` for the shape.
         try:
             await self._record_voice_tool_episode(session_id, name, args, result)
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.debug(
                 "gemini: voice tool episode persistence skipped",
@@ -929,10 +1083,12 @@ class GeminiRealtimeProxy:
         except RuntimeError:
             await _runner()
         else:
+            self._track_callback_task(_t)
             self._bg_tasks.add(_t)
             _t.add_done_callback(self._bg_tasks.discard)
 
     async def _handle_speech_started(self, session_id: str):
+        self._assert_callback_owner(session_id)
         gs = self._sessions.get(session_id)
         if not gs:
             return
@@ -947,11 +1103,13 @@ class GeminiRealtimeProxy:
                 payload=payload,
             )
             await self._send_to_session(session_id, msg)
+            self._assert_callback_owner(session_id)
             return
         if self._send_to_node:
             await self._send_to_node(gs.node_id, {
                 "type": "speech_started", "payload": payload,
             })
+            self._assert_callback_owner(session_id)
 
     async def _handle_error(self, session_id: str, error: str):
         """Classify a Gemini Live error and trigger fallback parity
@@ -970,6 +1128,7 @@ class GeminiRealtimeProxy:
           * 503 / model overloaded → ``gemini_live_overload``
           * any other → ``gemini_live_error``
         """
+        self._assert_callback_owner(session_id)
         err_lc = (error or "").lower()
         if (
             "api_key_invalid" in err_lc
@@ -1004,6 +1163,7 @@ class GeminiRealtimeProxy:
                     detail=str(error)[:200],
                     provider="gemini",
                 )
+                self._assert_callback_owner(session_id)
             except Exception:
                 logger.exception(
                     "Fallback router refused gemini failure handoff"
