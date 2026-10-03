@@ -25,10 +25,11 @@ async def stop_channel(body: dict, response: Response):
     if manager is None:
         response.status_code = 503
         return {"ok": False, "reason": "manager_unavailable"}
-    channels = getattr(manager, "_channels", None)
-    if not isinstance(channels, dict):
+    raw_channels = getattr(manager, "_channels", None)
+    if not isinstance(raw_channels, dict):
         response.status_code = 501
         return {"ok": False, "reason": "unsupported_manager"}
+    channels = raw_channels
     channel = channels.get(channel_type)
     if channel is None:
         response.status_code = 404

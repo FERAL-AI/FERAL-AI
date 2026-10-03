@@ -27,10 +27,11 @@ async def mcp_disconnect(body: dict, response: Response):
     if manager is None:
         response.status_code = 503
         return {"success": False, "reason": "manager_unavailable"}
-    servers = getattr(manager, "_servers", None)
-    if not isinstance(servers, dict):
+    raw_servers = getattr(manager, "_servers", None)
+    if not isinstance(raw_servers, dict):
         response.status_code = 501
         return {"success": False, "reason": "unsupported_manager"}
+    servers = raw_servers
     connection = servers.get(name)
     if connection is None:
         response.status_code = 404

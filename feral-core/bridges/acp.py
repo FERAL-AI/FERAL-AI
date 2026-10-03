@@ -607,14 +607,17 @@ class AcpAgentProcess:
         call = params.get("toolCall")
         if not isinstance(call, dict) or call.get("rawInput"):
             return params
-        session = self.sessions.get(params.get("sessionId"))
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return params
+        session = self.sessions.get(session_id)
         call_id, kind = call.get("toolCallId"), call.get("kind")
         if session is None or not isinstance(call_id, str) or not call_id or not isinstance(kind, str):
             return params
         events = [event for event in session.transcript if event.is_tool_call and event.tool_call_id == call_id]
         if not events or events[-1].status in {"completed", "failed"}:
             return params
-        snapshot = {}
+        snapshot: dict[str, object] = {}
         for event in events:
             if event.session_id != session.session_id or event.raw.get("kind", kind) != kind:
                 return params

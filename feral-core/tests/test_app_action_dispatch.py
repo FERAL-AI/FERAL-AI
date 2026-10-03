@@ -380,6 +380,86 @@ async def test_malformed_new_app_confirmation_fails_closed(registry, orchestrato
     orchestrator.handle_command.assert_not_called()
 
 
+class _TimestampInt(int):
+    pass
+
+
+class _TimestampFloat(float):
+    pass
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("field,value", [
+    pytest.param("created_at", "0", id="string-created"),
+    pytest.param("expires_at", "300", id="string-expiry"),
+    pytest.param("created_at", False, id="bool-created"),
+    pytest.param("expires_at", True, id="bool-expiry"),
+    pytest.param("created_at", _TimestampInt(0), id="int-subclass-created"),
+    pytest.param("expires_at", _TimestampInt(300), id="int-subclass-expiry"),
+    pytest.param("created_at", _TimestampFloat(0), id="float-subclass-created"),
+    pytest.param("expires_at", _TimestampFloat(300), id="float-subclass-expiry"),
+    pytest.param("created_at", 10 ** 1000, id="oversized-created"),
+    pytest.param("expires_at", 10 ** 1000, id="oversized-expiry"),
+])
+async def test_confirmation_timestamp_types_and_overflow_refuse_once(
+    registry, orchestrator, monkeypatch, field, value,
+):
+    # At time zero, False/True and numeric subclasses would otherwise describe
+    # a live bounded window. This distinguishes strict type rejection from an
+    # unrelated expired/future timestamp refusal.
+    monkeypatch.setattr("agents.ui_handlers.time.time", lambda: 0)
+    mock_state, request_id, _ = await _request_confirmation(registry, orchestrator)
+    pending = orchestrator._pending_confirmations[request_id]
+    pending[field] = value
+    with patch("api.state.state", mock_state):
+        await handle_ui_event(orchestrator, session_id="foreign", action_id="confirm_" + request_id, event="tap")
+        assert orchestrator._pending_confirmations[request_id] is pending
+        assert orchestrator.send.await_count == 1
+        await handle_ui_event(orchestrator, session_id="s1", action_id="confirm_" + request_id, event="tap")
+        receipt = orchestrator.send.await_args.args[1]
+        assert receipt.payload["status"] == "error"
+        assert receipt.payload["dispatch_accepted"] is False
+        assert receipt.payload["tool_outcome_verified"] is False
+        assert request_id not in orchestrator._pending_confirmations
+        await handle_ui_event(orchestrator, session_id="s1", action_id="confirm_" + request_id, event="tap")
+        assert orchestrator.send.await_count == 2
+    orchestrator.handle_command.assert_not_called()
+    orchestrator._execute_tool_call.assert_not_called()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("created,expiry,now,status", [
+    pytest.param(0, 300.0, 0, "accepted", id="exact-300-second-window"),
+    pytest.param(1, 301, 0, "error", id="future-created"),
+    pytest.param(0, 301, 0, "error", id="overlong-window"),
+    pytest.param(0, 0, 0, "error", id="empty-window"),
+    pytest.param(0, -1, 0, "error", id="reversed-window"),
+    pytest.param(0, 300, 300, "expired", id="exact-expiry"),
+    pytest.param(-1e308, 1e308, 0, "error", id="unbounded-finite-gap"),
+])
+async def test_confirmation_timestamp_window_boundaries(
+    registry, orchestrator, monkeypatch, created, expiry, now, status,
+):
+    monkeypatch.setattr("agents.ui_handlers.time.time", lambda: now)
+    mock_state, request_id, _ = await _request_confirmation(registry, orchestrator)
+    pending = orchestrator._pending_confirmations[request_id]
+    pending["created_at"], pending["expires_at"] = created, expiry
+    with patch("api.state.state", mock_state):
+        await handle_ui_event(orchestrator, session_id="s1", action_id="confirm_" + request_id, event="tap")
+        receipt = orchestrator.send.await_args.args[1]
+        assert receipt.payload["status"] == status
+        assert receipt.payload["dispatch_accepted"] is (status == "accepted")
+        assert receipt.payload["tool_outcome_verified"] is False
+        assert request_id not in orchestrator._pending_confirmations
+        await handle_ui_event(orchestrator, session_id="s1", action_id="confirm_" + request_id, event="tap")
+        assert orchestrator.send.await_count == 2
+    if status == "accepted":
+        orchestrator.handle_command.assert_awaited_once()
+    else:
+        orchestrator.handle_command.assert_not_called()
+    orchestrator._execute_tool_call.assert_not_called()
+
+
 @pytest.mark.asyncio
 async def test_expired_confirmation_never_dispatches(registry, orchestrator):
     mock_state, request_id, _ = await _request_confirmation(registry, orchestrator)

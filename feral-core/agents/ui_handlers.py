@@ -69,9 +69,17 @@ async def handle_ui_event(
                 now = time.time()
                 created, expiry = pending.get("created_at"), pending.get("expires_at")
                 import math
-                valid = (type(created) in (int, float) and type(expiry) in (int, float)
-                         and math.isfinite(created) and math.isfinite(expiry)
-                         and created <= now and expiry > created and expiry - created <= 300)
+                if (not isinstance(created, (int, float)) or not isinstance(expiry, (int, float))
+                        or type(created) not in (int, float) or type(expiry) not in (int, float)):
+                    await receipt("error")
+                    return
+                try:
+                    valid = (math.isfinite(created) and math.isfinite(expiry)
+                             and created <= now and expiry > created and expiry - created <= 300)
+                except OverflowError:
+                    # isfinite converts built-in ints to float; an oversized
+                    # timestamp must refuse consent rather than escape dispatch.
+                    valid = False
                 if not valid:
                     await receipt("error")
                     return

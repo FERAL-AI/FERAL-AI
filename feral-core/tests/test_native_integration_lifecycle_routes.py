@@ -199,6 +199,87 @@ async def test_channel_replacement_survives_await(managers):
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("surface", ["mcp", "channel"])
+@pytest.mark.parametrize("replacement_kind", ["manager", "table"])
+@pytest.mark.parametrize("close_fails", [False, True])
+async def test_registered_teardown_preserves_postawait_replacement(
+    managers, monkeypatch, surface, replacement_kind, close_fails,
+):
+    cm, mm = managers
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def paused_close():
+        entered.set()
+        await release.wait()
+        if close_fails:
+            raise RuntimeError("private-close-fixture")
+
+    if surface == "mcp":
+        module, manager = mcp, mm
+        manager_field, table_field, key = "mcp_client", "_servers", "local"
+        old, replacement = Connection(paused_close), Connection()
+        path, body = "/api/mcp/disconnect", {"name": key}
+        reason = "connection_replaced"
+        partial_flag = "captured_connection_closed"
+        manager._server_configs[key] = {"captured": True}
+    else:
+        module, manager = channels, cm
+        manager_field, table_field, key = "channel_manager", "_channels", "slack"
+        old, replacement = Listener(paused_close), Listener()
+        path, body = "/api/channels/stop", {"type": key}
+        reason = "channel_replaced"
+        partial_flag = "captured_channel_stopped"
+    captured_table = getattr(manager, table_field)
+    captured_table[key] = old
+    replacement_table = {key: replacement}
+    app = FastAPI()
+    app.include_router(module.router)
+    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+        request = asyncio.create_task(client.post(path, json=body))
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=2)
+            if replacement_kind == "manager":
+                replacement_manager = SimpleNamespace(**{table_field: replacement_table})
+                if surface == "mcp":
+                    replacement_manager._server_configs = {key: {"replacement": True}}
+                monkeypatch.setattr(module.state, manager_field, replacement_manager)
+            else:
+                setattr(manager, table_field, replacement_table)
+                if surface == "mcp":
+                    manager._server_configs[key] = {"replacement": True}
+            release.set()
+            response = await asyncio.wait_for(request, timeout=2)
+        finally:
+            release.set()
+            if not request.done():
+                request.cancel()
+            await asyncio.gather(request, return_exceptions=True)
+
+    result = response.json()
+    assert result.get("ok", result.get("success")) is False
+    if close_fails:
+        assert response.status_code == 502
+        assert result["runtime_outcome"] == "uncertain"
+        assert result["reason"] in {"disconnect_failed", "stop_failed"}
+        assert "private-close-fixture" not in str(result)
+    else:
+        assert response.status_code == 409
+        assert result["reason"] == reason
+        assert result[partial_flag] is True
+    active_manager = getattr(module.state, manager_field)
+    assert getattr(active_manager, table_field) is replacement_table
+    assert replacement_table[key] is replacement
+    assert replacement.calls == 0
+    assert captured_table[key] is old
+    assert old.calls == 1
+    if surface == "mcp":
+        assert replacement._connected is True
+        assert active_manager._server_configs[key] == {"replacement": True}
+    else:
+        assert replacement._running is True
+
+
+@pytest.mark.asyncio
 async def test_stop_drains_poll_and_background_but_not_shared_task(managers):
     manager, _ = managers
     drained = []
