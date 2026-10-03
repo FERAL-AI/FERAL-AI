@@ -8,14 +8,19 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 ## Current status at a glance
 
 - Review branch: [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-  Latest published source is `7f818da08139952b1698644469e7016563512cd5`; verify
+  Latest published source is `86a8b54ed273642da40776e75609f5a45a197924`; verify
   current remote tip before resuming. Main remains `452a01255`; no merge or release.
 - Exact7f PR verification: native, SDK, web, docs and naming passed. Remote mypy808
   matches all frozen local diagnostics against the unchanged812 count baseline.
   Backend failed:12,867 passed/3 failed/83 skipped/one setup error,75.10% coverage.
   Two fixtures omitted real connection/session ownership; corrections pass132
   focused tests. The setup sys.modules iteration now snapshots before iterating;
-  the affected ambient suite passes16 tests. New full CI remains required.
+  the affected ambient suite passes16 tests. Corrections published86a8b54; new
+  exact86 backend CI passed12,871/83 skipped/75.10%, native and mypy808 passed.
+  The web job failed after1,358 passing tests with a post-unmount Shell hydration
+  callback. Five deferred-response regressions reproduced it; the correction
+  passes201 shell tests and awaits new-head full CI. See
+  [hydration evidence](WEB_HYDRATION_LIFECYCLE_EVIDENCE.md).
   Prior55a99 CI passed12,783/83 skipped/74.93%; do not apply it to7f.
 - Packaged **9.32/build2026100206** contains exact source `61550e74f`.
   Build/signature/runtime/source checks passed. Actual disposable packaged-backend
@@ -62,10 +67,20 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   [Startup/ownership evidence](VOICE_STARTUP_OWNERSHIP_EVIDENCE.md).
   Candidate9.33/build2026100207 is assembled at exact7f:485 production files match;
   strict signature/runtime audit passed. Actual attempt2 completed Stop/recovery/
-  real local-model recall but restart exceeded100s readiness, so acceptance failed.
-  Attempt1 was sandbox-denied; both records remain. No retry weakens the deadline.
+  real local-model recall but restart exceeded100s readiness. Attempt3 passed the
+  complete unchanged journey/deadline in a fresh profile, including restart recall,
+  four receipts/zero tools and clean owned shutdown. Post-run hash/signature/all485
+  sources match. Earlier failed records remain; timeout cause remains unresolved.
+  [9.33 acceptance](NATIVE_9_33_ACCEPTANCE.md).
   A live browser run passed60 checks but failed copied-source integrity; do not
-  certify it. The worker reruns from an exact tracked, read-only source snapshot.
+  certify it. Exact7f tracked rerun passed60/failed1 Chat with an ENOSPC write error;
+  all1,127 source entries stayed unchanged, but end provenance was incomplete.
+  Focused resource-controlled Chat/keyboard rerun passed4 tests with complete
+  provenance and unchanged sources. Fresh full61 run with the corrected shutdown
+  observer is active; full browser acceptance remains open.
+  Next wave active: backend/native attempt-v1 ACK/media/control correlation and
+  explicit native preference/archive continuity. Native attempt fixtures55 pass;
+  preference component64 pass but remains unwired until archive/UI integration.
   Candidate9.32 remains unchanged and excludes these later source corrections.
   Its recovery probe passed with a disposable empty-tool fixture;
   it does not certify tool-enabled tasks, voice, cloud accounts or GUI operation.
@@ -98,10 +113,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Published7f818da native/web/SDK/type checks pass; backend failed3 fixtures/one setup race. Corrections132+16 tests pass; full rerun next.9.33 actual recovery restart acceptance incomplete |
+| Current checkpoint | Published86a8b54 backend12,871/native/type passed; web failed post-unmount. Shell correction passes201 tests, full new CI required.9.33 exact7f actual packaged recovery/restart passed; browser full61/attempt/prefs wave active |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | Latest2.9GiB free after five inspected completed-test mypy caches removed(~225MiB); logs/profiles/models/artifacts retained. Availability fluctuates; no disk-caused app crash established |
+| Disk observation | Latest3.2GiB free; five inspected completed-test mypy caches removed(~225MiB), logs/profiles/models/artifacts retained. Availability fluctuates; no disk-caused app crash established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update

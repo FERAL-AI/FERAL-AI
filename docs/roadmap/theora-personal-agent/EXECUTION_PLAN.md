@@ -14,12 +14,15 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Published source `7f818da08139952b1698644469e7016563512cd5` is in
+Published source `86a8b54ed273642da40776e75609f5a45a197924` is in
 [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
 Prior55a99 full backend passed12,783/83 skipped/74.93%. Exact7f native/web/SDK/type
 checks pass (808 matches frozen local); backend failed3 fixtures/one setup race
 with12,867 passed/83 skipped/75.10%. Fixture corrections132 plus ambient16 tests
-pass; full repaired CI remains required.
+pass. Exact86 backend passes12,871/83 skipped/75.10%, native and mypy808 pass.
+The web job failed after1,358 passing tests due to a post-unmount hydration
+callback. The five-case lifecycle correction passes201 shell tests; new-head full
+CI remains required. [Hydration evidence](WEB_HYDRATION_LIFECYCLE_EVIDENCE.md).
 Packaged 9.32 contains exact 61550e7 source. Its actual isolated Stop → recovery →
 real local-model recall → restart → recall journey passed without task replay,
 with zero tools at initial boot and restart. Strict signature, hash and all 484
@@ -28,6 +31,10 @@ GUI acceptance remains blocked by Computer Use native-pipe startup failure.
 See [completion evidence](COMPLETION_WAVE_EVIDENCE.md) and
 [candidate acceptance](NATIVE_9_32_ACCEPTANCE.md). Earlier artifacts and failed
 runs below remain historical evidence.
+
+Exact7f-source9.33 also passed its full packaged recovery/restart journey in a
+fresh profile, with post-run hash/signature/all485 source checks. Prior failed
+attempts remain visible. [9.33 acceptance](NATIVE_9_33_ACCEPTANCE.md).
 
 ## Active completion wave
 
@@ -38,10 +45,10 @@ No speculative calendar deadline or source-only completion claim closes a gate.
 
 | Owner | Exclusive workstream | Required outcome |
 |---|---|---|
-| Configuration worker | Shared configuration/router/tests frozen; then read-only native preference migration audit | Configuration156 passed/2 skipped. Exact returned-instance cleanup, truthful startup ACK and managed refusal retained; native preferences migration remains open |
-| Browser worker | Isolated actual-backend web acceptance only | First60 checks passed but copied-source integrity failed. Rerun exact tracked source with provenance/read-only freeze; retain unexplained dead-control reports |
-| Verification worker | Whole-core frozen typing/lint, then exact-head remote checks |808 errors/zero added/three removed versus55a99; all1,278 inputs stable. No baseline relaxation |
-| Parent | Shared voice integration, docs/Git and candidate acceptance | Engine285/2 skipped, typed recognition57, native44 assertions/typecheck passed. Publish this wave and assemble9.33; preserve9.32 and separate GUI/signing/migration gates |
+| Preference/archive worker | Native portable preference component and existing profile archive attachment | Cross-language canonical bytes, primary/avatar identity, fresh-root restore and explicit reviewed apply; no credential import or task replay |
+| Browser worker | Isolated actual-backend full61 verification | Focused4 passed with source/provenance/clean shutdown; full61 fresh tracked run active after earlier integrity/ENOSPC failures |
+| Voice/CI worker | Attempt-v1 lifecycle correlation in registered REST/gateway/router/engine paths | Exact captured attempt on ACK/media/control, strict ownership/no legacy downgrade/replay, scoped tests then frozen full typing |
+| Parent | Native attempt integration, web hydration correction, docs/Git and artifact acceptance | Native55 attempt assertions and web201 shell tests pass.9.33 exact7f packaged recovery passed; integration/full CI and GUI/signing/migration gates remain |
 
 Each completed workstream moves to the next ready card. Physical device,
 account and signed-distribution dependencies must not stall independent source

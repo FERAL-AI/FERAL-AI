@@ -1,6 +1,6 @@
 # Theora / FERAL full-product release readiness
 
-Latest published source is `7f818da08139952b1698644469e7016563512cd5`.
+Latest published source is `86a8b54ed273642da40776e75609f5a45a197924`.
 The completion wave implements explicit interrupted-context recovery with a
 native durable journal, reviewed cloud setup and offline profile archives.
 Integrated earlier local backend checks: 570 passed. Current PR native checks passed;
@@ -8,7 +8,11 @@ the unchanged type ratchet passed with 811 diagnostics against baseline 812.
 Prior55a99 full backend CI passed: **12,783 tests, 83 skipped, 74.93% coverage**.
 Exact7f backend failed12,867 passed/3 failed/83 skipped/one setup error;75.10%.
 Native/web/SDK/type checks passed. Precise fixture repairs pass132 tests; module
-snapshot correction's affected suite passes16. New full CI is required.
+snapshot correction's affected suite passes16. Exact86 backend now passes12,871
+with83 skipped/75.10%; native and mypy808 pass. Its web job failed after1,358 tests
+passed because a Shell hydration callback ran after unmount. The correction
+passes201 shell tests; new-head full web CI remains required.
+[Hydration evidence](WEB_HYDRATION_LIFECYCLE_EVIDENCE.md).
 The optional vault-status correction passed the unchanged real route sweep.
 The earlier failed 2d6839 run remains historical evidence.
 
@@ -29,12 +33,16 @@ recognition readiness and native chained audio handling. Engine285/2 skipped,
 configuration156/2 skipped, recognition57 and native44 assertions/typecheck passed;
 counts overlap. Mypy808 has zero added/three removed versus55a99, with stable inputs.
 [Startup/ownership evidence](VOICE_STARTUP_OWNERSHIP_EVIDENCE.md).
-Candidate9.33 assembled from7f passes485-file source/signature/runtime checks;
-actual recovery attempt2 failed restart readiness after Stop/recovery/model recall.
-New repaired CI and complete candidate acceptance are next. These corrections are excluded
-from preserved9.32. A60-check live browser run failed copied-source integrity and
-is rerunning; it is not certified acceptance. Native preference migration,
-voice attempt/output protocol and actual audio remain open.
+Candidate9.33 assembled from7f passes485-file source/signature/runtime checks.
+Actual attempt3 passed Stop/recovery/local-model recall/restart/recall with four
+receipts, zero tools and clean owned shutdown; post-run identity checks passed.
+Prior attempt2's100s restart timeout remains retained and unexplained.
+[9.33 acceptance](NATIVE_9_33_ACCEPTANCE.md).
+An initial60-check browser run failed copied-source integrity; a tracked rerun
+passed60/failed1 with ENOSPC and incomplete final provenance. A fresh focused
+Chat/keyboard run passed4 with all source/provenance/shutdown checks. Full61
+acceptance is running and remains open. Native preference migration and voice
+attempt correlation are being implemented; actual audio and GUI remain open.
 
 ## Earlier source and candidate checkpoints
 

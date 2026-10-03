@@ -6,13 +6,17 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Published `7f818da08` includes reviewed cloud setup, bounded offline archives and
+- Published `86a8b54ed` includes reviewed cloud setup, bounded offline archives and
   explicit saved-context recovery with a native durable journal. Local combined
   backend: 570 passed. Remote native checks and the unchanged type ratchet pass
   (remote808 exactly matches frozen local against baseline812). Prior55a99 full
   backend passed12,783/83 skipped/74.93%. Exact7f backend failed3 fixtures/one setup
   race;12,867 tests passed/83 skipped/75.10%. Corrections pass132 plus ambient16
-  tests; full repaired CI remains required. Current startup/engine/recognition
+  tests. Exact86 backend passes12,871/83 skipped/75.10%, native/type checks pass;
+  web failed after1,358 passing tests with a post-unmount hydration callback.
+  Its correction passes201 shell tests; new-head CI remains required.
+  [Hydration evidence](WEB_HYDRATION_LIFECYCLE_EVIDENCE.md).
+  Current startup/engine/recognition
   repairs pass their targeted integration and native checks; frozen typing808 has
   zero added/three removed versus55a99. New-head CI remains required. See
   [startup evidence](VOICE_STARTUP_OWNERSHIP_EVIDENCE.md).
@@ -23,6 +27,12 @@ The detailed contracts and acceptance work packages remain in [release readiness
   Current GUI, signed fresh-cloud operation, migration and real voice acceptance
   remain open. See [completion evidence](COMPLETION_WAVE_EVIDENCE.md) and
   [9.32 acceptance](NATIVE_9_32_ACCEPTANCE.md).
+- Exact7f-source9.33 also passes its actual packaged Stop/recovery/model recall/
+  restart/recall journey and all485 post-run source/hash/signature checks. Prior
+  timeouts remain preserved. [9.33 acceptance](NATIVE_9_33_ACCEPTANCE.md).
+  Focused Chat/keyboard4-test actual browser run passed; full61 run remains active.
+  Voice attempt-v1 and portable native preference/archive integration are in
+  progress and are excluded from those immutable candidate results.
 
 ### Preceding integration checkpoints
 

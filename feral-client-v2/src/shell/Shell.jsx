@@ -275,7 +275,6 @@ function ShellFrame() {
   // before sending, so a not-yet-created conversation is materialised
   // on the first user message.
   const [ready, setReady] = useState(true);
-  const hydratedRef = useRef(false);
   // The brain's per-install primary orchestrator session id, and which
   // UI conversation is bound to it. Every OTHER conversation is bound to
   // its own orchestrator session (== its conversationId) so threads keep
@@ -350,7 +349,8 @@ function ShellFrame() {
     return true;
   }, [fetchConversation, setConversation]);
 
-  const startNewConversation = useCallback(async () => {
+  const startNewConversation = useCallback(async ({ signal, isCurrent = () => true } = {}) => {
+    if (!isCurrent()) return null;
     const fallbackId = `thread-${Date.now().toString(36)}`;
     let nextId = fallbackId;
     try {
@@ -364,15 +364,19 @@ function ShellFrame() {
       const response = await apiFetch('/api/conversations/new', {
         method: 'POST',
         silent: true,
+        signal,
         body: JSON.stringify({ id: fallbackId, title: 'New conversation' }),
       });
+      if (!isCurrent()) return null;
       const body = await response.json().catch(() => ({}));
+      if (!isCurrent()) return null;
       if (response.ok && body && !body.error) {
         nextId = body.id || fallbackId;
       }
     } catch {
       // keep local fallback id
     }
+    if (!isCurrent()) return null;
     const initial = cloneGreeting();
     setConversation(nextId, initial);
     return { id: nextId, messages: initial };
@@ -385,19 +389,21 @@ function ShellFrame() {
   }, [conversationId, startNewConversation]);
 
   useEffect(() => {
-    if (hydratedRef.current) return;
-    hydratedRef.current = true;
     let cancelled = false;
+    const controller = new AbortController();
+    const isCurrent = () => !cancelled;
+    const options = { silent: true, signal: controller.signal };
 
     (async () => {
       // Resolve the brain's primary session id up front so we can tell
       // which thread is the cross-surface "primary" one.
       try {
-        const ps = await apiJson('/api/sessions/primary', { silent: true });
+        const ps = await apiJson('/api/sessions/primary', options);
         if (!cancelled && ps?.session_id) setPrimarySessionId(ps.session_id);
       } catch {
         /* primary id optional — primary thread still works via default ws */
       }
+      if (cancelled) return;
 
       const stored = readActiveConversationId();
       let hydratedFromConversations = false;
@@ -408,7 +414,8 @@ function ShellFrame() {
         // blocked. On a brain that is still booting this returned 503
         // and put "Request failed (503)" on screen next to a chat that
         // then worked.
-        const active = await apiJson(`/api/conversations/active/thread${query}`, { silent: true });
+        const active = await apiJson(`/api/conversations/active/thread${query}`, options);
+        if (cancelled) return;
         if (!active?.error && active?.id) {
           setConversation(active.id, active.messages || []);
           // The conversation resolved by the boot hydration is the
@@ -419,6 +426,7 @@ function ShellFrame() {
       } catch {
         // fall through to explicit create
       }
+      if (cancelled) return;
 
       // v2026.5.29 — also fetch the canonical primary-thread transcript
       // (Phase 9) from the orchestrator and merge any turns the
@@ -432,7 +440,8 @@ function ShellFrame() {
         // Silent for the same reason as the rest of the boot chain: the
         // catch below states outright that this endpoint is optional and
         // must never block hydration, so its failure is not news.
-        const transcript = await apiJson('/api/sessions/primary/transcript', { silent: true });
+        const transcript = await apiJson('/api/sessions/primary/transcript', options);
+        if (cancelled) return;
         const wsMessages = Array.isArray(transcript?.messages) ? transcript.messages : [];
         if (wsMessages.length) {
           // Functional updater so the merge sees the current messages,
@@ -444,9 +453,10 @@ function ShellFrame() {
       } catch {
         // Phase 9 endpoint optional — never block hydration on it.
       }
+      if (cancelled) return;
 
       if (!hydratedFromConversations) {
-        const created = await startNewConversation();
+        const created = await startNewConversation({ signal: controller.signal, isCurrent });
         // First-boot default thread is the primary thread.
         if (!cancelled && created?.id) setPrimaryConversationId(created.id);
       }
@@ -455,7 +465,7 @@ function ShellFrame() {
       // silently hangs or returns an error envelope.
     })();
 
-    return () => { cancelled = true; };
+    return () => { cancelled = true; controller.abort(); };
   }, [setConversation, setMessages, startNewConversation]);
 
   useEffect(() => {
