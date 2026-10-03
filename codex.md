@@ -19,3 +19,7 @@ and native coverage in [feature parity](desktop-native/FEATURE_PARITY.md).
 When delegating, assign exclusive file ownership. When reporting, name what
 changed, the checks actually run, the resulting commit or branch, and the remaining
 release gates. Do not substitute a proposed demonstration for a working product.
+During active work, give concise progress updates at least every minute. At each
+integration checkpoint, state what is published, what remains local, what is
+blocked and what comes next. Follow the public-publication wording rules in
+AGENTS.md; technical records must not reproduce private conversations.

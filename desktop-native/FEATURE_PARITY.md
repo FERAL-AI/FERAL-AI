@@ -2,12 +2,33 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
-**Current artifact checkpoint:2026.9.28, twenty-one native destinations.** Its
+**Current artifact checkpoint:2026.9.30/build2026100204**, frozen source
+`dd69c7bf5175517966a363591fa8137782358535`. All482 packaged production Python
+files matched that source; bundle audit and strict ad-hoc signature checks passed.
+Actual isolated packaged-backend replies, saved-context restart and cancellation
+journeys passed. **Current GUI journeys have not run** because Computer Use cannot
+initialize its native control pipe. These backend results do not certify native
+layout, navigation, microphone use, signed distribution or installation.
+[Current candidate evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_30_ACCEPTANCE.md).
+Required source CI/native checks passed; the backend passed12,543 tests/83 skipped
+with74.66% coverage. The type ratchet remains845 versus812 on that published source.
+Native saved-context creation and stale-action receipt fences have separate
+[source evidence](../docs/roadmap/theora-personal-agent/NATIVE_SAVED_CONTEXT_EVIDENCE.md).
+The earlier9.29 GUI passed bounded Security layout, rich Copy, three local-model
+turns, Stop and Quit/reopen/status checks; it contains earlier source634595c and
+does not certify9.30. [9.29 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_29_ACCEPTANCE.md).
+No inventory row is release-certified. See [release readiness](../docs/roadmap/theora-personal-agent/RELEASE_READINESS.md)
+and [work checkpoint](../docs/roadmap/theora-personal-agent/WORK_STATE.md) for the
+later integrated corea320f54bf and remaining acceptance. That new core passed1003
+controlled tests and measured818 local type errors versus812; its remote CI is
+pending and the frozen9.30 artifact does not contain it.
+
+**Historical9.28 checkpoint, twenty-one native destinations.** Its
 frozen runtime source66c7cd500 matches479 packaged production Python files.
 Actual retained-error New conversation/AX transition and a local-model reply
 passed. **A distinct SIGTRAP during Permissions and Cost navigation was
 confirmed**, alongside an unexplained normal exit and early timeout.
-[Current candidate evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_28_ACCEPTANCE.md).
+[Historical candidate evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_28_ACCEPTANCE.md).
 Sourcecd1571ef9 required CI/native passed; its full backend suite is separate
 from GUI acceptance. Historical9.26 onboarding/quit/relaunch and earlier imports,
 coding/synthetic hardware remain bounded earlier results. Hardware evidence is

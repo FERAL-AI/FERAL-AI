@@ -170,3 +170,33 @@ env FERAL_HOME=/private/tmp/feral-full-recheck-home FERAL_DATA_HOME=/private/tmp
 No completed full result is claimed at this checkpoint. Parent must compare the
 manifest after completion and record the actual final summary, coverage,
 descriptor/mock observer findings and any first causal failure separately.
+
+## Completed required run
+
+The run above completed with exit0: **12,576 passed,50 skipped,574 warnings in
+818.52s; coverage75.03%**, above the unchanged50% floor. Parent recomputed all
+1,261 manifest hashes after completion: **changed=[]**. The exact tested core
+is in commit407d158b2 and native integrationdd69c7bf5, whose core files are
+identical. Subsequent core cards require their own validation.
+
+The read-only observer recorded12,624 teardown reports, no failed-phase or
+internalerror events and no surviving tracked `Path.exists`/`sqlite3.connect`
+replacement. Peak sampled descriptors148 against inherited soft limit256;
+final sample48. Sampling is not a proof of every transient resource peak, but
+there was no observed exhaustion or coverage-finalizer crash. The earlier
+cascade did not recur after isolated-home fixtures and legitimate outside-sandbox
+socket/process execution; its exact earlier leak origin remains unproven.
+
+This is full local macOS/Python3.11 PR-equivalent backend acceptance, excluding
+performance tests. It does not certify Ubuntu, GUI, real voice/accounts/devices,
+all platform permission states, or distribution. The50 local skips differ from
+the83 Ubuntu skips; counts must not be merged. Logs/observer/private test homes
+remain outside Git. The prior failed run is retained separately.
+
+The subsequent exact-source Ubuntu3.11 PR job also passed ondd69c7bf5:
+[job111084390650](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37082003338/job/111084390650),
+**12,543 passed,83 skipped,592 warnings in702.14s; coverage74.66%**. Parent
+retrieved its terminal log. Generic Python SDK112 passed, Node standalone81
+passed and the installed-runtime Node step1 passed with0 skips. Native source
+CI37082003388 also passed; actual GUI acceptance is a separate blocked gate.
+Nonblocking mypy still reports845 against unchanged812 baseline.

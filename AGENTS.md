@@ -64,6 +64,12 @@ deployment, accounts, saved data or autonomy settings.
 
 ## Git and releases
 
+- Write public commit messages, PR titles/descriptions, release notes and shipped
+  documentation as professional technical records: describe the problem,
+  resulting behavior, validation and remaining limitations. Do not quote or
+  paraphrase private conversations, personal remarks, frustration or business
+  ambitions. Review the wording as well as the diff before publication. Leave
+  existing public history unchanged unless a separate history cleanup is authorized.
 - Stage explicit reviewed paths. Exclude ignored internal dossiers, credentials,
   runtime homes, downloaded dependencies and generated app bundles.
 - Review the staged diff, whitespace and sensitive-data exposure before committing.

@@ -4,7 +4,22 @@ Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` 
 
 The target is the full FERAL capability set, not a five-screen replacement. This plan tracks implementation milestones; [FEATURE_PARITY.md](FEATURE_PARITY.md) tracks the exact existing routes, settings, actions and missing work. The installed app and its data stay available during migration. A native milestone does not constitute a production release.
 
-## Current integration work — October 1
+## Current integration checkpoint: October 2
+
+The frozen9.30/build2026100204 candidate contains source `dd69c7bf5`. Its audit,
+strict ad-hoc signature checks and isolated packaged-backend memory/restart and
+cancellation journeys passed. Current GUI acceptance is not run because the
+Computer Use native control pipe cannot initialize. Earlier9.29 passed bounded
+GUI recovery and task checks on an earlier source; it does not certify9.30.
+See [current acceptance](../docs/roadmap/theora-personal-agent/NATIVE_9_30_ACCEPTANCE.md),
+[release readiness](../docs/roadmap/theora-personal-agent/RELEASE_READINESS.md) and
+[work checkpoint](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+
+Migration, backup/rollback, signing/notarization, upgrades and clean-machine
+installation remain open. The current candidate keeps its separate preview data
+and bundle identity; it has not replaced the supported installed application.
+
+## Historical integration work: October 1
 
 Latest assembled acceptance: **2026.9.23** built and passed strict ad-hoc signature verification. The bounded audit passed across 13,036 files, 265 Mach-O objects and nine internal links; bundled runtime probes passed Python 3.11.15, SQLite 3.53.1/FTS5 and OpenCode 1.18.10. The native app retained its selected avatar, name and saved conversation. A new 31 + 11 request delivered 42 in the UI, with 6,579 prompt tokens and no input truncation. This verifies that request, not arbitrary context fit or model quality.
 

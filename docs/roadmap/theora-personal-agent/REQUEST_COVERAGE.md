@@ -1,12 +1,33 @@
 # User request coverage and next implementation work
 
-Reconciled October 2, 2026 against the project conversation, existing source inventories and dated acceptance records. This tracks the requested full product, not a replacement project or a demo milestone. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
+Reconciled October 2, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
 
 The detailed contracts and acceptance work packages remain in [release readiness](RELEASE_READINESS.md), the [native inventory](../../../desktop-native/FEATURE_PARITY.md) and the [iOS handoff](IOS_AGENT_HANDOFF.md). The implementation branch is published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310); publication is not a release or a passing acceptance matrix.
 
 ## Current verified boundary
 
-- Latest sourcecd1571ef9 required CI/native passed: **12,369 backend tests,
+- Latest integrated core `a320f54bf` passed1003 controlled backend tests.
+  Full local mypy818 versus812 still fails;27 diagnostics removed/zero added
+  compared with the prior published log. Exact-source CI is pending. See
+  [integration evidence](INTEGRATION_RECHECK_20261002.md).
+- Published source `dd69c7bf5` passed required CI/native checks:12,543 backend
+  tests/83 skipped,74.66% coverage. Local full backend passed12,576 tests/50 skipped,
+ 75.03% coverage. Source identities and exclusions are recorded in the
+  [full recheck](FULL_BACKEND_RECHECK_20261002.md). Mypy845 versus812 remains failed.
+- Packaged9.30 contains that exact source. Audit and strict ad-hoc signature
+  verification passed. Actual bundled-backend local-model replies, original-context
+  recall after restart and cancellation/status/no-replay passed in disposable homes.
+  Current native GUI acceptance is not run because the control tool cannot initialize.
+  See [9.30 evidence](NATIVE_9_30_ACCEPTANCE.md).
+- Earlier9.29 passed bounded real GUI Security layout, rich Copy, tracked local
+  replies, Stop and Quit/reopen/status reconciliation. That earlier artifact remains
+  distinct from9.30. Distribution, migration, account/device and full-feature gates
+  remain open. Registry, strict-approval and type repairs are now integrated in
+  the new source above; the earlier full-suite result does not cover them.
+
+### Earlier October 2 evidence
+
+- Sourcecd1571ef9 required CI/native passed: **12,369 backend tests,
   83 skipped, coverage74% rounded**. Non-blocking mypy remains failed at846
   versus812 baseline. Live-brain and main Linux matrix skipped.
 - [Actual9.27](NATIVE_9_27_ACCEPTANCE.md) passed local reply, exact native

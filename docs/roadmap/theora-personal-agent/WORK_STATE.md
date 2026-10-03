@@ -5,6 +5,32 @@ Git, CI and processes after resuming; it is a checkpoint, not a live process loc
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
+## Current status at a glance
+
+- Review branch: [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
+  Latest integrated core is `a320f54bf1edb05901642463c98b70932bc39f63`; verify
+  current remote tip before resuming. Main remains `452a01255`; no merge or release.
+- Required CI on the preceding `dd69c7bf5` source passed, including backend12,543 tests and native
+  checks. The local full backend passed12,576 tests with75.03% coverage.
+- Packaged9.30: actual isolated backend memory/restart and cancellation/status
+  journeys passed. Actual native GUI acceptance is not run because Computer Use
+  cannot initialize. See [candidate acceptance](NATIVE_9_30_ACCEPTANCE.md).
+  Managed cancellation deliberately leaves saved context unready; continuing
+  that interrupted context needs an explicit recovery contract that is still open.
+- Integrated: timestamp/ACP/connector repairs, validated extension reloads with
+  cancellation/registry-owner fencing, redacted errors, strict explicit approval
+  precedence and the concrete browser adapter. Final combined backend1003 passed;
+  full configured mypy818 versus812 still failed,27 removed/zero added compared
+  with prior published diagnostics. Exact-source remote CI is pending. See
+  [integration recheck](INTEGRATION_RECHECK_20261002.md).
+- Remaining release gates include the type ratchet, current GUI acceptance,
+  migration/upgrade, signed distribution and clean-machine installation. Account,
+  physical-device, Linux and broader feature acceptance remain separate gates.
+- Next: publish the reviewed commits/checkpoint, reconcile exact-source CI and
+  remaining type diagnostics, then implement bounded interrupted-context recovery.
+  Keep the candidate frozen
+  for the pending GUI test. Do not rewrite existing public history.
+
 ## Objective and standing scope
 
 Finish the existing FERAL system as a dependable native app and open-source
@@ -30,17 +56,17 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Published core `90b75587a` and SDK `205f468a2`; CI/fixture correction `407d158b2` committed locally; next native9.30 integration and publication underway |
+| Current checkpoint | Integrated core a320f54bf after type fixes4e118360c; prior published native/runtime dd69c7bf5. Read actual HEAD/remote for publication and later documentation commits |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | Parent latest df reports8.0GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
+| Disk observation | Parent latest df reports4.8GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update
 every historic source identifier to HEAD or regenerate a baseline to make a gate
 appear green.
 
-## Latest checked source and active candidate
+## Dated source and candidate verification
 
 Core commit **90b75587a** contains the following working core wave and its fixture
 repairs. Its SDK authoring follow-up adds verified Python runtime adapters and
@@ -134,15 +160,78 @@ Parent staged the noneditable Python SDK in the bundled interpreter under the
 existing locked constraints; actual staged import/location and BaseSkill adapter
 probe passed. This does not repair the separate loader false-acknowledgement
 card in [registry recovery plan](REGISTRY_RELOAD_RECOVERY_PLAN.md).
-The required local full-suite recheck is running with explicit50% coverage floor,
-PR performance exclusions and a read-only descriptor/mock observer;1261 frozen
-core files have digest39a8b055528037f4a4652d67f9372a32c4871b3fed10791be3333ae14ca7d1d8.
+The required local full-suite recheck completed exit0:12,576 passed/50 skipped/
+574 warnings in818.52s;75.03% coverage against unchanged50% floor. It retained
+PR performance exclusions and read-only descriptor/mock observer;1261 frozen
+core files digest39a8b055528037f4a4652d67f9372a32c4871b3fed10791be3333ae14ca7d1d8
+were unchanged after completion. No teardown/coverage crash or surviving tracked
+mock recurred. Peak sampled descriptors148 against256; earlier cascade cause
+remains unproven. Exact-source Ubuntu CI37082003338 passed all required jobs:
+12,543 backend tests/83 skipped/592 warnings in702.14s, coverage74.66%; Python
+SDK112 and Node81 unit +1 mandatory actual-runtime tests passed. Native
+CI37082003388 passed full feature/linked fixtures, typecheck, actual child lifeline,
+bundle-audit and frozen-source comparison checks. Mypy remains nonblocking
+failure845 versus812; live-brain and main-branch Linux matrix skipped.
 See [recheck evidence](FULL_BACKEND_RECHECK_20261002.md).
 Parent owns source freeze, shared docs, explicit-path
 publication and candidate identity. Preserved AUDIT-FIXES.md stays excluded;
 historic failed candidate evidence stays intact. Next: publish coherent corrections
 and native integration, verify corrected-source remote CI and local full suite,
 then assemble/audit an exact-source9.30 candidate for actual isolated acceptance.
+
+### Active9.30 artifact and next owned cards
+
+Built **2026.9.30/build2026100204**, source
+`dd69c7bf5175517966a363591fa8137782358535`, executable SHA256
+`421d9756b42b3fd55a88102c396994112da561841b49e07171fe58d3aaf915b4`.
+All482 production Python files match that commit. Bounded bundle audit passed
+13,089 files/265 Mach-O/9 internal links; CPython3.11.15/SQLite3.53.1/FTS5 and
+OpenCode1.18.10 probes passed. Strict ad-hoc signature verification passed.
+Actual packaged SDK0.1 import/location and BaseSkill factory probe also passed.
+Prior9.29 artifact is preserved at `/private/tmp/feral-candidate-9-29-preserved.app`
+with its original executable hash. No release/signing certification follows.
+
+GUI acceptance is **not run**: worker initialization, reset, repeated inventory
+and independent parent inventory all returned `Sky Computer Use native pipe
+startup failed`, with no apps/browsers. No candidate was launched. The exact
+disposable GUI profile passed launcher check-only at
+`/private/tmp/feral-native-populated-saved-context-20261002`; it contains synthetic
+settings only. Restore the Computer Use runtime before actual GUI journeys;
+do not attribute the tool failure to FERAL or substitute a fixture for GUI proof.
+
+Completed independent cards after the preceding whole-backend freeze:
+
+- Native worker completed actual packaged-backend headless context/restart and
+  cancellation acceptance at `/private/tmp/feral-native-9-30-headless-20261002`.
+  The bounded probe and9.30 evidence are frozen. Actual local inference/backend
+  results stay distinct from GUI not-run. Artifact/resources remain frozen.
+- Developer worker completed registry/implementation/reload prepare-and-publish,
+  helper-mediated registration capture, recovery tests and the SDK false-ACK
+  negative probe correction. Review follow-ups add exact live registry ownership,
+  retained cancelled preparation tasks and redacted exceptions. Final focused159
+  runtime/112 Python SDK/82 Node SDK cases passed; the later browser adapter
+  follow-up passed453 controlled tests and introduced no normalized type error.
+- Type worker completed TYPE01H timestamp narrowing:107 tests passed, five
+  focused errors removed, older optional SID error retained. Files are frozen.
+  TYPE01I/J failover-fixture/ACP checks passed76 tests and removed12 focused
+  diagnostics. Connection-table checks passed33 tests and removed four focused
+  diagnostics while retaining two older WhatsApp errors. All these files are
+  frozen; no new global type count is asserted. These edits are not covered by
+  the completed full backend result above.
+
+The separate strict-mode manifest approval card passed324 tests. Final parent
+integration on corea320f54bf passed1003 tests/seven warnings in17.84s;
+1264 Python files digeste41154bfa63cc5725c60e21622a6729e335e409f9071fb084c4742afadd3bb62
+were unchanged. Full configured local mypy818 errors/234 files/1264 checked still
+exceeds812. Compared to the prior published845-error log,27 diagnostic occurrences
+were removed and none added. No baseline, suppression or cast was added.
+[Final integration evidence](INTEGRATION_RECHECK_20261002.md) keeps the preceding
+643-test/819-error check distinct from the corrected browser-wrapper follow-up.
+All workers are frozen; parent owns publication and subsequent exact-source CI.
+
+Parent owns final integration, global type measurement, checkpoint/PR and Git.
+Do not overlap worker files or overwrite uncommitted work after an interruption.
+Observe the current source-specific remote CI result before the next push.
 
 Source **cd1571ef94aa2fe244023d56ba468f7ba3266700** is committed/pushed.
 [CI37066669634](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37066669634)

@@ -1,35 +1,50 @@
 # Theora / FERAL full-product release readiness
 
-Current published core/SDK source is205f468a2b783e847acfe810e2e753d3785f89ad.
-Remote backend:12,540 passed/1 failed/83 skipped; coverage74.66%. The sole
-disconnect fixture failure and mandatory Node runtime CI setup are being
-corrected. Mypy845 versus812 remains failed. Immutable9.29, containing earlier
-source634595c, has passed bounded real Security layout, three local-model
-turns, Stop and Quit/relaunch/status reconciliation; see [9.29 evidence](NATIVE_9_29_ACCEPTANCE.md).
-The activation and real-executor approval repair below are published source,
-not that packaged payload. Signing, installation/migration, account/device and
-remaining capability acceptance gates remain open. [Checkpoint](WORK_STATE.md).
+Latest integrated core is `a320f54bf1edb05901642463c98b70932bc39f63`;
+exact-source remote CI is pending. Final controlled backend recheck passed1003
+tests, with1264 source files unchanged. Full local mypy818 versus812 remains
+failed; normalized prior-result comparison removed27 diagnostics and added none.
+[Current integration evidence](INTEGRATION_RECHECK_20261002.md).
 
-Current core working wave passed 597 combined targeted tests. The required local
-full-suite run ended in a test-harness INTERNALERROR and has no valid coverage
-result; it is not acceptance. Two socket failures passed after sandbox escalation,
-but the full teardown leak remains under investigation. A primary legacy fixture
-now binds the real checkpoint guard; exact approval-owner malformed inputs are
-refused. That follow-up passed 46 tests. Full local mypy is 845, above baseline812.
-Corrected-source remote CI and the next packaged native journey remain required.
-Core90b75587a is committed with these repairs and evidence; SDK205f468a2
-passed112 Python/82 Node tests plus wheel/tarball runtime checks. Neither source
-checkpoint is yet represented in the immutable9.29 packaged payload. The new
-publication's remote failures are recorded above. New saved-context native UI
-and action-specific stale-review gates passed the full pre-label37-feature run
-and final affected Workflow/typecheck checks; packaged9.30 acceptance is pending.
+The preceding published integration source is `dd69c7bf5175517966a363591fa8137782358535`.
+The required local backend run passed **12,576 tests,50 skipped,75.03% coverage**
+with all1,261 frozen files unchanged. Earlier failed-harness evidence is retained;
+its cascade did not recur. Corrected-source Ubuntu required CI passed:
+12,543 backend tests/83 skipped/74.66% coverage; Python SDK112 and Node81+1
+mandatory actual-runtime tests passed. Native full fixture/typecheck/lifeline/
+audit/source-comparison CI also passed. Mypy845 versus812
+remains failed on that preceding source. Later timestamp, ACP/failover, connection
+and registry fixes have the local measurement above; remote verification is pending.
+[Checkpoint](WORK_STATE.md).
+
+New **9.30/build2026100204** contains that exact published source:482 production
+Python files matched Git; bounded audit passed13,089 files/265 Mach-O/9 internal
+links, CPython3.11.15/SQLite3.53.1/FTS5/OpenCode1.18.10 and strict ad-hoc signing.
+The packaged Python SDK0.1 import/location and BaseSkill adapter probe passed.
+Saved-context native UI and final stale-receipt checks passed their documented
+fixture/typecheck runs. **Actual9.30 GUI is not run**: Computer Use native pipe
+startup fails after reset/retry and independent parent inventory.
+This tool failure is not an observed FERAL crash. A separate packaged headless
+journey passed real model replies, unchanged context restoration after a UI-only
+decoy edit, cancellation/status and refusal of a new task against unready context.
+All three owned servers/listeners stopped. These bounded backend results cannot
+substitute for GUI acceptance. See [9.30 acceptance](NATIVE_9_30_ACCEPTANCE.md).
+The cancelled managed context deliberately remained unready and refused another
+task. Explicit interrupted-context recovery is a remaining product gate; this
+test does not establish ordinary same-thread continuation after Stop.
+
+Immutable9.29/source634595c retains its bounded real Security layout, rich-copy,
+three local-model turns, Stop and Quit/relaunch/status reconciliation evidence;
+see [9.29 acceptance](NATIVE_9_29_ACCEPTANCE.md). It does not contain later changes.
+Signing/notarization, installation/migration/update/rollback, account/device,
+Intel/Linux desktop and remaining capability acceptance gates remain open.
 See [native saved-context evidence](NATIVE_SAVED_CONTEXT_EVIDENCE.md) and
-[backend recheck](FULL_BACKEND_RECHECK_20261002.md). No release claim follows
-from fixture counts or a preview version increment.
+[backend recheck](FULL_BACKEND_RECHECK_20261002.md). A fixture count or preview
+version increment does not establish a full-product release.
 
 Updated October 2, 2026. This is an implementation and acceptance roadmap, not a declaration of readiness. Start with the [source-backed execution plan](EXECUTION_PLAN.md), then the [architecture contracts](ARCHITECTURE_AND_CONTRACTS.md), [original execution plan](EXECUTION_AND_RELEASE_GATES.md), [iOS handoff](IOS_AGENT_HANDOFF.md) and [native feature inventory](../../../desktop-native/FEATURE_PARITY.md).
 
-## Latest October 2 checkpoint
+## Earlier October 2 checkpoints
 
 Published sourcecd1571ef9 passed required CI/native checks. Full Ubuntu/Python3.11
 PR backend: **12,369 passed,83 skipped,572 warnings**, coverage74% rounded.
