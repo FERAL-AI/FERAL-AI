@@ -8,27 +8,39 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 ## Current status at a glance
 
 - Review branch: [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-  Latest integrated core is `a320f54bf1edb05901642463c98b70932bc39f63`; verify
+  Latest published source is `d2158fc6a88586aa443f5adf24e471ee7a90d29f`; verify
   current remote tip before resuming. Main remains `452a01255`; no merge or release.
 - Required CI on the preceding `dd69c7bf5` source passed, including backend12,543 tests and native
   checks. The local full backend passed12,576 tests with75.03% coverage.
 - Packaged9.30: actual isolated backend memory/restart and cancellation/status
   journeys passed. Actual native GUI acceptance is not run because Computer Use
   cannot initialize. See [candidate acceptance](NATIVE_9_30_ACCEPTANCE.md).
-  Managed cancellation deliberately leaves saved context unready; continuing
-  that interrupted context needs an explicit recovery contract that is still open.
+  That artifact leaves managed cancellation unready. Explicit recovery is now
+  implemented in working source, with native durable-journal integration and
+  a new assembled-artifact acceptance run still pending.
 - Integrated: timestamp/ACP/connector repairs, validated extension reloads with
   cancellation/registry-owner fencing, redacted errors, strict explicit approval
   precedence and the concrete browser adapter. Final combined backend1003 passed;
   full configured mypy818 versus812 still failed,27 removed/zero added compared
-  with prior published diagnostics. Exact-source remote CI is pending. See
+  with prior published diagnostics. Exact-source remote CI on `d2158fc6a` passed:
+  backend12,654/83 skipped/74.77% coverage, native and Python SDK112 passed.
+  Remote mypy also818; against the tracked baseline22 added/16 removed remain.
+  See
   [integration recheck](INTEGRATION_RECHECK_20261002.md).
-- Remaining release gates include the type ratchet, current GUI acceptance,
+- Current completion wave implements interrupted-context recovery, reviewed
+  cloud setup and offline profile archive. Final backend integration:570 passed,
+  19 warnings in18.99s. Frozen full mypy:811 diagnostics versus812 baseline,
+  zero added/seven removed against d215. This is local evidence; current-source
+  remote CI remains pending. See [completion evidence](COMPLETION_WAVE_EVIDENCE.md).
+- Remaining release gates include remote type-ratchet confirmation, current GUI acceptance,
   migration/upgrade, signed distribution and clean-machine installation. Account,
   physical-device, Linux and broader feature acceptance remain separate gates.
-- Next: publish the reviewed commits/checkpoint, reconcile exact-source CI and
-  remaining type diagnostics, then implement bounded interrupted-context recovery.
-  Keep the candidate frozen
+- Active: backend/cloud/archive/type changes are saved in scoped commits.
+  Native durable-journal fixtures,26 linked-model groups and production typecheck
+  passed on87 unchanged inputs. The actual packaged recovery probe is frozen.
+  Parent now owns exact-source9.31 assembly, acceptance and publication.
+  Gen-UI expansion is deferred; coding-engine expansion follows dependable setup,
+  recovery, voice and data continuity. Keep the candidate frozen
   for the pending GUI test. Do not rewrite existing public history.
 
 ## Objective and standing scope
@@ -56,10 +68,10 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Integrated core a320f54bf after type fixes4e118360c; prior published native/runtime dd69c7bf5. Read actual HEAD/remote for publication and later documentation commits |
+| Current checkpoint | Prior published d2158fc6a; tested backend wave saved through3609f1b40. Native integration checks passed; final native commit/assembly/publication follows. Read actual HEAD/remote |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
-| Disk observation | Parent latest df reports4.8GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
+| Disk observation | Parent latest df reports5.8GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
 
 The checkpoint's own commit cannot name its future hash. Read current HEAD from
 Git/helper; evidence below explicitly names the source it tested. Do not update

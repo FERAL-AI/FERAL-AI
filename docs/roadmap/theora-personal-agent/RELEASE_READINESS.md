@@ -1,10 +1,15 @@
 # Theora / FERAL full-product release readiness
 
-Latest integrated core is `a320f54bf1edb05901642463c98b70932bc39f63`;
-exact-source remote CI is pending. Final controlled backend recheck passed1003
-tests, with1264 source files unchanged. Full local mypy818 versus812 remains
-failed; normalized prior-result comparison removed27 diagnostics and added none.
-[Current integration evidence](INTEGRATION_RECHECK_20261002.md).
+Latest published source is `d2158fc6a88586aa443f5adf24e471ee7a90d29f`;
+required CI/native passed, including12,654 backend tests/83 skipped/74.77%
+coverage and Python SDK112. Its non-blocking mypy remained818 versus812.
+The working completion wave adds explicit interrupted-context recovery, reviewed
+cloud setup and offline profile archives. Final integrated570 tests passed;
+frozen full local mypy811 versus812 satisfies the aggregate local ratchet,
+zero added/seven removed versus d215. Native journal fixtures,26 linked-model
+groups and production typecheck passed on87 frozen inputs. Candidate assembly,
+actual GUI and current-source remote verification are pending at this checkpoint.
+[Completion evidence](COMPLETION_WAVE_EVIDENCE.md).
 
 The preceding published integration source is `dd69c7bf5175517966a363591fa8137782358535`.
 The required local backend run passed **12,576 tests,50 skipped,75.03% coverage**
@@ -30,8 +35,9 @@ decoy edit, cancellation/status and refusal of a new task against unready contex
 All three owned servers/listeners stopped. These bounded backend results cannot
 substitute for GUI acceptance. See [9.30 acceptance](NATIVE_9_30_ACCEPTANCE.md).
 The cancelled managed context deliberately remained unready and refused another
-task. Explicit interrupted-context recovery is a remaining product gate; this
-test does not establish ordinary same-thread continuation after Stop.
+task. That test does not establish same-thread continuation after Stop. Recovery
+now exists in working source; its final native journal/readback and new packaged
+backend acceptance are separate from this historical9.30 result.
 
 Immutable9.29/source634595c retains its bounded real Security layout, rich-copy,
 three local-model turns, Stop and Quit/relaunch/status reconciliation evidence;
@@ -184,7 +190,7 @@ Review binds sending owner/account, resolved recipient, exact text/attachments, 
 
 ### Credentials, coding and oversight
 
-Native deferred vault boot stays passive. Optional vault absence must not block credential-free local use; encrypted profiles remain limited with Security reachable. Existing unlock and `/api/security/agent-bootstrap` continuation are separate reviews. OS/startup work may continue after timeout; no automatic retry. Fresh initialization remains gated/unwired until genuine signed OS acceptance. Never reset/reseed personal Keychain as recovery.
+Native deferred vault boot stays passive. Optional vault absence must not block credential-free local use; encrypted profiles remain limited with Security reachable. Existing unlock and `/api/security/agent-bootstrap` continuation are separate reviews. OS/startup work may continue after timeout; no automatic retry. Fresh initialization is now wired through reviewed native setup and the existing coordinator, but remains gated until genuine signed OS acceptance. Never reset/reseed personal Keychain as recovery.
 
 Revocation requires immediate ingress fencing, generation invalidation, cancellation/drain of registered turns and owned producers before closing restored memory. Failed drain requires truthful restart/unknown state, not clean rollback. Fixtures cover mechanisms; real encrypted-profile lifecycle remains open.
 

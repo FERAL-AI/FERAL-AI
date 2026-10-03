@@ -8,7 +8,9 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 - Latest integrated core `a320f54bf` passed1003 controlled backend tests.
   Full local mypy818 versus812 still fails;27 diagnostics removed/zero added
-  compared with the prior published log. Exact-source CI is pending. See
+  compared with the prior published log. Exact-source d2158fc6a required CI/native
+  passed:12,654 backend tests/83 skipped/74.77% coverage; remote mypy remains818.
+  See
   [integration evidence](INTEGRATION_RECHECK_20261002.md).
 - Published source `dd69c7bf5` passed required CI/native checks:12,543 backend
   tests/83 skipped,74.66% coverage. Local full backend passed12,576 tests/50 skipped,
@@ -97,6 +99,10 @@ The [Instinct-style report](INSTINCT_RESEARCH.md) now supplies verdicts for iMes
 The original research request said to stop after the report and wait for go. Later authorization to build the full app does not create payment credentials, authorize external messages or waive real-account tests; make the research findings reviewable before enabling those new external effects.
 
 ## Next three implementation priorities
+
+Gen-UI expansion is deferred. Preserve existing functionality while prioritizing
+fresh local/cloud setup, usable recovery, voice and data continuity. Additional
+coding-engine expansion follows these daily app journeys.
 
 1. **Finish the existing app.** Close corrected-source CI, latest populated-profile native acceptance, genuine parity omissions, safe migration, fresh credentials, clean installation and tested developer extension setup. The existing local runtime does not need a new multi-account service first.
 2. **Extend the existing contracts.** Reuse sessions/conversations/memory/TaskFlow/ACP; propagate coding conversation identity, add durable receipts, harden workflow authorization/recovery, unify voice/task activity and exact-device handoff. These changes support the newer requests without replacing working infrastructure.

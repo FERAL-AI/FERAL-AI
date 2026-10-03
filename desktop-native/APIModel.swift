@@ -79,9 +79,29 @@ import CoreFoundation
     var contextUnsupportedOperations: Set<String> { contextManaged ? NativeContextCheckpointWire.unsupportedPaths : [] }
     var contextToolsMayMutate: Bool { !contextSetupPending && contextState.permitsSubmission }
     var contextCheckpoint: NativeContextCheckpoint? { contextState.capability?.checkpoint }
-    private var contextPreferences: NativeContextCheckpointPreferences { NativeContextCheckpointPreferences(defaults: prefs) }
+    var contextRecoveryReview: NativeContextRecoveryReview? {
+        guard let fence = contextState.recoveryFence else { return nil }
+        return NativeContextRecoveryReview(fence: fence, connectionID: socketGeneration, selectionID: conversationRevision)
+    }
+    var contextRecoverySelectionID: UUID { conversationRevision }
+    var canRecoverSavedContext: Bool { ready && chatTurns.ready && contextState.canRecover && !chatMutationBusy && !contextSetupPending && !chatRecoveryBlocked && unresolvedChatRequest == nil }
+    var canCheckSavedContextRecovery: Bool { ready && chatTurns.ready && contextState.canCheckRecovery && !chatMutationBusy && !contextSetupPending && !chatRecoveryBlocked && unresolvedChatRequest == nil }
+    private var contextPreferences: NativeContextCheckpointPreferences { NativeContextCheckpointPreferences(defaults: prefs, recoveryJournalURL: contextRecoveryJournalURL) }
     private func contextRequired(_ id: String) -> Bool {
         !preferencesUnavailable && contextPreferences.required(id, primary: recovery.primarySessionID)
+    }
+    private func configureContext(sessionID: String?, connectionID: UUID?, required: Bool, requestID: String?) {
+        contextState.configure(sessionID: sessionID, connectionID: connectionID, required: required, requestID: requestID)
+        restorePendingContextRecovery()
+    }
+    private func restorePendingContextRecovery() {
+        guard let sessionID = contextState.sessionID, let primary = recovery.primarySessionID else { return }
+        do {
+            if let pending = try contextPreferences.pendingRecovery(session: sessionID, primary: primary),
+               contextState.trackedRecoveryFence != pending && contextState.recoveryReconciledFence != pending {
+                contextState.restorePendingRecovery(pending)
+            }
+        } catch { contextState.blockRecoveryPreferences() }
     }
     func canDeleteConversation(_ id: String) -> Bool {
         !switchingConversation && id != conversationID && !contextRequired(id)
@@ -96,6 +116,7 @@ import CoreFoundation
         return (data, http)
     })
     private let prefs: UserDefaults
+    private let contextRecoveryJournalURL: URL?
     private let preferencesUnavailable: Bool
     private let session: URLSession
     private let transportDelegate = NativeLocalSessionDelegate()
@@ -113,10 +134,10 @@ import CoreFoundation
     // App REST dispatch can run agent turns without Chat turn IDs. Give it
     // a distinct scope so late app replies cannot complete an active Chat turn.
     var appSurfaceSessionID: String? { conversationID.isEmpty ? nil : "native-apps-" + appSessionScope.uuidString }
-    var chatMutationBusy: Bool { shuttingDown || isSending || switchingConversation || uploadingAttachments || !["off", "ended"].contains(voice.state) }
+    var chatMutationBusy: Bool { shuttingDown || isSending || switchingConversation || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
     // Applying the reviewed saved point owns its own operation lock. Its
     // thread transition must not invalidate that same review mid-callback.
-    var chatToolsHostBusy: Bool { isSending || (switchingConversation && !applyingSnapshotHistory) || uploadingAttachments || !["off", "ended"].contains(voice.state) }
+    var chatToolsHostBusy: Bool { isSending || (switchingConversation && !applyingSnapshotHistory) || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
 
     func restoreThread(_ thread: [String: Any]) throws {
         guard let id = thread["id"] as? String, !id.isEmpty,
@@ -128,7 +149,7 @@ import CoreFoundation
         richChat.configure(sessionID: id, connectionID: socketGeneration)
         chatTurns.configure(sessionID:nil,connectionID:nil);recoverSavedChatRequest()
         contextSetupPending = false; pendingContextCreationSID = nil
-        contextState.configure(sessionID: id, connectionID: nil, required: contextRequired(id), requestID: nil)
+        configureContext(sessionID: id, connectionID: nil, required: contextRequired(id), requestID: nil)
         contextStatus = contextState.message
     }
 
@@ -141,10 +162,17 @@ import CoreFoundation
         return factory(suiteName)
     }
 
-    init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil,
+    init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, recoveryJournalURL: URL? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil,
          preferencesResolver: (() -> UserDefaults?)? = nil, chatSender: (([String:Any]) async throws -> Void)? = nil) {
         injectedRuntimeOwner = runtimeOwner
         injectedChatSender = chatSender
+        if let recoveryJournalURL { contextRecoveryJournalURL = recoveryJournalURL }
+        else if preferences != nil || preferencesResolver != nil { contextRecoveryJournalURL = nil }
+        else {
+            let home = ProcessInfo.processInfo.environment["FERAL_HOME"].map { URL(fileURLWithPath: $0) }
+                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".feral-native-preview")
+            contextRecoveryJournalURL = home.appendingPathComponent("native-context-recovery.json")
+        }
         let resolved: UserDefaults?
         if let preferences { resolved = preferences }
         else if let preferencesResolver { resolved = preferencesResolver() }
@@ -422,7 +450,7 @@ import CoreFoundation
         let generation = socketGeneration
         richChat.configure(sessionID: conversationID, connectionID: generation)
         chatTurns.configure(sessionID:conversationID,connectionID:generation);checkingChatStatus = false;chatTurnStatus = "Verifying chat receipt support…"
-        contextState.configure(sessionID: conversationID, connectionID: generation, required: contextRequired(conversationID) || contextSetupPending, requestID: chatTurns.capabilityID)
+        configureContext(sessionID: conversationID, connectionID: generation, required: contextRequired(conversationID) || contextSetupPending, requestID: chatTurns.capabilityID)
         contextStatus = contextState.message
         contextDeadline?.cancel()
         capabilityDeadline?.cancel();statusDeadline?.cancel()
@@ -469,7 +497,7 @@ import CoreFoundation
                             if self.chatTurns.isTracked { self.markTrackedUnknown("Chat disconnected before the request receipt arrived. Check status; it has not been retried.") }
                             else { self.recordChatFailure("Chat disconnected. Reconnect explicitly.");self.finishResponse() }
                             self.chatTurns.configure(sessionID:nil,connectionID:nil);self.checkingChatStatus = false
-                            self.contextState.configure(sessionID: self.conversationID, connectionID: nil, required: self.contextManaged, requestID: nil)
+                            self.configureContext(sessionID: self.conversationID, connectionID: nil, required: self.contextManaged, requestID: nil)
                             self.contextStatus = self.contextState.message
                             await self.persistConversation()
                         }
@@ -498,6 +526,54 @@ import CoreFoundation
         }
         do { try await sendChatFrame(frame) }
         catch { if connection == socketGeneration { contextState.expire(id); contextStatus = contextState.message; updateVoiceReadiness() } }
+    }
+    func recoverSavedContext(_ review: NativeContextRecoveryReview) async {
+        guard canRecoverSavedContext, review == contextRecoveryReview else { return }
+        await submitContextRecovery(review)
+    }
+    func checkSavedContextRecovery() async {
+        guard canCheckSavedContextRecovery, let review = contextRecoveryReview else { return }
+        await submitContextRecovery(review)
+    }
+    private func submitContextRecovery(_ review: NativeContextRecoveryReview) async {
+        let connection = review.connectionID
+        guard review == contextRecoveryReview, connection == socketGeneration,
+              review.selectionID == conversationRevision,
+              let frame = contextState.recoveryFrame(review: review.fence, connectionID: connection),
+              let id = frame["id"] as? String else {
+            contextStatus = "This conversation changed. Check its context before reviewing recovery again."
+            return
+        }
+        do {
+            guard let primary = recovery.primarySessionID else { throw NativeContextPreferenceFailure() }
+            if frame["method"] as? String == "session.context.recover" {
+                try contextPreferences.rememberRecovery(review.fence, primary: primary)
+            } else {
+                guard try contextPreferences.pendingRecovery(session: review.fence.sessionID, primary: primary) == review.fence else { throw NativeContextPreferenceFailure() }
+            }
+        } catch {
+            contextState.expireRecovery(id)
+            contextStatus = "Recovery information could not be saved or verified. No request was sent and no stored information was reset."
+            updateVoiceReadiness(); return
+        }
+        contextStatus = contextState.recoveryMessage ?? contextState.message
+        updateVoiceReadiness(); contextDeadline?.cancel()
+        contextDeadline = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 20_000_000_000)
+            guard !Task.isCancelled, let self, self.socketGeneration == connection else { return }
+            self.contextState.expireRecovery(id)
+            self.contextStatus = self.contextState.recoveryMessage ?? self.contextState.message
+            self.updateVoiceReadiness()
+        }
+        do { try await sendChatFrame(frame) }
+        catch {
+            guard socketGeneration == connection, conversationRevision == review.selectionID,
+                  conversationID == review.fence.sessionID,
+                  contextState.recoveryRequestID == id else { return }
+            contextDeadline?.cancel(); contextState.expireRecovery(id)
+            contextStatus = contextState.recoveryMessage ?? contextState.message
+            updateVoiceReadiness()
+        }
     }
     private func sendChatFrame(_ frame:[String:Any]) async throws {
         if let injectedChatSender { try await injectedChatSender(frame);return }
@@ -593,12 +669,25 @@ import CoreFoundation
         let globalBudget = type == "state_push" && frame["event"] as? String == "cost_cap_hit"
         if let sid = frame["session_id"] as? String, sid != conversationID, !globalBudget { return }
         if let sid = payload["session_id"] as? String, sid != conversationID, !globalBudget { return }
+        if contextState.consumeRecovery(frame, connectionID: connection) {
+            contextDeadline?.cancel(); contextStatus = contextState.recoveryMessage ?? contextState.message
+            updateVoiceReadiness()
+            if !contextState.recoveryUnknown { await refreshContextReadiness() }
+            return
+        }
+        restorePendingContextRecovery()
         let contextChanged = contextState.consume(frame, connectionID: connection)
         if contextChanged {
-            contextDeadline?.cancel(); contextStatus = contextState.message
+            contextDeadline?.cancel(); contextStatus = contextState.recoveryMessage ?? contextState.message
             if contextState.managed, let primary = recovery.primarySessionID {
-                do { try contextPreferences.remember(conversationID, primary: primary) }
-                catch { contextState.configure(sessionID: conversationID, connectionID: connection, required: true, requestID: nil); contextStatus = error.localizedDescription }
+                do {
+                    try contextPreferences.remember(conversationID, primary: primary)
+                    if let completed = contextState.recoveryReconciledFence {
+                        try contextPreferences.clearRecovery(completed, primary: primary)
+                        contextState.finishRecoveryPersistence(completed)
+                    }
+                }
+                catch { configureContext(sessionID: conversationID, connectionID: connection, required: true, requestID: nil); contextStatus = error.localizedDescription }
             }
             updateVoiceReadiness()
         }

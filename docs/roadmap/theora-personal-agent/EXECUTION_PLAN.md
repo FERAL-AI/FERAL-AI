@@ -14,7 +14,41 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Latest published source: `634595c7194aedaf6eb9b8c91cbacb87fedea4bd`, in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Required CI/native passed:12,426 backend tests,83 skipped,74.42% coverage; generic Python/Node transport jobs passed. Nonblocking mypy848 versus812 baseline failed. The working core wave repairs three server errors and its two new Forge errors; full local mypy now845, still above baseline. Immutable9.29 passes bounded real Security/chat/Stop/reopen/status journeys; [acceptance](NATIVE_9_29_ACCEPTANCE.md) is frozen. DATA01C production attachment/writer closure and the real extension approval repair passed597 combined targeted tests, followed by46 owner/primary/ingress tests. The required local full run failed with a harness INTERNALERROR and no valid coverage; exact-source remote CI remains required. Ownership and investigation are in [WORK_STATE](WORK_STATE.md).
+Published source `d2158fc6a88586aa443f5adf24e471ee7a90d29f` is in
+[draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Exact-source
+[required CI37086090592](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37086090592)
+and [native37086090563](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37086090563)
+passed. Backend:12,654 passed/83 skipped/74.77% coverage; Python SDK112 passed.
+Mypy remains818 against the unchanged812 baseline. Packaged9.30 still contains
+`dd69c7bf5`, not the later extension/approval/type repairs. Its real isolated
+backend restart/recall/cancellation checks passed; current GUI acceptance is
+blocked by the Computer Use native pipe startup failure. Earlier artifacts and
+failed runs below remain historical evidence.
+
+## Active completion wave
+
+Prioritize the existing backend's dependable daily app journeys. Additional
+coding-engine expansion follows model setup, recovery, voice and data continuity.
+Gen-UI expansion (NATIVE-05) is deferred; retain existing working capabilities.
+No speculative calendar deadline or source-only completion claim closes a gate.
+
+| Owner | Exclusive workstream | Required outcome |
+|---|---|---|
+| Context worker | Runtime checkpoint/activation recovery and focused tests | Explicit exact-owner recovery after Stop; retain saved context and uncertain outcomes; no automatic task replay; restart/concurrency/stale-review tests |
+| Onboarding worker | Existing vault initializer/router/state and native setup/provider views | Reviewed secure fresh setup, cancellation and independent outcome readback; preserve existing vaults; trusted signed release acceptance stays distinct from fixture proof |
+| Integration worker | Attributable type repairs in mesh, multi-agent and places modules | Precise types without baseline inflation or weakened behavior; targeted runtime tests and exact-source ratchet measurement |
+| Parent | Native recovery presentation, shared integration, checkpoint, Git and final assembly | Wire verified contracts, integrate sequentially, freeze/test sources, package their exact runtime, then actual app and installation acceptance |
+
+Each completed workstream moves to the next ready card. Physical device,
+account and signed-distribution dependencies must not stall independent source
+work. The complete release matrix remains required for enabled capabilities.
+
+### Historical verification checkpoint
+
+At `634595c7194aedaf6eb9b8c91cbacb87fedea4bd`, required CI/native passed:
+12,426 backend tests/83 skipped/74.42% coverage. Mypy848 versus812 failed.
+The subsequent working wave and earlier full-run failure are recorded in
+[WORK_STATE](WORK_STATE.md); later passing checks do not erase them.
 
 Actual immutable9.27 passed exact reviewed Deny/Allow, local reply and copy/link,
 but New conversation caused another accessibility recursion SIGSEGV and context
@@ -47,7 +81,7 @@ Start here. Several items can run independently. Do not wait for a social networ
 | NATIVE-02 / security worker | Reuse Vault initialization coordinator/router and native onboarding; wire safe reviewed fresh-key setup | Disposable new encrypted profile, real signed OS key storage, deny/cancel/drift, relaunch, provider activation and real reply; original artifacts preserved | OS signing and authorized account access / large |
 | NATIVE-03 / native acceptance worker | Oversight/Security/Operations/RuntimeHealth: exercise existing approvals, grants, jobs, checkpoints and lifecycle | Exact allow/deny; pause blocks dispatch; cancel owned work; revoke grant; restore safely; process exit, sleep/wake and reopen; unknown effects never replay | Stable candidate; CORE-03 where workflows involved / medium |
 | NATIVE-04 / native parity worker | Finish concrete missing controls: routine run-now and automation CRUD; Forge generation/proposals/stats; per-skill account configuration; peer/sync setup; push; complete status/cost presentation | Separate endpoint-backed subcards; exact payload/readback; denial/error/empty/persistence cases; real adapters only where available | Existing routes; distinguish absent backend support / medium per subcard |
-| NATIVE-05 / native parity worker | Finish bounded native GenUI component inventory and developer validate/install entry; retain existing confirmations/patch validation | Existing sample app opens, confirms/denies an action, patches/navigates and uninstalls; unsupported components remain explicit; no cross-app response leakage | DEV-01 and component inventory / medium |
+| NATIVE-05 / deferred | Gen-UI expansion and additional native component inventory are outside the current completion wave; preserve existing rendering and confirmations | Reconsider separately after the supported app's daily journeys pass | Explicitly deferred; not a current release prerequisite |
 | NATIVE-06 / native acceptance worker | Existing voice capture/playback/configuration; add missing global shortcut/floating controls after core audio works | Real mic/headphones: start/mute/interrupt/stop, deny permissions, drop provider, switch thread; capture and late playback stop accurately | Authorized provider/device access / medium–large |
 | DATA-01 / memory worker | Explicit migration from existing installation using store/config/vault schemas, not changing defaults silently | Disposable populated old profile migrates with transcripts/wiki/memory/identity/settings/grants intact; backup and rollback recover original; crashes/WAL and version conflicts tested | Schema manifest; NATIVE-02 for encrypted profiles / large |
 | DEV-01 / developer worker | Reuse Python/Node SDKs, manifests, skill registry, app publisher and HUP/device SDKs | Clean-clone tutorial builds a plugin and app, validates/installs/invokes through actual authorization and uninstalls; examples agree with real HTTP/WS authentication/schema; SDK compatibility tests in CI | Contract audit / medium |

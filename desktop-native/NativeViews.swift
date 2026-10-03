@@ -491,6 +491,7 @@ private struct NativeChatView: View {
     @State private var attachmentReviewPresented = false
     @State private var chatToolsPresented = false
     @State private var savedContextReviewPresented = false
+    @State private var contextRecoveryReview: NativeContextRecoveryReview?
     @State private var attachmentReview: (draft: String, ids: [String], session: String)?
     @FocusState private var composerFocused: Bool
 
@@ -510,6 +511,12 @@ private struct NativeChatView: View {
                 HStack {
                     Text(model.contextStatus).font(.caption).foregroundStyle(model.contextReady && !model.contextSetupPending ? Color.secondary : Color.orange)
                     Spacer()
+                    if model.canRecoverSavedContext {
+                        Button("Continue conversation…") { contextRecoveryReview = model.contextRecoveryReview }
+                    }
+                    if model.canCheckSavedContextRecovery {
+                        Button("Check recovery") { Task { await model.checkSavedContextRecovery() } }
+                    }
                     if model.contextNeedsAttention || model.contextSetupPending { Button("Reconnect saved context") { Task { await model.reconnectVerifiedChat() } }.disabled(!model.ready || model.chatMutationBusy) }
                 }.padding(.horizontal, 28).padding(.bottom, 8)
             }
@@ -645,6 +652,23 @@ private struct NativeChatView: View {
             case .failure(let error): if (error as NSError).code != NSUserCancelledError { model.attachmentError = error.localizedDescription }
             }
         }
+        .sheet(isPresented: Binding(get: { contextRecoveryReview != nil }, set: { if !$0 { contextRecoveryReview = nil } })) {
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Continue this conversation?").font(.title2.weight(.semibold))
+                NativeSelectableText(text: NativeContextRecoveryFence.disclosure)
+                HStack {
+                    Button("Cancel") { contextRecoveryReview = nil }.keyboardShortcut(.cancelAction)
+                    Spacer()
+                    Button("Continue without retrying the task") {
+                        guard let review = contextRecoveryReview else { return }
+                        contextRecoveryReview = nil
+                        Task { await model.recoverSavedContext(review) }
+                    }.disabled(!model.canRecoverSavedContext || model.contextRecoveryReview != contextRecoveryReview)
+                }
+            }.padding(24).frame(width: 480)
+        }
+        .onChange(of: model.chatConnectionID) { _ in contextRecoveryReview = nil }
+        .onChange(of: model.contextRecoverySelectionID) { _ in contextRecoveryReview = nil }
     }
 
     private func send() {

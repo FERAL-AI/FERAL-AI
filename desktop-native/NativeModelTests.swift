@@ -56,9 +56,11 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
     var frames:[[String:Any]] = []
     var failCommand = false
     var beforeCommand:(([String:Any]) async throws -> Void)?
+    var beforeRequest:(([String:Any]) async throws -> Void)?
     var savedBeforeSubmission = false
     func send(_ frame:[String:Any]) async throws {
         frames.append(frame)
+        if frame["type"] as? String == "req" { try await beforeRequest?(frame) }
         if frame["type"] as? String == "text_command" {
             let rows = WireProtocol.bodies("/api/conversations/save").last?["messages"] as? [[String:Any]] ?? []
             savedBeforeSubmission = (rows.last?["chat_turn"] as? [String:Any])?["request_id"] as? String == frame["msg_id"] as? String
@@ -180,6 +182,113 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         try expect(WireProtocol.bodies("/api/conversations/save").isEmpty, "read-only reconnect never injects display history")
         await creation.shutdown()
         print("PASS saved-context READY, cancelled-context gating, fresh explicit creation/readback, no UI import and known-mode downgrade rejection; mocked wire only")
+    }
+    @MainActor static func contextRecoveryTests() async throws {
+        let root = URL(fileURLWithPath: "/private/tmp/feral-native-recovery-model-" + UUID().uuidString)
+        try FileManager.default.createDirectory(at: root, withIntermediateDirectories: false)
+        defer { try? FileManager.default.removeItem(at: root) }
+        let journal = root.appendingPathComponent("native-context-recovery.json")
+        let suite = "feral.native-recovery-model." + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let primary = "recovery-owner-fixture"
+        let generation = "a55f2162-52c4-42a0-8c0c-c4f77b867bdb"
+        let newGeneration = "fffeeeab-fd01-48dd-a5b3-82bdce780731"
+        let attempt = "a99b4ddd-1ffc-4e53-bf24-548cd5f524f4"
+        let fence = NativeContextRecoveryFence(sessionID: primary, generation: generation, revision: 2, attemptID: attempt)
+        let store = NativeContextCheckpointPreferences(defaults: preferences, recoveryJournalURL: journal)
+        @MainActor func subject(_ wire: TrackedChatFrames) async throws -> NativeModel {
+            let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [WireProtocol.self]
+            let model = NativeModel(session: URLSession(configuration: configuration), preferences: preferences,
+                recoveryJournalURL: journal, chatSender: { try await wire.send($0) })
+            model.ready = true
+            WireProtocol.reset(["/api/sessions/primary": ["session_id": primary],
+                "/api/conversations/" + primary: ["id": primary, "messages": [[String: Any]]()],
+                "/api/sessions/primary/transcript": ["session_id": primary, "primary_session_id": primary, "messages": [[String: Any]](), "count": 0]])
+            try await model.resolveStartupConversation()
+            await model.reconnectVerifiedChat()
+            return model
+        }
+        @MainActor func pending(_ model: NativeModel, id: String) -> [String: Any] {
+            var frame = contextCapability(model, id: id, state: "in_progress")
+            var payload = frame["payload"] as! [String: Any]
+            payload["context_recovery_versions"] = [1]
+            payload["context_recovery"] = ["contract_version": 1, "session_id": primary,
+                "generation": generation, "revision": 2, "attempt_id": attempt,
+                "state": "in_progress", "durable": true, "requires_unknown_effects_acknowledgement": true]
+            frame["payload"] = payload; return frame
+        }
+        @MainActor func recoveredCapability(_ model: NativeModel, id: String) -> [String: Any] {
+            var frame = contextCapability(model, id: id, revision: 3)
+            var payload = frame["payload"] as! [String: Any]
+            var checkpoint = payload["context_checkpoint"] as! [String: Any]
+            checkpoint["generation"] = newGeneration; payload["context_checkpoint"] = checkpoint
+            frame["payload"] = payload; return frame
+        }
+        let wire = TrackedChatFrames(), model = try await subject(wire)
+        await model.consume(pending(model, id: model.chatCapabilityFrame!["id"] as! String))
+        let oldReview = model.contextRecoveryReview!
+        await model.reconnectVerifiedChat()
+        await model.consume(pending(model, id: model.chatCapabilityFrame!["id"] as! String))
+        try expect(model.canRecoverSavedContext, "new connection can prepare its own recovery review")
+        await model.recoverSavedContext(oldReview)
+        try expect(!wire.frames.contains { $0["method"] as? String == "session.context.recover" }, "old connection's confirmation sends no recovery RPC")
+        var persistedBeforeRPC = false
+        wire.beforeRequest = { frame in
+            if frame["method"] as? String == "session.context.recover" {
+                persistedBeforeRPC = try store.pendingRecovery(session: primary, primary: primary) == fence
+                throw NativeFailure("Fixture lost recovery response")
+            }
+        }
+        await model.recoverSavedContext(model.contextRecoveryReview!)
+        try expect(persistedBeforeRPC && model.canCheckSavedContextRecovery && !model.chatCanSend, "lost reply retains a persisted intent written before RPC")
+        await model.shutdown()
+        let restartedWire = TrackedChatFrames(), restarted = try await subject(restartedWire)
+        await restarted.consume(recoveredCapability(restarted, id: restarted.chatCapabilityFrame!["id"] as! String))
+        try expect(!restarted.chatCanSend && restarted.canCheckSavedContextRecovery, "fresh model cannot forget pending recovery despite a ready runtime")
+        await restarted.checkSavedContextRecovery()
+        let status = restartedWire.frames.last { $0["method"] as? String == "session.context.recoveryStatus" }!
+        try expect((status["params"] as! [String: Any])["acknowledge_unknown_effects"] == nil && !restartedWire.frames.contains { $0["method"] as? String == "session.context.recover" }, "restart uses read-only reconciliation instead of replay")
+        var checkpoint = (recoveredCapability(restarted, id: "unused")["payload"] as! [String: Any])["context_checkpoint"] as! [String: Any]
+        checkpoint["attempt_id"] = "d10ad8cd-bf90-4401-a4ec-8f80732328b2"; checkpoint["initialized"] = false
+        await restarted.consume(["type": "res", "id": status["id"]!, "ok": true,
+            "payload": ["contract_version": 1, "session_id": primary, "status": "recovered", "recovered": true,
+                "context_ready": true, "durable": true, "replayed": false, "action_outcome": "unknown", "context_checkpoint": checkpoint]])
+        try expect(!restarted.chatCanSend, "positive status alone cannot enable a task")
+        let readback = restartedWire.frames.last { $0["method"] as? String == "chat.capabilities" }!
+        await restarted.consume(recoveredCapability(restarted, id: readback["id"] as! String))
+        let remaining = try store.pendingRecovery(session: primary, primary: primary)
+        try expect(restarted.chatCanSend && remaining == nil && restartedWire.commands.isEmpty, "exact readback clears durable intent and permits only a new explicit task")
+        await restarted.shutdown()
+        let delayedWire = TrackedChatFrames(), delayed = try await subject(delayedWire)
+        await delayed.consume(pending(delayed, id: delayed.chatCapabilityFrame!["id"] as! String))
+        var readbackStatus = ""
+        delayedWire.beforeRequest = { frame in
+            guard frame["method"] as? String == "session.context.recover" else { return }
+            await delayed.consume(["type": "res", "id": frame["id"]!, "ok": true,
+                "payload": ["contract_version": 1, "session_id": primary, "status": "recovered",
+                    "context_ready": true, "durable": true, "replayed": false,
+                    "action_outcome": "unknown", "context_checkpoint": checkpoint]])
+            readbackStatus = delayed.contextStatus
+            throw NativeFailure("Fixture delayed send failure after server recovery response")
+        }
+        await delayed.recoverSavedContext(delayed.contextRecoveryReview!)
+        try expect(readbackStatus == "Checking saved-context readiness…" && delayed.contextStatus == readbackStatus,
+            "late old send failure cannot replace newer independent readback state")
+        try await Task.sleep(nanoseconds: 16_000_000_000)
+        try expect(!delayed.contextReady && !delayed.chatCanSend && delayed.contextStatus.contains("Saved context is unavailable"),
+            "independent readback still expires after a late old send failure")
+        let timedOutIntent = try store.pendingRecovery(session: primary, primary: primary)
+        try expect(timedOutIntent == fence,
+            "readback timeout preserves durable recovery intent")
+        await delayed.shutdown()
+        try Data("malformed-private-fixture".utf8).write(to: journal)
+        let brokenWire = TrackedChatFrames(), broken = try await subject(brokenWire)
+        await broken.consume(recoveredCapability(broken, id: broken.chatCapabilityFrame!["id"] as! String))
+        let preserved = try Data(contentsOf: journal)
+        try expect(!broken.chatCanSend && brokenWire.commands.isEmpty && preserved == Data("malformed-private-fixture".utf8), "corrupt journal is preserved and cannot silently enable a task")
+        await broken.shutdown()
+        print("PASS exact recovery review ownership, journal-before-RPC, restart/status/readback and corruption refusal; mocked network only")
     }
     @MainActor static func trackedChatTests() async throws {
         WireProtocol.reset()
@@ -670,7 +779,8 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
             try await trackedChatTests()
             try await contextCheckpointTests()
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 25 groups; mocked HTTP/wire only, no engine/model execution")
+            try await contextRecoveryTests()
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 26 groups; mocked HTTP/wire only, no engine/model execution")
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)
             exit(1)
