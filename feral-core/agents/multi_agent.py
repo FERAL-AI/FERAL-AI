@@ -357,7 +357,7 @@ class AgentWorker:
         w_usage: dict = {}
         w_model = ""
 
-        tools = self.get_tools()
+        tools: list[dict] | None = self.get_tools()
         perception_ctx = ""
         if self._perception:
             frame = self._perception.get_frame(session_id)
@@ -412,8 +412,8 @@ class AgentWorker:
         messages.extend(self.replay_history(session_id))
         messages.append({"role": "user", "content": user_text})
 
-        tool_calls_made = []
-        tool_results = []
+        tool_calls_made: list[dict] = []
+        tool_results: list[dict] = []
         nudged_for_text = False
 
         # v2026.6.11 — UNLIMITED rounds by default (was a hard-coded 4,

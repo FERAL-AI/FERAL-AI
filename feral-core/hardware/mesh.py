@@ -31,7 +31,7 @@ from hardware.command_contract import (
     NodeHealth,
 )
 from hardware.action_frames import build_action_request
-from hardware.reviewed_dispatch import HardwareBinding, HardwareReviewError, ReviewedHardwareCoordinator
+from hardware.reviewed_dispatch import HardwareBinding, HardwareReview, HardwareReviewError, ReviewedHardwareCoordinator
 
 logger = logging.getLogger("feral.hardware.mesh")
 
@@ -158,8 +158,8 @@ class HardwareMesh:
         self._kg = knowledge_graph
         self._reviewed_connections: dict[str, tuple[object, str]] = {}
         self._reviewed_tasks: dict[str, asyncio.Task] = {}
-        self._reviewed = None
-        self._reviewed_authorizations = {}
+        self._reviewed: ReviewedHardwareCoordinator | None = None
+        self._reviewed_authorizations: dict[str, HardwareReview] = {}
 
     def set_knowledge_graph(self, kg) -> None:
         """Late-bind the knowledge graph after BrainState wires memory.

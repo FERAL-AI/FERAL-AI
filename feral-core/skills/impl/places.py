@@ -27,10 +27,13 @@ import json
 import logging
 import math
 import os
-from typing import Any, Dict, Optional
+from typing import TYPE_CHECKING, Any, Dict, Optional
 
 from skills.base import BaseSkill
 from skills.impl import register_skill
+
+if TYPE_CHECKING:
+    from mcp.client import MCPServerConnection
 
 logger = logging.getLogger("feral.skills.places")
 
@@ -109,7 +112,7 @@ class PlacesSkill(BaseSkill):
     skill_id = "places"
 
     def __init__(self) -> None:
-        self._conn = None
+        self._conn: MCPServerConnection | None = None
 
     # ── connection ───────────────────────────────────────────────
 
