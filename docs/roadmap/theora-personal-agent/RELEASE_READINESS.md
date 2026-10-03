@@ -1,5 +1,19 @@
 # Theora / FERAL full-product release readiness
 
+**Reconciled Mac-first checkpoint (October 3): published `f41c204fe`.**
+General CI, docs, naming, version and the corrected automatic Linux desktop build
+pass. Native CI still fails the30s Process startup fixture; retained evidence
+establishes interpreter/child launch, not health readiness or a confirmed cause.
+Mac9.34 is built from the preceding `4eded179e` source and passes actual offline
+archive/readers acceptance. Its actual local-model recovery has no completed
+receipt; the earlier reported active run was waiting for approval and had not
+launched. Local provider-review fixes pass the integrated native fixture runner;
+attachment-bound committed-turn work passes171 focused backend checks and awaits
+parent integration. Managed voice, actual GUI/audio, cloud-account, clean-install,
+migration and signed-distribution acceptance remain open. Further Linux work and
+Gen-UI expansion are deferred. [Current work](WORK_STATE.md).
+The paragraphs below are historical checkpoints.
+
 **Current checkpoint (October 3): published `4eded179e2060c226739511fc53f5a8bde0eaa16`.**
 Exact-head general CI passes13,013 backend tests/83 skipped/75.24% coverage,
 web/SDK/type-count/asset checks. Separate native CI fails at a30s Process fixture

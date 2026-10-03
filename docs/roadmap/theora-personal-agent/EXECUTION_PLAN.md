@@ -14,6 +14,20 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
+Mac-first reconciliation: published `f41c204fe` passes general CI, docs, naming,
+version and the corrected automatic Linux desktop build. Further Linux engineering
+is deferred. Native CI still fails the unchanged30s Process startup fixture;
+bounded failure evidence establishes interpreter/child launch but not server
+readiness or root cause. The startup worker now owns this Mac diagnostic card.
+Immutable9.34/source4eded passes actual offline archive/readers acceptance; its
+local-model recovery has no completed receipt. The previous reported active run
+was an approval wait without a launch. Local provider-review repairs pass the
+integrated native fixture runner; committed-turn prerequisites pass171 focused
+backend checks and await parent integration. Managed chained voice is next after
+that contract is integrated. Actual GUI/audio, accounts and distribution gates
+remain separate. [Live checkpoint](WORK_STATE.md). Older records below do not
+supersede this reconciliation.
+
 Latest published source is `4eded179e2060c226739511fc53f5a8bde0eaa16`.
 Its general CI passes13,013 backend tests/83 skipped/75.24% and web/SDK/type gates.
 Separate native Process ownership CI times out without phase evidence; Linux

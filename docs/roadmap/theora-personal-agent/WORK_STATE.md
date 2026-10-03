@@ -7,6 +7,44 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
+### Reconciled Mac-first status
+
+- Published source is now `f41c204fea819f2a918d27f0715145ee9b99792d` in
+  [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310); main remains unchanged.
+  [General CI37134269808](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37134269808)
+  passed, including the backend PR lane, web, SDK and type-count checks.
+  Docs, naming and version checks passed. The opt-in real-brain job was skipped.
+- [Native CI37134269877](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37134269877)
+  passed production typecheck and feature/linked checks, then failed the original
+  30-second Process fixture. Its retained evidence now shows that the interpreter
+  and child launched, but startup did not become ready; the receipt precedes
+  HTTP-server construction and does not establish a listening health endpoint.
+  Root cause remains unconfirmed. Bounded startup diagnostics are the next Mac card.
+- The already-triggered [Desktop Build37134269807](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37134269807)
+  passed after the Linux payload correction. Further Linux engineering is deferred;
+  Mac delivery owns the active workstreams. This is not Linux GUI acceptance.
+- Mac9.34 remains the immutable candidate built from `4eded179e`; its actual
+  offline archive/readers round-trip passed. It does not contain the newer source
+  fixes. No completed actual9.34 local-model recovery receipt is available yet.
+  The earlier reported active run had not launched: a worker was waiting for
+  command approval. The fresh resource-bounded probe requires an actual launch
+  and completion receipt before its status can be reported as running or passed.
+- Local, not yet published: provider confirmation now rejects changed drafts,
+  repeated review and changed saved configuration. The integrated native runner
+  passed21 provider fixture groups/33 assertions,27 linked-model groups,39 desktop
+  assertions and five error-presentation assertions. These are mocked HTTP/wire
+  tests, not real provider, keychain or GUI acceptance.
+- Local, not yet published: attachment-bound committed-turn receipts pass171
+  focused backend checks. Parent integration/full typing remain open. This is
+  a prerequisite for managed voice, not completion of the voice experience.
+- Worker allocation: Mac startup diagnosis; immutable packaged local-model
+  recovery; completed committed-turn work awaiting parent integration. Parent
+  owns contracts, integration, documentation and publication. Gen-UI remains
+  deferred; coding expansion follows dependable setup, recovery and voice.
+
+The following status bullets record the preceding publication checkpoint and
+are superseded by the reconciliation above where they describe current activity.
+
 - Published source: `4eded179e2060c226739511fc53f5a8bde0eaa16` on the existing
   review branch; main is unchanged and PR310 remains open/unmerged.
 - Exact-head general CI [37131532584](https://github.com/FERAL-AI/FERAL-AI/actions/runs/37131532584)

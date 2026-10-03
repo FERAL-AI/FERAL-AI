@@ -51,15 +51,20 @@ harness remain preserved; production checkpoint code was unchanged.
 
 ## Current independent gates
 
-- Actual local-model Stop/recovery/restart acceptance is running against this
-  immutable candidate with the existing deadlines and isolated resources.
+- Actual local-model Stop/recovery/restart acceptance has no completed receipt
+  for this candidate yet. The initially reported active run had not launched:
+  its worker was waiting for command approval. A new resource-bounded probe is
+  prepared with the existing acceptance deadlines and isolated resources;
+  actual launch and completion must be recorded separately.
 - Current GUI/file-picker/preferences-application and microphone/speaker
   acceptance are unavailable because Computer Use cannot initialize its native
   pipe. The tool failure is not evidence of an app crash.
 - Managed saved-context voice remains refused pending its tracked-turn adapter.
-- Exact-source CI has two failures: a native Process fixture timed out without
-  retaining its blocked phase; Linux Debian assembly passed but extracted-payload
-  verification failed. Their fixes and new-head verification remain open.
+- Candidate-source native and Linux CI failed. Newer source `f41c204fe` passes
+  general CI and the corrected Linux desktop package workflow. Its native Process
+  fixture still times out at30s, now with evidence that the interpreter and child
+  launched before readiness stalled. This does not establish a listening server
+  or the root cause. Further diagnosis is a Mac-first workstream.
 - Cloud-account actions, physical glasses, iOS, Linux GUI, migration of encrypted
   profiles, distribution signing and full update/rollback need separate evidence.
 
