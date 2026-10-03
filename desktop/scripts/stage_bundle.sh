@@ -330,10 +330,10 @@ PYEXE="$(staged_python_exe)"
 # meant: install into this interpreter's own site-packages. $STAGED_PY is
 # a private copy inside the build tree, so nothing shared is modified;
 # the interpreter under ~/.local/share/uv is never written to.
-echo "  -> installing feral-core[llm] into the staged interpreter"
+echo "  -> installing feral-core[llm] and the Python plugin SDK into the staged interpreter"
 "$UV" pip install --python "$PYEXE" --break-system-packages \
     --constraint "$REPO_ROOT/feral-core/requirements.lock" \
-    "$REPO_ROOT/feral-core[llm]" >&2
+    "$REPO_ROOT/feral-core[llm]" "$REPO_ROOT/sdk/python" >&2
 
 # ── 4. Prove it, here, rather than at the user's first launch ────────
 #
@@ -442,6 +442,15 @@ trap 'rm -rf "$STAGE_PROBE_HOME" "$STAGE_PROBE_LOG"' EXIT
 # experience.
 if ( cd "$STAGED_CORE" && PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring FERAL_HOME="$STAGE_PROBE_HOME" FERAL_DATA_HOME="$STAGE_PROBE_HOME/data" FERAL_EMBED_PROVIDER=hash FERAL_LLM_PROVIDER=none "$PYEXE" -c "
 import memory.store, memory.knowledge_graph, api.server  # noqa: F401
+import feral_sdk
+from pathlib import Path
+from skills.base import BaseSkill
+sdk_file = Path(feral_sdk.__file__).resolve()
+assert sdk_file.is_relative_to(Path(__import__('sys').prefix).resolve()), 'plugin SDK is outside staged interpreter'
+class BundleSDKProbe(feral_sdk.FeralPlugin):
+    name = 'bundle_sdk_probe'
+adapter = BundleSDKProbe.runtime_skill()()
+assert isinstance(adapter, BaseSkill) and adapter.skill_id == 'bundle_sdk_probe', 'plugin adapter cannot bind bundled runtime'
 from memory.sqlite_features import interpreter_sqlite_report
 assert interpreter_sqlite_report()['fts5'], 'staged interpreter reports no FTS5'
 variant = api.server._webui_variant
@@ -451,9 +460,11 @@ assert variant == 'v2', (
     'dashboard belongs.' % (variant,)
 )
 print('     web UI variant resolved by the staged brain: %s' % variant)
+print('     Python SDK imports from staged interpreter; runtime adapter binds BaseSkill')
 " ) >"$STAGE_PROBE_LOG" 2>&1; then
     echo "     brain modules import cleanly under the staged interpreter"
     grep -a 'web UI variant resolved' "$STAGE_PROBE_LOG" || true
+    grep -a 'Python SDK imports' "$STAGE_PROBE_LOG" || true
 else
     echo "  [error] the staged brain does not import, or would not serve the" >&2
     echo "          v2 dashboard. Full output:" >&2

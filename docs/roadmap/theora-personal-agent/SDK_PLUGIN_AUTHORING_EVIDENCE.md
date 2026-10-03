@@ -228,3 +228,19 @@ Additional final logs:
 `feral-sdk-node-ci-repair-runtime-explicit-20261002.log`.
 The prior package artifact hashes above refer to the artifact check before this
 CI-script metadata change; no newly packed/published SDK is asserted by this fix.
+
+## Desktop SDK dependency integration
+
+Parent added the local Python SDK to the existing noneditable staged-interpreter
+install, using the same `feral-core/requirements.lock` constraints. This fixes
+the earlier absence of `feral_sdk` from the desktop runtime; it does not add a
+general extension dependency installer or repair reload acknowledgement.
+`bash -n desktop/scripts/stage_bundle.sh` passed. Actual staging exited0:
+CPython3.11.15/SQLite3.53.1/FTS5, v2 web UI import, SDK import physically inside
+the staged interpreter and an SDK-created adapter binding actual `BaseSkill`
+all passed. The probe constructs a harmless adapter and executes no plugin tool,
+model, account or external effect. Log:`/private/tmp/feral-native-9-30-stage.log`.
+
+Next9.30 assembly must independently verify the same SDK dependency in its final
+payload. These staging results are not yet packaged GUI or clean-machine
+acceptance; immutable9.29 remains unchanged and contains no SDK follow-up.

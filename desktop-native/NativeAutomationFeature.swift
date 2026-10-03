@@ -26,6 +26,7 @@ enum NativeAutomationAction {
 }
 struct NativeAutomationReview:Identifiable {
     let id = UUID(),generation:UUID
+    let contextRevision:UUID
     let action:NativeAutomationAction,title:String,detail:String
     let expected:[String:Any]?
 }
@@ -40,6 +41,11 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
     @Published private(set) var routineID:String?
     private var baseURL:URL?,generation = UUID(),issued = Set<UUID>()
     private var originals:[NativeAutomationKind:[String:[String:Any]]] = [:]
+    private var contextGate = NativeContextActionGate()
+    @Published private(set) var contextPolicy = NativeSelectedContextPolicy.legacy
+    func setContextPolicy(_ policy:NativeSelectedContextPolicy) {
+        if contextGate.update(policy) { contextPolicy = policy }
+    }
     private let session:URLSession
     init(session:URLSession? = nil) {
         if let session { self.session = session } else { let config = URLSessionConfiguration.ephemeral;config.timeoutIntervalForResource = 30;self.session = URLSession(configuration:config,delegate:NativeAutomationRedirectGuard(),delegateQueue:nil) }
@@ -70,7 +76,14 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
             return NativeAutomationRow(id:id,fields:safe)
         }
     }
+    func startsWork(_ action:NativeAutomationAction)->Bool {
+        switch action { case .create,.testOutgoing:return true;case .load,.delete,.runs:return false }
+    }
+    private func assertContext(_ approved:NativeAutomationReview) throws {
+        guard contextGate.accepts(approved.contextRevision),!startsWork(approved.action) || contextPolicy.taskReady else { throw NativeAutomationError("Selected chat, connection or readiness changed. Review again; no automatic retry is made.") }
+    }
     func review(_ action:NativeAutomationAction) throws -> NativeAutomationReview {
+        guard !startsWork(action) || contextPolicy.taskReady else { throw NativeAutomationError("Verify the selected chat before arming a trigger or sending a real test. Inspection and trigger deletion remain available.") }
         guard baseURL != nil,!busy else { throw NativeAutomationError("Wait for the local automation service.") }
         let title:String,detail:String;var expected:[String:Any]?
         switch action {
@@ -99,25 +112,27 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
             else { title = "Permanently delete \(selectedKind.rawValue) automation \(id)?";detail = "Deletes this exact stored trigger. Already running actions or outbound requests may continue; their effects are not undone. No provider credential revocation is established." }
         case .runs(let id):guard Int(id).map({$0 > 0}) == true,id.count <= 18 else { throw NativeAutomationError("Enter a positive routine ID.") };title = "Inspect routine \(id) and last 20 runs?";detail = "Reads schedule and execution metadata for this backend routine. This uses the detail endpoint and does not call the routine list that can restart the scheduler. Raw payloads, outputs and error strings are withheld because they may include private credentials or content."
         }
-        let result = NativeAutomationReview(generation:generation,action:action,title:title,detail:detail,expected:expected);issued.insert(result.id);return result
+        let result = NativeAutomationReview(generation:generation,contextRevision:contextGate.revision,action:action,title:title,detail:detail + "\nScope: global trigger/subscription. It is not bound to the selected chat or its saved context.",expected:expected);issued.insert(result.id);return result
     }
     func perform(_ approved:NativeAutomationReview) async -> Bool {
-        guard approved.generation == generation,issued.remove(approved.id) != nil,!busy else { error = "Review expired or already used.";return false }
+        guard approved.generation == generation,contextGate.accepts(approved.contextRevision),(!startsWork(approved.action) || contextPolicy.taskReady),issued.remove(approved.id) != nil,!busy else { error = "Review expired or already used.";return false }
         let version = generation;busy = true;receipt = nil;error = nil;var dispatched = false
         defer { if generation == version { busy = false } }
         do {
+            let text:String
             switch approved.action {
             case .load(let kind):
-                let records = try parse(kind,try await request(kind.path));guard generation == version else { return false };install(kind,records);receipt = "Inventory response loaded. Engine/store availability is not proven by an empty list."
+                let records = try parse(kind,try await request(kind.path));guard generation == version else { return false };install(kind,records);text = "Inventory response loaded. Engine/store availability is not proven by an empty list."
             case .runs(let id):
                 runRows = nil;routineID = nil
                 let value = try await request("/api/routines/" + id)
                 guard let routine = value["routine"] as? [String:Any],String(describing:routine["id"] ?? "") == id,let runs = value["runs"] as? [[String:Any]],runs.count <= 20,runs.allSatisfy({String(describing:$0["job_id"] ?? "") == id}) else { throw NativeAutomationError("Exact routine and bounded run history were not confirmed.") }
                 guard generation == version else { return false }
-                routineID = id;runRows = runs.map { NativeAutomationWire.safe($0,["id","job_id","started_at","finished_at","status","duration_ms"]) };receipt = "Routine \(id) metadata read; \(runs.count) run records returned. Completed external effects are not established by run status alone."
+                routineID = id;runRows = runs.map { NativeAutomationWire.safe($0,["id","job_id","started_at","finished_at","status","duration_ms"]) };text = "Routine \(id) metadata read; \(runs.count) run records returned. Completed external effects are not established by run status alone."
             case .create(let kind,let body):
                 let fresh = try parse(kind,try await request(kind.path));guard generation == version else { return false }
                 if kind == .geofences,let name = body["name"] as? String,fresh[name] != nil { throw NativeAutomationError("That geofence name now exists. Reload and review a new name.") }
+                try assertContext(approved)
                 dispatched = true
                 let path = kind == .inbound ? "/api/custom-webhooks/create" : kind.path
                 let value = try await request(path,method:"POST",body:body)
@@ -131,23 +146,27 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
                     guard NativeAutomationWire.bool(stored["has_secret"]) == true || stored["secret"] as? String == supplied else { throw NativeAutomationError("Outgoing signing secret presence was not confirmed by readback.") }
                 }
                 for field in body.keys where field != "secret" { guard let actual = stored[field],NativeAutomationWire.equal(["v":actual],["v":body[field]!]) else { throw NativeAutomationError("Stored automation fields differ from the review.") } }
-                guard generation == version else { return false };install(kind,after);receipt = "Exact stored \(kind.rawValue) automation \(id) confirmed. No completed trigger or delivery is established."
+                guard generation == version else { return false };install(kind,after);text = "Exact stored \(kind.rawValue) automation \(id) confirmed. No completed trigger or delivery is established."
             case .delete(let kind,let id):
-                let fresh = try parse(kind,try await request(kind.path));guard let expected = approved.expected,let current = fresh[id],NativeAutomationWire.equal(expected,current) else { throw NativeAutomationError("This automation changed. Reload and review again.") };guard generation == version else { return false };dispatched = true
+                let fresh = try parse(kind,try await request(kind.path));guard let expected = approved.expected,let current = fresh[id],NativeAutomationWire.equal(expected,current) else { throw NativeAutomationError("This automation changed. Reload and review again.") };guard generation == version else { return false };try assertContext(approved);dispatched = true
                 let path = kind == .inbound ? "/api/custom-webhooks/" : kind.path + "/"
                 let result = try await request(path + NativeAutomationWire.segment(id),method:"DELETE");guard NativeAutomationWire.bool(result["success"]) == true else { throw NativeAutomationError("Deletion was not acknowledged.") }
-                let after = try parse(kind,try await request(kind.path));guard after[id] == nil else { throw NativeAutomationError("Deleted automation still appears in readback.") };guard generation == version else { return false };install(kind,after);receipt = "Stored automation \(id) deleted. In-flight effects may remain."
+                let after = try parse(kind,try await request(kind.path));guard after[id] == nil else { throw NativeAutomationError("Deleted automation still appears in readback.") };guard generation == version else { return false };install(kind,after);text = "Stored automation \(id) deleted. In-flight effects may remain."
             case .testOutgoing(let id):
-                let fresh = try parse(.outgoing,try await request(NativeAutomationKind.outgoing.path));guard let expected = approved.expected,let current = fresh[id],NativeAutomationWire.equal(expected,current) else { throw NativeAutomationError("Outgoing target changed. Reload and review again.") };guard generation == version else { return false };dispatched = true
-                let result = try await request("/api/outgoing-webhooks/" + NativeAutomationWire.segment(id) + "/test",method:"POST",body:["event_type":"test.ping","payload":["message":"FERAL synthetic connection test"]]);guard result["event_type"] as? String == "test.ping",let delivered = NativeAutomationWire.bool(result["delivered"]) else { throw NativeAutomationError("No exact synthetic delivery verdict returned.") };guard generation == version else { return false };receipt = delivered ? "Backend reports synthetic test delivered. Future delivery is not guaranteed." : "Backend reports synthetic test delivery failed."
+                let fresh = try parse(.outgoing,try await request(NativeAutomationKind.outgoing.path));guard let expected = approved.expected,let current = fresh[id],NativeAutomationWire.equal(expected,current) else { throw NativeAutomationError("Outgoing target changed. Reload and review again.") };guard generation == version else { return false };try assertContext(approved);dispatched = true
+                let result = try await request("/api/outgoing-webhooks/" + NativeAutomationWire.segment(id) + "/test",method:"POST",body:["event_type":"test.ping","payload":["message":"FERAL synthetic connection test"]]);guard result["event_type"] as? String == "test.ping",let delivered = NativeAutomationWire.bool(result["delivered"]) else { throw NativeAutomationError("No exact synthetic delivery verdict returned.") };guard generation == version else { return false };text = delivered ? "Backend reports synthetic test delivered. Future delivery is not guaranteed." : "Backend reports synthetic test delivery failed."
             }
+            try assertContext(approved)
+            receipt = text + " Scope: global automation store, not selected-chat context."
             return true
-        } catch { if generation == version { self.error = error.localizedDescription + (dispatched ? " Action outcome may be partial or uncertain; reload before another review. No automatic retry." : "");if case .load(let kind) = approved.action { rows[kind] = nil;originals[kind] = nil;errors[kind] = self.error } };return false }
+        } catch { if generation == version { receipt = nil;self.error = error.localizedDescription + (dispatched ? " Action outcome may be partial or uncertain; reload before another review. No automatic retry." : "");if case .load(let kind) = approved.action { rows[kind] = nil;originals[kind] = nil;errors[kind] = self.error } };return false }
     }
 }
 
 struct NativeAutomationFeatureView:View {
     let baseURL:URL?,sessionID:String?
+    let contextPolicy:NativeSelectedContextPolicy
+    init(baseURL:URL?,sessionID:String? = nil,contextPolicy:NativeSelectedContextPolicy = .legacy) { self.baseURL = baseURL;self.sessionID = sessionID;self.contextPolicy = contextPolicy }
     @StateObject private var model = NativeAutomationModel()
     @State private var kind = NativeAutomationKind.geofences
     @State private var review:NativeAutomationReview?
@@ -167,6 +186,7 @@ struct NativeAutomationFeatureView:View {
     var body:some View {
         VStack(alignment:.leading,spacing:14) {
             Text("Automation triggers").font(.title.bold())
+            Text(contextPolicy.message).font(.caption).foregroundStyle(.secondary)
             Text("Location triggers, signed webhooks and routine run metadata.").foregroundStyle(.secondary)
             Picker("Trigger type",selection:$kind) { ForEach(NativeAutomationKind.allCases,id:\.self) { Text($0.rawValue.capitalized).tag($0) } }.pickerStyle(.segmented)
             Button("Review loading \(kind.rawValue)…") { prepare(.load(kind)) }.disabled(model.busy || baseURL == nil)
@@ -178,7 +198,7 @@ struct NativeAutomationFeatureView:View {
                         if rows.isEmpty { Text("Inventory returned no records. Backend engine/store availability remains unverified.") }
                         ForEach(rows) { row in VStack(alignment:.leading,spacing:6) {
                             Text(row.fields["name"] as? String ?? row.id).font(.headline)
-                            if kind == .outgoing { Text("Recipient: \(row.fields["target_host"] as? String ?? "Unavailable") · Enabled: \(NativeAutomationWire.bool(row.fields["enabled"]).map { $0 ? "Yes" : "No" } ?? "Unknown")");Button("Review synthetic delivery test…") { prepare(.testOutgoing(row.id)) } }
+                            if kind == .outgoing { Text("Recipient: \(row.fields["target_host"] as? String ?? "Unavailable") · Enabled: \(NativeAutomationWire.bool(row.fields["enabled"]).map { $0 ? "Yes" : "No" } ?? "Unknown")");Button("Review synthetic delivery test…") { prepare(.testOutgoing(row.id)) }.disabled(!contextPolicy.taskReady) }
                             if kind == .inbound { Text("Signed: \(NativeAutomationWire.bool(row.fields["signed"]) == true ? "Yes" : "No — unsigned endpoint") · Action: \(row.fields["action"] as? String ?? "Unknown")");Text("Receive path: /api/custom-webhooks/\(row.id)/receive").font(.system(.caption,design:.monospaced)) }
                             if kind == .geofences { Text("Coordinates: \(String(describing:row.fields["lat"] ?? "Unknown")), \(String(describing:row.fields["lon"] ?? "Unknown")) · Radius: \(String(describing:row.fields["radius_m"] ?? "Unknown")) m") }
                             Button("Review delete…",role:.destructive) { prepare(.delete(kind,row.id)) }
@@ -189,14 +209,15 @@ struct NativeAutomationFeatureView:View {
                     if let runs = model.runRows { Text("\(runs.count) run records for routine \(model.routineID ?? ""). Raw payload/output/error content withheld.");ForEach(Array(runs.enumerated()),id:\.offset) { _,run in Text("Status: \(safeRunStatus(run["status"])) · Started: \(String(describing:run["started_at"] ?? "Unknown"))").font(.caption) } }
                 }.disabled(model.busy)
             }
-        }.padding(24).task(id:baseURL?.absoluteString ?? "") { review = nil;secret = "";model.configure(baseURL) }.onChange(of:kind) { _ in secret = "";review = nil }
+        }.padding(24).task(id:baseURL?.absoluteString ?? "") { review = nil;secret = "";model.setContextPolicy(contextPolicy);model.configure(baseURL) }.onChange(of:kind) { _ in secret = "";review = nil }
+        .onChange(of:contextPolicy) { policy in review = nil;secret = "";model.setContextPolicy(policy) }
         .alert(review?.title ?? "Review automation",isPresented:Binding(get:{review != nil},set:{if !$0 {review = nil}})) {
             Button("Cancel",role:.cancel) {review = nil}
-            Button("Confirm") { if let approved = review {review = nil;secret = "";Task { _ = await model.perform(approved) }} }
+            Button("Confirm") { if let approved = review {review = nil;secret = "";Task { model.setContextPolicy(contextPolicy);_ = await model.perform(approved) }} }
         } message:{ Text(review?.detail ?? "") }
     }
     private func safeRunStatus(_ value:Any?) -> String { guard let text = value as? String,["success","failed","running","completed","pending","cancelled"].contains(text) else { return "Unrecognized / unavailable" };return text }
-    private func prepare(_ action:NativeAutomationAction) { do { review = try model.review(action);localError = nil } catch { localError = error.localizedDescription } }
+    private func prepare(_ action:NativeAutomationAction) { do { model.setContextPolicy(contextPolicy);review = try model.review(action);localError = nil } catch { localError = error.localizedDescription } }
     @ViewBuilder private var draft:some View {
         Text("Create a new trigger").font(.headline);TextField("Name (letters, digits, dash, dot, underscore)",text:$name)
         if kind == .geofences { TextField("Latitude",text:$latitude);TextField("Longitude",text:$longitude);TextField("Radius in metres",text:$radius);TextField("Enter action",text:$enter);TextField("Exit action",text:$exit) }
@@ -207,6 +228,6 @@ struct NativeAutomationFeatureView:View {
             else if kind == .inbound { body["secret"] = secret;body["action"] = "chat";body["action_params"] = ["prefix":prefix] }
             else { body["secret"] = secret;body["target_url"] = target;body["event_types"] = filters.split(separator:",").map { $0.trimmingCharacters(in:.whitespacesAndNewlines) };body["enabled"] = enabled }
             prepare(.create(kind,body))
-        }
+        }.disabled(!contextPolicy.taskReady)
     }
 }

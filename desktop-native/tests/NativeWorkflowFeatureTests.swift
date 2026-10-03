@@ -10,6 +10,7 @@ final class WorkflowFixture: URLProtocol {
     static var done = false
     static var delayPath:String?
     static var delayed = false
+    static var delayMethod:String?
     static var handler:(URLRequest) -> (Int,Any) = normal
     static var flow:[String:Any] { ["id":"f1","title":"Existing flow","status":flowStatus,"current_step":0,"context":["future_metadata":["keep":true]],"steps":[["id":1,"step_type":"sleep","status":"waiting","payload":["seconds":10,"future_field":true],"error":NSNull()]],"error":flowStatus == "failed" ? "Provider failed" : NSNull()] }
     static var routine:[String:Any] { ["id":7,"description":"Existing routine","cron_expr":"every 60m","job_type":"scheduled","session_id":"thread-a","enabled":routineEnabled,"payload":["prompt":"Read local notes","future_field":true],"disabled_reason":"","future_metadata":["keep":true]] }
@@ -68,7 +69,7 @@ final class WorkflowFixture: URLProtocol {
         let response = HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:nil,headerFields:nil)!
         let data = try! JSONSerialization.data(withJSONObject:value)
         let deliver = { self.client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed);self.client?.urlProtocol(self,didLoad:data);self.client?.urlProtocolDidFinishLoading(self) }
-        if Self.delayPath == request.url!.path { Self.delayPath = nil;Self.delayed = true;DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) } else { deliver() }
+        if Self.delayPath == request.url!.path && (Self.delayMethod == nil || Self.delayMethod == request.httpMethod) { Self.delayPath = nil;Self.delayed = true;DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) } else { deliver() }
     }
     override func stopLoading() {}
 }
@@ -95,6 +96,7 @@ final class WorkflowFixture: URLProtocol {
         let reviewed = try model.review(.createAutomation(minutes:60,action:"Read local notes"))
         check(reviewed.explanation.contains("scheduled prompt, not an event trigger") && WorkflowFixture.requests.count == attempted,"scheduled automation review inert and truthful")
         check(await model.perform(reviewed) && model.receipt?.contains("No completed run") == true,"CUSTOM creation requires persisted schedule receipt, not effect success")
+        check(reviewed.explanation.contains("explicitly targets the selected conversation thread-a") && model.receipt?.contains("Readback verified selected conversation thread-a") == true,"structured automation review and receipt identify verified selected owner")
         let createRequest = WorkflowFixture.requests.last { $0.url!.path == "/api/automations" && $0.httpMethod == "POST" }!
         let body = try JSONSerialization.jsonObject(with:createRequest.httpBody!) as! [String:Any]
         check(body.count == 3 && body["interval_minutes"] as? Int == 60 && body["action"] as? String == "Read local notes" && body["session_id"] as? String == "thread-a","structured interval/action/session contract exact with no bypass fields")
@@ -195,15 +197,27 @@ final class WorkflowFixture: URLProtocol {
         let creation = try model.review(.createFlow(body))
         check(creation.explanation.contains("queued work immediately") && WorkflowFixture.requests.count == beforeReview,"create review is inert and explains live queued execution")
         check(await model.perform(creation) && model.receipt?.contains("new-flow") == true,"queued workflow creation not completed execution")
+        check(creation.explanation.contains("taskflow-{new flow ID}") && model.receipt?.contains("Owner not confirmed by this response") == true,"new blank flow review discloses fallback without inventing response owner")
         let createdRequest = WorkflowFixture.requests.last { $0.httpMethod == "POST" && $0.url!.path == "/api/taskflows" }!
         let createdBody = try JSONSerialization.jsonObject(with:createdRequest.httpBody!) as! [String:Any]
         check((createdBody["steps"] as! [[String:Any]])[0]["future_field"] as? Bool == true && createdBody["session_id"] as? String == "","step metadata preserved and dedicated empty session explicit")
+        let scopeNormal = WorkflowFixture.normal
+        for sid in ["", "separate-background"] {
+            WorkflowFixture.handler = { request in
+                let (code,value) = scopeNormal(request)
+                if request.httpMethod == "POST",request.url!.path == "/api/taskflows",var row = value as? [String:Any] { row["session_id"] = sid;return (code,row) }
+                return (code,value)
+            }
+            check(await model.perform(try model.review(.createFlow(body))) && model.receipt?.contains(sid.isEmpty ? "taskflow-new-flow fallback" : "Response identifies session separate-background") == true,"returned \(sid.isEmpty ? "blank fallback" : "independent session") scope is displayed without rebinding selected chat")
+        }
+        WorkflowFixture.handler = scopeNormal
         let invalidCount = WorkflowFixture.requests.count
         do { _ = try model.review(.createFlow(["title":"bad","steps":[["type":"invented"]]]));fatalError("unsupported step accepted") } catch {}
         check(WorkflowFixture.requests.count == invalidCount,"invalid workflow review made no network request")
         let pack = try model.review(.pack(id:"pack-a",context:["topic":"local testing","future_context":true]))
         let packSucceeded = await model.perform(pack)
         check(pack.explanation.contains("live queued") && packSucceeded,"pack template reviewed before instantiating real flow")
+        check(pack.explanation.contains("pack-pack-a") && model.receipt?.contains("Owner not confirmed by this response") == true,"pack default is disclosed but missing receipt owner stays unconfirmed")
         let packReq = WorkflowFixture.requests.last { $0.url!.path.hasSuffix("instantiate") }!
         check((try JSONSerialization.jsonObject(with:packReq.httpBody!) as! [String:Any])["context"] != nil,"pack context passes through actual endpoint")
         check(await model.perform(try model.review(.flow(id:"f1",verb:"resume"))) && model.rows("flows")[0].raw["status"] as? String == "queued","resume confirms requeue not task success")
@@ -221,6 +235,7 @@ final class WorkflowFixture: URLProtocol {
         let routineCreate = try model.review(.createRoutine(routineBody))
         check(routineCreate.explanation.contains("Arms schedule") && routineCreate.explanation.contains("Runs once"),"routine enabled schedule/timezone/recurrence review")
         check(await model.perform(routineCreate) && model.receipt?.contains("Enabled routine 8") == true,"routine receipt confirms enabled creation not completed run")
+        check(routineCreate.explanation.contains("routine-{new routine ID}") && model.receipt?.contains("Owner not confirmed by this response") == true,"blank routine review states fallback without inventing missing response owner")
         let routineRequest = WorkflowFixture.requests.last { $0.url!.path == "/api/routines" && $0.httpMethod == "POST" }!
         let routineData = try JSONSerialization.jsonObject(with:routineRequest.httpBody!) as! [String:Any]
         check(routineData["cron_expr"] as? String == "0 9 * * 1-5" && routineData["tz_name"] as? String == "America/Los_Angeles" && routineData["recurring"] as? Bool == false && (routineData["payload"] as? [String:Any])?["future_field"] as? Bool == true,"canonical routine wire and payload metadata retained")
@@ -244,7 +259,7 @@ final class WorkflowFixture: URLProtocol {
         WorkflowFixture.handler = { request in request.url!.path.contains("/complete/") ? (200,["success":true]) : normal(request) }
         check(!(await model.perform(try model.review(.complete(plan:"p1",action:"a1",result:"")))) && model.actionError?.contains("still listed") == true,"lying completion acknowledgement not native success")
         WorkflowFixture.handler = { request in request.url!.path == "/api/intents/compile" ? (200,["error":"Intent runtime unavailable"]) : normal(request) }
-        check(!(await model.perform(try model.review(.compile("test")))) && model.actionError == "Intent runtime unavailable","HTTP200 error not plan compiled")
+        check(!(await model.perform(try model.review(.compile("test")))) && model.actionError?.contains("Intent runtime unavailable") == true,"HTTP200 error not plan compiled")
         WorkflowFixture.handler = { request in request.url!.path == "/api/taskflows" ? (200,["flows":[["title":"missing ID"]]]) : normal(request) }
         await model.refresh()
         check(model.errors["flows"] != nil && model.payloads["flows"] == nil && model.payloads["today"] != nil,"malformed list unavailable, other resources preserved")
@@ -267,6 +282,41 @@ final class WorkflowFixture: URLProtocol {
         try await parityTests(session:session,base:base)
         await model.configure(baseURL:nil,sessionID:nil)
         check(model.payloads.isEmpty && model.compiledPlan == nil && model.detail == nil,"disconnect clears private workflow/plan records")
+        WorkflowFixture.handler = normal;WorkflowFixture.flowStatus = "waiting";WorkflowFixture.routineExists = true;WorkflowFixture.routineEnabled = true
+        await model.configure(baseURL:base,sessionID:"thread-a")
+        _ = await model.perform(try model.review(.loadRoutines))
+        let blockedPolicy = NativeSelectedContextPolicy(sessionID:"thread-a",connectionID:UUID(),taskReady:false,managed:true)
+        model.setContextPolicy(blockedPolicy)
+        let blockedCount = WorkflowFixture.requests.count
+        for action in [NativeWorkflowAction.compile("No provider call"),.createAutomation(minutes:60,action:"No schedule"),.loadRoutines,.flow(id:"f1",verb:"resume")] {
+            do { _ = try model.review(action);fatalError("unready workflow start permitted") } catch {}
+        }
+        model.selectedFlow = "f1";await model.inspectFlow()
+        check(WorkflowFixture.requests.dropFirst(blockedCount).allSatisfy { $0.httpMethod == "GET" && $0.url!.path != "/api/routines" } && model.detail != nil,"blocked context allows passive flow inspection, no POST or scheduler-starting GET")
+        check(await model.perform(try model.review(.flow(id:"f1",verb:"cancel"))),"blocked chat retains flow cancellation")
+        check(await model.perform(try model.review(.routine(id:"7",verb:"pause"))),"blocked chat retains schedule pause")
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"thread-a",connectionID:UUID(),taskReady:true,managed:false))
+        let resumed = try model.review(.routine(id:"7",verb:"resume"))
+        WorkflowFixture.delayPath = "/api/routines/7";WorkflowFixture.delayed = false
+        let policyRace = Task { await model.perform(resumed) };try await delay()
+        let beforePolicySwitch = WorkflowFixture.requests.filter { $0.httpMethod != "GET" }.count
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"thread-b",connectionID:UUID(),taskReady:true,managed:false))
+        check(!(await policyRace.value) && WorkflowFixture.requests.filter { $0.httpMethod != "GET" }.count == beforePolicySwitch,"context switch after routine preflight prevents resume POST")
+        WorkflowFixture.handler = normal
+        let lateRefresh = try model.review(.compile("synthetic postdispatch gate"))
+        let beforeLateCompile = WorkflowFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/intents/compile" }.count
+        WorkflowFixture.delayed = false;WorkflowFixture.delayMethod = "GET"
+        WorkflowFixture.handler = { request in
+            let response = normal(request)
+            if request.httpMethod == "POST",request.url!.path == "/api/intents/compile" { WorkflowFixture.delayPath = "/api/automations" }
+            return response
+        }
+        let lateRefreshTask = Task { await model.perform(lateRefresh) };try await delay()
+        check(model.receipt == nil && WorkflowFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/intents/compile" }.count == beforeLateCompile + 1,"workflow fixture holds final refresh after one dispatched compile")
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"after-write",connectionID:UUID(),taskReady:false,managed:true))
+        check(!(await lateRefreshTask.value) && model.receipt == nil && model.actionError?.contains("unknown or unverified") == true && !model.acting,"post-refresh policy switch cannot publish stale workflow success")
+        check(!(await model.perform(lateRefresh)) && WorkflowFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/intents/compile" }.count == beforeLateCompile + 1,"late workflow outcome cannot replay compile")
+        WorkflowFixture.handler = normal;WorkflowFixture.delayMethod = nil
         task.cancel();session.invalidateAndCancel()
         print("PASS: \(count) native Workflow fixture assertions; no real jobs, providers or integration transmissions")
     }

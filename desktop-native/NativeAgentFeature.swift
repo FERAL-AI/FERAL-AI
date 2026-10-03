@@ -77,6 +77,7 @@ enum NativeAgentAction {
 struct NativeAgentReview: Identifiable {
     let id = UUID()
     let generation:UUID
+    let contextRevision:UUID
     let action:NativeAgentAction
     let source:[String:Any]
     let existing:[String:Any]?
@@ -92,6 +93,11 @@ struct NativeAgentReview: Identifiable {
     @Published private(set) var actionError:String?
     @Published private(set) var receipt:String?
     private var client:NativeAgentClient?
+    private var contextGate = NativeContextActionGate()
+    @Published private(set) var contextPolicy = NativeSelectedContextPolicy.legacy
+    func setContextPolicy(_ policy:NativeSelectedContextPolicy) {
+        if contextGate.update(policy) { contextPolicy = policy }
+    }
     private let session:URLSession
     private var generation = UUID(), read = UUID()
     private var consumed:Set<UUID> = []
@@ -127,6 +133,7 @@ struct NativeAgentReview: Identifiable {
         } catch { guard revision == read,connection == generation else { return };statistics = nil;errors["stats"] = "Runtime statistics could not be read." }
     }
     func review(_ action:NativeAgentAction) throws -> NativeAgentReview {
+        if action.isProposal && !contextPolicy.taskReady { throw NativeAgentFailure("Verify the selected chat before requesting provider generation. Global registration and feedback remain available.") }
         guard available,!loading,!acting,inventories["agents"] != nil else { throw NativeAgentFailure("Refresh the specialist inventory before reviewing a change.") }
         var source:[String:Any], existing:[String:Any]?, title:String, explanation:String
         switch action {
@@ -154,11 +161,11 @@ struct NativeAgentReview: Identifiable {
         }
         if existing != nil && !(action.isFeedback) { explanation += " WARNING: the same-ID registration replaces an existing specialist definition and resets its runtime counters; this is not a second agent. Existing row: \(NativeAgentWire.json(existing!))." }
         if !action.isFeedback { explanation += "\nExact reviewed definition/proposal:\n" + NativeAgentWire.json(source) }
-        explanation += "\nFresh reads are checked before sending. The backend has no atomic revision guard, so a simultaneous change by another client can still race the write."
-        return NativeAgentReview(generation:generation,action:action,source:source,existing:existing,title:title,explanation:explanation)
+        explanation += "\nScope: global specialist definition/feedback. This endpoint does not use the selected chat context.\nFresh reads are checked before sending. The backend has no atomic revision guard, so a simultaneous change by another client can still race the write."
+        return NativeAgentReview(generation:generation,contextRevision:contextGate.revision,action:action,source:source,existing:existing,title:title,explanation:explanation)
     }
     func perform(_ review:NativeAgentReview) async -> Bool {
-        guard let client = client,review.generation == generation,!loading,!acting,!consumed.contains(review.id) else { actionError = "This review expired or was already used. Refresh and review again.";return false }
+        guard let client = client,review.generation == generation,contextGate.accepts(review.contextRevision),(!review.action.isProposal || contextPolicy.taskReady),!loading,!acting,!consumed.contains(review.id) else { actionError = "This review expired or was already used. Refresh and review again.";return false }
         consumed.insert(review.id);acting = true;actionError = nil;receipt = nil
         let connection = generation
         defer { if connection == generation { acting = false } }
@@ -185,10 +192,11 @@ struct NativeAgentReview: Identifiable {
             if let existing = review.existing {
                 guard let current = current,NativeAgentWire.same(current,existing) else { throw NativeAgentFailure("The specialist changed after review. No write was sent.") }
             } else if current != nil { throw NativeAgentFailure("Another specialist now uses this ID. Review replacement explicitly; no write was sent.") }
-            guard connection == generation else { return false }
+            guard connection == generation,contextGate.accepts(review.contextRevision),!review.action.isProposal || contextPolicy.taskReady else { throw NativeAgentFailure("Selected chat or readiness changed during review. No write was sent; review again.") }
             dispatched = true
             let result = try await client.request(path,method:"POST",body:body)
             guard connection == generation else { return false }
+            guard contextGate.accepts(review.contextRevision) else { throw NativeAgentFailure("The selected chat changed after dispatch. Inspect global specialist state before another review.") }
             guard NativeAgentWire.bool(result["success"]) == true else { throw NativeAgentFailure("The service returned no explicit success receipt.") }
             if !review.action.isFeedback {
                 guard let agent = result["agent"] as? [String:Any],agent["agent_id"] as? String == expectedID,
@@ -200,6 +208,7 @@ struct NativeAgentReview: Identifiable {
             }
             let readback = try NativeAgentWire.rows(try await client.request("/api/agents/list"),key:"agents",idKey:"agent_id")
             guard connection == generation else { return false }
+            guard contextGate.accepts(review.contextRevision),!review.action.isProposal || contextPolicy.taskReady else { throw NativeAgentFailure("The selected chat changed during readback. Inspect global specialist state before another review.") }
             guard let stored = readback.first(where:{$0["agent_id"] as? String == expectedID}) else { throw NativeAgentFailure("The service acknowledged the action but the specialist could not be read back.") }
             if case .feedback(_,let positive) = review.action {
                 let tasks = (review.source["tasks"] as? NSNumber)?.intValue ?? -1
@@ -216,6 +225,7 @@ struct NativeAgentReview: Identifiable {
                 }
                 receipt = "Specialist definition \(expectedID) registered and tool scope read back. Prompt/memory-filter persistence is not exposed by the list endpoint; no task was started."
             }
+            receipt = (receipt ?? "") + " Scope: global specialist state, not selected-chat context."
             inventories["agents"] = readback;generation = UUID();acting = false
             return true
         } catch {
@@ -234,12 +244,13 @@ private extension NativeAgentAction {
 struct NativeAgentFeatureView: View {
     let baseURL:URL?
     let sessionID:String?
+    let contextPolicy:NativeSelectedContextPolicy
     @StateObject private var model = NativeAgentModel()
     @State private var tab = "personas"
     @State private var review:NativeAgentReview?
     @State private var localError:String?
     @State private var custom = "{\n  \"agent_id\": \"my-specialist\",\n  \"name\": \"My specialist\",\n  \"description\": \"\",\n  \"system_prompt\": \"Help with a specific task.\",\n  \"tool_permissions\": [],\n  \"schedule\": null,\n  \"memory_filter\": null\n}"
-    init(baseURL:URL?,sessionID:String? = nil) { self.baseURL = baseURL;self.sessionID = sessionID }
+    init(baseURL:URL?,sessionID:String? = nil,contextPolicy:NativeSelectedContextPolicy = .legacy) { self.baseURL = baseURL;self.sessionID = sessionID;self.contextPolicy = contextPolicy }
     var body:some View {
         VStack(alignment:.leading,spacing:14) {
             HStack {
@@ -248,6 +259,7 @@ struct NativeAgentFeatureView: View {
             }
             Text("Browse persona templates and persisted specialist definitions. Registration does not mean an agent is running, and it does not start a task.").font(.callout).foregroundStyle(.secondary)
             if !model.available { Text("Waiting for the app’s local service.").foregroundStyle(.secondary) }
+            Text(contextPolicy.message).font(.caption).foregroundStyle(.secondary)
             Picker("Section",selection:$tab) { Text("Personas").tag("personas");Text("Registered").tag("agents");Text("Proposals").tag("proposals");Text("Custom").tag("custom");Text("Runtime").tag("stats") }.pickerStyle(.segmented).disabled(model.acting)
             if model.loading || model.acting { ProgressView(model.acting ? "Checking review and service receipt…" : "Reading specialist inventory…") }
             if let error = localError ?? model.actionError { NativeSelectableText(error).foregroundStyle(.red) }
@@ -265,13 +277,14 @@ struct NativeAgentFeatureView: View {
                 }.frame(maxWidth:.infinity,alignment:.leading)
             }
         }.padding(20)
-        .task(id:baseURL?.absoluteString) { review = nil;localError = nil;await model.configure(baseURL:baseURL) }
+        .task(id:baseURL?.absoluteString) { review = nil;localError = nil;model.setContextPolicy(contextPolicy);await model.configure(baseURL:baseURL) }
+        .onChange(of:contextPolicy) { policy in review = nil;model.setContextPolicy(policy) }
         .onChange(of:sessionID) { _ in review = nil }
         .sheet(item:$review) { item in
             VStack(alignment:.leading,spacing:16) {
                 Text(item.title).font(.title2.bold())
                 ScrollView { NativeSelectableText(item.explanation).font(.callout).frame(maxWidth:.infinity,alignment:.leading) }
-                HStack { Spacer();Button("Cancel") { review = nil };Button("Confirm reviewed change") { review = nil;Task { _ = await model.perform(item) } }.disabled(model.loading || model.acting || !model.available) }
+                HStack { Spacer();Button("Cancel") { review = nil };Button("Confirm reviewed change") { review = nil;Task { model.setContextPolicy(contextPolicy);_ = await model.perform(item) } }.disabled(model.loading || model.acting || !model.available) }
             }.padding(24).frame(width:680,height:540)
         }
     }
@@ -311,13 +324,13 @@ struct NativeAgentFeatureView: View {
             DisclosureGroup("Definition and observed metadata") { NativeSelectableText(NativeAgentWire.json(row.raw)).font(.system(.caption,design:.monospaced)) }
             HStack {
                 if tab == "personas" { Button("Review registration…") { prepare(.persona(row.id)) } }
-                else if tab == "proposals" { Button("Review model generation…") { prepare(.proposal(row.id)) } }
+                else if tab == "proposals" { Button("Review model generation…") { prepare(.proposal(row.id)) }.disabled(!contextPolicy.taskReady) }
                 else { Button("Positive feedback…") { prepare(.feedback(id:row.id,positive:true)) };Button("Negative feedback…") { prepare(.feedback(id:row.id,positive:false)) } }
             }.disabled(!model.available || model.loading || model.acting)
         }.padding(14).frame(maxWidth:.infinity,alignment:.leading).background(Color.secondary.opacity(0.06),in:RoundedRectangle(cornerRadius:12))
     }
     private func prepare(_ action:NativeAgentAction) {
-        do { localError = nil;review = try model.review(action) }
+        do { localError = nil;model.setContextPolicy(contextPolicy);review = try model.review(action) }
         catch { localError = (error as? NativeAgentFailure)?.message ?? "This change could not be reviewed." }
     }
 }

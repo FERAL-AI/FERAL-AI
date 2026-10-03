@@ -253,14 +253,16 @@ struct NativeConversationFeatureView: View {
     let baseURL: URL?
     let onOpen: (String) -> Void
     let onNew: () -> Void
+    let onNewSavedContext: (() -> Void)?
     let onDeleted: (String) -> Void
     let canDelete: (String) -> Bool
     @StateObject private var model = NativeConversationFeatureModel()
     @State private var renameTarget: NativeConversationSummary?
     @State private var renameTitle = ""
+    @State private var savedContextReview = false
     @State private var deleteTarget: NativeConversationSummary?
-    init(baseURL: URL?, onOpen: @escaping (String) -> Void, onNew: @escaping () -> Void, onDeleted: @escaping (String) -> Void = { _ in }, canDelete: @escaping (String) -> Bool = { _ in true }) {
-        self.baseURL = baseURL; self.onOpen = onOpen; self.onNew = onNew; self.onDeleted = onDeleted; self.canDelete = canDelete
+    init(baseURL: URL?, onOpen: @escaping (String) -> Void, onNew: @escaping () -> Void, onNewSavedContext: (() -> Void)? = nil, onDeleted: @escaping (String) -> Void = { _ in }, canDelete: @escaping (String) -> Bool = { _ in true }) {
+        self.baseURL = baseURL; self.onOpen = onOpen; self.onNew = onNew; self.onNewSavedContext = onNewSavedContext; self.onDeleted = onDeleted; self.canDelete = canDelete
     }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -271,6 +273,7 @@ struct NativeConversationFeatureView: View {
                 }
                 Spacer()
                 Button { onNew() } label: { Label("New conversation", systemImage: "square.and.pencil") }.disabled(!model.available || model.controlsBusy)
+                if onNewSavedContext != nil { Button("New chat with saved context") { savedContextReview = true }.disabled(!model.available || model.controlsBusy) }
                 Button { Task { await model.refresh() } } label: { Label("Refresh", systemImage: "arrow.clockwise") }.disabled(!model.available || model.controlsBusy)
             }
             if !model.available {
@@ -322,6 +325,10 @@ struct NativeConversationFeatureView: View {
                 }
             }.padding(24).frame(width: 460).interactiveDismissDisabled(model.acting)
         }
+        .alert("New chat with saved context", isPresented: $savedContextReview) {
+            Button("Cancel", role: .cancel) {}
+            Button("Create text chat") { onNewSavedContext?() }
+        } message: { Text(NativeContextCheckpointWire.disclosure) }
         .alert("Permanently delete this saved conversation?", isPresented: Binding(get: { deleteTarget != nil }, set: { if !$0 { deleteTarget = nil } })) {
             Button("Cancel", role: .cancel) { deleteTarget = nil }
             Button("Delete conversation", role: .destructive) {

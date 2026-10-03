@@ -16,6 +16,8 @@ import CoreFoundation
     @Published private(set) var unresolvedChatRequest:NativeTurnReference?
     @Published private(set) var checkingChatStatus = false
     @Published private(set) var chatRecoveryBlocked = false
+    @Published private(set) var contextStatus = "Verifying conversation context…"
+    @Published private(set) var contextSetupPending = false
     @Published var codingBusy = false
     @Published var switchingConversation = false
     @Published var uploadingAttachments = false
@@ -42,6 +44,9 @@ import CoreFoundation
     private var responseDeadline: Task<Void, Never>?
     private var capabilityDeadline:Task<Void,Never>?
     private var statusDeadline:Task<Void,Never>?
+    private var contextDeadline: Task<Void, Never>?
+    private var contextState = NativeContextCheckpointState()
+    private var pendingContextCreationSID: String?
     private var conversationID = "" {
         didSet { if oldValue != conversationID { appSessionScope = UUID() } }
     }
@@ -66,7 +71,24 @@ import CoreFoundation
     var chatCapabilityFrame:[String:Any]? { chatTurns.capabilitiesFrame }
     var chatConnectionID:UUID { socketGeneration }
     var chatReceiptReady:Bool { chatTurns.ready }
-    var chatCanSend:Bool { ready && chatTurns.ready && !chatRecoveryBlocked && unresolvedChatRequest == nil && !isSending && !switchingConversation && !uploadingAttachments && !shuttingDown }
+    var chatCanSend:Bool { ready && chatTurns.ready && contextState.permitsSubmission && !contextSetupPending && !chatRecoveryBlocked && unresolvedChatRequest == nil && !isSending && !switchingConversation && !uploadingAttachments && !shuttingDown }
+    var contextManaged: Bool { contextState.managed || contextRequired(conversationID) }
+    var contextNeedsAttention: Bool { chatTurns.ready && !contextState.permitsSubmission }
+    var contextReady: Bool { contextState.capability?.ready == true }
+    var canCreateSavedContextChat: Bool { ready && chatTurns.ready && contextState.supportsCreation && !contextSetupPending && !chatMutationBusy }
+    var contextUnsupportedOperations: Set<String> { contextManaged ? NativeContextCheckpointWire.unsupportedPaths : [] }
+    var contextToolsMayMutate: Bool { !contextSetupPending && contextState.permitsSubmission }
+    var contextCheckpoint: NativeContextCheckpoint? { contextState.capability?.checkpoint }
+    private var contextPreferences: NativeContextCheckpointPreferences { NativeContextCheckpointPreferences(defaults: prefs) }
+    private func contextRequired(_ id: String) -> Bool {
+        !preferencesUnavailable && contextPreferences.required(id, primary: recovery.primarySessionID)
+    }
+    func canDeleteConversation(_ id: String) -> Bool {
+        !switchingConversation && id != conversationID && !contextRequired(id)
+    }
+    private func updateVoiceReadiness() {
+        voice.configureConnection(sessionID: conversationID, connected: ready && chatTurns.ready && contextState.permitsSubmission && !contextManaged && !contextSetupPending)
+    }
 
     private lazy var recovery = NativeSessionRecoveryModel(preferences: prefs, transport: { [session] request in
         let (data, response) = try await session.data(for: request)
@@ -78,7 +100,8 @@ import CoreFoundation
     private let session: URLSession
     private let transportDelegate = NativeLocalSessionDelegate()
     lazy var voice = NativeVoiceEngine(sendFrame: { [weak self] frame in
-        guard let self, !self.preferencesUnavailable, self.ready, !self.switchingConversation, let socket = self.socket, socket.state == .running,
+        guard let self, !self.preferencesUnavailable, self.ready, !self.switchingConversation, !self.contextManaged, !self.contextSetupPending,
+              self.contextState.permitsSubmission, let socket = self.socket, socket.state == .running,
               frame["session_id"] as? String == self.conversationID else { throw NativeFailure("Voice is disconnected or the conversation changed.") }
         let data = try JSONSerialization.data(withJSONObject: frame)
         try await socket.send(.string(String(decoding: data, as: UTF8.self)))
@@ -104,6 +127,9 @@ import CoreFoundation
         conversationID = id; messages = rows.map(NativeMessage.restored); observedTodos = nil
         richChat.configure(sessionID: id, connectionID: socketGeneration)
         chatTurns.configure(sessionID:nil,connectionID:nil);recoverSavedChatRequest()
+        contextSetupPending = false; pendingContextCreationSID = nil
+        contextState.configure(sessionID: id, connectionID: nil, required: contextRequired(id), requestID: nil)
+        contextStatus = contextState.message
     }
 
     /// A named suite equal to the app domain can return nil on macOS.
@@ -158,7 +184,7 @@ import CoreFoundation
         transportDelegate.onSocketOpen = { [weak self] socket in
             Task { @MainActor in
                 guard let self, self.socket === socket else { return }
-                self.voice.configureConnection(sessionID: self.conversationID, connected: true)
+                self.updateVoiceReadiness()
             }
         }
         transportDelegate.onSocketClose = { [weak self] socket in
@@ -313,6 +339,12 @@ import CoreFoundation
         catch { if runtimeOwner == runtimeRevision { recoveryStatus = "Shared primary session unavailable. No recent saved thread was silently treated as shared." }; throw error }
         guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision else { throw NativeFailure("The conversation changed during startup recovery.") }
         let remembered = try recovery.selectedConversationID()
+        if let remembered, contextPreferences.pending(primary: primary) == remembered {
+            conversationID = remembered; messages = []; pendingContextCreationSID = remembered; contextSetupPending = true
+            recoveryStatus = "Checking interrupted saved-context setup for this exact new chat. No task is being retried."
+            await connectChat()
+            return
+        }
         var selected: [String: Any]?
         if let remembered, !deletedConversationIDs.contains(remembered) { selected = try await readExactConversation(remembered) }
         guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision else { throw NativeFailure("The conversation changed during selection recovery.") }
@@ -390,11 +422,15 @@ import CoreFoundation
         let generation = socketGeneration
         richChat.configure(sessionID: conversationID, connectionID: generation)
         chatTurns.configure(sessionID:conversationID,connectionID:generation);checkingChatStatus = false;chatTurnStatus = "Verifying chat receipt support…"
+        contextState.configure(sessionID: conversationID, connectionID: generation, required: contextRequired(conversationID) || contextSetupPending, requestID: chatTurns.capabilityID)
+        contextStatus = contextState.message
+        contextDeadline?.cancel()
         capabilityDeadline?.cancel();statusDeadline?.cancel()
         let capabilityID = chatTurns.capabilityID
         capabilityDeadline = Task { [weak self] in
             try? await Task.sleep(nanoseconds:15_000_000_000)
-            guard !Task.isCancelled,let self,self.socketGeneration == generation,self.chatTurns.capabilityID == capabilityID,!self.chatTurns.ready else { return }
+            guard !Task.isCancelled,let self,self.socketGeneration == generation,self.chatTurns.capabilityID == capabilityID,(!self.chatTurns.ready || self.contextState.requestID != nil) else { return }
+            if let capabilityID { self.contextState.expire(capabilityID); self.contextStatus = self.contextState.message; self.updateVoiceReadiness() }
             self.recordChatFailure("Chat receipt negotiation timed out. No prompt was sent; reconnect explicitly.");self.chatTurnStatus = "Verified chat unavailable"
         }
         if injectedChatSender != nil {
@@ -403,7 +439,7 @@ import CoreFoundation
         }
         var components = URLComponents(url: runtime.baseURL, resolvingAgainstBaseURL: false)!
         components.scheme = "ws"; components.path = "/v1/session"
-        components.queryItems = [URLQueryItem(name: "session_id", value: conversationID)]
+        components.queryItems = NativeContextCheckpointWire.sessionQuery(conversationID, required: contextManaged || contextSetupPending)
         let ws = session.webSocketTask(with: components.url!)
         socket = ws; ws.resume()
         receiveTask = Task { [weak self] in
@@ -433,6 +469,8 @@ import CoreFoundation
                             if self.chatTurns.isTracked { self.markTrackedUnknown("Chat disconnected before the request receipt arrived. Check status; it has not been retried.") }
                             else { self.recordChatFailure("Chat disconnected. Reconnect explicitly.");self.finishResponse() }
                             self.chatTurns.configure(sessionID:nil,connectionID:nil);self.checkingChatStatus = false
+                            self.contextState.configure(sessionID: self.conversationID, connectionID: nil, required: self.contextManaged, requestID: nil)
+                            self.contextStatus = self.contextState.message
                             await self.persistConversation()
                         }
                     }
@@ -447,6 +485,20 @@ import CoreFoundation
     // The injected transport is a fixture seam; production always sends through
     // this exact current socket and never chooses execution identity from JSON.
     func reconnectVerifiedChat() async { await connectChat() }
+    func refreshContextReadiness() async {
+        guard ready, !shuttingDown, let frame = contextState.refreshFrame(), let id = frame["id"] as? String else { return }
+        let connection = socketGeneration
+        contextStatus = "Checking saved-context readiness…"
+        updateVoiceReadiness()
+        contextDeadline?.cancel()
+        contextDeadline = Task { [weak self] in
+            try? await Task.sleep(nanoseconds: 15_000_000_000)
+            guard !Task.isCancelled, let self, self.socketGeneration == connection else { return }
+            self.contextState.expire(id); self.contextStatus = self.contextState.message; self.updateVoiceReadiness()
+        }
+        do { try await sendChatFrame(frame) }
+        catch { if connection == socketGeneration { contextState.expire(id); contextStatus = contextState.message; updateVoiceReadiness() } }
+    }
     private func sendChatFrame(_ frame:[String:Any]) async throws {
         if let injectedChatSender { try await injectedChatSender(frame);return }
         guard let socket,socket.state == .running else { throw NativeFailure("Chat is disconnected.") }
@@ -526,8 +578,10 @@ import CoreFoundation
                 if terminal.outcome != "cancelled" || terminal.actionOutcome == "unknown" { messages[index].metadata["responseIncomplete"] = true;messages[index].metadata["deliveryError"] = observedError ?? terminal.summary }
             }
         }
-        await persistConversation()
+        // Fence the next task before any display persistence suspension.
+        if contextManaged { await refreshContextReadiness() }
         guard connection == socketGeneration else { return }
+        await persistConversation()
     }
 
     func consume(_ frame: [String: Any]) async {
@@ -539,11 +593,22 @@ import CoreFoundation
         let globalBudget = type == "state_push" && frame["event"] as? String == "cost_cap_hit"
         if let sid = frame["session_id"] as? String, sid != conversationID, !globalBudget { return }
         if let sid = payload["session_id"] as? String, sid != conversationID, !globalBudget { return }
+        let contextChanged = contextState.consume(frame, connectionID: connection)
+        if contextChanged {
+            contextDeadline?.cancel(); contextStatus = contextState.message
+            if contextState.managed, let primary = recovery.primarySessionID {
+                do { try contextPreferences.remember(conversationID, primary: primary) }
+                catch { contextState.configure(sessionID: conversationID, connectionID: connection, required: true, requestID: nil); contextStatus = error.localizedDescription }
+            }
+            updateVoiceReadiness()
+        }
         let turnEvent = chatTurns.consume(frame,connectionID:connection)
         switch turnEvent {
         case .ready:
             capabilityDeadline?.cancel()
             chatTurnStatus = chatRecoveryBlocked ? "Earlier request outcome needs checking" : "Verified chat ready"
+            updateVoiceReadiness()
+            if contextSetupPending { await finishContextCreation(connectionID: connection) }
             if unresolvedChatRequest != nil { await checkChatStatus() };return
         case .accepted:
             if let reference = chatTurns.active {
@@ -559,7 +624,7 @@ import CoreFoundation
             checkingChatStatus = false
             if chatTurns.isTracked || unresolvedChatRequest != nil { markTrackedUnknown(reason);await persistConversation() }
             else { recordChatFailure(reason);chatTurnStatus = "Verified chat unavailable" };return
-        case .ignored:break
+        case .ignored: if contextChanged { return }; break
         }
         if ["chat_turn_accepted","chat_turn_terminal"].contains(type) { return }
         let trackedProgress = chatTurns.isTracked || chatRecoveryBlocked || payload["chat_turn"] != nil
@@ -722,11 +787,61 @@ import CoreFoundation
                 guard conversationRevision == revision else { return }
                 guard let id = result["id"] as? String, !id.isEmpty else { throw NativeFailure("The agent did not confirm the new conversation.") }
                 conversationID = id
+                pendingContextCreationSID = nil; contextSetupPending = false
                 rememberCurrentSelection()
                 recoveryStatus = "New isolated conversation. This exact session does not inherit shared-primary history."
                 messages = []; pendingAttachments = []; attachmentError = nil; chatError = nil; recoverSavedChatRequest(); await connectChat()
             } catch { self.error = error.localizedDescription }
         }
+    }
+    func newSavedContextConversation() {
+        guard preferencesPermitEffects(), canCreateSavedContextChat, let primary = recovery.primarySessionID else { return }
+        switchingConversation = true; conversationRevision = UUID()
+        let revision = conversationRevision
+        Task {
+            defer { if revision == conversationRevision { switchingConversation = false } }
+            _ = await conversationSaveTask?.value
+            guard ready, !shuttingDown, revision == conversationRevision else { return }
+            do {
+                let id = contextPreferences.pending(primary: primary) ?? "thread-" + UUID().uuidString.lowercased()
+                guard NativeContextCheckpointWire.validID(id) else { throw NativeContextPreferenceFailure() }
+                try contextPreferences.remember(id, primary: primary)
+                try contextPreferences.setPending(id, primary: primary)
+                try recovery.rememberSelection(id)
+                conversationID = id; messages = []; pendingAttachments = []; attachmentError = nil; chatError = nil
+                pendingContextCreationSID = id; contextSetupPending = true
+                recoveryStatus = "Preparing a new text chat with saved context. Existing chat messages are not being imported."
+                recoverSavedChatRequest(); await connectChat()
+            } catch { self.error = error.localizedDescription }
+        }
+    }
+    private func finishContextCreation(connectionID: UUID) async {
+        guard let id = pendingContextCreationSID, contextSetupPending, contextState.capability?.ready == true,
+              contextState.managed, socketGeneration == connectionID, id == conversationID,
+              let primary = recovery.primarySessionID else { return }
+        let revision = conversationRevision
+        do {
+            // The opt-in create-if-missing route is atomic; the legacy route is an upsert.
+            // A winning nonempty UI record is never overwritten or imported.
+            guard let receipt = try await request("/api/conversations/new", body: ["id": id, "title": "New chat with saved context", "create_if_missing": true]) as? [String: Any],
+                  NativeContextCheckpointWire.boolean(receipt["ok"]) == true, receipt["id"] as? String == id,
+                  NativeContextCheckpointWire.boolean(receipt["create_if_missing"]) == true,
+                  NativeContextCheckpointWire.boolean(receipt["created"]) != nil,
+                  let winning = receipt["conversation"] as? [String: Any], winning["id"] as? String == id,
+                  let rows = winning["messages"] as? [Any], rows.isEmpty else {
+                throw NativeFailure("New saved-context chat creation collided or was not confirmed. Existing messages were not replaced.")
+            }
+            guard ready, !shuttingDown, conversationID == id, socketGeneration == connectionID, conversationRevision == revision else { return }
+            guard let stored = try await readExactConversation(id), let rows = stored["messages"] as? [Any], rows.isEmpty else {
+                throw NativeFailure("The empty saved-context chat could not be verified. No existing history was imported.")
+            }
+            guard ready, !shuttingDown, conversationID == id, socketGeneration == connectionID, conversationRevision == revision else { return }
+            try contextPreferences.setPending(nil, primary: primary)
+            pendingContextCreationSID = nil; contextSetupPending = false
+            rememberCurrentSelection()
+            recoveryStatus = "This new text chat uses verified server-owned saved context. Saved UI messages are not its authority."
+            updateVoiceReadiness()
+        } catch { if conversationID == id, socketGeneration == connectionID { self.error = error.localizedDescription; contextStatus = "Saved-context setup needs checking. Reconnect this exact new chat; no task was sent." } }
     }
 
     func openConversation(_ id: String) async {
@@ -770,7 +885,7 @@ import CoreFoundation
         } catch { self.error = error.localizedDescription }
     }
     func applySnapshotHistory(_ id: String, history: [[String: Any]]) async throws {
-        guard ready, !chatMutationBusy, !id.isEmpty, id.count <= 256,
+        guard !contextManaged, !contextRequired(id), ready, !chatMutationBusy, !id.isEmpty, id.count <= 256,
               !deletedConversationIDs.contains(id), history.count <= 500,
               JSONSerialization.isValidJSONObject(history),
               history.allSatisfy({ ($0["role"] as? String)?.isEmpty == false }) else {
@@ -803,6 +918,7 @@ import CoreFoundation
     @discardableResult private func persistConversation() async -> Bool {
         let id = conversationID
         guard !id.isEmpty, !deletedConversationIDs.contains(id) else { return false }
+        guard !contextSetupPending, contextState.canSaveDisplay else { return false }
         let rows = messages.map(\.savedRecord), owner = runtimeRevision, previous = conversationSaveTask
         let task = Task { [weak self] in
             _ = await previous?.value
@@ -1005,6 +1121,7 @@ import CoreFoundation
         voice.configureConnection(sessionID: nil, connected: false)
         richChat.configure(sessionID: nil, connectionID: nil)
         responseDeadline?.cancel(); codingPoll?.cancel(); receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
+        contextDeadline?.cancel()
         await runtime.stop(); runtimeRevision = UUID(); recovery.configure(baseURL: nil, connectionID: nil); session.invalidateAndCancel(); ready = false; serviceReachable = false
         capabilityDeadline?.cancel();statusDeadline?.cancel()
     }

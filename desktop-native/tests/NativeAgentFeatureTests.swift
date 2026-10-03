@@ -7,6 +7,7 @@ final class AgentFixture: URLProtocol {
     static var proposal:[String:Any] = ["pattern_id":"pattern-a","name":"Notes Agent","topic":"notes","tools":["memory.search"],"sample_prompts":["Private fixture topic"],"seen_count":7,"time_pattern":"morning"]
     static var delayPath:String?
     static var delayed = false
+    static var delayMethod:String?
     static var handler:(URLRequest) -> (Int,Any) = normal
     static func normal(_ request:URLRequest) -> (Int,Any) {
         let path = request.url!.path
@@ -55,7 +56,7 @@ final class AgentFixture: URLProtocol {
         let response = HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:nil,headerFields:nil)!
         let data = try! JSONSerialization.data(withJSONObject:value)
         let deliver = { self.client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed);self.client?.urlProtocol(self,didLoad:data);self.client?.urlProtocolDidFinishLoading(self) }
-        if Self.delayPath == request.url!.path { Self.delayPath = nil;Self.delayed = true;DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) }
+        if Self.delayPath == request.url!.path && (Self.delayMethod == nil || Self.delayMethod == request.httpMethod) { Self.delayPath = nil;Self.delayed = true;DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) }
         else { deliver() }
     }
     override func stopLoading() {}
@@ -164,6 +165,37 @@ final class AgentFixture: URLProtocol {
         check(!(await task.value) && AgentFixture.posts == beforeDisconnect && !model.available,"disconnect during preflight prevents POST and stale state publication")
         await model.configure(baseURL:URL(string:"http://example.com")!)
         check(model.inventories.isEmpty && AgentFixture.posts == beforeDisconnect,"non-loopback service refused before network dispatch")
+        AgentFixture.handler = normal;await model.configure(baseURL:base)
+        let blockedPolicy = NativeSelectedContextPolicy(sessionID:"blocked",connectionID:UUID(),taskReady:false,managed:true)
+        model.setContextPolicy(blockedPolicy)
+        let beforeBlocked = AgentFixture.posts
+        do { _ = try model.review(.proposal("pattern-a"));fatalError("unready proposal permitted") } catch {}
+        await model.refresh()
+        check(AgentFixture.posts == beforeBlocked && !model.inventories.isEmpty,"blocked context retains passive inventory with no proposal POST")
+        check(await model.perform(try model.review(.feedback(id:"research",positive:true))),"global feedback remains available while chat blocked")
+        let switched = try model.review(.feedback(id:"research",positive:false))
+        AgentFixture.delayPath = "/api/agents/list";AgentFixture.delayed = false
+        let policyRace = Task { await model.perform(switched) }
+        for _ in 0..<1000 { if AgentFixture.delayed { break };try await Task.sleep(nanoseconds:1_000_000) }
+        let beforePolicySwitch = AgentFixture.posts
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"other",connectionID:UUID(),taskReady:true,managed:false))
+        check(!(await policyRace.value) && AgentFixture.posts == beforePolicySwitch,"context switch after awaited inventory invalidates metadata review before POST")
+        AgentFixture.handler = normal;await model.refresh()
+        let lateReadback = try model.review(.feedback(id:"research",positive:true))
+        let beforeLatePost = AgentFixture.posts
+        AgentFixture.delayed = false;AgentFixture.delayMethod = "GET"
+        AgentFixture.handler = { request in
+            let response = normal(request)
+            if request.httpMethod == "POST" { AgentFixture.delayPath = "/api/agents/list" }
+            return response
+        }
+        let lateReadbackTask = Task { await model.perform(lateReadback) }
+        for _ in 0..<1000 { if AgentFixture.delayed { break };try await Task.sleep(nanoseconds:1_000_000) }
+        check(AgentFixture.delayed && AgentFixture.posts == beforeLatePost + 1 && model.receipt == nil,"specialist fixture holds post-write readback without early receipt")
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"after-write",connectionID:UUID(),taskReady:false,managed:true))
+        check(!(await lateReadbackTask.value) && model.receipt == nil && model.actionError?.contains("write may already") == true && AgentFixture.posts == beforeLatePost + 1,"late specialist readback after policy switch sends one write and publishes no stale success")
+        check(!(await model.perform(lateReadback)) && AgentFixture.posts == beforeLatePost + 1,"late specialist outcome cannot replay consumed review")
+        AgentFixture.handler = normal;AgentFixture.delayMethod = nil
         print("Native specialist feature: \(count) assertions passed.")
     }
 }

@@ -104,6 +104,83 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         var data = payload;data["chat_turn"] = ["contract_version":1,"request_id":reference.requestID,"turn_id":turn]
         return ["type":type,"session_id":reference.sessionID,"payload":data]
     }
+    @MainActor static func contextCapability(_ model: NativeModel, id: String, state: String = "ready", revision: Int = 1) -> [String: Any] {
+        let sid = model.activeConversationID
+        var payload: [String: Any] = ["session_id": sid, "turn_contract_versions": [1], "durable_receipts": true,
+            "whole_turn_terminal": true, "context_checkpoint_versions": [1], "context_managed": true,
+            "context_ready": state == "ready", "context_state": state,
+            "managed_unsupported_paths": Array(NativeContextCheckpointWire.unsupportedPaths)]
+        if state == "ready" { payload["context_checkpoint"] = ["contract_version": 1, "session_id": sid,
+            "generation": "a55f2162-52c4-42a0-8c0c-c4f77b867bdb", "revision": revision, "durable": true,
+            "initialized": true, "omissions": ["history_rows": 0, "system_rows": 0, "images": 0, "working_rows": 0]] }
+        return ["type": "res", "id": id, "ok": true, "payload": payload]
+    }
+    @MainActor static func contextCheckpointTests() async throws {
+        WireProtocol.reset()
+        let wire = TrackedChatFrames(), subject = try await trackedModel(wire)
+        try expect(!subject.chatCanSend && WireProtocol.bodies("/api/conversations/save").isEmpty, "before capability no display presave")
+        await subject.consume(contextCapability(subject, id: subject.chatCapabilityFrame!["id"] as! String))
+        try expect(subject.contextManaged && subject.contextReady && subject.chatCanSend, "known managed READY adopted from backend without UI import")
+        let submitted = await subject.sendChat("Synthetic managed text")
+        try expect(submitted && wire.savedBeforeSubmission, "managed READY preserves exact request marker before submission")
+        let reference = subject.trackedChatReference!
+        let turn = UUID().uuidString.lowercased()
+        await subject.consume(receipt(reference, type: "chat_turn_accepted", turn: turn))
+        await subject.consume(receipt(reference, type: "chat_turn_terminal", turn: turn, outcome: "cancelled", text: ""))
+        let refresh = wire.frames.last!
+        try expect(refresh["method"] as? String == "chat.capabilities" && !subject.chatCanSend, "terminal fences next send pending actual context refresh")
+        await subject.consume(contextCapability(subject, id: refresh["id"] as! String, state: "in_progress"))
+        let count = wire.commands.count
+        let blocked = await subject.sendChat("Must not dispatch from interrupted context")
+        try expect(!blocked && wire.commands.count == count && !subject.contextToolsMayMutate, "cancelled in-progress context cannot dispatch next task")
+        try expect(!WireProtocol.bodies("/api/conversations/save").isEmpty, "terminal display marker remains savable after initial READY")
+        try expect(subject.contextUnsupportedOperations.contains("voice") && subject.contextUnsupportedOperations.contains("restore"), "managed unsupported paths remain explicit")
+        await subject.shutdown()
+
+        let suite = "feral.saved-context-creation-fixture." + UUID().uuidString
+        let preferences = UserDefaults(suiteName: suite)!
+        defer { preferences.removePersistentDomain(forName: suite) }
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [WireProtocol.self]
+        let creationWire = TrackedChatFrames()
+        let creation = NativeModel(session: URLSession(configuration: configuration), preferences: preferences,
+            chatSender: { try await creationWire.send($0) })
+        creation.ready = true
+        let primary = "context-primary-fixture"
+        WireProtocol.reset(["/api/sessions/primary": ["session_id": primary],
+            "/api/conversations/" + primary: ["id": primary, "messages": [[String: Any]]()],
+            "/api/sessions/primary/transcript": ["session_id": primary, "primary_session_id": primary, "messages": [[String: Any]](), "count": 0]])
+        try await creation.resolveStartupConversation()
+        await creation.reconnectVerifiedChat()
+        var legacy: [String: Any] = ["session_id": primary, "turn_contract_versions": [1], "durable_receipts": true,
+            "whole_turn_terminal": true, "context_checkpoint_versions": [1], "context_managed": false, "context_ready": false, "context_state": "legacy"]
+        await creation.consume(["type": "res", "id": creation.chatCapabilityFrame!["id"]!, "ok": true, "payload": legacy])
+        try expect(creation.canCreateSavedContextChat && !creation.contextManaged, "ordinary chat advertises explicit new-only option")
+        WireProtocol.reset()
+        creation.newSavedContextConversation()
+        for _ in 0..<100 { if creation.contextSetupPending && !creation.switchingConversation { break }; try await Task.sleep(nanoseconds: 1_000_000) }
+        let fresh = creation.activeConversationID
+        try expect(fresh != primary && fresh.hasPrefix("thread-") && creation.contextSetupPending, "opt-in creates new exact identity without converting current chat")
+        try expect(WireProtocol.bodies("/api/conversations/new").isEmpty && WireProtocol.bodies("/api/conversations/save").isEmpty, "attach READY must precede UI creation and presave")
+        let premature = await creation.sendChat("No task before create readback")
+        try expect(!premature && creationWire.commands.isEmpty, "setup gates dispatch")
+        WireProtocol.reset(["/api/conversations/new": ["ok": true, "id": fresh, "create_if_missing": true, "created": true,
+                "conversation": ["id": fresh, "messages": [[String: Any]]()]],
+            "/api/conversations/" + fresh: ["id": fresh, "messages": [[String: Any]]()]])
+        await creation.consume(contextCapability(creation, id: creation.chatCapabilityFrame!["id"] as! String))
+        try expect(!creation.contextSetupPending && creation.chatCanSend, "verified create and readback open new text chat")
+        let createBody = WireProtocol.bodies("/api/conversations/new").last!
+        try expect(createBody["id"] as? String == fresh && createBody["create_if_missing"] as? Bool == true && createBody["messages"] == nil, "new UI route atomic and never imports rows")
+        try expect(!creation.canDeleteConversation(fresh), "managed deletion unavailable")
+        let modes = NativeContextCheckpointPreferences(defaults: preferences)
+        try expect(modes.required(fresh, primary: primary) && modes.pending(primary: primary) == nil, "successful setup retains mode and clears only pending intent")
+        await creation.reconnectVerifiedChat()
+        legacy["session_id"] = fresh
+        await creation.consume(["type": "res", "id": creation.chatCapabilityFrame!["id"]!, "ok": true, "payload": legacy])
+        try expect(creation.chatReceiptReady && !creation.chatCanSend && creation.contextManaged, "known managed cannot downgrade even if receipt negotiation succeeds")
+        try expect(WireProtocol.bodies("/api/conversations/save").isEmpty, "read-only reconnect never injects display history")
+        await creation.shutdown()
+        print("PASS saved-context READY, cancelled-context gating, fresh explicit creation/readback, no UI import and known-mode downgrade rejection; mocked wire only")
+    }
     @MainActor static func trackedChatTests() async throws {
         WireProtocol.reset()
         let transport = TrackedChatFrames(),model = try await trackedModel(transport)
@@ -592,6 +669,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             try expect(!dying.ready && dying.serviceReachable && dying.securityBaseURL != nil && dying.featureBaseURL == nil, "limited memory readiness exposes Security only and never full agent features")
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
             try await trackedChatTests()
+            try await contextCheckpointTests()
             print("NATIVE_MODEL_WIRE_TESTS_PASSED: 25 groups; mocked HTTP/wire only, no engine/model execution")
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)

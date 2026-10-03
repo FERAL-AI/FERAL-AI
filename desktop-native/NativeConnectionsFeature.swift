@@ -83,6 +83,7 @@ enum NativeConnectionAction {
 struct NativeConnectionReview: Identifiable {
     let id = UUID()
     let generation: UUID
+    let contextRevision:UUID
     let action: NativeConnectionAction
     let title: String
     let explanation: String
@@ -112,6 +113,11 @@ struct NativeConnectionRow: Identifiable {
     private var readGeneration = UUID()
     private var capGeneration = UUID()
     private var operation = UUID()
+    private var contextGate = NativeContextActionGate()
+    @Published private(set) var contextPolicy = NativeSelectedContextPolicy.legacy
+    func setContextPolicy(_ policy:NativeSelectedContextPolicy) {
+        if contextGate.update(policy) { contextPolicy = policy }
+    }
     private let session: URLSession
     static let paths = ["connected": "/api/devices/connected", "paired": "/api/devices/paired", "tokens": "/api/devices/paired", "mesh": "/api/hardware/mesh", "access": "/api/access/status", "sync": "/api/sync/status", "handoff": "/api/handoff/devices"]
     init(session: URLSession? = nil) { self.session = session ?? NativeConnectionsRedirectGuard.session() }
@@ -159,7 +165,15 @@ struct NativeConnectionRow: Identifiable {
             guard cap == capGeneration && connection == generation && selectedNode == node else { return }; capabilities = caps
         } catch { if cap == capGeneration && connection == generation && selectedNode == node { capabilityError = error.localizedDescription } }
     }
+    func permits(_ action:NativeConnectionAction)->Bool {
+        if case .handoff(let source,_,_) = action { return contextPolicy.taskReady && !contextPolicy.managed && (contextPolicy.sessionID == nil || contextPolicy.sessionID == source) }
+        return true
+    }
+    private func assertContext(_ reviewed:NativeConnectionReview) throws {
+        guard contextGate.accepts(reviewed.contextRevision),permits(reviewed.action) else { throw NativeConnectionsFailure("Selected chat, connection or readiness changed. Managed chat handoff is unavailable; review global settings separately.") }
+    }
     func review(_ action: NativeConnectionAction) throws -> NativeConnectionReview {
+        guard permits(action) else { throw NativeConnectionsFailure("Handoff requires a ready standard chat. Saved-context chats cannot hand off yet; global connection settings remain available.") }
         guard available, !acting, !loading else { throw NativeConnectionsFailure("Wait for the local connection to finish refreshing.") }
         let title: String, explanation: String
         switch action {
@@ -198,17 +212,18 @@ struct NativeConnectionRow: Identifiable {
             guard currentSession == source, !source.isEmpty, devices.contains(where: { $0.raw["session_id"] as? String == source }), ["phone", "desktop", "glasses", "wristband", "channel", "browser_node"].contains(type), (1...100).contains(depth), devices.contains(where: { $0.raw["node_type"] as? String == type && $0.raw["session_id"] as? String != source }) else { throw NativeConnectionsFailure("Refresh handoff targets and choose another connected device class for the active thread.") }
             title = "Hand off this thread’s context?"; explanation = "Copies up to \(depth) working-memory messages from session \(source) to the first connected \(type) session chosen by the backend. You cannot select an exact device within that class. It may replace the receiving session’s working context; pending tools, saved transcript and hardware state are not promised to transfer. If the class disconnects before execution, the backend may queue this request."
         }
-        return NativeConnectionReview(generation: generation, action: action, title: title, explanation: explanation)
+        return NativeConnectionReview(generation: generation, contextRevision: contextGate.revision, action: action, title: title, explanation: explanation + "\nScope: handoff uses the exact reviewed source; other actions affect global connections/settings, not selected-chat saved context.")
     }
     func perform(_ reviewed: NativeConnectionReview) async -> Bool {
-        guard reviewed.generation == generation, let client = client else { actionError = "The connection changed. Review this action again."; return false }
-        do { _ = try review(reviewed.action) } catch { actionError = error.localizedDescription; return false }
+        guard reviewed.generation == generation,contextGate.accepts(reviewed.contextRevision), let client = client else { actionError = "The connection changed. Review this action again."; return false }
+        do { try assertContext(reviewed); _ = try review(reviewed.action) } catch { actionError = error.localizedDescription; return false }
         let connection = generation; operation = UUID(); let op = operation
         acting = true; actionError = nil; receipt = nil; exportData = nil
         defer { if connection == generation && op == operation { acting = false } }
         do {
             let response: [String: Any]
             var text: String
+            try assertContext(reviewed)
             switch reviewed.action {
             case .accessMode(let mode):
                 response = try await client.request("/api/access/mode", method: "POST", body: ["mode":mode])
@@ -246,13 +261,16 @@ struct NativeConnectionRow: Identifiable {
                 else { guard let target = response["to_session_id"] as? String, !target.isEmpty, target != source else { throw NativeConnectionsFailure("No receiving session was confirmed.") }; text = "Backend reports \(transferred) working-memory messages copied to \(target). Receiving-device behavior is not verified here." }
             }
             guard connection == generation && op == operation else { return false }
+            try assertContext(reviewed)
             if case .pair = reviewed.action { pairLink = response }
             if case .revoke(let id) = reviewed.action, pairLink?["device_id"] as? String == id { pairLink = nil }
             if case .prune = reviewed.action { pairLink = nil }
             if case .exportBundle = reviewed.action { exportData = try JSONSerialization.data(withJSONObject:response,options:[.prettyPrinted,.sortedKeys]) }
             await refresh()
             if case .capability = reviewed.action { await loadCapabilities() }
-            guard connection == generation && op == operation else { return false }; receipt = text; return true
+            guard connection == generation && op == operation else { return false }
+            try assertContext(reviewed)
+            receipt = text; return true
         } catch { if connection == generation && op == operation { actionError = error.localizedDescription }; return false }
     }
 }
@@ -268,6 +286,7 @@ struct NativeConnectionsExport: FileDocument {
 struct NativeConnectionsFeatureView: View {
     let baseURL: URL?
     let sessionID: String?
+    let contextPolicy:NativeSelectedContextPolicy
     @StateObject private var model = NativeConnectionsModel()
     @State private var tab = "Devices"
     @State private var review: NativeConnectionReview?
@@ -276,7 +295,7 @@ struct NativeConnectionsFeatureView: View {
     @State private var importOpen = false
     @State private var exportOpen = false
     @State private var exportDocument: NativeConnectionsExport?
-    init(baseURL: URL?, sessionID: String? = nil) { self.baseURL = baseURL; self.sessionID = sessionID }
+    init(baseURL: URL?, sessionID: String? = nil, contextPolicy:NativeSelectedContextPolicy = .legacy) { self.baseURL = baseURL; self.sessionID = sessionID;self.contextPolicy = contextPolicy }
     private var busy: Bool { model.loading || model.acting }
     var body: some View {
         VStack(alignment:.leading,spacing:16) {
@@ -285,6 +304,7 @@ struct NativeConnectionsFeatureView: View {
                 Spacer(); Button("Refresh") { Task { await model.refresh() } }.disabled(busy || baseURL == nil)
             }
             Picker("Connection section",selection:$tab) { ForEach(["Devices","Access","Sync","Handoff"],id:\.self) { Text($0).tag($0) } }.pickerStyle(.segmented).disabled(model.acting)
+            Text(contextPolicy.message).font(.caption).foregroundStyle(.secondary)
             if baseURL == nil { Text("Connections will be available when the local service is ready.").foregroundStyle(.secondary); Spacer() }
             else {
                 if let error = localError ?? model.actionError { HStack(alignment: .top) { Image(systemName:"exclamationmark.triangle").accessibilityHidden(true); NativeSelectableText(error).foregroundStyle(.red) }.foregroundStyle(.red).accessibilityElement(children: .contain) }
@@ -293,17 +313,18 @@ struct NativeConnectionsFeatureView: View {
                 ScrollView { VStack(alignment:.leading,spacing:18) { if tab == "Devices" { devices }; if tab == "Access" { access }; if tab == "Sync" { sync }; if tab == "Handoff" { handoff } }.frame(maxWidth:.infinity,alignment:.leading) }
             }
         }.padding(24)
-        .task(id:(baseURL?.absoluteString ?? "") + "|" + (sessionID ?? "")) { review = nil; exportOpen = false; importOpen = false; exportDocument = nil; localError = nil; await model.configure(baseURL:baseURL,sessionID:sessionID) }
+        .task(id:(baseURL?.absoluteString ?? "") + "|" + (sessionID ?? "")) { review = nil; exportOpen = false; importOpen = false; exportDocument = nil; localError = nil; model.setContextPolicy(contextPolicy);await model.configure(baseURL:baseURL,sessionID:sessionID) }
         .onChange(of:model.selectedNode) { _ in Task { await model.loadCapabilities() } }
+        .onChange(of:contextPolicy) { policy in review = nil;model.setContextPolicy(policy) }
         .sheet(item:$review) { reviewed in
-            VStack(alignment:.leading,spacing:16) { Text(reviewed.title).font(.title2.bold()); NativeSelectableText(reviewed.explanation); if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.acting).keyboardShortcut(.cancelAction); Button(model.acting ? "Applying…" : "Confirm") { Task { if await model.perform(reviewed) { if let data = model.exportData { exportDocument = NativeConnectionsExport(data:data); exportOpen = true }; review = nil } } }.disabled(busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.acting)
+            VStack(alignment:.leading,spacing:16) { Text(reviewed.title).font(.title2.bold()); NativeSelectableText(reviewed.explanation); if let error = model.actionError { Text(error).foregroundStyle(.red) }; HStack { Spacer(); Button("Cancel") { review = nil }.disabled(model.acting).keyboardShortcut(.cancelAction); Button(model.acting ? "Applying…" : "Confirm") { Task { model.setContextPolicy(contextPolicy);if await model.perform(reviewed) { if let data = model.exportData { exportDocument = NativeConnectionsExport(data:data); exportOpen = true }; review = nil } } }.disabled(busy).keyboardShortcut(.defaultAction) } }.padding(24).frame(width:560).interactiveDismissDisabled(model.acting)
         }
         .fileImporter(isPresented:$importOpen,allowedContentTypes:[.json]) { result in
             do { let url = try result.get(); let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }; let values = try url.resourceValues(forKeys:[.fileSizeKey]); guard (values.fileSize ?? 0) <= 10 * 1024 * 1024 else { throw NativeConnectionsFailure("Sync bundle exceeds 10 MB.") }; let bundle = try NativeConnectionsWire.bundle(Data(contentsOf:url)); requestReview(.importBundle(bundle)) } catch { localError = error.localizedDescription }
         }
         .fileExporter(isPresented:$exportOpen,document:exportDocument,contentType:.json,defaultFilename:"FERAL-private-sync-state") { result in if case .failure(let error) = result { localError = error.localizedDescription } }
     }
-    private func requestReview(_ action: NativeConnectionAction) { do { localError = nil; review = try model.review(action) } catch { localError = error.localizedDescription } }
+    private func requestReview(_ action: NativeConnectionAction) { do { localError = nil;model.setContextPolicy(contextPolicy); review = try model.review(action) } catch { localError = error.localizedDescription } }
     private func card<Content:View>(_ title:String,@ViewBuilder content:() -> Content) -> some View { VStack(alignment:.leading,spacing:12) { Text(title).font(.headline); content() }.padding(16).frame(maxWidth:.infinity,alignment:.leading).background(Color.secondary.opacity(0.07),in:RoundedRectangle(cornerRadius:12)) }
     @ViewBuilder private func failure(_ resource:String) -> some View { if let error = model.errors[resource] { NativeSelectableText("Unavailable: " + error).foregroundStyle(.red) } }
     private func field(_ label:String,_ value:String) -> some View { HStack(alignment:.top) { Text(label).foregroundStyle(.secondary).frame(width:150,alignment:.leading); NativeSelectableText(value); Spacer() } }
@@ -394,7 +415,7 @@ struct NativeConnectionsFeatureView: View {
             if model.payloads["handoff"] != nil && targets.isEmpty { Text("No other connected sessions were returned.").foregroundStyle(.secondary) }
             ForEach(targets) { row in
                 let type = row.raw["node_type"] as? String ?? "Unknown"
-                HStack { VStack(alignment:.leading) { Text(type.capitalized); Text("Session \(NativeConnectionsWire.text(row.raw["session_id"])) · Node \(NativeConnectionsWire.text(row.raw["node_id"]))").font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Review \(type) handoff…") { requestReview(.handoff(session:sessionID ?? "",type:type,depth:20)) }.disabled(busy || sessionID?.isEmpty != false) }
+                HStack { VStack(alignment:.leading) { Text(type.capitalized); Text("Session \(NativeConnectionsWire.text(row.raw["session_id"])) · Node \(NativeConnectionsWire.text(row.raw["node_id"]))").font(.caption).foregroundStyle(.secondary) }; Spacer(); Button("Review \(type) handoff…") { requestReview(.handoff(session:sessionID ?? "",type:type,depth:20)) }.disabled(busy || sessionID?.isEmpty != false || !contextPolicy.taskReady || contextPolicy.managed) }
             }
         }
     }

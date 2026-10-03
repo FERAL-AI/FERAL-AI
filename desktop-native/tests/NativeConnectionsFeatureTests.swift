@@ -4,6 +4,7 @@ final class ConnectionsFixture: URLProtocol {
     static var requests: [URLRequest] = []
     static var delayPath: String?
     static var delayed = false
+    static var delayMethod:String?
     static func body(_ request:URLRequest) -> Data {
         if let data = request.httpBody { return data }
         guard let stream = request.httpBodyStream else { return Data() }
@@ -55,7 +56,7 @@ final class ConnectionsFixture: URLProtocol {
         let response = HTTPURLResponse(url:request.url!,statusCode:status,httpVersion:nil,headerFields:nil)!
         let data = try! JSONSerialization.data(withJSONObject:value)
         let deliver = { self.client?.urlProtocol(self,didReceive:response,cacheStoragePolicy:.notAllowed); self.client?.urlProtocol(self,didLoad:data); self.client?.urlProtocolDidFinishLoading(self) }
-        if Self.delayPath == request.url!.path { Self.delayPath = nil; Self.delayed = true; DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) } else { deliver() }
+        if Self.delayPath == request.url!.path && (Self.delayMethod == nil || Self.delayMethod == request.httpMethod) { Self.delayPath = nil; Self.delayed = true; DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) } else { deliver() }
     }
     override func stopLoading() {}
 }
@@ -149,6 +150,40 @@ final class ConnectionsFixture: URLProtocol {
         check(forwarded,"same-origin redirect remains valid")
         await model.configure(baseURL:nil,sessionID:nil)
         check(model.pairLink == nil && model.exportData == nil && model.payloads.isEmpty,"disconnect removes credential/export/user records")
+        ConnectionsFixture.handler = normal;await model.configure(baseURL:base,sessionID:"thread-a")
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"thread-a",connectionID:UUID(),taskReady:false,managed:true))
+        let beforeBlocked = ConnectionsFixture.requests.count
+        do { _ = try model.review(.handoff(session:"thread-a",type:"phone",depth:20));fatalError("managed handoff permitted") } catch {}
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"thread-a",connectionID:UUID(),taskReady:true,managed:true))
+        do { _ = try model.review(.handoff(session:"thread-a",type:"phone",depth:20));fatalError("ready managed handoff permitted") } catch {}
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"thread-a",connectionID:UUID(),taskReady:false,managed:false))
+        do { _ = try model.review(.handoff(session:"thread-a",type:"phone",depth:20));fatalError("unready standard handoff permitted") } catch {}
+        await model.refresh()
+        check(ConnectionsFixture.requests.dropFirst(beforeBlocked).allSatisfy { $0.httpMethod == "GET" } && model.payloads["handoff"] != nil,"blocked managed chat keeps passive connection/handoff inventory with no POST")
+        check(await model.perform(try model.review(.accessMode("localhost"))),"global access settings remain available while chat blocked")
+        let oldPolicyReview = try model.review(.accessMode("local"))
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"other",connectionID:UUID(),taskReady:true,managed:false))
+        let beforeStale = ConnectionsFixture.requests.count
+        check(!(await model.perform(oldPolicyReview)) && ConnectionsFixture.requests.count == beforeStale,"exact context epoch invalidates held global settings review before dispatch")
+        for action in [NativeConnectionAction.accessMode("localhost"),.capability(node:"phone-a",name:"camera",granted:false)] {
+            model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"thread-a",connectionID:UUID(),taskReady:true,managed:false))
+            model.selectedNode = "phone-a";await model.loadCapabilities()
+            let lateReadback = try model.review(action)
+            let beforeLatePosts = ConnectionsFixture.requests.filter { $0.httpMethod == "POST" }.count
+            ConnectionsFixture.delayed = false;ConnectionsFixture.delayMethod = "GET"
+            ConnectionsFixture.handler = { request in
+                let response = normal(request)
+                if request.httpMethod == "POST" {
+                    ConnectionsFixture.delayPath = request.url!.path.hasSuffix("capabilities") ? "/api/devices/phone-a/capabilities" : "/api/access/status"
+                }
+                return response
+            }
+            let lateReadbackTask = Task { await model.perform(lateReadback) };try await awaitDelay()
+            check(model.receipt == nil && ConnectionsFixture.requests.filter { $0.httpMethod == "POST" }.count == beforeLatePosts + 1,"connections fixture holds final refresh/capability read after one effect")
+            model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"after-write",connectionID:UUID(),taskReady:false,managed:true))
+            check(!(await lateReadbackTask.value) && model.receipt == nil && model.actionError != nil && !model.acting && ConnectionsFixture.requests.filter { $0.httpMethod == "POST" }.count == beforeLatePosts + 1,"policy switch during final connection readback publishes no stale success or duplicate effect")
+            ConnectionsFixture.handler = normal;ConnectionsFixture.delayMethod = nil
+        }
         task.cancel(); session.invalidateAndCancel()
         print("PASS: \(count) native Connections fixture assertions; no Tailscale, remote exposure, physical device or user-data actions")
     }

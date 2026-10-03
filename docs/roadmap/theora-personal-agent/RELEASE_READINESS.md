@@ -1,11 +1,13 @@
 # Theora / FERAL full-product release readiness
 
-Current published source is634595c7194aedaf6eb9b8c91cbacb87fedea4bd, required CI/native
-passed with12,426 backend tests/83skipped/74.42%coverage. Mypy848 versus812 remains
-failed. Immutable9.29 has passed bounded real Security layout, three local-model
+Current published core/SDK source is205f468a2b783e847acfe810e2e753d3785f89ad.
+Remote backend:12,540 passed/1 failed/83 skipped; coverage74.66%. The sole
+disconnect fixture failure and mandatory Node runtime CI setup are being
+corrected. Mypy845 versus812 remains failed. Immutable9.29, containing earlier
+source634595c, has passed bounded real Security layout, three local-model
 turns, Stop and Quit/relaunch/status reconciliation; see [9.29 evidence](NATIVE_9_29_ACCEPTANCE.md).
-The activation and real-executor approval repair below are working changes,
-not the packaged payload. Signing, installation/migration, account/device and
+The activation and real-executor approval repair below are published source,
+not that packaged payload. Signing, installation/migration, account/device and
 remaining capability acceptance gates remain open. [Checkpoint](WORK_STATE.md).
 
 Current core working wave passed 597 combined targeted tests. The required local
@@ -14,11 +16,16 @@ result; it is not acceptance. Two socket failures passed after sandbox escalatio
 but the full teardown leak remains under investigation. A primary legacy fixture
 now binds the real checkpoint guard; exact approval-owner malformed inputs are
 refused. That follow-up passed 46 tests. Full local mypy is 845, above baseline812.
-Exact-source remote CI and the next packaged native journey remain required.
-Core90b75587a is committed with these repairs and evidence; its SDK follow-up
+Corrected-source remote CI and the next packaged native journey remain required.
+Core90b75587a is committed with these repairs and evidence; SDK205f468a2
 passed112 Python/82 Node tests plus wheel/tarball runtime checks. Neither source
 checkpoint is yet represented in the immutable9.29 packaged payload. The new
-publication's remote checks must be reconciled before any release claim.
+publication's remote failures are recorded above. New saved-context native UI
+and action-specific stale-review gates passed the full pre-label37-feature run
+and final affected Workflow/typecheck checks; packaged9.30 acceptance is pending.
+See [native saved-context evidence](NATIVE_SAVED_CONTEXT_EVIDENCE.md) and
+[backend recheck](FULL_BACKEND_RECHECK_20261002.md). No release claim follows
+from fixture counts or a preview version increment.
 
 Updated October 2, 2026. This is an implementation and acceptance roadmap, not a declaration of readiness. Start with the [source-backed execution plan](EXECUTION_PLAN.md), then the [architecture contracts](ARCHITECTURE_AND_CONTRACTS.md), [original execution plan](EXECUTION_AND_RELEASE_GATES.md), [iOS handoff](IOS_AGENT_HANDOFF.md) and [native feature inventory](../../../desktop-native/FEATURE_PARITY.md).
 

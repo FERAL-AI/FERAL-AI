@@ -118,6 +118,12 @@ struct NativeRootView: View {
     @State private var navigationQuery = ""
     @FocusState private var navigationFocused: Bool
 
+    private var selectedContextPolicy: NativeSelectedContextPolicy {
+        NativeSelectedContextPolicy(sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID,
+            connectionID: model.chatConnectionID,
+            taskReady: model.ready && model.contextToolsMayMutate && !model.chatToolsHostBusy && !model.chatRecoveryBlocked && model.unresolvedChatRequest == nil,
+            managed: model.contextManaged)
+    }
     private var matchingDestinations: [NativeDestination] {
         let query = navigationQuery.trimmingCharacters(in: .whitespacesAndNewlines)
         return NativeDestination.allCases.filter { query.isEmpty || $0.rawValue.localizedCaseInsensitiveContains(query) }
@@ -183,11 +189,15 @@ struct NativeRootView: View {
                         switch selection ?? .chat {
                         case .home: NativeAmbientFeatureView(baseURL: model.featureBaseURL)
                         case .chat: NativeChatView(model: model)
-                        case .voice: NativeVoiceFeatureView(baseURL: model.featureBaseURL, engine: model.voice)
+                        case .voice:
+                            VStack(alignment: .leading) {
+                                if model.contextManaged { Text("Voice is unavailable in this saved-context chat. Open a standard chat to use voice; this chat's context is not converted.").foregroundStyle(.secondary).padding() }
+                                NativeVoiceFeatureView(baseURL: model.featureBaseURL, engine: model.voice)
+                            }
                         case .conversations:
                             NativeConversationFeatureView(baseURL: model.featureBaseURL, onOpen: { id in
                                 Task { await model.openConversation(id); if model.activeConversationID == id && model.error == nil { selection = .chat } }
-                            }, onNew: { model.newConversation(); selection = .chat }, onDeleted: { model.conversationDeleted($0) }, canDelete: { !model.switchingConversation && $0 != model.activeConversationID })
+                            }, onNew: { model.newConversation(); selection = .chat }, onNewSavedContext: model.canCreateSavedContextChat ? { model.newSavedContextConversation(); selection = .chat } : nil, onDeleted: { model.conversationDeleted($0) }, canDelete: { model.canDeleteConversation($0) })
                         case .providers:
                             NativeProvidersFeatureView(baseURL: model.featureBaseURL, onConfigurationChanged: { Task { await model.refreshProviderConfiguration() } })
                         case .coding: NativeCodingView(model: model)
@@ -199,10 +209,10 @@ struct NativeRootView: View {
                         case .memory: NativeMemoryFeatureView(baseURL: model.featureBaseURL)
                         case .knowledge: NativeKnowledgeFeatureView(baseURL: model.featureBaseURL)
                         case .memoryContext: NativeMemoryContextFeatureView(baseURL: model.featureBaseURL)
-                        case .agents: NativeAgentFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID)
+                        case .agents: NativeAgentFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID, contextPolicy: selectedContextPolicy)
                         case .identity: NativeIdentityFeatureView(baseURL: model.featureBaseURL)
-                        case .workflows: NativeWorkflowFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID)
-                        case .automation: NativeAutomationFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID)
+                        case .workflows: NativeWorkflowFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID, contextPolicy: selectedContextPolicy)
+                        case .automation: NativeAutomationFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID, contextPolicy: selectedContextPolicy)
                         case .apps: NativeAppSurfaceFeatureView(baseURL: model.featureBaseURL, sessionID: model.appSurfaceSessionID)
                         case .capabilities: NativeCapabilitiesFeatureView(baseURL: model.featureBaseURL)
                         case .oversight: NativeOversightFeatureView(baseURL: model.featureBaseURL)
@@ -212,7 +222,7 @@ struct NativeRootView: View {
                             })
                         case .devices:
                             TabView {
-                                NativeConnectionsFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID).tabItem { Label("Connections", systemImage: "network") }
+                                NativeConnectionsFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID, contextPolicy: selectedContextPolicy).tabItem { Label("Connections", systemImage: "network") }
                                 NativeHardwareFeatureView(baseURL: model.featureBaseURL).tabItem { Label("Device methods", systemImage: "sensor") }
                             }
                         case .security:
@@ -480,6 +490,7 @@ private struct NativeChatView: View {
     @State private var dispatching = false
     @State private var attachmentReviewPresented = false
     @State private var chatToolsPresented = false
+    @State private var savedContextReviewPresented = false
     @State private var attachmentReview: (draft: String, ids: [String], session: String)?
     @FocusState private var composerFocused: Bool
 
@@ -487,11 +498,21 @@ private struct NativeChatView: View {
         VStack(spacing: 0) {
             HStack {
                 NativePageHeader(title: "Chat", subtitle: "A conversation with your personal agent")
+                Button("New chat with saved context") { savedContextReviewPresented = true }.disabled(!model.canCreateSavedContextChat)
                 Button("Conversation tools…") { chatToolsPresented = true }.disabled(!model.ready).padding(.trailing, 28)
             }
             DisclosureGroup("Conversation connection") {
+                NativeSelectableText(text: model.contextStatus, font: .systemFont(ofSize: NSFont.smallSystemFontSize), color: .secondaryLabelColor)
+                if let checkpoint = model.contextCheckpoint { Text("Saved context revision \(checkpoint.revision). Omitted rows: history \(checkpoint.omissions["history_rows"] ?? 0), system \(checkpoint.omissions["system_rows"] ?? 0), working \(checkpoint.omissions["working_rows"] ?? 0); images \(checkpoint.omissions["images"] ?? 0).") }
                 NativeSelectableText(text: model.recoveryStatus, font: .systemFont(ofSize: NSFont.smallSystemFontSize), color: .secondaryLabelColor).frame(maxWidth: .infinity, alignment: .leading)
             }.font(.caption).padding(.horizontal, 28).padding(.bottom, 10)
+            if model.contextManaged || model.contextSetupPending || model.contextNeedsAttention {
+                HStack {
+                    Text(model.contextStatus).font(.caption).foregroundStyle(model.contextReady && !model.contextSetupPending ? Color.secondary : Color.orange)
+                    Spacer()
+                    if model.contextNeedsAttention || model.contextSetupPending { Button("Reconnect saved context") { Task { await model.reconnectVerifiedChat() } }.disabled(!model.ready || model.chatMutationBusy) }
+                }.padding(.horizontal, 28).padding(.bottom, 8)
+            }
             if let error = model.chatError, !error.isEmpty { NativeErrorBanner(text: error) }
             if let error = model.attachmentError, !error.isEmpty { NativeErrorBanner(text: error) }
             if model.messages.isEmpty {
@@ -600,7 +621,11 @@ private struct NativeChatView: View {
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
         .sheet(isPresented: $chatToolsPresented) {
             NativeChatToolsHost(model: model, voice: model.voice).frame(width: 820, height: 680)
-        }.alert("Send attachment contents to the model?", isPresented: $attachmentReviewPresented) {
+        }.alert("New chat with saved context", isPresented: $savedContextReviewPresented) {
+            Button("Cancel", role: .cancel) {}
+            Button("Create text chat") { model.newSavedContextConversation() }
+        } message: { Text(NativeContextCheckpointWire.disclosure) }
+        .alert("Send attachment contents to the model?", isPresented: $attachmentReviewPresented) {
             Button("Send with attachments") {
                 guard let review = attachmentReview, review.draft == draft,
                       review.session == model.activeConversationID,
@@ -670,7 +695,7 @@ private struct NativeChatToolsHost: View {
         VStack {
             HStack { Text("Conversation tools").font(.headline); Spacer(); Button("Done") { dismiss() } }.padding()
             NativeChatToolsFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID,
-                                      isChatBusy: model.chatToolsHostBusy, todos: model.observedTodos,
+                                      isChatBusy: model.chatToolsHostBusy, mutationsAllowed: model.contextToolsMayMutate, blockedOperations: model.contextUnsupportedOperations, todos: model.observedTodos,
                                       onOpenThread: { id, rows in try await model.applySnapshotHistory(id, history: rows) })
         }
     }

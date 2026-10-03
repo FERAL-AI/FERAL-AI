@@ -30,7 +30,7 @@ order; this does not grant real account login, messaging or purchase authorizati
 | Origin | `https://github.com/FERAL-AI/FERAL-AI.git` |
 | Working branch | `feat/native-product-release-foundation-20261001` |
 | Published review | [Draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310), open/unmerged |
-| Current checkpoint | Published core `90b75587a` and executable SDK `205f468a2`; mandatory SDK CI setup and disconnect fixture correction are the next integration |
+| Current checkpoint | Published core `90b75587a` and SDK `205f468a2`; CI/fixture correction `407d158b2` committed locally; next native9.30 integration and publication underway |
 | Prior correction | `2754ce677`: wait for stale-heart-rate metadata without weakening assertions |
 | Unrelated local edit | `AUDIT-FIXES.md`; preserve and exclude unless separately reviewed |
 | Disk observation | Parent latest df reports8.0GiB free. Availability fluctuates; inspect before heavy builds. No disk-caused crash or personal/cache cleanup established |
@@ -124,9 +124,16 @@ implemented. Full pre-label37-feature matrix passed. The narrow
 Workflow scope-label refinement passed its affected runner:80 Workflow assertions,
 25 linked model groups,39 Desktop and5 Error assertions. Final production
 typecheck passed. Parent review then found late readback/refresh publication gaps
-in four panels; the native worker is fixing and testing those before packaging.
-The working native evidence keeps each tested revision distinct. No new candidate
-has been assembled. Developer worker prepares bounded9.30 launcher/read-only probes.
+in four panels. Corrected final four-suite run passed Specialists42, Workflow83,
+Automation43, Connections41; linked Model25 groups, Desktop39, Error5 and final
+production typecheck passed. [Native evidence](NATIVE_SAVED_CONTEXT_EVIDENCE.md)
+keeps each tested revision distinct. No new candidate has been assembled.
+Developer worker completed bounded9.30 launcher/read-only checkpoint probes:
+47 disposable assertions, Ruff, syntax and CLI help passed; no GUI launch.
+Parent staged the noneditable Python SDK in the bundled interpreter under the
+existing locked constraints; actual staged import/location and BaseSkill adapter
+probe passed. This does not repair the separate loader false-acknowledgement
+card in [registry recovery plan](REGISTRY_RELOAD_RECOVERY_PLAN.md).
 The required local full-suite recheck is running with explicit50% coverage floor,
 PR performance exclusions and a read-only descriptor/mock observer;1261 frozen
 core files have digest39a8b055528037f4a4652d67f9372a32c4871b3fed10791be3333ae14ca7d1d8.

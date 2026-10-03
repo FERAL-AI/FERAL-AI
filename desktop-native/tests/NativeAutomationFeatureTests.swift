@@ -2,6 +2,9 @@ import Foundation
 
 final class AutomationFixture:URLProtocol {
     static var requests:[URLRequest] = []
+    static var delayPath:String?
+    static var delayed = false
+    static var delayMethod:String?
     static var records:[String:[[String:Any]]] = ["/api/geofences":[],"/api/custom-webhooks/list":[],"/api/outgoing-webhooks":[]]
     static var handler:(URLRequest) -> (Int,[String:Any]) = normal
     static func normal(_ req:URLRequest) -> (Int,[String:Any]) {
@@ -26,8 +29,11 @@ final class AutomationFixture:URLProtocol {
         var req = request
         if req.httpBody == nil,let stream = req.httpBodyStream {stream.open();defer {stream.close()};var data = Data(),buffer = [UInt8](repeating:0,count:4096);while stream.hasBytesAvailable {let n = stream.read(&buffer,maxLength:buffer.count);if n <= 0 {break};data.append(buffer,count:n)};req.httpBody = data}
         Self.requests.append(req);let (code,value) = Self.handler(req)
+        let deliver = { [self] in
         client?.urlProtocol(self,didReceive:HTTPURLResponse(url:req.url!,statusCode:code,httpVersion:nil,headerFields:nil)!,cacheStoragePolicy:.notAllowed)
         client?.urlProtocol(self,didLoad:try! JSONSerialization.data(withJSONObject:value));client?.urlProtocolDidFinishLoading(self)
+        }
+        if Self.delayPath == req.url!.path && (Self.delayMethod == nil || Self.delayMethod == req.httpMethod) { Self.delayPath = nil;Self.delayed = true;DispatchQueue.global().asyncAfter(deadline:.now()+0.1,execute:deliver) } else { deliver() }
     }
     override func stopLoading() {}
 }
@@ -111,6 +117,42 @@ final class AutomationFixture:URLProtocol {
         let stale = try model.review(.load(.inbound));model.configure(nil);let staleCount = AutomationFixture.requests.count
         check(!(await model.perform(stale)) && AutomationFixture.requests.count == staleCount && model.runRows == nil,"connection clears private metadata and invalidates review")
         model.configure(URL(string:"https://external.fixture")!);check(!(await model.perform(try model.review(.load(.inbound)))) && AutomationFixture.requests.count == staleCount,"nonloopback refused before transport")
+        AutomationFixture.handler = normal;model.configure(base)
+        let blockedPolicy = NativeSelectedContextPolicy(sessionID:"blocked",connectionID:UUID(),taskReady:false,managed:true)
+        model.setContextPolicy(blockedPolicy)
+        let beforeBlocked = AutomationFixture.requests.count
+        check(await model.perform(try model.review(.load(.geofences))),"blocked chat retains reviewed trigger inventory")
+        check(await model.perform(try model.review(.runs("7"))),"blocked chat retains exact routine run inspection")
+        var blockedFence = fence;blockedFence["name"] = "context-fence"
+        do { _ = try model.review(.create(.geofences,blockedFence));fatalError("unready trigger permitted") } catch {}
+        check(AutomationFixture.requests.dropFirst(beforeBlocked).allSatisfy { $0.httpMethod == "GET" },"blocked trigger creation sends no POST")
+        check(await model.perform(try model.review(.load(.outgoing))),"blocked chat retains outgoing inventory")
+        do { _ = try model.review(.testOutgoing("created-hook"));fatalError("unready real outbound test permitted") } catch {}
+        check(await model.perform(try model.review(.delete(.outgoing,"created-hook"))),"blocked chat retains global trigger deletion")
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"ready",connectionID:UUID(),taskReady:true,managed:false))
+        let staleCreate = try model.review(.create(.geofences,blockedFence))
+        AutomationFixture.delayPath = "/api/geofences";AutomationFixture.delayed = false
+        let policyRace = Task { await model.perform(staleCreate) }
+        for _ in 0..<1000 { if AutomationFixture.delayed { break };try await Task.sleep(nanoseconds:1_000_000) }
+        let beforePolicySwitch = AutomationFixture.requests.filter { $0.httpMethod != "GET" }.count
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"other",connectionID:UUID(),taskReady:true,managed:false))
+        check(!(await policyRace.value) && AutomationFixture.requests.filter { $0.httpMethod != "GET" }.count == beforePolicySwitch,"context switch after trigger preflight prevents arming POST")
+        AutomationFixture.handler = normal
+        let lateCreation = try model.review(.create(.geofences,blockedFence))
+        let beforeLateCreate = AutomationFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/geofences" }.count
+        AutomationFixture.delayed = false;AutomationFixture.delayMethod = "GET"
+        AutomationFixture.handler = { request in
+            let response = normal(request)
+            if request.httpMethod == "POST",request.url!.path == "/api/geofences" { AutomationFixture.delayPath = "/api/geofences" }
+            return response
+        }
+        let lateCreationTask = Task { await model.perform(lateCreation) }
+        for _ in 0..<1000 { if AutomationFixture.delayed { break };try await Task.sleep(nanoseconds:1_000_000) }
+        check(AutomationFixture.delayed && model.receipt == nil && AutomationFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/geofences" }.count == beforeLateCreate + 1,"automation fixture holds post-create readback without early success")
+        model.setContextPolicy(NativeSelectedContextPolicy(sessionID:"after-write",connectionID:UUID(),taskReady:false,managed:true))
+        check(!(await lateCreationTask.value) && model.receipt == nil && model.error?.contains("partial or uncertain") == true && !model.busy,"stale automation readback cannot leave success receipt beside uncertain error")
+        check(!(await model.perform(lateCreation)) && AutomationFixture.requests.filter { $0.httpMethod == "POST" && $0.url!.path == "/api/geofences" }.count == beforeLateCreate + 1,"late automation outcome cannot replay arming")
+        AutomationFixture.handler = normal;AutomationFixture.delayMethod = nil
         print("PASS: \(count) native Automation fixture assertions; no real location samples, webhooks, external delivery, scheduled jobs or credentials")
         session.invalidateAndCancel()
     }
