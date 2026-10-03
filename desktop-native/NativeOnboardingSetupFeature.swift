@@ -92,7 +92,7 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
         guard !busy,let base=baseURL,let choice=providers.first(where:{$0.id==selected}),!saved.isEmpty else{throw NativeSetupFailure("Wait for the saved provider catalogue and settings.")}
         let cleanModel=model.trimmingCharacters(in:.whitespacesAndNewlines),cleanEndpoint=try NativeSetupWire.endpoint(endpoint)
         guard NativeSetupWire.text(cleanModel,limit:256) != nil else{throw NativeSetupFailure("Choose or enter a model name. Cached suggestions do not prove model availability.")}
-        if case .saveCredential=action{guard choice.endpointTemplate==nil || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("Enter a valid resolved workspace endpoint before saving this provider credential.")};guard vaultReady,choice.needsKey,!secret.isEmpty,secret.utf8.count<=16384 else{throw NativeSetupFailure("Authenticate the existing vault before saving a provider key. Fresh-vault initialization is unsupported here.")}}
+        if case .saveCredential=action{guard choice.endpointTemplate==nil || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("Enter a valid resolved workspace endpoint before saving this provider credential.")};guard vaultReady,choice.needsKey,!secret.isEmpty,secret.utf8.count<=16384 else{throw NativeSetupFailure("Set up or unlock encrypted credential storage before reviewing a provider key save.")}}
         if case .activate=action{guard choice.endpointTemplate==nil || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("This provider has an unresolved workspace endpoint template. Enter a valid resolved endpoint before activation; configured credentials alone do not prove endpoint readiness.")};guard !choice.needsKey || choice.configured else{throw NativeSetupFailure("Save the required provider key first, or choose a local provider.")};guard choice.chatReady || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("This provider lacks a chat adapter. An explicit supported gateway endpoint is required.")}}
         if case .complete=action{guard saved["provider"] as? String==selected,saved["model"] as? String==cleanModel,saved["base_url"] as? String==cleanEndpoint else{throw NativeSetupFailure("Activate and read back this exact provider/model/endpoint before completing setup.")}}
         return NativeSetupReview(generation:generation,origin:base,operation:action,provider:selected,model:cleanModel,endpoint:cleanEndpoint,secret:secret,config:saved,descriptor:choice.raw,setupComplete:setupComplete)
@@ -136,6 +136,7 @@ struct NativeOnboardingSetupFeatureView:View {
     @State private var secret=""
     @State private var review:NativeSetupReview?
     @State private var localError:String?
+    @State private var vaultPresented=false
     var body:some View {
         VStack(alignment:.leading,spacing:14){
             Text("Connect your assistant").font(.title.bold())
@@ -150,13 +151,19 @@ struct NativeOnboardingSetupFeatureView:View {
                 if !model.models.isEmpty{Menu("Cached suggestions (\(model.modelsSource))"){ForEach(model.models,id:\.self){id in Button(id){model.model=id}}}}
                 TextField("Provider endpoint (empty selects runtime default)",text:$model.endpoint).textFieldStyle(.roundedBorder)
                 if let template=provider.endpointTemplate{NativeSelectableText("Workspace endpoint template (not a usable default): "+template).font(.caption);Text("Enter the resolved endpoint explicitly before activation or key storage.").font(.caption).foregroundStyle(.secondary)}
-                if provider.needsKey{SecureField("Provider API key",text:$secret).textFieldStyle(.roundedBorder).disabled(!model.vaultReady);Text(model.vaultReady ? "Existing vault authenticated; saving the key requires review." : "Cloud key storage requires explicit existing-vault unlock. Fresh-vault initialization is unavailable; local providers can be selected without adding a key.").font(.caption).foregroundStyle(.secondary);Button("Review key storage…"){prepare(.saveCredential)}.disabled(model.busy || !model.vaultReady || secret.isEmpty)}
+                if provider.needsKey{
+                    if !model.vaultReady{NativeVaultSetupFeatureView(baseURL:baseURL,onReady:{Task{await model.refresh()}});Button("Unlock existing credential storage…"){secret="";vaultPresented=true}.disabled(model.busy)}
+                    SecureField("Provider API key",text:$secret).textFieldStyle(.roundedBorder).disabled(!model.vaultReady)
+                    Text(model.vaultReady ? "Encrypted vault authenticated; saving the key requires a separate review." : "Set up or unlock encrypted credential storage first. Local providers do not require a key.").font(.caption).foregroundStyle(.secondary)
+                    Button("Review key storage…"){prepare(.saveCredential)}.disabled(model.busy || !model.vaultReady || secret.isEmpty)
+                }
                 HStack{Button("Review activation…"){prepare(.activate)};Button("Review saved-provider probe…"){prepare(.probe)}}.disabled(model.busy)
             }
             Text("Voice, microphone permission, access mode and glasses/phone pairing are optional later steps. This stage does not change them.").font(.caption).foregroundStyle(.secondary)
             HStack{Button("Refresh saved state"){Task{await model.refresh()}}.disabled(model.busy);Spacer();Button("Review finish setup…"){prepare(.complete)}.disabled(model.busy || model.selected.isEmpty);if model.busy{ProgressView().controlSize(.small)}}
         }.padding(24).task(id:baseURL){secret="";review=nil;model.configure(baseURL:baseURL);await model.refresh()}
         .sheet(item:$review){item in VStack(alignment:.leading,spacing:16){ScrollView{NativeReviewSummaryView(review:summary(item))};HStack{Button("Cancel"){review=nil;secret=""};Spacer();Button("Confirm reviewed step"){review=nil;secret="";Task{if await model.perform(item),case .complete=item.operation{onCompleted()}}}.disabled(!model.canUse(item))}}.padding(24).frame(width:680,height:520)}
+        .sheet(isPresented:$vaultPresented,onDismiss:{Task{await model.refresh()}}){ScrollView{VStack(alignment:.leading,spacing:16){HStack{Text("Credential storage").font(.headline);Spacer();Button("Done"){vaultPresented=false}};NativeVaultFeatureView(baseURL:baseURL)}.padding(24)}.frame(width:760,height:680)}
     }
     private func summary(_ item:NativeSetupReview)->NativeReviewSummary {
         let effect:String,scope:[String]

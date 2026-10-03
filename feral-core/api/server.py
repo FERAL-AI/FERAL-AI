@@ -958,6 +958,7 @@ async def _start_reviewed_agent_hooks(brain_state, checkpoint=None):
 
 
 from api.routes.agent_bootstrap import create_agent_bootstrap_router
+from api.routes.vault_initialization import create_vault_initialization_router
 from security.agent_bootstrap_lifecycle import create_agent_bootstrap_controller
 from security.agent_bootstrap_fence import AgentBootstrapFence
 
@@ -970,6 +971,9 @@ if state.vault_coordinator is not None:
 app.add_middleware(AgentBootstrapFence, state=state)
 app.include_router(
     create_agent_bootstrap_router(lambda: state.agent_bootstrap_controller)
+)
+app.include_router(
+    create_vault_initialization_router(lambda: state.vault_initialization_controller)
 )
 
 app.include_router(dashboard_router)

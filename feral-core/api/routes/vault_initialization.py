@@ -1,4 +1,4 @@
-"""Optional reviewed initialization router. Not wired into the frozen server.
+"""Reviewed initialization router bound to the deferred server coordinator.
 
 Root must provide a stable controller bound to the existing coordinator;
 no route creates another coordinator or changes the release acceptance gate.

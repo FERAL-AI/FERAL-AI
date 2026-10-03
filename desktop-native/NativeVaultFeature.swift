@@ -216,7 +216,8 @@ struct NativeVaultFeatureView:View {
     var body:some View {
         VStack(alignment:.leading,spacing:12) {
                 Text("Encrypted credentials").font(.title3.bold())
-                Text("Status refresh reads the backend’s in-memory state and does not request OS Keychain access. Initialization and recovery are unavailable here; this panel does not reset your keychain.").font(.caption).foregroundStyle(.secondary)
+                Text("Status refresh does not request OS Keychain access. Unlocking existing storage and setting up fresh storage are separate reviewed actions. Recovery and Keychain reset are unavailable here.").font(.caption).foregroundStyle(.secondary)
+                NativeVaultSetupFeatureView(baseURL:baseURL,onReady:{Task{await model.refresh();await bootstrap.refresh()}})
                 if let status=model.status {
                     Text("Vault: \(status.state) · \(status.code)").font(.headline)
                     Text("Credentials: \(status.credentialsAvailable ? "available" : "unavailable") · Memory working data: \(status.memoryAvailable ? "available" : "unavailable") · Full bootstrap: \(status.bootstrapRequired ? "still required" : "not reported required") · Sync: \(status.syncDormant ? "dormant" : "not reported dormant")").font(.caption)

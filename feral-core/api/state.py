@@ -323,16 +323,30 @@ class BrainState:
         self._native_pending_agent_turns = []
         self.agent_bootstrap_controller = None
         self.vault_coordinator = None
+        self.vault_initialization_controller = None
         self._deferred_vault_facade = None
         if self._native_vault_deferred:
             from security.vault_coordinator import (
                 VaultCoordinator,
                 DeferredBootVaultFacade,
+                readonly_vault_factory,
             )
+            from security.vault_initialization_api import (
+                BoundVaultInitializer, VaultInitializationAPI,
+            )
+            from security.vault_release_acceptance import inspect_vault_release_acceptance
 
+            vault_path = feral_home().absolute() / "credentials.json"
             self.vault_coordinator = VaultCoordinator(
+                vault_factory=readonly_vault_factory(vault_path),
                 credential_hydrator=self._hydrate_native_vault,
                 disable_dependents=self._disable_native_vault_dependents,
+                fresh_initializer=BoundVaultInitializer(vault_path),
+            )
+            acceptance = inspect_vault_release_acceptance()
+            self.vault_initialization_controller = VaultInitializationAPI(
+                self.vault_coordinator, vault_path,
+                signed_release_accepted=acceptance.accepted,
             )
             self._deferred_vault_facade = DeferredBootVaultFacade(
                 self.vault_coordinator

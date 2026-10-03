@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 test_cache=/private/tmp/theora-native-feature-tests-cache
-all_features=(Health Memory Oversight Configuration Providers Conversation ContextCheckpoint Attachment Operations Security Connections Voice Identity Capabilities Workflow ChatTools ChatTurn VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery SurfaceUpdate HealthHistory RuntimeHealth Vault Hardware OnboardingSetup ReviewSummary SelectableText)
+all_features=(Health Memory Oversight Configuration Providers Conversation ContextCheckpoint Attachment Operations Security Connections Voice Identity Capabilities Workflow ChatTools ChatTurn VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery SurfaceUpdate HealthHistory RuntimeHealth Vault VaultSetup Hardware OnboardingSetup ReviewSummary SelectableText)
 features=("${all_features[@]}")
 if [[ $# -gt 0 ]]; then
   features=("$@")
@@ -26,6 +26,9 @@ for feature in "${features[@]}"; do
   if [[ "$feature" == "AppSurface" ]]; then feature_sources+=(NativeRichChatFeature.swift NativeAppConfirmationFeature.swift NativeSurfaceUpdateFeature.swift); fi
   if [[ "$feature" == "SurfaceUpdate" ]]; then feature_sources+=(NativeRichChatFeature.swift NativeAppConfirmationFeature.swift NativeAppSurfaceFeature.swift); fi
   if [[ "$feature" == "Providers" ]]; then feature_sources+=(NativeProviderRoutingFeature.swift); fi
+  if [[ "$feature" == "Vault" ]]; then feature_sources+=(NativeVaultSetupFeature.swift); fi
+  if [[ "$feature" == "VaultSetup" ]]; then feature_sources+=(NativeVaultFeature.swift); fi
+  if [[ "$feature" == "OnboardingSetup" ]]; then feature_sources+=(NativeVaultFeature.swift NativeVaultSetupFeature.swift); fi
   feature_sources+=("$main_source" "$test_source")
   xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
     -module-cache-path "$test_cache" -parse-as-library \
@@ -40,7 +43,7 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
   NativeHealthFeature.swift NativeHealthHistoryFeature.swift NativeRuntimeHealthFeature.swift NativeMemoryFeature.swift NativeOversightFeature.swift \
   NativeConfigurationFeature.swift NativeProvidersFeature.swift NativeConversationFeature.swift NativeContextCheckpointFeature.swift \
   NativeAttachmentFeature.swift NativeRichText.swift NativePlainTextEditor.swift NativeReviewSummary.swift \
-  NativeOperationsFeature.swift NativeSecurityFeature.swift NativeVaultFeature.swift NativeConnectionsFeature.swift NativeHardwareFeature.swift NativeOnboardingSetupFeature.swift NativeVoiceFeature.swift \
+  NativeOperationsFeature.swift NativeSecurityFeature.swift NativeVaultFeature.swift NativeVaultSetupFeature.swift NativeConnectionsFeature.swift NativeHardwareFeature.swift NativeOnboardingSetupFeature.swift NativeVoiceFeature.swift \
   NativeIdentityFeature.swift NativeCapabilitiesFeature.swift NativeWorkflowFeature.swift \
   NativeChatToolsFeature.swift NativeVoiceConfigurationFeature.swift NativeIntegrationFeature.swift NativeRichChatFeature.swift NativeAmbientFeature.swift NativeAgentFeature.swift NativeKnowledgeFeature.swift NativeMemoryContextFeature.swift NativeAutomationFeature.swift NativeAppSurfaceFeature.swift NativeAppConfirmationFeature.swift NativeProviderRoutingFeature.swift NativeSurfaceUpdateFeature.swift NativeSessionRecoveryFeature.swift NativeDesktopExperience.swift NativeDesktopHost.swift \
   NativeModelTests.swift -o "$model_binary"

@@ -6,7 +6,7 @@ sources=(
   NativeHealthHistoryFeature.swift NativeRuntimeHealthFeature.swift NativeMemoryFeature.swift
   NativeOversightFeature.swift NativeConversationFeature.swift NativeContextCheckpointFeature.swift NativeProvidersFeature.swift
   NativeConfigurationFeature.swift NativeAttachmentFeature.swift NativeOperationsFeature.swift
-  NativeSecurityFeature.swift NativeVaultFeature.swift NativeConnectionsFeature.swift
+  NativeSecurityFeature.swift NativeVaultFeature.swift NativeVaultSetupFeature.swift NativeConnectionsFeature.swift
   NativeHardwareFeature.swift NativeOnboardingSetupFeature.swift NativeVoiceFeature.swift
   NativeIdentityFeature.swift NativeCapabilitiesFeature.swift NativeWorkflowFeature.swift
   NativeChatToolsFeature.swift NativeChatTurnFeature.swift NativeVoiceConfigurationFeature.swift NativeIntegrationFeature.swift
