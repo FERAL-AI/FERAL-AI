@@ -1,6 +1,23 @@
 # Theora personal agent: product and engineering plan
 
-**Current implementation checkpoint: October 2, 2026.** Published source4e19f07f passed required CI/native checks, including12,278 backend tests and generic Python/Node transport tests. The next source wave repairs live SDK thread continuity, local conversation growth, asynchronous memory maintenance and dependency alerts. Native selectable views are being migrated to AppKit after another reproduced accessibility crash. Native9.28 must be assembled and tested before these source repairs become app acceptance. [Actual9.27 evidence](NATIVE_9_27_ACCEPTANCE.md) remains frozen: local reply, reviewed file Deny/Allow and copy/link passed, but New conversation crashed and context growth blocked later turns. The app exposes21 destinations backed by the existing runtime. Signed distribution, fresh cloud-key setup, encrypted-profile/Keychain acceptance, physical glasses, live commerce, iOS and Linux remain open. Start with the [completion plan](EXECUTION_PLAN.md), [request coverage](REQUEST_COVERAGE.md), [release readiness](RELEASE_READINESS.md) and [native inventory](../../../desktop-native/FEATURE_PARITY.md).
+**Current implementation checkpoint: October 3, 2026.** Published backend source
+`c8651d16bff8dd633587c999fd908084f65f66c2` repairs foreground terminal commitment
+and configured chat output allowances; 623 isolated integration checks pass.
+The immutable 9.35 app contains the preceding implementation `12cc62c4`, exposes
+21 destinations and passes actual avatar selection and single-stage provider
+setup. Its whole-turn chat acceptance failed; later source fixes are not yet in
+that app. Native passive-health recovery is being integrated before the next
+build. Storage cleanup preserved useful history and recovered disk headroom.
+Mac acceptance leads; Linux expansion and Gen-UI are deferred. Start with
+[current work](WORK_STATE.md), [completion plan](EXECUTION_PLAN.md),
+[request coverage](REQUEST_COVERAGE.md), [release readiness](RELEASE_READINESS.md)
+and [native inventory](../../../desktop-native/FEATURE_PARITY.md).
+
+Contributor principles live in [AGENTS.md](../../../AGENTS.md) and
+[codex.md](../../../codex.md). They require exclusive worker ownership,
+source-bound evidence, explicit staging, professional public records, protected
+user data and bounded artifact retention. The [resume procedure](RESUME_WORK.md)
+explains how another session continues this checkout without restarting work.
 
 Prepared September 30, 2026 from FERAL and Theora source inspection, focused verification, and primary-source research. This is a proposed product plan, not a claim that the described capabilities are shipping. No application implementation, publishing, payments, deployments or external messages were performed for this plan.
 
@@ -21,6 +38,15 @@ The candidate advantage is the complete loop from real-world context to grounded
 | Document | Purpose |
 |---|---|
 | [Current work checkpoint](WORK_STATE.md) | Tested source/candidate, current evidence, worker ownership, next ready cards and external dependencies |
+| [Contributor rules](../../../AGENTS.md) | Authorization, privacy, verification, worker ownership, resource retention and clean Git publication |
+| [Codex continuation rules](../../../codex.md) | Checkpoint cadence, source/candidate distinctions and resuming the existing project |
+| [Latest native candidate](NATIVE_9_35_ACCEPTANCE.md) | Exact packaged source, actual setup success, failed whole-turn chat and preserved resource evidence |
+| [Chat completion and output allowance](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md) | Published backend repairs, 623 integration checks and remaining rebuilt-app acceptance |
+| [Managed chained voice integration](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md) | Durable voice/chat ownership and source fixtures; actual audio remains separate |
+| [Single-stage Mac onboarding](MAC_SINGLE_STAGE_ONBOARDING_EVIDENCE.md) | Shared reviewed provider setup and prevention of duplicate onboarding |
+| [Native action admission](NATIVE_ACTION_ADMISSION_EVIDENCE.md) | Retained HTTP client ownership, uncertain effects and refusal after runtime replacement |
+| [Profile continuity](NATIVE_PROFILE_ARCHIVE_EVIDENCE.md) | Reviewed archive/restore, runtime quiescence and data preservation |
+| [Previous native candidate](NATIVE_9_34_ACCEPTANCE.md) | Preserved source-specific archive/readers acceptance and historical limitations |
 | [Coding session evidence](CODING_SESSION_EVIDENCE.md) | Trusted caller continuity, exact handle ownership, local REST propagation and actual ACP-pipe regression results |
 | [Python SDK HTTP evidence](PYTHON_SDK_EVIDENCE.md) | Registered routes/authentication/policy tests, transport failures and developer-facing failure contracts |
 | [Whole-turn receipts](CHAT_TURN_RECEIPTS_EVIDENCE.md) | Durable exact-turn identity/status, duplicate requests, capability negotiation and cancellation isolation |

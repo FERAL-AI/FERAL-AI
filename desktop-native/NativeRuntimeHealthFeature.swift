@@ -50,7 +50,7 @@ enum NativeRuntimeReadinessWire {
         return (false, "The local service is reachable, but the agent is unavailable. Security recovery remains available.")
     }
 }
-enum NativeRuntimeHealthPhase: String { case stopped, starting, ready, limited, unavailable, stopping }
+enum NativeRuntimeHealthPhase: String { case stopped, starting, ready, limited, transportSuspended, unavailable, stopping }
 struct NativeRuntimeHealthEvent {
     let ownership: NativeRuntimeOwnership
     let phase: NativeRuntimeHealthPhase
@@ -93,7 +93,7 @@ struct NativeRuntimeHealthEvent {
     private var recoverableTransportFailure = false
     private let transportGraceSeconds: Double
     private(set) var healthWarning: String?
-    private var canMonitor: Bool { [.ready, .limited].contains(phase) || (phase == .unavailable && recoverableTransportFailure) }
+    private var canMonitor: Bool { [.ready, .limited, .transportSuspended].contains(phase) }
     private var canProbe: Bool { phase == .starting || canMonitor }
     private(set) var ownership: NativeRuntimeOwnership?
     private(set) var phase: NativeRuntimeHealthPhase = .stopped
@@ -200,7 +200,7 @@ struct NativeRuntimeHealthEvent {
                 let changed = hadWarning || previous != next || (!result.agentReady && self.lastReadinessReason != detail)
                 self.phase = next; self.waking = false; self.lastReadinessReason = result.agentReady ? nil : detail
                 if changed || resumed || recovered {
-                    self.emit(owner, reason: result.agentReady ? ((resumed || recovered) ? "The same owned runtime was reverified after a connection interruption. Reconnect the exact session and recover replies without replaying actions." : "Owned runtime and full agent readiness verified.") : detail, reconnect: result.agentReady && (resumed || recovered))
+                    self.emit(owner, reason: result.agentReady ? ((resumed || recovered) ? "The same owned runtime was reverified. Resume admission without replaying actions; a lost session still requires receipt reconciliation." : "Owned runtime and full agent readiness verified.") : detail, reconnect: result.agentReady && resumed)
                 }
                 return true
             } catch {
@@ -229,7 +229,7 @@ struct NativeRuntimeHealthEvent {
         healthWarning = "The local agent is responding slowly (" + code + "). Its owned process is still running; checking continues without replaying requests."
         if transportFailures >= 3 && timestamp - began >= transportGraceSeconds {
             guard !recoverableTransportFailure else { return }
-            recoverableTransportFailure = true; phase = .unavailable; waking = false
+            recoverableTransportFailure = true; phase = .transportSuspended; waking = false
             emit(owner, reason: "The local agent could not be reverified within the transport grace period. Its owned process is still running; passive checks continue. Earlier effects are unknown and requests are not replayed.")
         } else if changed { emit(owner, reason: healthWarning!) }
     }

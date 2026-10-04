@@ -10,9 +10,9 @@ struct NativeLocalActionGateFailure: LocalizedError {
 /// with NativeModel. Unmanaged fixture origins begin open at epoch zero.
 final class NativeLocalActionGate {
     static let shared = NativeLocalActionGate()
-    private struct OriginState { var epoch: UInt64; var open: Bool }
+    private struct OriginState { var epoch: UInt64; var open: Bool; var suspensionRevision: UInt64 = 0; var suspended = false }
     private final class Leases: NSObject { var epochs: [String: UInt64] = [:] }
-    struct Lease { fileprivate let origin: String; fileprivate let epoch: UInt64 }
+    struct Lease { fileprivate let origin: String; fileprivate let epoch: UInt64; fileprivate let suspensionRevision: UInt64 }
     private let lock = NSLock()
     private var origins: [String: OriginState] = [:]
     private var exhausted = false
@@ -41,6 +41,24 @@ final class NativeLocalActionGate {
     func pause(origin: URL) throws { try change(origin, open: false) }
     /// Only the host with a newly verified owned runtime calls this method.
     func activate(origin: URL) throws { try change(origin, open: true) }
+    /// Only the exact host suspends/resumes admission after passive proof loss.
+    /// Runtime epochs are preserved; receipts spanning a suspension are refused.
+    func suspend(origin: URL) throws { try changeSuspension(origin, suspended: true) }
+    func resume(origin: URL) throws { try changeSuspension(origin, suspended: false) }
+    private func changeSuspension(_ url: URL, suspended: Bool) throws {
+        guard let key = Self.origin(url) else { throw NativeLocalActionGateFailure(message: "The local runtime origin is invalid. Admission remains unchanged.") }
+        lock.lock(); defer { lock.unlock() }
+        guard !exhausted else { throw NativeLocalActionGateFailure(message: "Local admission is closed. Restart the app.") }
+        var state = origins[key] ?? OriginState(epoch: 0, open: true)
+        guard state.open else { throw NativeLocalActionGateFailure(message: "The current runtime cannot resume admission.") }
+        guard origins[key] != nil || origins.count < maximumOrigins else {
+            exhausted = true
+            throw NativeLocalActionGateFailure(message: "Local admission capacity was reached and is closed. Restart the app.")
+        }
+        guard state.suspended != suspended else { return }
+        guard state.suspensionRevision < UInt64.max else { exhausted = true; throw NativeLocalActionGateFailure(message: "Local admission cannot renew. Restart the app.") }
+        state.suspensionRevision += 1; state.suspended = suspended; origins[key] = state
+    }
     private func change(_ url: URL, open: Bool) throws {
         guard let key = Self.origin(url) else { throw NativeLocalActionGateFailure(message: "The local runtime origin is invalid. Action admission stays unchanged.") }
         lock.lock(); defer { lock.unlock() }
@@ -74,7 +92,7 @@ final class NativeLocalActionGate {
             guard leases.epochs.count < maximumSessionOrigins else { throw NativeLocalActionGateFailure(message: "This native HTTP client reached its origin limit. No request was admitted.") }
             leases.epochs[key] = state.epoch
         }
-        let lease = Lease(origin: key, epoch: leases.epochs[key]!)
+        let lease = Lease(origin: key, epoch: leases.epochs[key]!, suspensionRevision: state.suspensionRevision)
         try requireOpen(lease, state: state)
         return lease
     }
@@ -85,6 +103,9 @@ final class NativeLocalActionGate {
         try requireOpen(lease, state: origins[lease.origin] ?? OriginState(epoch: 0, open: true))
     }
     private func requireOpen(_ lease: Lease, state: OriginState) throws {
+        guard !state.suspended, state.suspensionRevision == lease.suspensionRevision else {
+            throw NativeLocalActionGateFailure(message: "Passive runtime verification was interrupted. New actions are paused; earlier effects may be unknown. No automatic retry is made.")
+        }
         guard state.open, state.epoch == lease.epoch else {
             throw NativeLocalActionGateFailure(message: "This local client belongs to a stopped or replaced runtime. Earlier dispatched effects may be unknown; no automatic retry is made.")
         }

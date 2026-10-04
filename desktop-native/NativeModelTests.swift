@@ -98,11 +98,11 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         return model
     }
     static func frame(_ type: String, _ payload: [String: Any]) -> [String: Any] { ["type": type, "payload": payload] }
-    @MainActor private static func trackedModel(_ transport:TrackedChatFrames, voiceAudio: NativeVoiceAudioIO? = nil) async throws -> NativeModel {
+    @MainActor private static func trackedModel(_ transport:TrackedChatFrames, voiceAudio: NativeVoiceAudioIO? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil) async throws -> NativeModel {
         let configuration = URLSessionConfiguration.ephemeral;configuration.protocolClasses = [WireProtocol.self]
         let name = "feral.native-chat-receipt-fixture." + UUID().uuidString
         let preferences = UserDefaults(suiteName:name)!;preferences.removePersistentDomain(forName:name)
-        let model = NativeModel(session:URLSession(configuration:configuration),preferences:preferences,chatSender:{ frame in try await transport.send(frame) }, voiceAudio: voiceAudio)
+        let model = NativeModel(session:URLSession(configuration:configuration),preferences:preferences,runtimeOwner:runtimeOwner,chatSender:{ frame in try await transport.send(frame) }, voiceAudio: voiceAudio)
         model.ready = true;try model.restoreThread(["id":"fixture-thread","messages":[[String:Any]]()])
         await model.reconnectVerifiedChat();return model
     }
@@ -378,6 +378,83 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         try expect(!broken.chatCanSend && brokenWire.commands.isEmpty && preserved == Data("malformed-private-fixture".utf8), "corrupt journal is preserved and cannot silently enable a task")
         await broken.shutdown()
         print("PASS exact recovery review ownership, journal-before-RPC, restart/status/readback and corruption refusal; mocked network only")
+    }
+    @MainActor static func passiveRuntimeSuspensionTests() async throws {
+        WireProtocol.reset()
+        let owner = NativeRuntimeOwnership(generation: UUID(), instanceID: "passive-owned", baseURL: URL(string: "http://127.0.0.1:47999")!, processIdentity: UUID())
+        let wire = TrackedChatFrames(), subject = try await trackedModel(wire, runtimeOwner: { owner })
+        await negotiate(subject)
+        let submitted = await subject.sendChat("Synthetic in-flight response")
+        try expect(submitted, "passive fixture must submit a real tracked model request")
+        let ref = subject.trackedChatReference!, turn = UUID().uuidString.lowercased()
+        await subject.consume(receipt(ref, type: "chat_turn_accepted", turn: turn))
+        let connection = subject.chatConnectionID, scope = subject.appSurfaceSessionID, generation = subject.localRuntimeGeneration
+        let suspended = NativeRuntimeHealthEvent(ownership: owner, phase: .transportSuspended, reason: "Owned HTTP proof delayed; no replay.", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false, healthWarning: "Passive health delayed.")
+        subject.observeRuntimeHealth(suspended)
+        try expect(subject.ready && subject.runtimeAdmissionSuspended && subject.isSending && subject.trackedChatReference?.requestID == ref.requestID &&
+            subject.chatConnectionID == connection && subject.appSurfaceSessionID == scope && subject.localRuntimeGeneration == generation,
+            "passive suspension must retain exact receive/turn/connection identities")
+        try expect(subject.featureBaseURL == nil && subject.securityBaseURL == nil && !subject.contextToolsMayMutate,
+            "passive suspension must remove new feature and approval admission")
+        await subject.stopChat()
+        try expect(wire.aborts.count == 1 && subject.isSending &&
+            (wire.aborts[0]["params"] as? [String: Any])?["turn_id"] as? String == turn,
+            "suspended model must still send exact owned Stop without claiming terminal cancellation")
+        await subject.consume(progress(ref, type: "stream_delta", turn: turn, payload: ["delta": "Actual late partial", "is_final": false]))
+        await subject.consume(receipt(ref, type: "chat_turn_terminal", turn: turn, outcome: "completed", text: "Actual durable reply"))
+        try expect(!subject.isSending && subject.messages.contains(where: { $0.text == "Actual durable reply" }) && !subject.chatCanSend,
+            "matching live terminal must remain consumable while new submissions stay suspended")
+        let refused = await subject.sendChat("Must not run during passive suspension")
+        await subject.saveSettings()
+        try expect(!refused && wire.commands.count == 1 && WireProtocol.bodies("/api/llm/config").isEmpty,
+            "suspended admission must dispatch neither new prompt nor provider write")
+        subject.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: owner, phase: .ready, reason: "Exact owned READY", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: true, serviceReachable: true))
+        try expect(subject.chatCanSend && !subject.runtimeAdmissionSuspended && subject.chatConnectionID == connection &&
+            subject.appSurfaceSessionID == scope && subject.localRuntimeGeneration == generation && wire.commands.count == 1,
+            "same-owner READY must resume existing socket without request replay or ownership renewal")
+        let next = await subject.sendChat("Next synthetic task")
+        try expect(next && wire.commands.count == 2, "fresh explicit task may run after actual readiness")
+        let second = subject.trackedChatReference!
+        subject.observeRuntimeHealth(suspended)
+        await subject.checkChatDeadline(second, connectionID: connection)
+        await subject.checkChatStatus()
+        let status = wire.frames.last { $0["method"] as? String == "chat.status" }
+        try expect((status?["params"] as? [String: Any])?["request_id"] as? String == second.requestID && wire.commands.count == 2,
+            "suspension must allow exact passive status without replay")
+        subject.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: owner, phase: .unavailable, reason: "Exact owned process exited", requiresExplicitRestart: true, reconnectVerifiedSession: false, availableForActions: false))
+        try expect(!subject.ready && subject.chatConnectionID != connection && subject.chatRecoveryBlocked && subject.unresolvedChatRequest?.requestID == second.requestID,
+            "definite exit must still tear down and retain uncertain request identity")
+        let configuration = URLSessionConfiguration.ephemeral; configuration.protocolClasses = [WireProtocol.self]
+        let retiredClient = URLSession(configuration: configuration)
+        defer { retiredClient.invalidateAndCancel() }
+        do { _ = try NativeLocalActionGate.shared.capture(session: retiredClient, url: owner.baseURL); throw AssertionFailure(description: "dead runtime HTTP admission remained open") }
+        catch is NativeLocalActionGateFailure {}
+        await subject.shutdown()
+        let limitedOwner = NativeRuntimeOwnership(generation: UUID(), instanceID: "limited-owned", baseURL: URL(string: "http://127.0.0.1:47998")!, processIdentity: UUID())
+        let limitedWire = TrackedChatFrames(), limited = try await trackedModel(limitedWire, runtimeOwner: { limitedOwner })
+        await negotiate(limited)
+        let retained = URLSession(configuration: configuration)
+        defer { retained.invalidateAndCancel() }
+        let retainedLease = try NativeLocalActionGate.shared.capture(session: retained, url: limitedOwner.baseURL)
+        limited.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: limitedOwner, phase: .transportSuspended, reason: "Passive proof missing", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false))
+        limited.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: limitedOwner, phase: .limited, reason: "Memory unavailable; Security only", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false, serviceReachable: true))
+        do { try NativeLocalActionGate.shared.validate(retainedLease); throw AssertionFailure(description: "old feature receipt survived limited transition") }
+        catch is NativeLocalActionGateFailure {}
+        do { _ = try NativeLocalActionGate.shared.capture(session: retained, url: limitedOwner.baseURL); throw AssertionFailure(description: "retained feature client renewed limited epoch") }
+        catch is NativeLocalActionGateFailure {}
+        WireProtocol.reset(["/api/security/grants": ["grants": [[String: Any]]()], "/api/security/permissions": ["max_tier": "passive", "tiers": ["passive"]], "/api/security/audit": ["entries": [[String: Any]]()], "/api/policy": ["mode": "strict"], "/api/config": ["cost": [String: Any]()]])
+        let fresh = URLSession(configuration: configuration)
+        defer { fresh.invalidateAndCancel() }
+        let security = NativeSecurityModel(baseURL: limitedOwner.baseURL, session: fresh)
+        await security.refresh()
+        try expect(security.errors.isEmpty && security.data.count == 5 && limited.securityBaseURL != nil && limited.featureBaseURL == nil && !limited.chatCanSend,
+            "verified limited service permits fresh actual Security reads while agent admission stays closed")
+        let noLimitedTask = await limited.sendChat("Must not infer in limited service")
+        await limited.saveSettings()
+        try expect(!noLimitedTask && limitedWire.commands.isEmpty && WireProtocol.bodies("/api/llm/config").isEmpty,
+            "limited readback cannot authorize task or provider write")
+        await limited.shutdown()
+        print("PASS passive HTTP suspension retains exact tracked Stop/status/terminal and blocks new actions")
     }
     @MainActor static func trackedChatTests() async throws {
         WireProtocol.reset()
@@ -993,6 +1070,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             try expect(!dying.ready && dying.serviceReachable && dying.securityBaseURL != nil && dying.featureBaseURL == nil, "limited memory readiness exposes Security only and never full agent features")
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
             try await managedVoiceRequestBarrierTests()
+            try await passiveRuntimeSuspensionTests()
             try await trackedChatTests()
             try await contextCheckpointTests()
             try await contextRecoveryTests()

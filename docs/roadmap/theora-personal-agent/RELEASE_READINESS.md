@@ -1,16 +1,17 @@
 # Theora / FERAL full-product release readiness
 
 **Current Mac checkpoint (October 3).**
-Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef`; main remains
-unchanged. Exact-source native CI, desktop, docs, naming and version pass. General
-backend coverage was still running at its recorded snapshot. Candidate 9.35 is
+Published backend source is `c8651d16bff8dd633587c999fd908084f65f66c2`; main
+remains unchanged. Its desktop/docs/naming/version checks pass; native/general
+CI are running at the snapshot. Preceding12cc passes native and general CI. Candidate 9.35 is
 assembled, signature/runtime audited, and matches51 native inputs and 488 Python
 files. Actual avatar selection and single-stage provider setup pass. The main
 chat answer was generated, but optional skill discovery delayed its committed
 terminal; a later health-related disconnect produced a cancelled receipt. Whole-
-turn chat acceptance therefore failed. The backend correction passes 623 frozen
-checks and awaits rebuilt-app acceptance; native passive-health suspension is
-active. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
+turn chat acceptance therefore failed. The final backend correction passes630 frozen
+checks, including null-delete configuration precedence, and awaits rebuilt-app
+acceptance. Native passive-health suspension passes Health62/gate46 and all
+linked model checks; these fixes are outside immutable9.35. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
 storage pressure was removed with verified history-preserving cleanup. Actual
 voice, cloud accounts, migration, clean installation and signed distribution
 remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and

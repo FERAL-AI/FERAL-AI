@@ -2,6 +2,38 @@
 
 October 3, 2026. Extends the existing native HTTP clients and runtime lifecycle.
 
+## Passive health suspension follow-up
+
+The 9.35 journey exposed a distinct boundary: delayed passive HTTP proof was
+treated like definite runtime loss, discarding a still-live WebSocket and turn.
+The unchanged three-miss/45-second grace now enters typed transport suspension.
+The exact socket, receive loop, runtime/session identity and tracked turn remain
+available for terminal delivery, Stop and status. New prompts, feature HTTP calls,
+provider writes and approval responses are refused during suspension.
+
+Same-owner verified READY resumes admission without replacing the socket,
+renewing ownership or replaying requests. A separate suspension revision refuses
+receipts crossing an outage, even if readiness returns before the response.
+Definite process exit and foreign identity retain terminal fences. Verified
+limited service creates a fresh HTTP epoch for the existing Security surface;
+retained clients/reviews stay stale and chat/provider task admission stays closed.
+
+Final source checks pass Health62, gate46, all registered linked-model checks
+including live Stop/status/terminal and limited-service recovery, desktop39 and
+error5. The linked harness's legacy printed28-group counter was not updated;
+it must not be presented as a newly enumerated total. Command:
+
+```sh
+bash test_features.sh RuntimeHealth LocalActionGate
+```
+
+These are synthetic HTTP/wire checks. The immutable9.35 app is unchanged;
+optimized compilation and actual rebuilt-app acceptance remain next. Existing
+Swift5 fixture concurrency warnings remain. Source checks cannot prove real
+audio, account operations or reversal of already dispatched effects.
+
+## Earlier shutdown and replacement evidence
+
 A source review found that a retained feature model could finish an earlier
 passive read and dispatch a write after archive shutdown began. The actual Agents
 model reproduced this with mocked HTTP: a held read followed by one spawn POST.

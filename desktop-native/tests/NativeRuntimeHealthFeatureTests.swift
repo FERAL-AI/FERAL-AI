@@ -162,14 +162,14 @@ import Foundation
         slowClock = 1220; _ = await slow.verifyNow()
         slowClock = 1240; _ = await slow.verifyNow()
         slowClock = 1265; _ = await slow.verifyNow()
-        check(slow.phase == .unavailable && !slow.availableForActions && slowEvents.last?.requiresExplicitRestart == false, "sustained three transport misses beyond45seconds gate actions but do not claim owned process death")
+        check(slow.phase == .transportSuspended && !slow.availableForActions && slowEvents.last?.requiresExplicitRestart == false, "sustained three transport misses beyond45seconds gate actions but do not claim owned process death")
         check(slow.ownership == slowOwner && slowEvents.last?.automaticActionReplay == false, "recoverable transport retains exact ownership without action replay")
         transportError = nil; slowClock = 1266; _ = await slow.verifyNow()
-        check(slow.phase == .ready && slow.ownership == slowOwner && slowEvents.last?.reconnectVerifiedSession == true && slowEvents.last?.healthWarning == nil, "exact health recovers same owned runtime after transport outage without launching replacement or replaying requests")
+        check(slow.phase == .ready && slow.ownership == slowOwner && slowEvents.last?.reconnectVerifiedSession == false && slowEvents.last?.healthWarning == nil, "exact health resumes same owned runtime without forcing a healthy socket reconnect or replay")
         transportError = URLError(.timedOut)
         slowClock = 1270; _ = await slow.verifyNow()
         slowClock = 1280; _ = await slow.verifyNow(); slowClock = 1315; _ = await slow.verifyNow()
-        check(slow.phase == .unavailable && slowEvents.last?.requiresExplicitRestart == false, "transport outage remains passively recoverable before definite exit")
+        check(slow.phase == .transportSuspended && slowEvents.last?.requiresExplicitRestart == false, "transport outage remains passively recoverable before definite exit")
         slowRunning = false
         _ = await slow.verifyNow()
         check(slow.phase == .unavailable && slowEvents.last?.requiresExplicitRestart == true && slowEvents.last?.reason.contains("exited") == true, "definite process exit during grace remains immediate terminal failure")
@@ -205,11 +205,11 @@ import Foundation
         recoveryClock = 2050
         resumePause = recoveryPause; recoveryPause = nil; resumePause?.resume(); resumePause = nil
         while recoveryPause == nil { await Task.yield() }
-        check(recoveryMonitor.phase == .unavailable && recoveryMonitor.monitorEnabled && recoveryEvents.last?.requiresExplicitRestart == false, "owned periodic monitor keeps running after bounded transport outage")
+        check(recoveryMonitor.phase == .transportSuspended && recoveryMonitor.monitorEnabled && recoveryEvents.last?.requiresExplicitRestart == false, "owned periodic monitor keeps running after bounded transport outage")
         recoveryError = nil; recoveryClock = 2051
         resumePause = recoveryPause; recoveryPause = nil; resumePause?.resume(); resumePause = nil
         while recoveryPause == nil { await Task.yield() }
-        check(recoveryMonitor.phase == .ready && recoveryEvents.last?.reconnectVerifiedSession == true && recoveryMonitor.ownership == recoveryOwner, "periodic exact200 proof passively recovers same session without explicit restart")
+        check(recoveryMonitor.phase == .ready && recoveryEvents.last?.reconnectVerifiedSession == false && recoveryMonitor.ownership == recoveryOwner, "periodic exact200 proof resumes admission without forcing socket replacement")
         recoveryMonitor.endMonitoring(); recoveryPause?.resume(throwing: CancellationError()); recoveryPause = nil
         _ = recoveryMonitor.beginStop(recoveryOwner); _ = recoveryMonitor.completeStop(recoveryOwner)
         print("NativeRuntimeHealthFeatureTests: \(count) assertions passed")

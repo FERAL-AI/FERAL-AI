@@ -66,6 +66,8 @@ import CoreFoundation
     private var shuttingDown = false
     private var connecting = false
     private var runtimeRevision = UUID()
+    @Published private(set) var runtimeAdmissionSuspended = false
+    private var runtimeAdmissionRevision = UUID()
     private var conversationSaveTask: Task<Bool, Never>?
     private var workspaceCenter: NotificationCenter?
     private var workspaceObservers: [NSObjectProtocol] = []
@@ -77,7 +79,7 @@ import CoreFoundation
     var chatCapabilityFrame:[String:Any]? { chatTurns.capabilitiesFrame }
     var chatConnectionID:UUID { socketGeneration }
     var chatReceiptReady:Bool { chatTurns.ready }
-    var chatCanSend:Bool { ready && chatTurns.ready && contextState.permitsSubmission && !contextSetupPending && !chatRecoveryBlocked && unresolvedChatRequest == nil && !isSending && !switchingConversation && !uploadingAttachments && !shuttingDown }
+    var chatCanSend:Bool { ready && !runtimeAdmissionSuspended && chatTurns.ready && contextState.permitsSubmission && !contextSetupPending && !chatRecoveryBlocked && unresolvedChatRequest == nil && !isSending && !switchingConversation && !uploadingAttachments && !shuttingDown }
     var contextManaged: Bool { contextState.managed || contextRequired(conversationID) }
     var contextNeedsAttention: Bool { chatTurns.ready && !contextState.permitsSubmission }
     var contextReady: Bool { contextState.capability?.ready == true }
@@ -86,7 +88,7 @@ import CoreFoundation
         guard contextManaged else { return [] }
         return chatTurns.managedChainedVoiceReady ? NativeContextCheckpointWire.unsupportedPaths.subtracting(["voice"]).union(["realtime_voice"]) : NativeContextCheckpointWire.unsupportedPaths
     }
-    var contextToolsMayMutate: Bool { !contextSetupPending && contextState.permitsSubmission }
+    var contextToolsMayMutate: Bool { !runtimeAdmissionSuspended && !contextSetupPending && contextState.permitsSubmission }
     var contextCheckpoint: NativeContextCheckpoint? { contextState.capability?.checkpoint }
     var contextRecoveryReview: NativeContextRecoveryReview? {
         guard let fence = contextState.recoveryFence else { return nil }
@@ -151,6 +153,7 @@ import CoreFoundation
     func sendVoiceFrame(_ frame: [String: Any]) async throws {
         let managedStop = voice.matchesStopDispatch(frame)
         let disabled = frame["type"] as? String == "voice_config" && (frame["payload"] as? [String: Any])?["mode"] as? String == "disabled"
+        guard !runtimeAdmissionSuspended || managedStop else { throw NativeFailure("New voice actions are paused until the owned runtime is reverified.") }
         guard !preferencesUnavailable, !effectsPaused, ready, !switchingConversation, !contextSetupPending,
               (!contextManaged || ((chatTurns.managedChainedVoiceReady || voice.hasManagedRequest || managedStop) && voice.isManaged)),
               (!contextManaged || !disabled || managedStop),
@@ -243,16 +246,16 @@ import CoreFoundation
     var effectsPaused: Bool { shuttingDown || profileArchivePaused }
     var canAdvanceProfileOnboarding: Bool { !preferencesUnavailable && !effectsPaused && !onboarded }
     var localRuntimeGeneration: UUID { runtimeRevision }
-    var featureBaseURL: URL? { !preferencesUnavailable && !effectsPaused && ready ? runtime.baseURL : nil }
-    var securityBaseURL: URL? { !preferencesUnavailable && !effectsPaused && (serviceReachable || ready) ? runtime.baseURL : nil }
+    var featureBaseURL: URL? { !preferencesUnavailable && !effectsPaused && !runtimeAdmissionSuspended && ready ? runtime.baseURL : nil }
+    var securityBaseURL: URL? { !preferencesUnavailable && !effectsPaused && !runtimeAdmissionSuspended && (serviceReachable || ready) ? runtime.baseURL : nil }
     var activeConversationID: String { conversationID }
     // App REST dispatch can run agent turns without Chat turn IDs. Give it
     // a distinct scope so late app replies cannot complete an active Chat turn.
     var appSurfaceSessionID: String? { conversationID.isEmpty ? nil : "native-apps-" + appSessionScope.uuidString }
-    var chatMutationBusy: Bool { shuttingDown || isSending || switchingConversation || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
+    var chatMutationBusy: Bool { runtimeAdmissionSuspended || shuttingDown || isSending || switchingConversation || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
     // Applying the reviewed saved point owns its own operation lock. Its
     // thread transition must not invalidate that same review mid-callback.
-    var chatToolsHostBusy: Bool { effectsPaused || isSending || (switchingConversation && !applyingSnapshotHistory) || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
+    var chatToolsHostBusy: Bool { runtimeAdmissionSuspended || effectsPaused || isSending || (switchingConversation && !applyingSnapshotHistory) || uploadingAttachments || contextState.recoveryRequestID != nil || !["off", "ended"].contains(voice.state) }
 
     func restoreThread(_ thread: [String: Any]) throws {
         guard let id = thread["id"] as? String, !id.isEmpty,
@@ -355,7 +358,34 @@ import CoreFoundation
         guard preferencesPermitEffects() else { return }
         guard !shuttingDown, (injectedRuntimeOwner?() ?? runtime.ownership) == event.ownership else { return }
         runtimeHealthWarning = event.healthWarning
+        if event.phase == .transportSuspended {
+            if !runtimeAdmissionSuspended { runtimeAdmissionRevision = UUID() }
+            runtimeAdmissionSuspended = true
+            do { try NativeLocalActionGate.shared.suspend(origin: event.ownership.baseURL) }
+            catch { self.error = "Local action admission could not be suspended. Restart explicitly before another action." }
+            serviceReachable = false
+            startupStatus = event.reason
+            // Keep the exact receive loop, socket, turn and presentation alive.
+            // Lack of passive HTTP proof does not establish loss of that socket.
+            return
+        }
+        if event.phase == .ready, event.availableForActions, runtimeAdmissionSuspended {
+            do { try NativeLocalActionGate.shared.resume(origin: event.ownership.baseURL) }
+            catch { self.error = "Local action admission could not be restored. Restart explicitly before another action."; return }
+            runtimeAdmissionSuspended = false
+            startupStatus = "The same local agent was reverified. Previous actions were not replayed."
+        }
+        if event.phase == .limited, event.serviceReachable, runtimeAdmissionSuspended {
+            // A verified service may expose Security without claiming agent
+            // readiness. Retained feature clients lose their prior epoch.
+            do { try NativeLocalActionGate.shared.activate(origin: event.ownership.baseURL) }
+            catch { self.error = "Security admission could not be restored. Restart explicitly before recovery."; return }
+        }
         if event.phase == .unavailable || event.phase == .limited || (event.phase == .ready && !event.availableForActions) {
+            if event.phase == .unavailable, ready || runtimeAdmissionSuspended {
+                do { try NativeLocalActionGate.shared.pause(origin: event.ownership.baseURL) }
+                catch { self.error = "Local action admission is closed. Restart explicitly." }
+            }
             serviceReachable = event.serviceReachable
             archiveRichTurn()
             if let id = streamMessageID, let index = messages.firstIndex(where: { $0.id == id }) {
@@ -372,6 +402,7 @@ import CoreFoundation
             runtimeRevision = UUID(); conversationRevision = UUID(); switchingConversation = false
             recovery.configure(baseURL: nil, connectionID: nil)
             ready = false; appSessionScope = UUID()
+            runtimeAdmissionSuspended = false
             startupStatus = event.reason
             recoveryStatus = "Connection unavailable. Saved and visible messages retained; earlier actions are not retried automatically."
             if event.phase == .unavailable { error = event.reason; chatError = event.reason }
@@ -416,9 +447,11 @@ import CoreFoundation
                          shutdownSave: Bool = false) async throws -> Any {
         guard preferencesPermitEffects() else { throw NativeFailure("Local preferences are unavailable; startup and profile changes are paused.") }
         let permitsFinalSave = shutdownSave && path == "/api/conversations/save" && body != nil
+        let passiveDisplaySave = path == "/api/conversations/save" && body != nil
+        guard !runtimeAdmissionSuspended || passiveDisplaySave else { throw NativeFailure("New local actions are paused until the owned runtime is reverified.") }
         guard !effectsPaused || permitsFinalSave else { throw NativeFailure("The local profile is stopping or stopped. Finish the archive review or restart the original profile before another action.") }
         guard ready else { throw NativeFailure("The local agent is not ready yet.") }
-        let owner = runtimeRevision, origin = runtime.baseURL
+        let owner = runtimeRevision, origin = runtime.baseURL, admission = runtimeAdmissionRevision
         var req = URLRequest(url: URL(string: path, relativeTo: origin)!)
         if let body {
             req.httpMethod = "POST"
@@ -427,6 +460,7 @@ import CoreFoundation
         }
         let (data, response) = try await session.data(for: req)
         guard ready, !effectsPaused || permitsFinalSave, owner == runtimeRevision, origin == runtime.baseURL else { throw NativeFailure("The local connection changed during this request. Earlier actions may have taken effect; inspect before retrying.") }
+        guard passiveDisplaySave || (!runtimeAdmissionSuspended && admission == runtimeAdmissionRevision) else { throw NativeFailure("Local verification was interrupted. Earlier dispatched effects may be unknown; inspect before retrying.") }
         let value = try JSONSerialization.jsonObject(with: data)
         let dict = value as? [String: Any] ?? [:]
         guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
@@ -699,6 +733,9 @@ import CoreFoundation
         }
     }
     private func sendChatFrame(_ frame:[String:Any]) async throws {
+        let passiveControl = frame["type"] as? String == "req" && ["chat.abort", "chat.status", "chat.capabilities", "session.context.capabilities"].contains(frame["method"] as? String ?? "")
+        let managedStop = voice.matchesStopDispatch(frame)
+        guard !runtimeAdmissionSuspended || passiveControl || managedStop else { throw NativeFailure("New local actions are paused until the owned runtime is reverified.") }
         if let injectedChatSender { try await injectedChatSender(frame);return }
         guard let socket,socket.state == .running else { throw NativeFailure("Chat is disconnected.") }
         let data = try JSONSerialization.data(withJSONObject:frame)
@@ -908,7 +945,7 @@ import CoreFoundation
 
     func respondToChatPermission(_ response: NativeRichPermissionResponse) async throws {
         guard preferencesPermitEffects() else { throw NativeFailure("Local preferences are unavailable; startup and profile changes are paused.") }
-        guard ready, !effectsPaused, !switchingConversation, response.sessionID == conversationID,
+        guard ready, !effectsPaused, !runtimeAdmissionSuspended, !switchingConversation, response.sessionID == conversationID,
               response.connectionID == socketGeneration, let socket, socket.state == .running,
               richChat.permissions.contains(where: { $0.id == response.requestID && $0.session == conversationID && $0.supported && !$0.expired && $0.state == "responding" }) else {
             throw NativeFailure("The permission request or connection changed. Reconnect and request access again.")
@@ -990,7 +1027,7 @@ import CoreFoundation
     @discardableResult func sendChat(_ text: String, authorizedAttachmentIDs: [String]? = nil) async -> Bool {
         guard preferencesPermitEffects() else { return false }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard ready && !shuttingDown && !isSending && !switchingConversation && !uploadingAttachments && !text.isEmpty else { return false }
+        guard ready && !runtimeAdmissionSuspended && !shuttingDown && !isSending && !switchingConversation && !uploadingAttachments && !text.isEmpty else { return false }
         if !pendingAttachments.isEmpty && authorizedAttachmentIDs != pendingAttachments.map(\.id) {
             attachmentError = "Review the current attachments before sending their contents to the configured model and fallbacks."
             return false
@@ -998,7 +1035,7 @@ import CoreFoundation
         guard !chatRecoveryBlocked,unresolvedChatRequest == nil else { recordChatFailure("Check the earlier request's status or choose a new conversation. It has not been retried.");return false }
         if !chatTurns.ready { await connectChat() }
         guard chatCanSend,let reference = chatTurns.beginRequest() else { recordChatFailure("Verified chat capability negotiation is not ready. No task was sent.");return false }
-        let connection = socketGeneration,revision = conversationRevision
+        let connection = socketGeneration,revision = conversationRevision,admission = runtimeAdmissionRevision
         archiveRichTurn(); richChat.clearTurnPresentation()
         error = nil; chatError = nil; isSending = true; streamMessageID = nil
         let userID = UUID().uuidString
@@ -1008,7 +1045,7 @@ import CoreFoundation
         if !attachments.isEmpty { record["attachments"] = attachments.map(\.record) }
         var marker = reference.record;marker["state"] = "submitted";record["chat_turn"] = marker
         messages.append(NativeMessage(id: userID, role: "user", text: text, metadata: record))
-        guard await persistConversation(),connection == socketGeneration,revision == conversationRevision,chatTurns.active?.requestID == reference.requestID,ready,!shuttingDown else {
+        guard await persistConversation(),connection == socketGeneration,revision == conversationRevision,chatTurns.active?.requestID == reference.requestID,ready,!shuttingDown,!runtimeAdmissionSuspended,admission == runtimeAdmissionRevision else {
             if connection == socketGeneration,revision == conversationRevision {
                 marker["state"] = "not_submitted";updateRequestMarker(reference,record:marker);chatTurns.discardUnsubmitted(reference);finishResponse()
                 recordChatFailure("The request reference could not be saved before submission. No task was sent; your draft and attachments are retained.")

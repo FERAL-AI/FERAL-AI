@@ -9,15 +9,15 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ### Current Mac integration checkpoint
 
-- Published implementation before this source wave is
-  `12cc62c480422a3d844eada816d9cdf29c79fbef` on the
+- Published implementation before the native recovery integration is
+  `c8651d16bff8dd633587c999fd908084f65f66c2` on the
   existing review branch in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
   Backend contracts and typed empty-response handling are included from
   `9e9ac51fdd1f569f95afe79c17973beab6c93de2`. Main remains unchanged.
 - Exact-source native CI 37166186400 passes production typecheck, full feature/
   linked checks, lifeline and 28 actual process-ownership assertions. Desktop,
-  documentation, naming and version checks pass. General CI 37166186552 was
-  still running backend coverage at the recorded snapshot; 12 other jobs passed.
+  documentation, naming and version checks pass. General CI 37166186552 now passes. Current c865 native/general checks are
+  running at the snapshot; its desktop, docs, naming and version checks pass.
   The preceding 9e native ownership timeout is retained historical failure,
   without claiming its root cause was proved.
 - Immutable 9.35/build 2026100302 is assembled and audited. All 51 native build
@@ -32,10 +32,11 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   foreground terminal commitment; the observed disconnect cancelled that wait.
   The backend correction now passes parent integration. Do not relabel a cancelled receipt completed
   from transcript text. The app exited normally with host code 0.
-- The new frozen terminal/output-budget integration passes 623 tests with 1,291
-  unchanged Python inputs. Full mypy 809 has zero added/removed diagnostics
-  versus retained 809, and core Ruff passes. Publication and rebuilt actual-app
-  acceptance are next. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md).
+- The final frozen terminal/output-budget integration passes 630 tests with 1,291
+  unchanged Python inputs, including deletion revealing project/local precedence.
+  Full mypy 809 has zero added/removed diagnostics versus retained 809, and core
+  Ruff passes. The preceding 623-check backend wave is published as c865; final
+  native/configuration integration and rebuilt actual-app acceptance are next. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md).
   The preceding voice wave passed 471 before these corrections. Native production typecheck and 28 linked groups pass, with
   Voice 55, ManagedVoice 50, ChatTurn/ContextCheckpoint, OnboardingSetup 34,
   additional linked onboarding 33, desktop 39 and error 5 assertions. These checks
@@ -55,14 +56,18 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   checks; all their manifests, logs and profiles remain. The canonical9.35 app
   and preceding 9.34 copy are retained. Artifact/resource rules are in AGENTS.md.
 - Parent owns integration, shared contracts, documents and publication. Backend
-  terminal sequencing and configured output-budget corrections are integrated
-  and frozen. A worker owns typed native passive-health suspension, preserving
-  live conversation control while blocking new action admission. These source
+  terminal sequencing, configured output-budget and null-delete precedence
+  corrections are integrated and frozen. Typed native passive-health suspension
+  passes Health62/gate46 and all linked model checks, preserving live turn
+  control while blocking new action admission. Desktop39/error5 also pass.
+  Worker source ownership is released; parent owns packaging and publication. These source
   changes are outside immutable 9.35. The output setting defect is independent
   of the earlier 25-token empty generation. Resource/docs checkpoint b3995e02a
   is published; prior work is preserved.
-- Next: publish the verified backend correction, finish/integrate the native
-  suspension card and rebuild. Repeat actual tool-enabled chat/recovery with
+- Next: publish the verified native/configuration integration and build
+  9.36/build2026100303. Free disk is31 GiB; the build budget is at most2 GiB,
+  with cached dependencies/models and one retained preceding generated app.
+  Sources stay frozen during checks/compilation. Repeat actual tool-enabled chat/recovery with
   ample headroom, checking durable receipt and transcript together. Microphone/speaker,
   cloud accounts, migration, clean installation and signed distribution remain
   acceptance gates. Mac usability remains first; Linux and Gen-UI are deferred.

@@ -9,11 +9,11 @@ runtime probes pass. Actual FERAL/Orb selection and single-stage reviewed setup
 reach the connected main app. A normal arithmetic answer was generated, but
 optional skill discovery delayed the committed foreground terminal and a later
 disconnect left a cancelled/unknown receipt. Whole-turn chat acceptance failed;
-the backend correction passes 623 frozen checks and awaits rebuilt-app acceptance.
-Native passive-health suspension is active.
+the final backend correction passes630 frozen checks and awaits rebuilt-app acceptance.
+Native passive-health suspension passes Health62/gate46 and linked model checks.
+These later fixes are outside this immutable candidate.
 [Integration evidence](../docs/roadmap/theora-personal-agent/MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Exact-source native CI passes, including
-28 real process-ownership assertions. General backend CI was still running at
-its recorded snapshot. [9.35 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_35_ACCEPTANCE.md).
+28 real process-ownership assertions. General backend CI for12cc also passes. [9.35 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_35_ACCEPTANCE.md).
 Source/fixture managed-voice and provider checks do not prove physical audio,
 cloud-account behavior, clean installation or signed distribution. Those gates
 remain open; Mac usability leads and Linux/Gen-UI engineering is deferred.

@@ -28,7 +28,9 @@ cross-provider failover preserve the selected value. Explicit background/worker
 limits keep precedence. Invalid values produce `llm_configuration_error` before
 budget reservation or model traffic; settings endpoints reject invalid writes
 before changing credentials, identity or profile data. Null patch deletion
-restores the default 1024.
+reveals the actual project/local setting, or default1024 when no override remains.
+The live allowance and reload match, without reopening credentials or resetting
+unrelated active setup/fallback state.
 
 Ollama request-capacity checks use the selected allowance. Cloud history-fit
 heuristics are unchanged. Provider-specific thinking headroom and the existing
@@ -37,10 +39,11 @@ output or spending cap. No native output-limit editor was added.
 
 ## Parent integration and limits
 
-The parent ran 25 suites in a fresh isolated home with offline caches/null keyring:
-**623 passed**, 219 warnings, 24.89 seconds. All 1,291 Python inputs remained unchanged
+The published c865 wave passed623 tests. After the null-delete layering repair,
+the parent reran25 suites in a fresh isolated home with offline caches/null keyring:
+**630 passed**, 219 warnings, 26.57 seconds. All 1,291 Python inputs remained unchanged
 before/after tests, lint and typing. Their shared fingerprint is
-`9939c8aa570f661064364aa4a737ea3e6bd853cd3fbf1ee39828cdd61850b875`.
+`153c531d4964a0d691a899014d9512ccc6d5381061168a90736ba324be549c51`.
 Core Ruff passes. Full mypy reports 809 existing diagnostics in 233 files, with
 zero added/removed normalized diagnostics versus the retained 809 baseline.
 Typing is not clean.
@@ -52,7 +55,8 @@ terminal-store failures; real HTTP request bodies; rejected settings mutations;
 fallback routing and thinking-provider transformations. Provider traffic is mocked
 in these fixture checks; the original failed journey used a real local model.
 
-Native passive-health suspension is a separate active correction. Rebuild and
+Native passive-health suspension is a separately verified source correction.
+[Admission evidence](NATIVE_ACTION_ADMISSION_EVIDENCE.md). Rebuild and
 repeat actual tool-enabled chat, exact terminal recovery and restart before
 claiming reliable app acceptance. Physical audio, cloud accounts and distribution
 remain separate gates. [Current work](WORK_STATE.md) and

@@ -257,6 +257,84 @@ def test_merge_patch_null_deletes_allowance_and_reverts_default(tmp_path):
     assert stored["meta"] == {"fixture":"keep"}
 
 
+@pytest.mark.parametrize("project_limit, local_limit, expected", [
+    (512, None, 512), (512, 768, 768), (None, 768, 768),
+])
+def test_null_delete_restores_layered_limit_without_resetting_other_live_state(tmp_path, project_limit, local_limit, expected):
+    from config.loader import ConfigLoader
+    loader = config_loader(tmp_path)
+    directory = loader.project_dir / ".feral"
+    directory.mkdir(parents=True)
+    if project_limit is not None:
+        (directory / "settings.json").write_text(json.dumps({"llm": {"max_tokens": project_limit}}))
+    if local_limit is not None:
+        (directory / "settings.local.json").write_text(json.dumps({"llm": {"max_tokens": local_limit}}))
+    loader.update_settings("llm", "max_tokens", 2048)
+    # Active state can include values derived from unlocked credentials which
+    # settings-only resolution must not replace or re-derive.
+    fallback = [{"provider": "synthetic", "model": "fixture"}]
+    loader._merged["llm"]["fallback_providers"] = fallback
+    loader._setup_complete = True
+    with patch.object(ConfigLoader, "_load_credentials", side_effect=AssertionError("Vault must not be opened")) as credentials:
+        loader.update_settings("llm", "max_tokens", None)
+        assert loader._merged["llm"]["max_tokens"] == expected
+        assert loader._merged["llm"]["fallback_providers"] is fallback
+        assert loader._setup_complete is True
+        stored = json.loads((loader.user_home / "settings.json").read_text())
+        assert "max_tokens" not in stored["llm"]
+        reloaded = ConfigLoader(project_dir=str(loader.project_dir))
+        assert reloaded.discover(load_credentials=False)["llm"]["max_tokens"] == expected
+        credentials.assert_not_called()
+
+
+@pytest.mark.parametrize("invalid_layer", [True, "not-a-token-count"])
+def test_null_delete_preserves_invalid_layer_refusal_instead_of_masking_with_default(tmp_path, invalid_layer):
+    from config.loader import ChatOutputBudgetError, ConfigLoader, resolve_chat_output_budget
+    loader = config_loader(tmp_path)
+    directory = loader.project_dir / ".feral"
+    directory.mkdir(parents=True)
+    (directory / "settings.json").write_text(json.dumps({"llm": {"max_tokens": invalid_layer}}))
+    loader.update_settings("llm", "max_tokens", 512)
+    loader.update_settings("llm", "max_tokens", None)
+    reloaded = ConfigLoader(project_dir=str(loader.project_dir)).discover(load_credentials=False)
+    assert loader._merged["llm"]["max_tokens"] == reloaded["llm"]["max_tokens"] == invalid_layer
+    for settings in (loader._merged["llm"], reloaded["llm"]):
+        with pytest.raises(ChatOutputBudgetError):
+            resolve_chat_output_budget(settings)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("streaming", [False, True])
+async def test_http_null_delete_uses_layered_limit_on_next_actual_request_and_reload(tmp_path, monkeypatch, streaming):
+    from fastapi import FastAPI
+    from api.routes import config as routes
+    from config.loader import ConfigLoader
+    loader = config_loader(tmp_path)
+    directory = loader.project_dir / ".feral"
+    directory.mkdir(parents=True)
+    (directory / "settings.json").write_text(json.dumps({"llm": {"max_tokens": 512}}))
+    (directory / "settings.local.json").write_text(json.dumps({"llm": {"max_tokens": 768}}))
+    loader.update_settings("llm", "max_tokens", 2048)
+    server = FixtureServer()
+    provider = make_provider(server, {"max_tokens": 2048})
+    provider.switch_provider = AsyncMock()
+    monkeypatch.setattr(routes, "state", SimpleNamespace(config=loader, orchestrator=SimpleNamespace(llm=provider)))
+    app = FastAPI()
+    app.include_router(routes.router)
+    try:
+        async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url="http://fixture") as client:
+            response = await client.post("/api/config/update", json={"section": "llm", "key": "max_tokens", "value": None})
+        assert response.status_code == 200
+        frames = await run_real_chat(provider, streaming)
+        assert not any(frame["type"] == "error" for frame in frames)
+        assert [body["max_tokens"] for body in server.bodies] == [768]
+        reloaded = ConfigLoader(project_dir=str(loader.project_dir)).discover(load_credentials=False)
+        assert loader._merged["llm"]["max_tokens"] == reloaded["llm"]["max_tokens"] == 768
+        assert "max_tokens" not in json.loads((loader.user_home / "settings.json").read_text())["llm"]
+    finally:
+        await provider.close()
+
+
 @pytest.mark.asyncio
 @pytest.mark.parametrize("streaming", [False, True])
 async def test_config_http_write_updates_actual_next_request(tmp_path, monkeypatch, streaming):

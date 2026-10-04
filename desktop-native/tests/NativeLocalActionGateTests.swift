@@ -164,6 +164,38 @@ private final class LocalGateFixture: URLProtocol {
         try await retainedAgent(port: 47981, reopenBeforeRelease: false)
         try await retainedAgent(port: 47982, reopenBeforeRelease: true)
         try await edgeCases()
+        try await passiveSuspension()
         print("NativeLocalActionGate: \(count) assertions passed; actual retained Agent model/mock HTTP, no real agent effects")
+    }
+    @MainActor private static func passiveSuspension() async throws {
+        LocalGateFixture.reset()
+        let base = URL(string: "http://127.0.0.1:47988")!, retained = session()
+        defer { retained.invalidateAndCancel() }
+        var write = URLRequest(url: base.appendingPathComponent("/held-passive-write")); write.httpMethod = "POST"
+        LocalGateFixture.hold("/held-passive-write")
+        let inFlight = Task { try await retained.feralLocalData(for: write) }
+        try await waitForHold()
+        try NativeLocalActionGate.shared.suspend(origin: base)
+        let requests = LocalGateFixture.requestCount
+        await refuses { _ = try await retained.feralLocalData(for: write) }
+        check(LocalGateFixture.requestCount == requests, "suspension refuses new retained-client dispatch")
+        try NativeLocalActionGate.shared.resume(origin: base)
+        LocalGateFixture.release()
+        await refuses { _ = try await inFlight.value }
+        check(LocalGateFixture.postCount == 1, "receipt crossing suspension is refused without retrying the effect")
+        _ = try await retained.feralLocalData(for: URLRequest(url: base.appendingPathComponent("/fresh-read")))
+        check(LocalGateFixture.requestCount == requests + 1, "matching host resume permits fresh capture on same retained client")
+        try NativeLocalActionGate.shared.pause(origin: base)
+        await refuses { try NativeLocalActionGate.shared.resume(origin: base) }
+        try NativeLocalActionGate.shared.activate(origin: base)
+        await refuses { _ = try await retained.feralLocalData(for: URLRequest(url: base)) }
+        check(LocalGateFixture.postCount == 1, "passive resume cannot reactivate a retired epoch or replay an old review")
+        let bounded = NativeLocalActionGate(maximumOrigins: 1)
+        let other = URL(string: "http://127.0.0.1:47989")!
+        try bounded.activate(origin: base)
+        await refuses { try bounded.suspend(origin: other) }
+        await refuses { _ = try bounded.capture(session: retained, url: other) }
+        await refuses { _ = try bounded.capture(session: retained, url: base) }
+        check(LocalGateFixture.postCount == 1, "suspension capacity exhaustion fails closed on all origins without dispatch")
     }
 }

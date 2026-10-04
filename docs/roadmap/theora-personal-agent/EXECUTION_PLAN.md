@@ -14,16 +14,18 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef`; main remains
-unchanged. Exact-source native CI, desktop, docs, naming and version pass. General
-backend coverage was still running at its recorded snapshot. Candidate 9.35 is
+Published source is `c8651d16bff8dd633587c999fd908084f65f66c2`; main remains
+unchanged. Its desktop, docs, naming and version checks pass; native/general CI
+are running at the recorded snapshot. Preceding implementation `12cc62c4`
+passes both native and general CI. Candidate 9.35 is
 assembled, signature/runtime audited, and matches51 native inputs and 488 Python
 files. Actual avatar selection and single-stage provider setup pass. The main
 chat answer was generated, but optional skill discovery delayed its committed
 terminal; a later health-related disconnect produced a cancelled receipt. Whole-
 turn chat acceptance therefore failed. The backend correction passes 623 frozen
-checks and awaits rebuilt-app acceptance; native passive-health suspension is
-active. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
+checks on the published wave; the final configuration follow-up passes630.
+Native passive-health suspension passes Health62/gate46 and linked model checks,
+with actual rebuilt-app acceptance still pending. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
 storage pressure was removed with verified history-preserving cleanup. Actual
 voice, cloud accounts, migration, clean installation and signed distribution
 remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
@@ -37,6 +39,32 @@ provider transformations remain authoritative. This does not establish a univers
 hard output or cost cap and does not explain the preceding empty generation.
 It is outside immutable 9.35. The next integration combines its 623-check backend
 wave with native passive-health suspension before rebuilt actual-app acceptance.
+Post-integration review identified a null-delete configuration-layer mismatch:
+removing a user output override must reveal the actual project/local allowance,
+both immediately and after reload. Its narrow correction is verified in the final630-check integration.
+
+### Current integration assignments
+
+| Owner | Exclusive work | Completion check |
+|---|---|---|
+| Native recovery worker | Native health coordinator, model admission, local gate and their fixtures | Keep live Stop/status/terminal during delayed HTTP proof; refuse new actions; resume exact owner without replay; retain definite-death fences |
+| Backend worker | Configuration loader and output-budget fixtures | Verified: removing a user override uses real configuration precedence and preserves unrelated live state |
+| Acceptance worker | Private next-candidate launcher/preparation | Bind future source/artifact identity; isolated normal-tools chat, durable receipts, saved context, restart and Stop |
+| Parent | Integration, docs, publication, packaging and actual Mac GUI | Review/freeze inputs, publish coherent source, assemble matching app and record observed outcomes |
+
+Worker production sources are frozen and released; the parent now owns them.
+The next build uses cached dependencies/models, needs at least10 GiB free and
+allows at most2 GiB of new temporary payloads. Keep the canonical app and one
+preceding generated candidate; retain all small evidence and isolated profiles.
+Do not mutate another worker's files while its checks are active.
+
+Follow-on card: generated skill proposals are currently indexed/approved by
+`skill_id`. Concurrent sessions can collide on that identifier. Before claiming
+multi-session proposal isolation, bind draft approval to proposal/session/request
+identity and test replacement, stale delivery and approval races. This is a
+separate existing gap; the foreground terminal correction does not close it.
+
+### Historical checkpoints
 
 Mac-first reconciliation: published `f41c204fe` passes general CI, docs, naming,
 version and the corrected automatic Linux desktop build. Further Linux engineering
@@ -104,8 +132,9 @@ Exact7f-source9.33 also passed its full packaged recovery/restart journey in a
 fresh profile, with post-run hash/signature/all485 source checks. Prior failed
 attempts remain visible. [9.33 acceptance](NATIVE_9_33_ACCEPTANCE.md).
 
-## Active completion wave
+## Earlier completion wave
 
+The table below records a preceding wave; current owners are listed above.
 Prioritize the existing backend's dependable daily app journeys. Additional
 coding-engine expansion follows model setup, recovery, voice and data continuity.
 Gen-UI expansion (NATIVE-05) is deferred; retain existing working capabilities.

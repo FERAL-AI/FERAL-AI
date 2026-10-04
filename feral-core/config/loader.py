@@ -1674,6 +1674,17 @@ class ConfigLoader:
 
         self.save_user_settings(user_settings)
 
+        if section == "llm" and key == "max_tokens" and value is None:
+            # Removing the user value restores the effective layered setting,
+            # which may come from project/local config rather than the builtin
+            # default. Resolve without credentials and retain all other live
+            # settings, including credential-derived fallback providers.
+            layered = ConfigLoader(project_dir=str(self.project_dir))
+            layered.user_home = self.user_home
+            layered.data_home = self.data_home
+            effective = layered.discover(load_credentials=False)
+            self._merged["llm"]["max_tokens"] = effective["llm"]["max_tokens"]
+
         # Republish to os.environ only when a brain is actually running.
         #
         # The re-export exists so a live toggle reaches env-only readers
