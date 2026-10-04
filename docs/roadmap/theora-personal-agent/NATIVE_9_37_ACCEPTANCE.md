@@ -61,7 +61,10 @@ through Computer Use.
   requires a 9-by-9 magenta background patch and requires that same patch to become
   white in the masked frame. Failed receipts remain; the assertion was not removed.
   A private corrected harness passed all 11 real Chrome/controller/route checks.
-  The committed corrected harness requires its own exact-source run.
+  The committed corrected harness at `10d1223ba0328f33e06fab43cc04415c06313d07`
+  also passed all 11 checks in 5.19 seconds. Chrome exited 0, the owned debug
+  listener closed, and cleanup reported no errors. Runtime source remains b9af;
+  this later commit changes the harness and evidence only.
 - The first GUI launcher attempt used an interpreter without its dependency; it
   stopped before launch. A subsequent launcher process guard blocked its own
   verification calls before launch. The corrected helper and fresh profiles

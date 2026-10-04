@@ -36,7 +36,9 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   revisions do not change the immutable package identity.
 - A pixel-control defect in the committed acceptance harness was diagnosed in real
   Chrome; a private corrected harness passed 11 checks. Parent integrated its
-  strict 9-by-9 patch repair; committed exact-source rerun is next. Failed evidence
+  strict 9-by-9 patch repair. Its committed exact-source run at
+  `10d1223ba0328f33e06fab43cc04415c06313d07` passed 11 checks in 5.19 seconds,
+  with owned Chrome exit 0, closed debug listener and no cleanup errors. Failed evidence
   is retained. GUI launcher preflight defects stopped before dispatch and were
   corrected independently of product source.
 - Two follow-up cards: reject unbound mutating REST calls before an empty-session
@@ -47,8 +49,8 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 - Canonical 9.37 and one 9.36 rollback copy remain; obsolete generated 9.34/9.35
   copies were retired, about 1.2 GB. Personal profiles/models/history were retained.
   All source workers released their paths; parent owns evidence/publication.
-- Next: publish the harness/evidence checkpoint and run its exact committed Chrome
-  probe, then the two follow-up cards, desktop viewing/foreground ownership and
+- Next: publish the passing harness/evidence checkpoint, then the two follow-up
+  cards, desktop viewing/foreground ownership and
   task-linked browser takeover. Full product audio/accounts/devices/Messages/
   commerce/migration/distribution gates remain explicit. Preserve unrelated
   AUDIT-FIXES.md edits unstaged. [Browser contract](BROWSER_VIEW_EVIDENCE.md).

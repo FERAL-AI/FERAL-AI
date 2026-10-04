@@ -93,8 +93,9 @@ Packaged 9.37/source b9af now passes actual native consent, real masked frames,
 intended-field Unicode, approved coordinate marker, Stop, navigation retirement,
 expiry/error clearing and normal Quit. [Exact acceptance](NATIVE_9_37_ACCEPTANCE.md)
 records synthetic task dispatch, approval-button limits and the existing
-empty-session REST mismatch. The corrected committed Chrome harness awaits its
-exact-source rerun; a private corrected run passed.
+empty-session REST mismatch. The corrected committed Chrome harness at
+`10d1223ba0328f33e06fab43cc04415c06313d07` passed all 11 checks in 5.19 seconds;
+owned Chrome exited normally and its debug listener closed.
 
 Remaining integration work: task-owned browser contexts and account-write leases;
 one common foreground lease for AX/GUI desktop control; a consented desktop view;
