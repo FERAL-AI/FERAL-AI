@@ -79,6 +79,20 @@ private func ready(_ sid: String = "context-fixture", revision: Any = 1,
         let parsed = NativeContextCheckpointWire.parse(ready(), sessionID: "context-fixture", required: true)
         expect(parsed?.ready == true && parsed?.managed == true, "exact managed READY")
         expect(parsed?.checkpoint?.revision == 1, "actual initial revision one")
+        var managedVoice = ready()
+        managedVoice["managed_chained_voice_versions"] = [1]
+        managedVoice["managed_unsupported_paths"] = Array(NativeContextCheckpointWire.unsupportedPaths.subtracting(["voice"]).union(["realtime_voice"]))
+        expect(NativeContextCheckpointWire.parse(managedVoice, sessionID: "context-fixture", required: true)?.ready == true, "actual negotiated chained voice capability preserves READY")
+        var unnegotiatedVoice = managedVoice; unnegotiatedVoice.removeValue(forKey: "managed_chained_voice_versions")
+        expect(NativeContextCheckpointWire.parse(unnegotiatedVoice, sessionID: "context-fixture", required: true) == nil, "voice omission cannot imply capability")
+        let invalidVoiceVersions: [[Any]] = [[true], [1.0], [2], [1, "1"]]
+        for versions in invalidVoiceVersions {
+            var invalidVoice = managedVoice; invalidVoice["managed_chained_voice_versions"] = versions
+            expect(NativeContextCheckpointWire.parse(invalidVoice, sessionID: "context-fixture", required: true) == nil, "malformed or unsupported voice negotiation cannot remove refusal")
+        }
+        var realtimeUnqualified = managedVoice
+        realtimeUnqualified["managed_unsupported_paths"] = Array(NativeContextCheckpointWire.unsupportedPaths.subtracting(["voice"]))
+        expect(NativeContextCheckpointWire.parse(realtimeUnqualified, sessionID: "context-fixture", required: true) == nil, "chained negotiation never grants realtime support")
         for revision: Any in [true, 1.0, 0, -1, NSNumber(value: Int64.max), NSNumber(value: UInt64.max), "1"] {
             expect(NativeContextCheckpointWire.parse(ready(revision: revision), sessionID: "context-fixture", required: true) == nil, "invalid revision rejected")
         }

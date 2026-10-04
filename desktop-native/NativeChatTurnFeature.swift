@@ -26,12 +26,14 @@ struct NativeTurnTerminal {
     let text: String
     let actionOutcome: String
     let approvals: [String]
-    let replayed: Bool
+    var replayed: Bool
+    var contextCheckpoint: NativeTurnContextCheckpoint? = nil
     var record: [String: Any] {
         var result = reference.record
         result["state"] = "terminal"; result["processing_outcome"] = outcome
         result["action_outcome"] = actionOutcome; result["approval_request_ids"] = approvals
         result["durable"] = true; result["replayed"] = replayed
+        if let contextCheckpoint { result["context_checkpoint"] = contextCheckpoint.record }
         return result
     }
     var summary: String {
@@ -45,6 +47,24 @@ struct NativeTurnTerminal {
         case "unavailable": return "Agent unavailable"
         default: return "Request failed"
         }
+    }
+}
+
+/// Exact historical commit receipt; never authority to replay a task or audio.
+struct NativeTurnContextCheckpoint: Equatable {
+    let sessionID: String
+    let generation: String
+    let revision: Int64
+    let attemptID: String
+    var record: [String: Any] { ["contract_version": 1, "session_id": sessionID, "generation": generation, "revision": revision, "attempt_id": attemptID, "durable": true] }
+    static func parse(_ value: Any?, sessionID: String) -> Self? {
+        guard let row = value as? [String: Any], Set(row.keys) == Set(["contract_version", "session_id", "generation", "revision", "attempt_id", "durable"]),
+              NativeChatTurnWire.version(row["contract_version"]), row["session_id"] as? String == sessionID,
+              NativeChatTurnWire.boolean(row["durable"]) == true,
+              let generation = row["generation"] as? String, NativeChatTurnWire.uuid(generation),
+              let revision = NativeChatTurnWire.integer(row["revision"]), revision >= 1, revision < Int64.max,
+              let attempt = row["attempt_id"] as? String, NativeChatTurnWire.uuid(attempt) else { return nil }
+        return Self(sessionID: sessionID, generation: generation, revision: revision, attemptID: attempt)
     }
 }
 
@@ -62,9 +82,25 @@ enum NativeChatTurnWire {
         guard let number = value as? NSNumber, CFGetTypeID(number) == CFBooleanGetTypeID() else { return nil }
         return number.boolValue
     }
+    static func integer(_ value: Any?) -> Int64? {
+        guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID(),
+              ["c", "s", "i", "l", "q", "C", "S", "I", "L", "Q"].contains(String(cString: number.objCType)),
+              number.compare(NSNumber(value: Int64.max)) != .orderedDescending else { return nil }
+        return number.int64Value
+    }
     static func version(_ value: Any?) -> Bool {
         guard let number = value as? NSNumber, CFGetTypeID(number) != CFBooleanGetTypeID() else { return false }
         return ["c", "s", "i", "l", "q", "C", "S", "I", "L", "Q"].contains(String(cString: number.objCType)) && number.intValue == 1
+    }
+    /// Local capture is already stopped when its captured disable is sent.
+    /// The host still verifies the current socket/SID; the backend verifies
+    /// the exact retired attempt. This predicate confers no start authority.
+    static func managedVoiceStop(_ frame: [String: Any]) -> Bool {
+        guard frame["type"] as? String == "voice_config", let payload = frame["payload"] as? [String: Any],
+              payload["mode"] as? String == "disabled", version(payload["managed_chained_voice_version"]),
+              version(payload["voice_attempt_version"]), let attempt = payload["voice_attempt_id"] as? String,
+              uuid(attempt) else { return false }
+        return true
     }
     static let outcomes: Set<String> = ["completed", "awaiting_approval", "failed", "cancelled", "outcome_unknown", "unavailable", "refused", "budget_exceeded"]
     static func terminal(_ payload: [String: Any], reference: NativeTurnReference) -> NativeTurnTerminal? {
@@ -79,7 +115,9 @@ enum NativeChatTurnWire {
               let approvals = payload["approval_request_ids"] as? [String], approvals.count <= 128,
               approvals.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 1024 }),
               let replayed = boolean(payload["replayed"]) else { return nil }
-        return NativeTurnTerminal(reference: NativeTurnReference(sessionID: reference.sessionID, requestID: reference.requestID, turnID: turn), outcome: outcome, text: text, actionOutcome: action, approvals: approvals, replayed: replayed)
+        let checkpoint = NativeTurnContextCheckpoint.parse(payload["context_checkpoint"], sessionID: reference.sessionID)
+        if payload["context_checkpoint"] != nil && (checkpoint == nil || !["completed", "awaiting_approval", "refused"].contains(outcome)) { return nil }
+        return NativeTurnTerminal(reference: NativeTurnReference(sessionID: reference.sessionID, requestID: reference.requestID, turnID: turn), outcome: outcome, text: text, actionOutcome: action, approvals: approvals, replayed: replayed, contextCheckpoint: checkpoint)
     }
 }
 
@@ -89,6 +127,7 @@ struct NativeChatTurnState {
     private(set) var connectionID: UUID?
     private(set) var capabilityID: String?
     private(set) var ready = false
+    private(set) var managedChainedVoiceReady = false
     private(set) var active: NativeTurnReference?
     private(set) var stopRequested = false
     private(set) var stopAcknowledged = false
@@ -101,12 +140,25 @@ struct NativeChatTurnState {
     mutating func configure(sessionID: String?, connectionID: UUID?) {
         self.sessionID = sessionID; self.connectionID = connectionID
         capabilityID = sessionID != nil && connectionID != nil ? UUID().uuidString.lowercased() : nil
-        ready = false; active = nil; stopRequested = false; stopAcknowledged = false
+        ready = false; managedChainedVoiceReady = false; active = nil; stopRequested = false; stopAcknowledged = false
         abortID = nil; statusID = nil; statusReference = nil
     }
     var capabilitiesFrame: [String: Any]? {
         guard let capabilityID else { return nil }
         return ["type": "req", "id": capabilityID, "method": "chat.capabilities", "params": [:]]
+    }
+    /// Called only after the host consumes a correlated, validated READY
+    /// context capability. IN_PROGRESS availability is not a revocation.
+    mutating func refreshManagedVoiceCapabilities(_ payload: [String: Any]) {
+        guard ready, payload["session_id"] as? String == sessionID,
+              NativeChatTurnWire.boolean(payload["context_managed"]) == true,
+              NativeChatTurnWire.boolean(payload["context_ready"]) == true,
+              payload["context_state"] as? String == "ready" else { return }
+        guard let versions = payload["managed_chained_voice_versions"] as? [Any], versions.count <= 16,
+              versions.allSatisfy({ NativeChatTurnWire.integer($0).map { $0 >= 1 && $0 <= 1024 } ?? false }) else {
+            managedChainedVoiceReady = false; return
+        }
+        managedChainedVoiceReady = versions.contains { NativeChatTurnWire.version($0) }
     }
     mutating func beginRequest() -> NativeTurnReference? {
         guard ready, let sessionID, connectionID != nil, active == nil else { return nil }
@@ -154,6 +206,10 @@ struct NativeChatTurnState {
                   let versions = payload["turn_contract_versions"] as? [Any], versions.contains(where: { NativeChatTurnWire.version($0) }),
                   NativeChatTurnWire.boolean(payload["durable_receipts"]) == true,
                   NativeChatTurnWire.boolean(payload["whole_turn_terminal"]) == true else { return .unavailable("This agent connection does not support verified chat turns. Update the local runtime before sending.") }
+            if let versions = payload["managed_chained_voice_versions"] as? [Any], versions.count <= 16,
+               versions.allSatisfy({ NativeChatTurnWire.integer($0).map { $0 >= 1 && $0 <= 1024 } ?? false }) {
+                managedChainedVoiceReady = versions.contains { NativeChatTurnWire.version($0) }
+            }
             ready = true; return .ready
         }
         if type == "res", let statusID, frame["id"] as? String == statusID {
@@ -161,7 +217,8 @@ struct NativeChatTurnState {
             guard let reference, NativeChatTurnWire.boolean(frame["ok"]) == true,
                   NativeChatTurnWire.boolean(payload["found"]) == true,
                   let receipt = payload["receipt"] as? [String: Any] else { return .unavailable("The earlier request's outcome is not confirmed. It has not been retried.") }
-            guard let terminal = NativeChatTurnWire.terminal(receipt, reference: reference) else { return .unavailable("The earlier request is still running or its outcome needs checking. It has not been retried.") }
+            guard var terminal = NativeChatTurnWire.terminal(receipt, reference: reference) else { return .unavailable("The earlier request is still running or its outcome needs checking. It has not been retried.") }
+            terminal.replayed = true // A status read is historical even if the stored receipt originally was live.
             if active?.requestID == reference.requestID { active = nil; abortID = nil;stopRequested = false;stopAcknowledged = false }
             return .terminal(terminal)
         }

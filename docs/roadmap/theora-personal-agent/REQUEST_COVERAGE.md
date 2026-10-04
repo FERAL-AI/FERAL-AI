@@ -6,6 +6,17 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
+- Current backend publication is `9e9ac51fd`; preceding6ff general CI and desktop build pass.
+  Native CI fails the archive startup fixture, whose local narrow repair now
+  passes its original deadline. Actual9.34 GUI avatar/setup reached the app but
+  local chat failed with an upstream empty response. The current typed-failure
+  and managed chained-voice integration passes471 backend checks and native
+  linked28 groups plus33 onboarding assertions. Readiness and Stop repairs pass;
+  native publication and exact-source packaging remain.
+  [Current checkpoint](WORK_STATE.md) and
+  [voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md).
+  The following bullets are historical and do not supersede this boundary.
+
 - Latest publication is `4eded179e2060c226739511fc53f5a8bde0eaa16`.
   General CI passes13,013 backend tests/83 skipped/75.24% coverage and web/SDK/type
   gates. Native Process-fixture timeout and Linux extracted-payload check remain

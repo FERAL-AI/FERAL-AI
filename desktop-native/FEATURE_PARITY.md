@@ -6,12 +6,23 @@ Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` 
 `4eded179e2060c226739511fc53f5a8bde0eaa16`. Assembly, strict ad-hoc signature,
 51 compiled native input comparisons and487 packaged Python comparisons pass.
 Actual offline backup/restore and production readers pass with synthetic data;
-actual local-model recovery has no completed9.34 receipt. Newer published f41
-general CI and corrected Linux package checks pass; its native startup fixture
-still times out. Local provider-review integration passes21 groups/33 assertions;
+actual local-model recovery has no completed9.34 receipt. Actual isolated GUI
+avatar/setup acceptance reached the connected main app, but its first local chat
+returned an empty-response fallback. Raw-provider reproduction confirms an empty
+HTTP200 result on matching synthetic wording; a reliable-chat gate remains open.
+[Reply investigation](../docs/roadmap/theora-personal-agent/MAC_LOCAL_REPLY_DIAGNOSTIC_EVIDENCE.md).
+Newer published6ff general CI and desktop package checks pass; its native archive
+ownership fixture still times out. Provider-review integration passes21 groups/33 assertions;
 committed-turn broader checks pass567 tests and unchanged812 full mypy diagnostics.
-Those source changes are not in9.34. Computer Use inventory now succeeds and
-isolated actual Mac journeys take priority. GUI/audio and distribution gates
+Those source changes are not in9.34. Current managed chained voice and typed
+empty-response integration pass471 backend checks with no new typing diagnostics.
+Native production typecheck and28 linked groups plus33 onboarding assertions
+pass, alongside55 voice and50 managed-voice assertions. Capability revocation,
+pending-context Stop and single-stage onboarding repairs are verified locally;
+native publication and packaging are next. These
+source fixtures do not establish actual microphone/provider acceptance.
+[Voice evidence](../docs/roadmap/theora-personal-agent/MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md).
+Isolated actual Mac journeys take priority. GUI/audio and distribution gates
 remain open; further Linux and Gen-UI engineering is deferred.
 [9.34 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_34_ACCEPTANCE.md).
 

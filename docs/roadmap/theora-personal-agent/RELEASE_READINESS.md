@@ -1,5 +1,21 @@
 # Theora / FERAL full-product release readiness
 
+**Current Mac checkpoint (October 3): backend published `9e9ac51fd`.**
+The preceding6ff general CI, docs, naming, version and desktop build pass. Native production
+typecheck, feature/linked suites and lifeline pass, but its archive-ownership
+fixture still times out. Actual immutable9.34 GUI selection/setup reached the
+connected app, then its first local chat returned an empty-response fallback.
+Raw-provider reproduction confirms a zero-text HTTP200 response on matching
+synthetic wording. The actionable failure repair and managed chained voice pass
+471 backend checks, with zero added typing diagnostics; native typecheck and
+28 linked groups plus33 onboarding assertions pass. Capability revocation,
+pending-context Stop and duplicate onboarding are repaired and verified locally.
+Native publication and packaging are next. These source changes are not in9.34. Reliable actual chat/audio,
+cloud accounts, clean installation/migration and signed distribution remain open.
+[Reply evidence](MAC_LOCAL_REPLY_DIAGNOSTIC_EVIDENCE.md),
+[voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md), [current work](WORK_STATE.md).
+The following records are historical checkpoints.
+
 **Reconciled Mac-first checkpoint (October 3): published `f41c204fe`.**
 General CI, docs, naming, version and the corrected automatic Linux desktop build
 pass. Native CI still fails the30s Process startup fixture; retained evidence

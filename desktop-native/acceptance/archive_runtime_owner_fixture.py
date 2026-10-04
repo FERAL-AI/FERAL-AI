@@ -45,6 +45,7 @@ import subprocess
 import sys
 import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from socketserver import TCPServer
 
 root = Path(os.environ["FERAL_ARCHIVE_OWNER_FIXTURE_ROOT"])
 profile = root / "profile"
@@ -97,8 +98,25 @@ class Handler(BaseHTTPRequestHandler):
     def log_message(self, *args):
         pass
 
+class OwnedLoopbackHTTPServer(HTTPServer):
+    def server_bind(self):
+        if self.server_address[0] != "127.0.0.1":
+            raise ValueError("The synthetic health listener must remain IPv4 loopback")
+        event("socket_bind_entered")
+        TCPServer.server_bind(self)
+        event("socket_bind_returned")
+        # HTTPServer normally resolves a hostname here. This synthetic listener
+        # is an explicit IPv4 endpoint; external reverse DNS is not its contract.
+        self.server_name = "localhost"
+        self.server_port = self.server_address[1]
+
+    def server_activate(self):
+        event("listener_activate_entered")
+        super().server_activate()
+        event("listener_activate_returned")
+
 try:
-    server = HTTPServer(("127.0.0.1", int(os.environ["FERAL_PORT"])), Handler)
+    server = OwnedLoopbackHTTPServer(("127.0.0.1", int(os.environ["FERAL_PORT"])), Handler)
     event("listener_ready")
 except BaseException:
     child.terminate()

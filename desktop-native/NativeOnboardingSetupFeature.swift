@@ -140,10 +140,10 @@ struct NativeOnboardingSetupFeatureView:View {
     var body:some View {
         VStack(alignment:.leading,spacing:14){
             Text("Connect your assistant").font(.title.bold())
-            Text("Your avatar stays selected. Choose a chat provider and model next. Saved settings and cached suggestions load without automatic provider probes, grants or live discovery.").foregroundStyle(.secondary)
+            Text("Choose a local or cloud model. You can change this later in AI Providers.").foregroundStyle(.secondary)
             if let error=localError ?? model.error{NativeSelectableText(error).foregroundStyle(.orange)}
             if let notice=model.notice{NativeSelectableText(notice).font(.callout)}
-            if model.providers.isEmpty{Text("An encrypted-memory installation may need explicit vault unlock and separately reviewed bootstrap continuation before the provider catalogue is available.").font(.caption).foregroundStyle(.secondary)}
+            if model.providers.isEmpty{Text("Waiting for your providers to load. If FERAL needs unlocking, open Security & Cost.").font(.caption).foregroundStyle(.secondary)}
             Picker("Chat provider",selection:Binding(get:{model.selected},set:{id in secret="";Task{await model.select(id)}})){Text("Choose provider").tag("");ForEach(model.providers){provider in Text(provider.name+(provider.local ? " · local" : " · cloud")).tag(provider.id)}}.disabled(model.busy)
             if let provider=model.providers.first(where:{$0.id==model.selected}){
                 Text(provider.reachable.map{$0 ? "Cached status: reachable" : "Cached status: unreachable"} ?? "Provider has not been probed.").font(.caption).foregroundStyle(.secondary)
@@ -157,10 +157,10 @@ struct NativeOnboardingSetupFeatureView:View {
                     Text(model.vaultReady ? "Encrypted vault authenticated; saving the key requires a separate review." : "Set up or unlock encrypted credential storage first. Local providers do not require a key.").font(.caption).foregroundStyle(.secondary)
                     Button("Review key storage…"){prepare(.saveCredential)}.disabled(model.busy || !model.vaultReady || secret.isEmpty)
                 }
-                HStack{Button("Review activation…"){prepare(.activate)};Button("Review saved-provider probe…"){prepare(.probe)}}.disabled(model.busy)
+                HStack{Button("Review connection…"){prepare(.activate)};Button("Check saved connection…"){prepare(.probe)}}.disabled(model.busy)
             }
-            Text("Voice, microphone permission, access mode and glasses/phone pairing are optional later steps. This stage does not change them.").font(.caption).foregroundStyle(.secondary)
-            HStack{Button("Refresh saved state"){Task{await model.refresh()}}.disabled(model.busy);Spacer();Button("Review finish setup…"){prepare(.complete)}.disabled(model.busy || model.selected.isEmpty);if model.busy{ProgressView().controlSize(.small)}}
+            Text("You can connect voice and glasses later.").font(.caption).foregroundStyle(.secondary)
+            HStack{Button("Refresh"){Task{await model.refresh()}}.disabled(model.busy);Spacer();Button("Finish setup…"){prepare(.complete)}.disabled(model.busy || model.selected.isEmpty);if model.busy{ProgressView().controlSize(.small)}}
         }.padding(24).task(id:baseURL){secret="";review=nil;model.configure(baseURL:baseURL);await model.refresh()}
         .sheet(item:$review){item in VStack(alignment:.leading,spacing:16){ScrollView{NativeReviewSummaryView(review:summary(item))};HStack{Button("Cancel"){review=nil;secret=""};Spacer();Button("Confirm reviewed step"){review=nil;secret="";Task{if await model.perform(item),case .complete=item.operation{onCompleted()}}}.disabled(!model.canUse(item))}}.padding(24).frame(width:680,height:520)}
         .sheet(isPresented:$vaultPresented,onDismiss:{Task{await model.refresh()}}){ScrollView{VStack(alignment:.leading,spacing:16){HStack{Text("Credential storage").font(.headline);Spacer();Button("Done"){vaultPresented=false}};NativeVaultFeatureView(baseURL:baseURL)}.padding(24)}.frame(width:760,height:680)}

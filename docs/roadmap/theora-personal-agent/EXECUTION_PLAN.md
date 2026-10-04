@@ -14,6 +14,18 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
+Backend source is published as `9e9ac51fd`; main remains unchanged. Actual isolated
+Mac9.34 GUI setup and avatar selection were exercised, but the first local-model
+chat returned an empty-response fallback. The app remained connected and Quit
+removed its owned processes. Raw reproduction confirms an upstream empty result;
+the typed-failure repair and managed chained voice pass471 backend checks with
+no new typing diagnostics. Final native checks pass28 linked groups plus33
+onboarding assertions, including readiness revocation and exact Stop. Native
+publication and packaging are next. Source fixtures do not establish reliable actual
+chat, microphone or provider acceptance. Candidate9.34 remains immutable
+and predates these changes. [Current checkpoint](WORK_STATE.md) owns live status;
+the following paragraphs are historical verification records.
+
 Mac-first reconciliation: published `f41c204fe` passes general CI, docs, naming,
 version and the corrected automatic Linux desktop build. Further Linux engineering
 is deferred. Native CI still fails the unchanged30s Process startup fixture;

@@ -8,6 +8,8 @@ private final class WireProtocol: URLProtocol {
     static var replies: [String: [String: Any]] = [:]
     static var sequences: [String: [[String: Any]]] = [:]
     static var delayedPath: String?
+    static var readSavedRows = false
+    static var savedRows: [[String: Any]] = []
 
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
@@ -26,8 +28,10 @@ private final class WireProtocol: URLProtocol {
         let path = request.url!.path
         Self.lock.lock()
         Self.captured.append((path, body))
+        if Self.readSavedRows, path == "/api/conversations/save" { Self.savedRows = body["messages"] as? [[String: Any]] ?? [] }
         let response: [String: Any]
         if var queue = Self.sequences[path], !queue.isEmpty { response = queue.removeFirst(); Self.sequences[path] = queue }
+        else if Self.readSavedRows, path.hasPrefix("/api/conversations/"), path != "/api/conversations/save" { response = ["id": String(path.dropFirst("/api/conversations/".count)), "messages": Self.savedRows] }
         else { response = Self.replies[path] ?? (path == "/api/conversations/save" ? ["id": body["id"] ?? "", "message_count": (body["messages"] as? [Any])?.count ?? 0] : ["ok": true]) }
         let delayed = Self.delayedPath == path; if delayed { Self.delayedPath = nil }
         Self.lock.unlock()
@@ -41,7 +45,7 @@ private final class WireProtocol: URLProtocol {
     }
     override func stopLoading() {}
     static func reset(_ responses: [String: [String: Any]] = [:]) {
-        lock.lock(); defer { lock.unlock() }; captured = []; replies = responses; sequences = [:]; delayedPath = nil
+        lock.lock(); defer { lock.unlock() }; captured = []; replies = responses; sequences = [:]; delayedPath = nil; readSavedRows = false; savedRows = []
     }
     static func bodies(_ path: String) -> [[String: Any]] {
         lock.lock(); defer { lock.unlock() }; return captured.filter { $0.0 == path }.map { $0.1 }
@@ -72,6 +76,15 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
     var aborts:[[String:Any]] { frames.filter { $0["method"] as? String == "chat.abort" } }
 }
 
+@MainActor private final class ModelVoiceAudioFixture: NativeVoiceAudioIO {
+    var starts = 0
+    func authorize() async -> Bool { true }
+    func startCapture(onPCM: @escaping (Data) -> Void, onFailure: @escaping (String) -> Void) throws { starts += 1 }
+    func play(_ data: Data, encoding: String, sampleRate: Double, completed: @escaping () -> Void) throws {}
+    func clearPlayback() {}
+    func shutdown() {}
+}
+
 @main struct NativeModelTests {
     @MainActor static func model(preferences injectedPreferences: UserDefaults? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil) -> NativeModel {
         let configuration = URLSessionConfiguration.ephemeral
@@ -85,11 +98,11 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         return model
     }
     static func frame(_ type: String, _ payload: [String: Any]) -> [String: Any] { ["type": type, "payload": payload] }
-    @MainActor private static func trackedModel(_ transport:TrackedChatFrames) async throws -> NativeModel {
+    @MainActor private static func trackedModel(_ transport:TrackedChatFrames, voiceAudio: NativeVoiceAudioIO? = nil) async throws -> NativeModel {
         let configuration = URLSessionConfiguration.ephemeral;configuration.protocolClasses = [WireProtocol.self]
         let name = "feral.native-chat-receipt-fixture." + UUID().uuidString
         let preferences = UserDefaults(suiteName:name)!;preferences.removePersistentDomain(forName:name)
-        let model = NativeModel(session:URLSession(configuration:configuration),preferences:preferences,chatSender:{ frame in try await transport.send(frame) })
+        let model = NativeModel(session:URLSession(configuration:configuration),preferences:preferences,chatSender:{ frame in try await transport.send(frame) }, voiceAudio: voiceAudio)
         model.ready = true;try model.restoreThread(["id":"fixture-thread","messages":[[String:Any]]()])
         await model.reconnectVerifiedChat();return model
     }
@@ -117,6 +130,82 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             "initialized": true, "omissions": ["history_rows": 0, "system_rows": 0, "images": 0, "working_rows": 0]] }
         return ["type": "res", "id": id, "ok": true, "payload": payload]
     }
+    @MainActor static func managedVoiceRequestBarrierTests() async throws {
+        func managedCapability(_ model: NativeModel) -> [String: Any] {
+            var frame = contextCapability(model, id: model.chatCapabilityFrame!["id"] as! String)
+            var payload = frame["payload"] as! [String: Any]
+            payload["managed_chained_voice_versions"] = [1]
+            payload["managed_unsupported_paths"] = Array(NativeContextCheckpointWire.unsupportedPaths.subtracting(["voice"]).union(["realtime_voice"]))
+            frame["payload"] = payload
+            return frame
+        }
+        WireProtocol.reset()
+        let wire = TrackedChatFrames(), subject = try await trackedModel(wire)
+        await subject.consume(managedCapability(subject))
+        try expect(subject.voice.connected && subject.voice.isManaged && !subject.contextUnsupportedOperations.contains("voice") && subject.contextUnsupportedOperations.contains("realtime_voice"), "negotiated READY managed voice can connect without legacy downgrade")
+        WireProtocol.lock.lock(); WireProtocol.readSavedRows = true; WireProtocol.lock.unlock()
+        guard let reference = await subject.beginManagedVoiceRequest() else { throw AssertionFailure(description: "managed voice save/readback refused") }
+        let saved = WireProtocol.bodies("/api/conversations/save").last?["messages"] as? [[String: Any]] ?? []
+        try expect((saved.last?["chat_turn"] as? [String: Any])?["request_id"] as? String == reference.requestID && saved.last?["source"] as? String == "managed_chained_voice", "voice reference exists in saved user placeholder before admission")
+        try expect(!WireProtocol.bodies("/api/conversations/fixture-thread").isEmpty && wire.commands.isEmpty, "independent voice readback does not submit text or begin microphone")
+        let duplicate = await subject.beginManagedVoiceRequest()
+        try expect(duplicate == nil && subject.trackedChatReference?.requestID == reference.requestID, "second voice admission cannot replace active saved request")
+        await subject.shutdown()
+
+        WireProtocol.reset(["/api/conversations/fixture-thread": ["id": "fixture-thread", "messages": []]])
+        let refusedWire = TrackedChatFrames(), refused = try await trackedModel(refusedWire)
+        await refused.consume(managedCapability(refused))
+        let missing = await refused.beginManagedVoiceRequest()
+        try expect(missing == nil && refused.trackedChatReference == nil && !refused.isSending, "missing readback refuses admission and clears unsubmitted tracking")
+        try expect((refused.messages.last?.metadata["chat_turn"] as? [String: Any])?["state"] as? String == "not_submitted" && refusedWire.commands.isEmpty, "unsubmitted voice marker is preserved without task replay")
+        await refused.shutdown()
+
+        WireProtocol.reset(["/api/conversations/save": ["id": "wrong", "message_count": 1]])
+        let badSave = try await trackedModel(TrackedChatFrames()); await badSave.consume(managedCapability(badSave))
+        let noSave = await badSave.beginManagedVoiceRequest()
+        try expect(noSave == nil && WireProtocol.bodies("/api/conversations/fixture-thread").isEmpty, "wrong save receipt never advances to admission readback")
+        await badSave.shutdown()
+        WireProtocol.reset()
+        let stoppingWire = TrackedChatFrames(), audio = ModelVoiceAudioFixture()
+        let stopping = try await trackedModel(stoppingWire, voiceAudio: audio)
+        await stopping.consume(managedCapability(stopping))
+        WireProtocol.lock.lock(); WireProtocol.readSavedRows = true; WireProtocol.lock.unlock()
+        await stopping.voice.start(mode: "chained", provider: "configured")
+        let config = stoppingWire.frames.last!["payload"] as! [String: Any]
+        let sid = stopping.activeConversationID
+        let fence = NativeTurnContextCheckpoint(sessionID: sid, generation: stopping.contextCheckpoint!.generation, revision: stopping.contextCheckpoint!.revision, attemptID: UUID().uuidString.lowercased())
+        var ack: [String: Any] = ["mode": "chained", "provider": "configured", "status": "configured", "managed_chained_voice_version": 1,
+            "voice_attempt_version": 1, "voice_attempt_id": config["voice_attempt_id"]!, "context_checkpoint": fence.record]
+        await stopping.consume(["type": "voice_config_ack", "session_id": sid, "payload": ack])
+        let voiceReference = stopping.trackedChatReference!
+        ack["request_id"] = voiceReference.requestID; ack["status"] = "collecting"
+        await stopping.consume(["type": "voice_utterance_begin_ack", "session_id": sid, "payload": ack])
+        try expect(audio.starts == 1, "real model guarded ACK flow admits only persisted/readback utterance")
+        await stopping.refreshContextReadiness()
+        let revokedRefresh = stoppingWire.frames.last!
+        var unsupported = contextCapability(stopping, id: revokedRefresh["id"] as! String)
+        var unsupportedPayload = unsupported["payload"] as! [String: Any]
+        unsupportedPayload["managed_chained_voice_versions"] = [Any](); unsupported["payload"] = unsupportedPayload
+        await stopping.consume(unsupported)
+        try expect(stopping.contextUnsupportedOperations.contains("voice") && stopping.voice.connected && stopping.voice.isManaged && stopping.voice.state == "active", "fresh unsupported READY revokes future admission while preserving owned voice")
+        await stopping.refreshContextReadiness()
+        try expect(!stopping.chatCanSend && stopping.voice.connected, "pending READY refresh preserves exact owned voice")
+        await stopping.voice.stop()
+        let disables = stoppingWire.frames.filter { $0["type"] as? String == "voice_config" && ($0["payload"] as? [String: Any])?["mode"] as? String == "disabled" }
+        try expect(!stopping.voice.connected && !stopping.voice.isManaged, "Stop completion applies revoked capability to idle voice readiness")
+        try expect(disables.count == 1 && (disables[0]["payload"] as? [String: Any])?["voice_attempt_id"] as? String == config["voice_attempt_id"] as? String, "captured exact disable traverses actual model sender despite pending context")
+        var rejectedOldStop = false
+        do { try await stopping.sendVoiceFrame(disables[0]) } catch { rejectedOldStop = true }
+        try expect(rejectedOldStop && stoppingWire.frames.filter { $0["type"] as? String == "voice_config" && ($0["payload"] as? [String: Any])?["mode"] as? String == "disabled" }.count == 1, "expired same-attempt disable cannot reuse stop-only dispatch permit")
+        var fake = disables[0]; var fakePayload = fake["payload"] as! [String: Any]
+        fakePayload["voice_attempt_id"] = UUID().uuidString.lowercased(); fake["payload"] = fakePayload
+        var rejectedFakeStop = false
+        do { try await stopping.sendVoiceFrame(fake) } catch { rejectedFakeStop = true }
+        try expect(rejectedFakeStop, "arbitrary UUID disable does not acquire current stop authority")
+        await stopping.shutdown()
+        print("PASS managed voice model persistence/readback, duplicate admission and refused barriers")
+    }
+
     @MainActor static func contextCheckpointTests() async throws {
         WireProtocol.reset()
         let wire = TrackedChatFrames(), subject = try await trackedModel(wire)
@@ -422,8 +511,118 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         print("PASS failed terminal retains observed error and uncertain effects without output success")
     }
 
+    @MainActor static func onboardingTransitions() async throws {
+        var assertions = 0
+        func check(_ condition: Bool, _ message: String) throws {
+            try expect(condition, message); assertions += 1
+        }
+        let configuration = URLSessionConfiguration.ephemeral
+        configuration.protocolClasses = [WireProtocol.self]
+        let session = URLSession(configuration: configuration)
+        defer { session.invalidateAndCancel() }
+        let providers: [[String: Any]] = [
+            ["id": "ollama", "display_name": "Fixture local", "supports_local": true,
+             "requires_api_key": false, "configured": true, "chat_ready": true,
+             "reachable": NSNull(), "default_model": "local-suggestion", "default_base_url": "http://127.0.0.1:11436/v1"],
+            ["id": "openai", "display_name": "Fixture cloud", "supports_local": false,
+             "requires_api_key": true, "configured": true, "chat_ready": true,
+             "reachable": NSNull(), "default_model": "cloud-suggestion", "default_base_url": "https://example.invalid/v1"]
+        ]
+        func replies(_ config: [String: Any], completed: Bool = false) -> [String: [String: Any]] {
+            ["/api/llm/providers": ["providers": providers], "/api/llm/config": config,
+             "/api/setup/status": ["setup_complete": completed], "/api/setup/complete": ["ok": true, "setup_complete": true],
+             "/api/llm/status": ["available": false],
+             "/api/security/vault/status": ["state": "locked", "credentials_available": false, "in_flight": false],
+             "/api/llm/providers/ollama/models": ["provider_id": "ollama", "models": [["id": "cached-local"]], "source": "cache"],
+             "/api/llm/providers/openai/models": ["provider_id": "openai", "models": [["id": "cached-cloud"]], "source": "cache"]]
+        }
+        for provider in ["ollama", "openai"] {
+            let suite = "feral.onboarding-transition." + UUID().uuidString
+            let prefs = UserDefaults(suiteName: suite)!
+            defer { prefs.removePersistentDomain(forName: suite) }
+            WireProtocol.reset()
+            let host = model(preferences: prefs)
+            host.displayName = "Synthetic companion"; host.avatarChoice = "orb"
+            try check(host.canAdvanceProfileOnboarding && host.completeProfileOnboarding(), "fresh profile could not enter the single provider stage")
+            try check(host.onboarded && host.showProviderSetup && prefs.bool(forKey: "onboarded") && prefs.string(forKey: "displayName") == "Synthetic companion" && prefs.string(forKey: "avatarChoice") == "orb", "avatar/name were lost while entering provider setup")
+            try check(WireProtocol.captured.isEmpty, "profile transition dispatched a provider write or probe")
+            let origin = host.featureBaseURL!, generation = host.localRuntimeGeneration, stage = host.providerSetupRevision
+            let endpoint = provider == "ollama" ? "http://127.0.0.1:11436/v1" : "https://example.invalid/v1"
+            let initial: [String: Any] = ["provider": provider, "model": "saved-" + provider, "base_url": endpoint,
+                                         "fallback_providers": [provider == "ollama" ? "openai" : "ollama"], "configured": true]
+            var activated = initial; activated["model"] = "reviewed-" + provider
+            WireProtocol.reset(replies(activated, completed: true))
+            WireProtocol.lock.lock()
+            WireProtocol.sequences["/api/llm/config"] = [initial, initial,
+                ["success": true, "provider": provider, "model": "reviewed-" + provider], activated, activated, activated]
+            WireProtocol.sequences["/api/setup/status"] = [["setup_complete": false], ["setup_complete": true],
+                                                         ["setup_complete": true], ["setup_complete": true]]
+            WireProtocol.lock.unlock()
+            let setup = NativeOnboardingSetupModel(session: session)
+            setup.configure(baseURL: origin); await setup.refresh()
+            try check(setup.selected == provider && setup.runtimeAvailable == false, "saved local/cloud selection or truthful runtime status was lost")
+            setup.model = "reviewed-" + provider
+            let activation = try setup.review(.activate)
+            let activationOK = await setup.perform(activation)
+            try check(activationOK && host.showProviderSetup, "activation alone incorrectly finished onboarding")
+            let activationBodies = WireProtocol.bodies("/api/llm/config").filter { !$0.isEmpty }
+            try check(activationBodies.count == 1 && activationBodies[0]["provider"] as? String == provider && activationBodies[0]["model"] as? String == "reviewed-" + provider && activationBodies[0]["base_url"] as? String == endpoint && activationBodies[0]["fallback_providers"] as? [String] == initial["fallback_providers"] as? [String], "activation duplicated a write, changed fallbacks or silently changed a cloud provider to Ollama")
+            let completionOK = await setup.perform(try setup.review(.complete))
+            try check(completionOK && host.completeProviderSetup(origin: origin, generation: generation, stage: stage), "verified provider completion did not enter the main app")
+            try check(!host.showProviderSetup && WireProtocol.bodies("/api/setup/complete").count == 1 && WireProtocol.bodies("/api/llm/config").filter { !$0.isEmpty }.count == 1, "provider completion reopened or repeated activation")
+            try check(!host.completeProviderSetup(origin: origin, generation: generation, stage: stage) && !host.completeProfileOnboarding() && !host.showProviderSetup, "repeated completion reopened the provider stage")
+            let restarted = NativeModel(session: session, preferences: prefs)
+            try check(restarted.onboarded && !restarted.showProviderSetup && restarted.avatarChoice == "orb" && restarted.displayName == "Synthetic companion", "restart repeated provider onboarding or lost the saved profile")
+            host.openProviderSetup()
+            let reopenedStage = host.providerSetupRevision
+            try check(host.showProviderSetup && !host.completeProviderSetup(origin: origin, generation: UUID(), stage: reopenedStage) && !host.completeProviderSetup(origin: URL(string: "http://127.0.0.1:9464"), generation: generation, stage: reopenedStage), "stale generation or foreign origin dismissed current provider setup")
+            host.dismissProviderSetup(); host.openProviderSetup()
+            try check(!host.completeProviderSetup(origin: origin, generation: generation, stage: reopenedStage) && host.showProviderSetup, "late completion from a dismissed stage closed a newly opened provider stage")
+            host.ready = false
+            try check(!host.completeProviderSetup(origin: origin, generation: generation, stage: host.providerSetupRevision) && host.showProviderSetup, "unready runtime accepted an old provider completion")
+            host.ready = true; host.dismissProviderSetup()
+        }
+        let suite = "feral.onboarding-skip." + UUID().uuidString
+        let prefs = UserDefaults(suiteName: suite)!
+        defer { prefs.removePersistentDomain(forName: suite) }
+        WireProtocol.reset()
+        let skip = model(preferences: prefs)
+        skip.displayName = "Synthetic skip"; skip.avatarChoice = "orb"
+        _ = skip.completeProfileOnboarding(); skip.dismissProviderSetup()
+        try check(skip.onboarded && !skip.showProviderSetup && WireProtocol.captured.isEmpty, "Set up later dispatched effects or returned to provider setup")
+        let afterSkip = NativeModel(session: session, preferences: prefs)
+        try check(afterSkip.onboarded && !afterSkip.showProviderSetup && afterSkip.avatarChoice == "orb", "skip did not preserve profile across restart")
+        skip.openProviderSetup()
+        try check(skip.showProviderSetup && WireProtocol.captured.isEmpty, "explicit provider reopening dispatched an implicit provider action")
+
+        let failed = model()
+        _ = failed.completeProfileOnboarding()
+        let saved: [String: Any] = ["provider": "ollama", "model": "saved-local", "base_url": "http://127.0.0.1:11436/v1", "fallback_providers": [], "configured": true]
+        WireProtocol.reset(replies(saved))
+        let incomplete = NativeOnboardingSetupModel(session: session)
+        incomplete.configure(baseURL: failed.featureBaseURL); await incomplete.refresh()
+        let incompleteOK = await incomplete.perform(try incomplete.review(.complete))
+        if incompleteOK { _ = failed.completeProviderSetup(origin: failed.featureBaseURL, generation: failed.localRuntimeGeneration, stage: failed.providerSetupRevision) }
+        try check(!incompleteOK && failed.showProviderSetup && !incomplete.setupComplete, "successful completion acknowledgement replaced failed durable readback")
+        let stale = try incomplete.review(.complete)
+        var changed = saved; changed["fallback_providers"] = ["openai"]
+        WireProtocol.lock.lock(); WireProtocol.replies["/api/llm/config"] = changed; WireProtocol.lock.unlock()
+        let previousCompletions = WireProtocol.bodies("/api/setup/complete").count
+        let staleOK = await incomplete.perform(stale)
+        try check(!staleOK && failed.showProviderSetup && WireProtocol.bodies("/api/setup/complete").count == previousCompletions, "changed saved configuration permitted a stale onboarding completion")
+        let paused = model()
+        _ = await paused.flushConversationForShutdown()
+        WireProtocol.reset()
+        try check(!paused.canAdvanceProfileOnboarding && !paused.completeProfileOnboarding() && !paused.onboarded && WireProtocol.captured.isEmpty, "paused profile was marked onboarded despite revoked effects")
+        let blocked = NativeModel(session: session, preferencesResolver: { nil })
+        try check(!blocked.canAdvanceProfileOnboarding && !blocked.completeProfileOnboarding() && !blocked.onboarded && WireProtocol.captured.isEmpty, "unavailable preferences permitted an onboarding transition")
+        WireProtocol.reset()
+        print("PASS single provider onboarding: \(assertions) linked assertions (local/cloud, exact readback, skip, restart, stale owner, failed completion and paused effects)")
+    }
+
     @MainActor static func main() async {
         do {
+            try await onboardingTransitions()
             let prefsSuite = "feral.preferences-startup-fixture." + UUID().uuidString
             let fixturePrefs = UserDefaults(suiteName: prefsSuite)!
             defer { fixturePrefs.removePersistentDomain(forName: prefsSuite) }
@@ -793,10 +992,11 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             dying.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: staleHealthOwner, phase: .limited, reason: "Memory unavailable; use Security.", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false, serviceReachable: true))
             try expect(!dying.ready && dying.serviceReachable && dying.securityBaseURL != nil && dying.featureBaseURL == nil, "limited memory readiness exposes Security only and never full agent features")
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
+            try await managedVoiceRequestBarrierTests()
             try await trackedChatTests()
             try await contextCheckpointTests()
             try await contextRecoveryTests()
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 27 groups; mocked HTTP/wire only, no engine/model execution")
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 28 groups; mocked HTTP/wire only, no engine/model execution")
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)
             exit(1)

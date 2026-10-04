@@ -145,7 +145,12 @@ struct NativeRootView: View {
                         NativeStartupStatus(model: model, openSecurity: { model.dismissProviderSetup(); selection = .security }).padding(.horizontal, 24)
                     }
                     ScrollView {
-                        NativeOnboardingSetupFeatureView(baseURL: model.featureBaseURL, onCompleted: { model.completeProviderSetup() })
+                        let origin = model.featureBaseURL
+                        let generation = model.localRuntimeGeneration
+                        let stage = model.providerSetupRevision
+                        NativeOnboardingSetupFeatureView(baseURL: origin, onCompleted: {
+                            _ = model.completeProviderSetup(origin: origin, generation: generation, stage: stage)
+                        }).id(stage)
                     }
                 }
             } else {
@@ -191,7 +196,12 @@ struct NativeRootView: View {
                         case .chat: NativeChatView(model: model)
                         case .voice:
                             VStack(alignment: .leading) {
-                                if model.contextManaged { Text("Voice is unavailable in this saved-context chat. Open a standard chat to use voice; this chat's context is not converted.").foregroundStyle(.secondary).padding() }
+                                if model.contextManaged {
+                                    Text(model.voice.isManaged
+                                         ? "Speak, then choose Finish speaking to send your task. You can stop speech while the task continues."
+                                         : "Voice is unavailable for this saved-context chat's current configuration.")
+                                        .foregroundStyle(.secondary).padding()
+                                }
                                 NativeVoiceFeatureView(baseURL: model.featureBaseURL, engine: model.voice)
                             }
                         case .conversations:
@@ -399,9 +409,6 @@ private struct NativeAvatarPicker: View {
 
 private struct NativeOnboardingView: View {
     @ObservedObject var model: NativeModel
-    @State private var step = 0
-    @State private var finishing = false
-    @State private var providersPresented = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -409,78 +416,30 @@ private struct NativeOnboardingView: View {
                 NativeBrandMark(size: 28)
                 Text("FERAL Native Preview").font(.headline)
                 Spacer()
-                Text(step == 0 ? "Make it yours" : "Connect your AI").font(.callout).foregroundStyle(.secondary)
+                Text("Make it yours").font(.callout).foregroundStyle(.secondary)
             }.padding(28)
             Spacer(minLength: 24)
             VStack(spacing: 24) {
-                if step == 0 {
-                    VStack(spacing: 10) {
-                        Text("Choose your companion").font(.system(size: 34, weight: .semibold, design: .rounded))
-                        Text("A familiar face for every conversation.").font(.title3).foregroundStyle(.secondary)
-                    }
-                    NativeAvatarPicker(model: model)
-                    VStack(alignment: .leading, spacing: 8) {
-                        Text("What should FERAL call you?").font(.callout)
-                        TextField("Your name (optional)", text: $model.displayName).textFieldStyle(.roundedBorder)
-                    }.frame(maxWidth: 350)
-                    if let error = model.error, !error.isEmpty { NativeErrorBanner(text: error).frame(maxWidth: 500) }
-                    Button("Continue") { step = 1; Task { await model.start() } }.buttonStyle(.borderedProminent).controlSize(.large)
-                        .keyboardShortcut(.defaultAction)
-                } else {
-                    NativeAvatar(choice: model.avatarChoice, importedPath: model.importedAvatarPath, size: 76)
-                    VStack(spacing: 10) {
-                        Text("Give FERAL a place to think").font(.system(size: 30, weight: .semibold, design: .rounded))
-                        Text("Connect a local AI service, choose another provider, or set up AI later.")
-                            .font(.callout).foregroundStyle(.secondary).multilineTextAlignment(.center)
-                    }
-                    NativeAIFields(model: model).frame(maxWidth: 460)
-                    Button("Choose another AI provider") { providersPresented = true }.disabled(!model.ready)
-                    if let error = model.error, !error.isEmpty { NativeErrorBanner(text: error).frame(maxWidth: 500) }
-                    if !model.ready {
-                        NativeStartupStatus(model: model)
-                    }
-                    HStack(spacing: 14) {
-                        Button("Back") { step = 0 }.controlSize(.large)
-                        Button(finishing ? "Connecting…" : "Start chatting") {
-                            finishing = true
-                            Task { await model.finishOnboarding(); finishing = false }
-                        }.buttonStyle(.borderedProminent).controlSize(.large)
-                            .disabled(!model.ready || finishing || model.endpoint.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.modelName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
-                            .keyboardShortcut(.defaultAction)
-                    }
-                    Button("Set up AI later") { model.completeProfileOnboarding() }.disabled(!model.ready || finishing)
+                VStack(spacing: 10) {
+                    Text("Choose your companion").font(.system(size: 34, weight: .semibold, design: .rounded))
+                    Text("A familiar face for every conversation.").font(.title3).foregroundStyle(.secondary)
                 }
+                NativeAvatarPicker(model: model)
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("What should FERAL call you?").font(.callout)
+                    TextField("Your name (optional)", text: $model.displayName).textFieldStyle(.roundedBorder)
+                }.frame(maxWidth: 350)
+                if let error = model.error, !error.isEmpty { NativeErrorBanner(text: error).frame(maxWidth: 500) }
+                Button("Continue to AI setup") {
+                    if model.completeProfileOnboarding() { Task { await model.start() } }
+                }.buttonStyle(.borderedProminent).controlSize(.large)
+                    .disabled(!model.canAdvanceProfileOnboarding)
+                    .keyboardShortcut(.defaultAction)
             }.padding(.horizontal, 32)
             Spacer(minLength: 24)
             Text("Native Preview · Some FERAL features are not available here yet.").font(.caption).foregroundStyle(.secondary).padding(24)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
             .background(Color(nsColor: .windowBackgroundColor))
-            .sheet(isPresented: $providersPresented) {
-                VStack(spacing: 0) {
-                    HStack { Text("AI Providers").font(.headline); Spacer(); Button("Done") { providersPresented = false } }.padding()
-                    NativeProvidersFeatureView(baseURL: model.featureBaseURL, onConfigurationChanged: { Task { await model.refreshProviderConfiguration() } })
-                    Button("Finish setup") { model.completeProfileOnboarding(); providersPresented = false }.padding().disabled(!model.ready)
-                }.frame(width: 900, height: 650)
-            }
-    }
-}
-
-private struct NativeAIFields: View {
-    @ObservedObject var model: NativeModel
-    var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Local AI address").font(.callout.weight(.medium))
-                TextField("http://127.0.0.1:11434", text: $model.endpoint).textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("native-ai-endpoint")
-            }
-            VStack(alignment: .leading, spacing: 6) {
-                Text("Model").font(.callout.weight(.medium))
-                TextField("Model installed in your local AI service", text: $model.modelName).textFieldStyle(.roundedBorder)
-                    .accessibilityIdentifier("native-ai-model")
-            }
-            Text("A running local service and an installed model are required.").font(.caption).foregroundStyle(.secondary)
-        }
     }
 }
 

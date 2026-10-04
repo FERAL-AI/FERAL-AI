@@ -33,14 +33,16 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   tests with1290 frozen inputs unchanged; full mypy809 has zero new diagnostics
   versus the retained812 baseline, and core Ruff passes. Native production
   typecheck and linked28 groups pass, alongside Voice55, ManagedVoice50,
-  ChatTurn/ContextCheckpoint, desktop39 and error5 assertions. Final review fixed
-  a stale native capability flag and pending-context Stop dispatch. Their merged
-  linked run is next after the single-stage onboarding repair is frozen.
+  ChatTurn/ContextCheckpoint, OnboardingSetup34, additional linked onboarding33,
+  desktop39 and error5 assertions. Final review fixed a stale native capability
+  flag and pending-context Stop dispatch; their actual linked fixture journey
+  passes. All122 native source/test/harness inputs stayed unchanged in final runs.
   These are source/fixture results, not microphone, account or audio acceptance.
   [Voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md).
-- Backend contracts and typed empty-response handling are frozen for a separate
-  coherent publication. Native readiness/onboarding changes remain local until
-  their final linked checks and reviewed integration commit.
+- Backend contracts and typed empty-response handling are published as
+  `9e9ac51fdd1f569f95afe79c17973beab6c93de2` in the existing review branch. Main
+  remains unchanged. Native readiness/onboarding changes now pass final combined
+  checks and are ready for their reviewed integration commit.
 - The parent owns canonical contracts, documentation and publication. Workers
   own final native readiness/Stop review and duplicate onboarding diagnosis.
   Mac usability remains first; Linux engineering and Gen-UI are deferred.
@@ -50,8 +52,13 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   home-directory Git repository was inspected read-only and remains untouched.
 - Candidate9.34 is also preserved in a verified disposable copy before replacing
   the canonical build. Its binary, signature and487-source comparison passed.
-- Next: publish the tested backend change, finish the native onboarding integration
-  and its combined checks, then assemble and test
+- Single-stage onboarding passes local/cloud, skip and stale-completion linked
+  cases. The final wrapper's initial sandbox runs failed Swift macro-server
+  startup; sources were unchanged. The permitted outside-sandbox retry passed.
+  Production typecheck has zero warnings; linked fixtures retain18 async-lock
+  warnings under Swift5, without a Swift6 migration claim.
+  [Onboarding evidence](MAC_SINGLE_STAGE_ONBOARDING_EVIDENCE.md).
+- Next: publish the reviewed native change, then assemble and test
   an exact-source Mac candidate. Distribution, real accounts and hardware remain
   separate acceptance gates in RELEASE_READINESS.
 

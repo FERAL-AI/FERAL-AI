@@ -43,16 +43,44 @@ enum NativeVoicePCM {
     func play(_ data: Data, encoding: String, sampleRate: Double, completed: @escaping () -> Void) throws
     func clearPlayback()
     func shutdown()
+    func stopCapture()
+    func finishCapture() async
+}
+
+extension NativeVoiceAudioIO {
+    func stopCapture() { shutdown() }
+    func finishCapture() async { stopCapture() }
 }
 
 private final class NativeVoiceCaptureBridge: @unchecked Sendable {
     private let slots = DispatchSemaphore(value: 4)
     private let lock = NSLock()
     private var reportedOverflow = false
+    private var closed = false
+    private var pending = 0
+    private var drain: CheckedContinuation<Void, Never>?
+    func close() { lock.lock(); closed = true; lock.unlock() }
+    @MainActor func closeAndDrain() async {
+        await withCheckedContinuation { waiter in
+            lock.lock(); closed = true
+            if pending == 0 { lock.unlock(); waiter.resume() }
+            else { drain = waiter; lock.unlock() }
+        }
+    }
+    private func delivered() {
+        lock.lock(); pending -= 1
+        let completed = pending == 0 ? drain : nil
+        if pending == 0 { drain = nil }
+        lock.unlock(); completed?.resume()
+    }
     func submit(_ body: @escaping @MainActor () -> Void, overflow: @escaping @MainActor () -> Void) {
+        lock.lock()
+        guard !closed else { lock.unlock(); return }
         if slots.wait(timeout: .now()) == .success {
-            Task { @MainActor in body(); self.slots.signal() }
+            pending += 1; lock.unlock()
+            Task { @MainActor in body(); self.slots.signal(); self.delivered() }
         } else {
+            lock.unlock()
             lock.lock(); let report = !reportedOverflow; reportedOverflow = true; lock.unlock()
             if report { Task { @MainActor in overflow() } }
         }
@@ -68,6 +96,7 @@ private final class NativeVoiceCaptureBridge: @unchecked Sendable {
     private var compressed: AVAudioPlayer?
     private var compressedWatcher: Task<Void, Never>?
     private var installedTap = false
+    private var captureBridge: NativeVoiceCaptureBridge?
     func authorize() async -> Bool {
         guard Bundle.main.object(forInfoDictionaryKey: "NSMicrophoneUsageDescription") is String else { return false }
         switch AVCaptureDevice.authorizationStatus(for: .audio) {
@@ -81,7 +110,7 @@ private final class NativeVoiceCaptureBridge: @unchecked Sendable {
         let engine = AVAudioEngine(); capture = engine
         let node = engine.inputNode, format = node.outputFormat(forBus: 0)
         guard format.sampleRate > 0, format.channelCount > 0, let target = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: NativeVoicePCM.rate, channels: 1, interleaved: false), let converter = AVAudioConverter(from: format, to: target) else { shutdown(); throw NativeVoiceFailure(message: "No compatible microphone input format is available.") }
-        let bridge = NativeVoiceCaptureBridge()
+        let bridge = NativeVoiceCaptureBridge(); captureBridge = bridge
         node.installTap(onBus: 0, bufferSize: 2048, format: format) { buffer, _ in
             do { let data = try NativeVoicePCM.convert(buffer, converter: converter); bridge.submit({ onPCM(data) }, overflow: { onFailure("Microphone delivery fell behind; capture stopped to avoid delayed audio.") }) }
             catch { bridge.submit({ onFailure("Microphone conversion failed. Stop voice and try again.") }, overflow: {}) }
@@ -112,9 +141,19 @@ private final class NativeVoiceCaptureBridge: @unchecked Sendable {
         } else { throw NativeVoiceFailure(message: "Unsupported speech response encoding: \(encoding).") }
     }
     func clearPlayback() { player?.stop(); player?.play(); compressedWatcher?.cancel(); compressedWatcher = nil; compressed?.stop(); compressed = nil }
-    func shutdown() {
+    func stopCapture() {
+        captureBridge?.close()
         if installedTap { capture?.inputNode.removeTap(onBus: 0) }; installedTap = false
         capture?.stop(); capture = nil
+    }
+    func finishCapture() async {
+        let bridge = captureBridge
+        stopCapture()
+        await bridge?.closeAndDrain()
+        if captureBridge === bridge { captureBridge = nil }
+    }
+    func shutdown() {
+        stopCapture(); captureBridge = nil
         clearPlayback(); output?.stop(); output = nil; player = nil
     }
 }
@@ -162,8 +201,55 @@ struct NativeVoiceTranscript: Identifiable {
     private var providerDegraded = false
     private var awaitingInterrupt = false
     private var voiceAttemptID: String?
+    private var stopDispatchAttempt: String?
+    private var stopDispatchGeneration: UUID?
     private var interruptRequestID: String?
-    private var maySend: Bool { connected && sessionID != nil && ["active", "degraded"].contains(state) && captureRunning && !muted && !privacyRefused }
+    private var managed = false
+    private var managedGeneration: String?
+    private var managedRevision: Int64?
+    private var observedGeneration: String?
+    private var observedRevision: Int64?
+    private var managedReference: NativeTurnReference?
+    private var speechCheckpoint: NativeTurnContextCheckpoint?
+    private var speechSuppressed = false
+    private var managedOutputClosed = false
+    private var finishingCapture = false
+    private var beginManagedRequest: (() async -> NativeTurnReference?)?
+    private var updateManagedTranscript: ((NativeTurnReference, String) async -> Void)?
+    private var managedUnknown: ((NativeTurnReference) async -> Void)?
+    private var stopManagedTask: (() async -> Void)?
+    var hasManagedRequest: Bool { managed && managedReference != nil }
+    var isManaged: Bool { managed }
+    var canFinishSpeaking: Bool { managed && captureRunning && !finishingCapture }
+    func configureManaged(enabled: Bool, generation: String?, revision: Int64?,
+                          beginRequest: @escaping () async -> NativeTurnReference?,
+                          transcript: @escaping (NativeTurnReference, String) async -> Void,
+                          stopTask: @escaping () async -> Void,
+                          unknown: @escaping (NativeTurnReference) async -> Void) {
+        if managed != enabled && state != "off" { cleanup(); state = "off"; phase = "idle" }
+        managed = enabled
+        if let generation, let revision { observedGeneration = generation; observedRevision = revision }
+        // An active attempt keeps its captured checkpoint; refreshing READY
+        // after its terminal must not silently rebind that attempt.
+        if managedReference == nil && ["off", "ended"].contains(state) { managedGeneration = generation; managedRevision = revision }
+        beginManagedRequest = beginRequest; updateManagedTranscript = transcript; stopManagedTask = stopTask; managedUnknown = unknown
+    }
+    /// A fresh verified READY observation can revoke queued media, but never
+    /// changes the historical terminal or retries the interrupted request.
+    func observeManagedContext(generation: String, revision: Int64) {
+        guard managed else { return }
+        observedGeneration = generation; observedRevision = revision
+        guard !["off", "ended"].contains(state) else { return }
+        let changedGeneration = managedGeneration != generation
+        let changedSpeech = speechCheckpoint.map { $0.generation != generation || $0.revision != revision } ?? false
+        let admitting = captureRunning || ["starting", "configured", "saving_request", "awaiting_utterance"].contains(state)
+        guard changedGeneration || changedSpeech || (admitting && managedRevision != revision) else { return }
+        if let reference = managedReference {
+            taskUncertain(); diagnostic = "Saved context changed. Capture and queued speech stopped; check the task status before continuing."
+            let callback = managedUnknown; Task { await callback?(reference) }
+        } else { fail("Saved context changed before microphone admission. Start again after reviewing the current conversation.") }
+    }
+    private var maySend: Bool { connected && sessionID != nil && ["active", "degraded"].contains(state) && (captureRunning || finishingCapture) && !muted && !privacyRefused }
     init(sendFrame: @escaping ([String: Any]) async throws -> Void, audio: NativeVoiceAudioIO? = nil) { self.sendFrame = sendFrame; self.audio = audio ?? NativeAVVoiceIO() }
     func configureConnection(sessionID: String?, connected: Bool) {
         let sessionID = sessionID.flatMap { $0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? nil : $0 }
@@ -178,7 +264,19 @@ struct NativeVoiceTranscript: Identifiable {
     private func frame(_ type: String, _ payload: [String: Any]) -> [String: Any] {
         var bound = payload
         if let voiceAttemptID { bound["voice_attempt_version"] = 1; bound["voice_attempt_id"] = voiceAttemptID }
+        if managed {
+            bound["managed_chained_voice_version"] = 1
+            if let managedGeneration { bound["context_generation"] = managedGeneration }
+            if let managedRevision { bound["context_revision"] = managedRevision }
+            if let managedReference { bound["request_id"] = managedReference.requestID }
+        }
         return ["type": type, "hop": "client", "session_id": sessionID ?? "", "payload": bound]
+    }
+    func matchesStopDispatch(_ frame: [String: Any]) -> Bool {
+        guard NativeChatTurnWire.managedVoiceStop(frame), stopDispatchGeneration == generation,
+              let stopDispatchAttempt, frame["session_id"] as? String == sessionID,
+              let payload = frame["payload"] as? [String: Any], payload["voice_attempt_id"] as? String == stopDispatchAttempt else { return false }
+        return true
     }
     private func matchesAttempt(_ payload: [String: Any]) -> Bool {
         guard let voiceAttemptID, payload["voice_attempt_id"] as? String == voiceAttemptID,
@@ -189,6 +287,10 @@ struct NativeVoiceTranscript: Identifiable {
     }
     func start(mode: String, provider: String) async {
         guard connected, sessionID != nil, state == "off" || state == "ended", ["realtime", "chained"].contains(mode), !provider.isEmpty else { error = "Connect to a conversation before starting voice."; return }
+        if managed { managedGeneration = observedGeneration; managedRevision = observedRevision }
+        if managed && (mode != "chained" || provider != "configured" || managedGeneration == nil || managedRevision == nil) {
+            error = "Saved-context voice requires the configured chained pipeline and a verified saved context."; return
+        }
         cleanup(); error = nil; diagnostic = nil; transcripts = []; acknowledgedProvider = nil; reportedProvider = nil; fallbackProvider = nil; privacyRefused = false; muted = false
         requestedMode = mode; requestedProvider = provider; providerDegraded = false; state = "authorizing"
         voiceAttemptID = UUID().uuidString.lowercased()
@@ -208,18 +310,33 @@ struct NativeVoiceTranscript: Identifiable {
     }
     func stop() async {
         let message = frame("voice_config", ["mode": "disabled"])
+        let selectedGeneration = generation, selectedAttempt = voiceAttemptID
         let couldSend = connected && sessionID != nil
+        if managedReference != nil {
+            audio.stopCapture(); captureRunning = false; finishingCapture = false
+            sending?.cancel(); sending = nil; ingress = []; pcmBuffer = Data(); speechSuppressed = true; flushPlayback()
+            await stopManagedTask?()
+        }
+        guard generation == selectedGeneration else { return }
         cleanup(); state = "off"; phase = "idle"
         let current = generation
+        if managed { stopDispatchAttempt = selectedAttempt; stopDispatchGeneration = current }
+        defer { if generation == current { stopDispatchAttempt = nil; stopDispatchGeneration = nil } }
         if couldSend { do { try await sendFrame(message) } catch { if generation == current { self.error = "Local capture and playback stopped; the remote stop request could not be confirmed." } } }
     }
     private func cleanup() {
         generation = UUID(); acknowledgmentDeadline?.cancel(); acknowledgmentDeadline = nil; interruptDeadline?.cancel(); interruptDeadline = nil; sending?.cancel(); sending = nil
         audio.shutdown(); captureRunning = false; pcmBuffer = Data(); ingress = []; chunkIndex = 0
+        managedReference = nil; speechCheckpoint = nil; speechSuppressed = false; managedOutputClosed = false; finishingCapture = false
         awaitingInterrupt = false; voiceAttemptID = nil; interruptRequestID = nil
+        stopDispatchAttempt = nil; stopDispatchGeneration = nil
         flushPlayback(); ttsIndex = -1
     }
-    private func fail(_ message: String) { cleanup(); state = "ended"; phase = "error"; error = message }
+    private func fail(_ message: String) {
+        let uncertain = managed ? managedReference : nil, callback = managedUnknown
+        cleanup(); state = "ended"; phase = "error"; error = message
+        if let uncertain { Task { await callback?(uncertain) } }
+    }
     func setMuted(_ value: Bool) async {
         guard captureRunning, connected else { return }
         muted = value; pcmBuffer = Data(); ingress = []
@@ -228,8 +345,8 @@ struct NativeVoiceTranscript: Identifiable {
         catch { if current == generation { muted = true; fail("The microphone mute change could not be delivered. Local capture stopped.") } }
     }
     func interrupt() async {
-        guard connected, captureRunning else { return }
-        flushPlayback(); phase = "listening"
+        guard connected, captureRunning || (managed && managedReference != nil) else { return }
+        speechSuppressed = managed; flushPlayback(); phase = "listening"
         diagnostic = "Queued playback stopped locally. Requesting remote response cancellation…"
         awaitingInterrupt = true
         let requestID = UUID().uuidString.lowercased(); interruptRequestID = requestID
@@ -271,16 +388,148 @@ struct NativeVoiceTranscript: Identifiable {
             }
         }
     }
+    /// One explicit utterance per attempt. A fresh Start is required for another.
+    private func beginUtterance() async {
+        guard managed, state == "configured", managedReference == nil else { return }
+        let current = generation
+        state = "saving_request"
+        let prepared = await beginManagedRequest?()
+        guard current == generation else {
+            if let prepared { await managedUnknown?(prepared) }; return
+        }
+        guard let reference = prepared, reference.sessionID == sessionID, NativeChatTurnWire.uuid(reference.requestID) else {
+            fail("The voice request could not be saved and verified. No microphone audio was sent."); return
+        }
+        managedReference = reference; state = "awaiting_utterance"
+        do {
+            try await sendFrame(frame("voice_utterance_begin", [:]))
+            guard current == generation, state == "awaiting_utterance" else { return }
+            acknowledgmentDeadline = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 15_000_000_000)
+                guard !Task.isCancelled, let self, self.generation == current, self.state == "awaiting_utterance" else { return }
+                self.audio.stopCapture(); self.captureRunning = false; self.state = "uncertain"
+                self.error = "Voice admission was not confirmed. Check the saved request status; it was not retried."
+                if let reference = self.managedReference { await self.managedUnknown?(reference) }
+            }
+        } catch {
+            if current == generation { state = "uncertain"; self.error = "Voice admission could not be confirmed. No audio was sent; check request status before starting again."; if let reference = managedReference { await managedUnknown?(reference) } }
+        }
+    }
+    func finishSpeaking() async {
+        guard canFinishSpeaking else { return }
+        let current = generation
+        finishingCapture = true
+        await audio.finishCapture()
+        guard current == generation, finishingCapture else { return }
+        captureRunning = false
+        // Device capture is stopped and all admitted callback deliveries have
+        // drained. Flush their ordered ingress before the explicit finish.
+        if !pcmBuffer.isEmpty { ingress.append(pcmBuffer); pcmBuffer = Data() }
+        pumpIngress()
+        while let pending = sending { await pending.value; guard generation == current else { return } }
+        guard generation == current, finishingCapture, state == "active" || state == "degraded" else { return }
+        finishingCapture = false; state = "processing"; phase = "processing"
+        do { try await sendFrame(frame("voice_utterance_finish", [:])) }
+        catch { if generation == current { state = "uncertain"; self.error = "The voice submission is unconfirmed. Check request status; it has not been retried."; if let reference = managedReference { await managedUnknown?(reference) } } }
+    }
+    func taskUncertain() {
+        guard managed, managedReference != nil else { return }
+        audio.stopCapture(); captureRunning = false; finishingCapture = false
+        sending?.cancel(); sending = nil; ingress = []; pcmBuffer = Data()
+        speechSuppressed = true; speechCheckpoint = nil; flushPlayback(); state = "uncertain"; phase = "idle"
+    }
+    func accepted(_ reference: NativeTurnReference) {
+        guard managed, let current = managedReference, reference.sessionID == current.sessionID,
+              reference.requestID == current.requestID, let turn = reference.turnID,
+              current.turnID == nil || current.turnID == turn else { return }
+        managedReference = reference; phase = "processing"
+    }
+    func terminal(_ terminal: NativeTurnTerminal) {
+        guard managed, let reference = managedReference,
+              terminal.reference.sessionID == reference.sessionID, terminal.reference.requestID == reference.requestID,
+              reference.turnID != nil, terminal.reference.turnID == reference.turnID else { return }
+        audio.stopCapture(); captureRunning = false; finishingCapture = false
+        guard !terminal.replayed, !speechSuppressed,
+              ["completed", "awaiting_approval", "refused"].contains(terminal.outcome),
+              let checkpoint = terminal.contextCheckpoint, checkpoint.generation == managedGeneration,
+              let expected = managedRevision, expected <= Int64.max - 2, checkpoint.revision == expected + 2,
+              observedGeneration == checkpoint.generation,
+              observedRevision == expected || observedRevision == checkpoint.revision else {
+            speechCheckpoint = nil; speechSuppressed = true; flushPlayback(); state = "completed"; phase = "idle"; return
+        }
+        speechCheckpoint = checkpoint; managedOutputClosed = false; state = "completed"; phase = "idle"
+    }
+    private func matchesManagedIdentity(_ payload: [String: Any]) -> Bool {
+        managed && NativeChatTurnWire.version(payload["managed_chained_voice_version"]) &&
+            managedReference != nil && payload["request_id"] as? String == managedReference?.requestID
+    }
+    private func refuseUtteranceACK(_ payload: [String: Any]) async {
+        guard matchesManagedIdentity(payload), payload["status"] as? String == "error",
+              NativeChatTurnWire.boolean(payload["retry_safe"]) == false,
+              let code = payload["code"] as? String, !code.isEmpty, code.utf8.count <= 256 else { return }
+        acknowledgmentDeadline?.cancel(); acknowledgmentDeadline = nil
+        taskUncertain(); error = "The voice request was refused or became unavailable. Check its status; no task was retried and cancellation is not confirmed."
+        if let reference = managedReference { await managedUnknown?(reference) }
+    }
+    private func matchesManagedRequest(_ payload: [String: Any], speech: Bool = false) -> Bool {
+        guard managed, NativeChatTurnWire.version(payload["managed_chained_voice_version"]),
+              let reference = managedReference, payload["request_id"] as? String == reference.requestID else { return false }
+        if speech {
+            guard !speechSuppressed, !managedOutputClosed, let checkpoint = speechCheckpoint,
+                  payload["turn_id"] as? String == reference.turnID,
+                  NativeTurnContextCheckpoint.parse(payload["context_checkpoint"], sessionID: reference.sessionID) == checkpoint else { return false }
+        } else {
+            guard let checkpoint = NativeTurnContextCheckpoint.parse(payload["context_checkpoint"], sessionID: reference.sessionID),
+                  checkpoint.generation == managedGeneration, checkpoint.revision == managedRevision else { return false }
+        }
+        return true
+    }
+    private func startMicrophone() {
+        let current = generation
+        do {
+            try audio.startCapture(onPCM: { [weak self] data in guard let self, self.generation == current, self.captureRunning else { return }; self.receivePCM(data) },
+                onFailure: { [weak self] message in guard let self, self.generation == current else { return }; self.fail(message) })
+            captureRunning = true; state = providerDegraded ? "degraded" : "active"; phase = "listening"
+        } catch { fail("The microphone could not start. Check the input device and app permissions.") }
+    }
     func handle(frame: [String: Any]) async {
         guard connected, let sessionID, frame["session_id"] as? String == sessionID, !["off", "ended", "authorizing"].contains(state) else { return }
         let type = frame["type"] as? String ?? "", payload = frame["payload"] as? [String: Any] ?? [:]
         // A SID survives Stop/Start. Only the identity sent by this Start may
         // authorize capture or publish media/status; never infer it from arrival.
         guard matchesAttempt(payload) else { return }
+        if managed {
+            if type == "voice_utterance_begin_ack" {
+                if state == "awaiting_utterance", payload["status"] as? String == "error" { await refuseUtteranceACK(payload); return }
+                guard state == "awaiting_utterance", matchesManagedRequest(payload), payload["status"] as? String == "collecting" else { return }
+                acknowledgmentDeadline?.cancel(); acknowledgmentDeadline = nil; startMicrophone(); return
+            }
+            if type == "voice_utterance_finish_ack" {
+                if state == "processing", payload["status"] as? String == "error" { await refuseUtteranceACK(payload); return }
+                guard ["processing", "completed"].contains(state), matchesManagedIdentity(payload),
+                      payload["status"] as? String == "submitted_processing",
+                      NativeChatTurnWire.boolean(payload["task_accepted"]) == false else { return }
+                diagnostic = "Voice submitted; waiting for the tracked task receipt."; return
+            }
+            if type == "voice_state" {
+                guard matchesManagedRequest(payload) || matchesManagedRequest(payload, speech: true) else { return }
+                if payload["state"] as? String == "error" {
+                    taskUncertain(); error = "The voice pipeline failed. Check the tracked task status; cancellation is not confirmed."
+                    if let reference = managedReference { await managedUnknown?(reference) }; return
+                }
+            }
+            if ["transcript", "speech_started", "audio_response", "audio_delta", "tts_chunk", "audio_chunk", "voice_cancel"].contains(type) {
+                let userTranscript = type == "transcript" && payload["role"] as? String == "user"
+                guard matchesManagedRequest(payload, speech: !userTranscript) else { return }
+                if userTranscript, payload["is_partial"] as? Bool != true, let text = payload["text"] as? String, let reference = managedReference {
+                    await updateManagedTranscript?(reference, text)
+                }
+            }
+        }
         // Status may precede configuration acknowledgment. Media never may:
         // queued frames from an earlier run must not play while a new run waits.
         if ["voice_state", "transcript", "speech_started", "audio_response", "audio_delta", "tts_chunk", "audio_chunk", "voice_cancel"].contains(type) {
-            guard captureRunning, ["active", "degraded"].contains(state) else { return }
+            guard managed ? (managedReference != nil) : (captureRunning && ["active", "degraded"].contains(state)) else { return }
         }
         switch type {
         case "voice_interrupt_ack":
@@ -295,13 +544,16 @@ struct NativeVoiceTranscript: Identifiable {
             else { diagnostic = "Local playback stopped; remote cancellation is not confirmed (\(status))." }
         case "voice_config_ack":
             guard state == "starting" else { return }
-            guard payload["status"] as? String == "ok", payload["mode"] as? String == requestedMode,
+            guard payload["status"] as? String == (managed ? "configured" : "ok"), payload["mode"] as? String == requestedMode,
                   payload["provider"] as? String == requestedProvider else { fail("The agent refused or mismatched the voice configuration."); return }
             acknowledgedProvider = payload["provider"] as? String
             acknowledgmentDeadline?.cancel(); acknowledgmentDeadline = nil
-            let current = generation
-            do { try audio.startCapture(onPCM: { [weak self] data in guard let self, self.generation == current else { return }; self.receivePCM(data) }, onFailure: { [weak self] message in guard let self, self.generation == current else { return }; self.fail(message) }); captureRunning = true; state = providerDegraded ? "degraded" : "active"; phase = "listening" }
-            catch { fail("The microphone could not start. Check the input device and app permissions.") }
+            if managed {
+                guard NativeChatTurnWire.version(payload["managed_chained_voice_version"]),
+                      let checkpoint = NativeTurnContextCheckpoint.parse(payload["context_checkpoint"], sessionID: sessionID),
+                      checkpoint.generation == managedGeneration, checkpoint.revision == managedRevision else { fail("The saved-context voice configuration did not match."); return }
+                state = "configured"; await beginUtterance()
+            } else { startMicrophone() }
         case "voice_status":
             reportedProvider = payload["provider"] as? String; fallbackProvider = payload["fallback_provider"] as? String
             privacyRefused = payload["privacy_downgrade"] as? Bool == true
@@ -347,8 +599,8 @@ struct NativeVoiceTranscript: Identifiable {
                     guard outputQueue.count < 32, queuedOutputBytes + bytes.count <= 4_000_000 else { throw NativeVoiceFailure(message: "Speech playback queue filled. Stop voice and try again.") }
                     outputQueue.append((bytes, encoding, rate)); queuedOutputBytes += bytes.count; assistantSpeaking = true; phase = "speaking"; pumpOutput()
                 }
-                if final { if sequenced { ttsIndex = -1 }; if !playing && outputQueue.isEmpty { assistantSpeaking = false; phase = "listening" } }
-            } catch { flushPlayback(); self.error = error.localizedDescription }
+                if final { if managed { managedOutputClosed = true }; if sequenced { ttsIndex = -1 }; if !playing && outputQueue.isEmpty { assistantSpeaking = false; phase = "listening" } }
+            } catch { if managed { speechSuppressed = true }; flushPlayback(); self.error = error.localizedDescription }
         default: break
         }
     }
@@ -359,7 +611,7 @@ struct NativeVoiceTranscript: Identifiable {
         do { try audio.play(next.0, encoding: next.1, sampleRate: next.2) { [weak self] in
             guard let self, self.playbackGeneration == current else { return }; self.playing = false
             if self.outputQueue.isEmpty { self.assistantSpeaking = false; self.phase = "listening" } else { self.pumpOutput() }
-        } } catch { flushPlayback(); self.error = "Speech audio could not be played. Check the output device or response format." }
+        } } catch { if managed { speechSuppressed = true }; flushPlayback(); self.error = "Speech audio could not be played. Check the output device or response format." }
     }
 }
 
@@ -381,7 +633,8 @@ struct NativeVoiceFeatureView: View {
             if let diagnostic = engine.diagnostic, !diagnostic.isEmpty { Text(diagnostic).font(.caption).foregroundStyle(.secondary) }
             HStack {
                 Button("Start voice…") { reviewedStart = true }.disabled(!localAvailable || !engine.connected || (engine.state != "off" && engine.state != "ended"))
-                Button("Stop") { Task { await engine.stop() } }.disabled(engine.state == "off")
+                if engine.isManaged { Button("Finish speaking") { Task { await engine.finishSpeaking() } }.disabled(!engine.canFinishSpeaking) }
+                Button(engine.isManaged ? "Stop task and voice" : "Stop") { Task { await engine.stop() } }.disabled(engine.state == "off")
                 Button(engine.muted ? "Unmute microphone" : "Mute microphone") { Task { await engine.setMuted(!engine.muted) } }.disabled(!["active", "degraded"].contains(engine.state))
                 Button("Interrupt response") { Task { await engine.interrupt() } }.disabled(!engine.assistantSpeaking)
             }

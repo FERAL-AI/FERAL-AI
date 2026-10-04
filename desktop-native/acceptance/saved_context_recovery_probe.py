@@ -45,6 +45,9 @@ CANDIDATES = {
     '34': {'version': '2026.9.34', 'build': '2026100301',
            'root': Path('/private/tmp/feral-native-9-34-recovery-20261003'),
            'manifest': Path('/private/tmp/feral-candidate-9-34-manifest.json')},
+    '35': {'version': '2026.9.35', 'build': '2026100302',
+           'root': Path('/private/tmp/feral-native-9-35-recovery-20261003'),
+           'manifest': Path('/private/tmp/feral-candidate-9-35-manifest.json')},
 }
 FACT = 'JADE-COMPASS-853'
 CANCELLED_MARKER = 'CANCELLED-SYNTHETIC-DO-NOT-REPLAY-982'

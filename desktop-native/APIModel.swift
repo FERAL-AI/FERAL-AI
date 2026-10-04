@@ -41,6 +41,7 @@ import CoreFoundation
     @Published var onboarded = false
     // This is presentation state, separate from the backend's setup receipt.
     @Published var showProviderSetup = false
+    @Published private(set) var providerSetupRevision = UUID()
     private let runtime = BrainRuntime()
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
@@ -69,6 +70,7 @@ import CoreFoundation
     private var workspaceCenter: NotificationCenter?
     private var workspaceObservers: [NSObjectProtocol] = []
     private let injectedRuntimeOwner: (() -> NativeRuntimeOwnership?)?
+    private let injectedVoiceAudio: NativeVoiceAudioIO?
     private let injectedChatSender: (([String:Any]) async throws -> Void)?
     private var chatTurns = NativeChatTurnState()
     var trackedChatReference:NativeTurnReference? { chatTurns.active }
@@ -80,7 +82,10 @@ import CoreFoundation
     var contextNeedsAttention: Bool { chatTurns.ready && !contextState.permitsSubmission }
     var contextReady: Bool { contextState.capability?.ready == true }
     var canCreateSavedContextChat: Bool { ready && chatTurns.ready && contextState.supportsCreation && !contextSetupPending && !chatMutationBusy }
-    var contextUnsupportedOperations: Set<String> { contextManaged ? NativeContextCheckpointWire.unsupportedPaths : [] }
+    var contextUnsupportedOperations: Set<String> {
+        guard contextManaged else { return [] }
+        return chatTurns.managedChainedVoiceReady ? NativeContextCheckpointWire.unsupportedPaths.subtracting(["voice"]).union(["realtime_voice"]) : NativeContextCheckpointWire.unsupportedPaths
+    }
     var contextToolsMayMutate: Bool { !contextSetupPending && contextState.permitsSubmission }
     var contextCheckpoint: NativeContextCheckpoint? { contextState.capability?.checkpoint }
     var contextRecoveryReview: NativeContextRecoveryReview? {
@@ -111,7 +116,19 @@ import CoreFoundation
         !switchingConversation && id != conversationID && !contextRequired(id)
     }
     private func updateVoiceReadiness() {
-        voice.configureConnection(sessionID: conversationID, connected: !effectsPaused && ready && chatTurns.ready && contextState.permitsSubmission && !contextManaged && !contextSetupPending)
+        let managedVoice = contextManaged && (chatTurns.managedChainedVoiceReady || voice.hasManagedRequest)
+        if contextState.requestID == nil, let checkpoint = contextCheckpoint { voice.observeManagedContext(generation: checkpoint.generation, revision: checkpoint.revision) }
+        voice.configureManaged(enabled: managedVoice, generation: contextCheckpoint?.generation, revision: contextCheckpoint?.revision,
+            beginRequest: { [weak self] in await self?.beginManagedVoiceRequest() },
+            transcript: { [weak self] reference, text in await self?.applyManagedVoiceTranscript(reference, text: text) },
+            stopTask: { [weak self] in await self?.stopChat() },
+            unknown: { [weak self] reference in
+                guard let self, self.chatTurns.active?.requestID == reference.requestID, self.conversationID == reference.sessionID else { return }
+                self.markTrackedUnknown("The voice request acknowledgment was lost. Check status; no task or audio was retried.")
+                await self.persistConversation()
+            })
+        voice.configureConnection(sessionID: conversationID, connected: !effectsPaused && ready && chatTurns.ready && !contextSetupPending &&
+            ((!contextManaged && contextState.permitsSubmission) || (managedVoice && (contextState.permitsSubmission || voice.hasManagedRequest))))
     }
 
     private lazy var recovery = NativeSessionRecoveryModel(preferences: prefs, transport: { [weak self] request in
@@ -127,13 +144,21 @@ import CoreFoundation
     private let preferencesUnavailable: Bool
     private let session: URLSession
     private let transportDelegate = NativeLocalSessionDelegate()
-    lazy var voice = NativeVoiceEngine(sendFrame: { [weak self] frame in
-        guard let self, !self.preferencesUnavailable, !self.effectsPaused, self.ready, !self.switchingConversation, !self.contextManaged, !self.contextSetupPending,
-              self.contextState.permitsSubmission, let socket = self.socket, socket.state == .running,
-              frame["session_id"] as? String == self.conversationID else { throw NativeFailure("Voice is disconnected or the conversation changed.") }
-        let data = try JSONSerialization.data(withJSONObject: frame)
-        try await socket.send(.string(String(decoding: data, as: UTF8.self)))
-    })
+    lazy var voice: NativeVoiceEngine = NativeVoiceEngine(sendFrame: { [weak self] frame in
+        guard let self else { throw NativeFailure("Voice is disconnected.") }
+        try await self.sendVoiceFrame(frame)
+    }, audio: injectedVoiceAudio)
+    func sendVoiceFrame(_ frame: [String: Any]) async throws {
+        let managedStop = voice.matchesStopDispatch(frame)
+        let disabled = frame["type"] as? String == "voice_config" && (frame["payload"] as? [String: Any])?["mode"] as? String == "disabled"
+        guard !preferencesUnavailable, !effectsPaused, ready, !switchingConversation, !contextSetupPending,
+              (!contextManaged || ((chatTurns.managedChainedVoiceReady || voice.hasManagedRequest || managedStop) && voice.isManaged)),
+              (!contextManaged || !disabled || managedStop),
+              (contextState.permitsSubmission || voice.hasManagedRequest || managedStop),
+              frame["session_id"] as? String == conversationID else { throw NativeFailure("Voice is disconnected or the conversation changed.") }
+        try await sendChatFrame(frame)
+        if managedStop { updateVoiceReadiness() }
+    }
     lazy var profileArchive = NativeProfileArchiveFeature(
         allowedDestinations: Set(NativeDestination.allCases.map(\.rawValue)),
         ownerStatus: { [weak self] owner in
@@ -216,6 +241,7 @@ import CoreFoundation
     }
 
     var effectsPaused: Bool { shuttingDown || profileArchivePaused }
+    var canAdvanceProfileOnboarding: Bool { !preferencesUnavailable && !effectsPaused && !onboarded }
     var localRuntimeGeneration: UUID { runtimeRevision }
     var featureBaseURL: URL? { !preferencesUnavailable && !effectsPaused && ready ? runtime.baseURL : nil }
     var securityBaseURL: URL? { !preferencesUnavailable && !effectsPaused && (serviceReachable || ready) ? runtime.baseURL : nil }
@@ -253,9 +279,10 @@ import CoreFoundation
 
     init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, recoveryJournalURL: URL? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil,
          preferencesResolver: (() -> UserDefaults?)? = nil, chatSender: (([String:Any]) async throws -> Void)? = nil,
-         preferenceSuite: String? = nil) {
+         preferenceSuite: String? = nil, voiceAudio: NativeVoiceAudioIO? = nil) {
         injectedRuntimeOwner = runtimeOwner
         injectedChatSender = chatSender
+        injectedVoiceAudio = voiceAudio
         preferenceSuiteName = preferenceSuite ?? ((preferences != nil || preferencesResolver != nil) ? nil :
             (ProcessInfo.processInfo.environment["FERAL_NATIVE_PREFS_SUITE"] ?? "ai.feral.native.preview"))
         if let recoveryJournalURL { contextRecoveryJournalURL = recoveryJournalURL }
@@ -704,6 +731,7 @@ import CoreFoundation
     }
     func checkChatDeadline(_ reference:NativeTurnReference,connectionID:UUID) async {
         guard connectionID == socketGeneration,chatTurns.active?.requestID == reference.requestID,reference.sessionID == conversationID,isSending else { return }
+        voice.taskUncertain()
         markTrackedUnknown("The whole-turn receipt has not arrived within four minutes. Earlier actions may have run. Check status or request Stop; no task was retried.")
         await persistConversation()
     }
@@ -774,6 +802,7 @@ import CoreFoundation
         restorePendingContextRecovery()
         let contextChanged = contextState.consume(frame, connectionID: connection)
         if contextChanged {
+            if contextState.capability?.ready == true { chatTurns.refreshManagedVoiceCapabilities(payload) }
             contextDeadline?.cancel(); contextStatus = contextState.recoveryMessage ?? contextState.message
             if contextState.managed, let primary = recovery.primarySessionID {
                 do {
@@ -797,14 +826,16 @@ import CoreFoundation
             if unresolvedChatRequest != nil { await checkChatStatus() };return
         case .accepted:
             if let reference = chatTurns.active {
+                voice.accepted(reference)
                 var marker = reference.record;marker["state"] = "accepted";updateRequestMarker(reference,record:marker)
                 chatTurnStatus = chatTurns.stopRequested ? "Requesting Stop…" : "Request accepted; processing…"
                 if let abort = chatTurns.pendingAbortFrame() { do { try await sendChatFrame(abort) } catch { markTrackedUnknown("Stop could not be sent. Check status; cancellation is not confirmed.") } }
                 await persistConversation()
             };return
         case .stopAcknowledged:chatTurnStatus = "Stop requested; waiting for the terminal receipt";return
-        case .terminal(let terminal):await applyChatTerminal(terminal);return
+        case .terminal(let terminal):voice.terminal(terminal);await applyChatTerminal(terminal);return
         case .unavailable(let reason):
+            voice.taskUncertain()
             if !chatTurns.statusPending { statusDeadline?.cancel() }
             checkingChatStatus = false
             if chatTurns.isTracked || unresolvedChatRequest != nil { markTrackedUnknown(reason);await persistConversation() }
@@ -812,6 +843,9 @@ import CoreFoundation
         case .ignored: if contextChanged { return }; break
         }
         if ["chat_turn_accepted","chat_turn_terminal"].contains(type) { return }
+        if voice.isManaged && ["voice_config_ack", "voice_utterance_begin_ack", "voice_utterance_finish_ack", "voice_interrupt_ack", "voice_status", "voice_state", "transcript", "speech_started", "audio_response", "audio_delta", "tts_chunk", "audio_chunk", "voice_cancel"].contains(type) {
+            await voice.handle(frame: frame); return
+        }
         let trackedProgress = chatTurns.isTracked || chatRecoveryBlocked || payload["chat_turn"] != nil
         if trackedProgress && !globalBudget && !chatTurns.matchesProgress(frame,connectionID:connection) { return }
         await voice.handle(frame: frame)
@@ -904,6 +938,55 @@ import CoreFoundation
             } catch { if conversationRevision == revision { attachmentError = "\(url.lastPathComponent): \(error.localizedDescription)" } }
         }
     }
+    func beginManagedVoiceRequest() async -> NativeTurnReference? {
+        guard preferencesPermitEffects(), contextManaged, chatTurns.managedChainedVoiceReady,
+              chatCanSend, pendingAttachments.isEmpty, let checkpoint = contextCheckpoint,
+              checkpoint.sessionID == conversationID, let reference = chatTurns.beginRequest() else { return nil }
+        let connection = socketGeneration, revision = conversationRevision
+        archiveRichTurn(); richChat.clearTurnPresentation(); error = nil; chatError = nil
+        isSending = true; streamMessageID = nil
+        let userID = UUID().uuidString; pendingUserMessageID = userID
+        var marker = reference.record; marker["state"] = "voice_pending"
+        messages.append(NativeMessage(id: userID, role: "user", text: "Voice request", metadata:
+            ["text": "Voice request", "content": "Voice request", "chat_turn": marker, "source": "managed_chained_voice"]))
+        do {
+            guard await persistConversation(), connection == socketGeneration, revision == conversationRevision,
+                  chatTurns.active?.requestID == reference.requestID, contextCheckpoint?.generation == checkpoint.generation,
+                  contextCheckpoint?.revision == checkpoint.revision, ready, !shuttingDown else { throw NativeFailure("Voice request save was not confirmed.") }
+            guard let stored = try await request("/api/conversations/" + NativeSessionRecoveryWire.segment(reference.sessionID)) as? [String: Any],
+                  stored["id"] as? String == reference.sessionID,
+                  let rows = stored["messages"] as? [[String: Any]], rows.contains(where: {
+                      $0["id"] as? String == userID && $0["role"] as? String == "user" &&
+                      NativeTurnReference.restored($0["chat_turn"] as? [String: Any] ?? [:], sessionID: reference.sessionID)?.requestID == reference.requestID &&
+                      ($0["chat_turn"] as? [String: Any])?["state"] as? String == "voice_pending"
+                  }), connection == socketGeneration, revision == conversationRevision, ready, !shuttingDown,
+                  chatTurns.active?.requestID == reference.requestID, contextState.permitsSubmission,
+                  contextCheckpoint?.generation == checkpoint.generation, contextCheckpoint?.revision == checkpoint.revision,
+                  preferencesPermitEffects() else { throw NativeFailure("Voice request readback did not match.") }
+            responseDeadline?.cancel()
+            responseDeadline = Task { [weak self] in
+                try? await Task.sleep(nanoseconds: 240_000_000_000)
+                guard !Task.isCancelled else { return }; await self?.checkChatDeadline(reference, connectionID: connection)
+            }
+            return reference
+        } catch {
+            if connection == socketGeneration, revision == conversationRevision {
+                marker["state"] = "not_submitted"; updateRequestMarker(reference, record: marker)
+                chatTurns.discardUnsubmitted(reference); finishResponse()
+                recordChatFailure("The voice request could not be saved and verified. No microphone audio was sent.")
+                await persistConversation()
+            }
+            return nil
+        }
+    }
+    private func applyManagedVoiceTranscript(_ reference: NativeTurnReference, text: String) async {
+        guard reference.sessionID == conversationID, chatTurns.active?.requestID == reference.requestID,
+              !text.isEmpty, text.utf8.count <= 128 * 1024,
+              let index = messages.firstIndex(where: { $0.role == "user" && ($0.metadata["chat_turn"] as? [String: Any])?["request_id"] as? String == reference.requestID }) else { return }
+        messages[index].text = text
+        await persistConversation()
+    }
+
     @discardableResult func sendChat(_ text: String, authorizedAttachmentIDs: [String]? = nil) async -> Bool {
         guard preferencesPermitEffects() else { return false }
         let text = text.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -1129,20 +1212,28 @@ import CoreFoundation
         }
         catch { self.error = error.localizedDescription }
     }
-    func finishOnboarding() async {
-        guard preferencesPermitEffects() else { return }
-        await saveSettings()
-        if error == nil { onboarded = true; prefs.set(true, forKey: "onboarded"); showProviderSetup = true }
-    }
-    func completeProfileOnboarding() {
-        guard preferencesPermitEffects() else { return }
+    @discardableResult func completeProfileOnboarding() -> Bool {
+        guard preferencesPermitEffects(), canAdvanceProfileOnboarding else { return false }
+        providerSetupRevision = UUID()
         saveProfile(); onboarded = true; prefs.set(true, forKey: "onboarded"); showProviderSetup = true
+        return true
     }
-    func openProviderSetup() { showProviderSetup = true }
-    func dismissProviderSetup() { showProviderSetup = false }
+    func openProviderSetup() {
+        guard preferencesPermitEffects(), !effectsPaused, onboarded else { return }
+        providerSetupRevision = UUID()
+        showProviderSetup = true
+    }
+    func dismissProviderSetup() { providerSetupRevision = UUID(); showProviderSetup = false }
     // Called only after the provider feature has verified its own HTTP receipt.
     // Clearing a local sheet must never mark backend setup complete.
-    func completeProviderSetup() { showProviderSetup = false }
+    @discardableResult func completeProviderSetup(origin: URL?, generation: UUID, stage: UUID) -> Bool {
+        guard preferencesPermitEffects(), !effectsPaused, onboarded, showProviderSetup,
+              let origin, origin == featureBaseURL, generation == runtimeRevision,
+              stage == providerSetupRevision else { return false }
+        providerSetupRevision = UUID()
+        showProviderSetup = false
+        return true
+    }
     func saveProfile() {
         guard preferencesPermitEffects(), !effectsPaused else { return }
         prefs.set(displayName, forKey: "displayName"); prefs.set(avatarChoice, forKey: "avatarChoice"); prefs.set(importedAvatarPath, forKey: "importedAvatarPath")

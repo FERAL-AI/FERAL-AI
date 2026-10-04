@@ -79,7 +79,7 @@ private func check(_ value: @autoclosure () -> Bool, _ message: String) throws {
         try check(query["method"] as? String == "chat.status" && state.statusFrame(old) == nil && state.pendingAbortFrame() == nil, "reconnect acquired abort or replayed status")
         let recovered: [String: Any] = ["type": "res", "id": query["id"]!, "ok": true, "payload": ["found": true, "receipt": receipt(old, type: "chat_turn_terminal", turn: turn)["payload"]!]]
         guard case .terminal(let recoveredResult) = state.consume(recovered, connectionID: newerConnection) else { throw Failure(message: "read-only exact status failed") }
-        try check(recoveredResult.reference.requestID == old.requestID && state.active == nil, "status restored execution authority")
+        try check(recoveredResult.reference.requestID == old.requestID && recoveredResult.replayed && state.active == nil, "status restored execution authority")
         try check(NativeTurnReference.restored(old.record, sessionID: "B") == nil, "foreign persisted reference restored")
         var invalid = old.record; invalid["request_id"] = old.requestID.uppercased()
         try check(NativeTurnReference.restored(invalid, sessionID: "A") == nil, "noncanonical persisted UUID restored")
@@ -92,6 +92,53 @@ private func check(_ value: @autoclosure () -> Bool, _ message: String) throws {
         uncertain["action_outcome"] = "unknown"
         try check(NativeChatTurnWire.terminal(uncertain, reference: old)?.summary.contains("actions may still need checking") == true, "processing completion hid uncertain action outcome")
         print("PASS read-only reconciliation on a new connection without task or abort replay")
+        let checkpoint = NativeTurnContextCheckpoint(sessionID: "A", generation: UUID().uuidString.lowercased(), revision: 3, attemptID: UUID().uuidString.lowercased())
+        var committed = receipt(old, type: "chat_turn_terminal", turn: turn)["payload"] as! [String: Any]
+        committed["context_checkpoint"] = checkpoint.record
+        try check(NativeChatTurnWire.terminal(committed, reference: old)?.contextCheckpoint == checkpoint, "exact committed receipt not preserved")
+        for badRevision: Any in [true, 3.0, "3", 0, -1, UInt64.max] {
+            var row = checkpoint.record; row["revision"] = badRevision; committed["context_checkpoint"] = row
+            try check(NativeChatTurnWire.terminal(committed, reference: old) == nil, "noncanonical committed revision accepted")
+        }
+        var wrong = checkpoint.record; wrong["extra"] = true; committed["context_checkpoint"] = wrong
+        try check(NativeChatTurnWire.terminal(committed, reference: old) == nil, "unknown committed receipt fields accepted")
+        committed["context_checkpoint"] = checkpoint.record; committed["processing_outcome"] = "cancelled"
+        try check(NativeChatTurnWire.terminal(committed, reference: old) == nil, "unverified outcome certified a committed context")
+        for advertised: [Any] in [[1], [true], [1.0], ["1"], [1, true], []] {
+            var negotiated = NativeChatTurnState(); let connection = UUID()
+            negotiated.configure(sessionID: "A", connectionID: connection)
+            var frame = capability(negotiated); var payload = frame["payload"] as! [String: Any]
+            payload["managed_chained_voice_versions"] = advertised; frame["payload"] = payload
+            _ = negotiated.consume(frame, connectionID: connection)
+            try check(negotiated.managedChainedVoiceReady == (advertised.count == 1 && NativeChatTurnWire.version(advertised.first)), "managed voice capability malformed or downgraded")
+        }
+        print("PASS committed context schema and strict managed voice capability negotiation")
+        var refreshed = NativeChatTurnState(); let refreshConnection = UUID()
+        refreshed.configure(sessionID: "A", connectionID: refreshConnection)
+        var initial = capability(refreshed); var initialPayload = initial["payload"] as! [String: Any]
+        initialPayload["managed_chained_voice_versions"] = [1]; initial["payload"] = initialPayload
+        _ = refreshed.consume(initial, connectionID: refreshConnection)
+        var readiness: [String: Any] = ["session_id": "A", "context_managed": true, "context_ready": false, "context_state": "in_progress", "managed_chained_voice_versions": [Any]()]
+        refreshed.refreshManagedVoiceCapabilities(readiness)
+        try check(refreshed.managedChainedVoiceReady, "temporary active-writer availability revoked negotiated voice")
+        readiness["context_ready"] = true; readiness["context_state"] = "ready"; readiness["session_id"] = "B"
+        refreshed.refreshManagedVoiceCapabilities(readiness)
+        try check(refreshed.managedChainedVoiceReady, "foreign context revoked current voice capability")
+        readiness["session_id"] = "A"; refreshed.refreshManagedVoiceCapabilities(readiness)
+        try check(!refreshed.managedChainedVoiceReady && refreshed.ready, "correlated READY unsupported voice did not revoke admission independently of chat")
+        readiness["managed_chained_voice_versions"] = [1]; refreshed.refreshManagedVoiceCapabilities(readiness)
+        try check(refreshed.managedChainedVoiceReady, "fresh READY supported pipeline did not restore admission")
+        readiness["managed_chained_voice_versions"] = [true]; refreshed.refreshManagedVoiceCapabilities(readiness)
+        try check(!refreshed.managedChainedVoiceReady, "malformed READY version restored microphone admission")
+        let stopPayload: [String: Any] = ["mode": "disabled", "managed_chained_voice_version": 1, "voice_attempt_version": 1, "voice_attempt_id": UUID().uuidString.lowercased()]
+        let stopped: [String: Any] = ["type": "voice_config", "session_id": "A", "payload": stopPayload]
+        try check(NativeChatTurnWire.managedVoiceStop(stopped), "captured versioned disable lost stop-only classification")
+        for (key, value): (String, Any) in [("mode", "chained"), ("managed_chained_voice_version", true), ("voice_attempt_version", 1.0), ("voice_attempt_id", "invalid")] {
+            var invalid = stopPayload; invalid[key] = value
+            try check(!NativeChatTurnWire.managedVoiceStop(["type": "voice_config", "payload": invalid]), "malformed or start frame obtained stop-only admission")
+        }
+        try check(!NativeChatTurnWire.managedVoiceStop(["type": "audio_chunk", "payload": stopPayload]), "media obtained pending-context stop exception")
+        print("PASS correlated READY capability revocation/restoration, active writer preservation and strict stop-only dispatch")
         print("NATIVE_CHAT_TURN_TESTS_PASSED: receipt state-machine fixtures only, no network or action execution")
     }
 }

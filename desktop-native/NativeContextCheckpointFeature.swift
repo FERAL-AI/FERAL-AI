@@ -98,10 +98,18 @@ enum NativeContextCheckpointWire {
             guard !ready, payload["context_checkpoint"] == nil, ["legacy", "unavailable"].contains(state) else { return nil }
             return NativeContextCapability(managed: false, supported: supported, state: "legacy", checkpoint: nil)
         }
+        var requiredUnsupported = unsupportedPaths
+        if let voiceVersions = payload["managed_chained_voice_versions"] as? [Any],
+           voiceVersions.count <= 16,
+           voiceVersions.allSatisfy({ integer($0, minimum: 1, maximum: 1024) != nil }),
+           voiceVersions.contains(where: { integer($0) == 1 }) {
+            requiredUnsupported.remove("voice")
+            requiredUnsupported.insert("realtime_voice")
+        }
         guard supported, managed || (!ready && state != "legacy" && state != "ready"),
               let unsupported = payload["managed_unsupported_paths"] as? [String],
               unsupported.count <= 32, Set(unsupported).count == unsupported.count,
-              unsupportedPaths.isSubset(of: Set(unsupported)) else { return nil }
+              requiredUnsupported.isSubset(of: Set(unsupported)) else { return nil }
         if !ready {
             guard state != "ready", state != "legacy", payload["context_checkpoint"] == nil else { return nil }
             var result = NativeContextCapability(managed: managed, supported: true, state: state, checkpoint: nil)
