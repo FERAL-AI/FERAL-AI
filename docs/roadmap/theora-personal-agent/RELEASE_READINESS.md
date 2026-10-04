@@ -1,5 +1,14 @@
 # Theora / FERAL full-product release readiness
 
+**Native browser source integration (October 4).** Explicit viewing leases, real
+memory-only viewport images and actual input locations are implemented; CDP field
+typing is corrected. Combined backend 1,230 and separate installed-Chrome checks
+pass, native Browser 74 and production/linked checks pass, and full typing stays 809
+without added diagnostics. Last published a334521 passes all executed required CI.
+New 9.37 package/actual GUI acceptance is next. Desktop sharing, concurrent browser
+ownership and a provider-specific computer-use adapter remain open.
+[Browser evidence](BROWSER_VIEW_EVIDENCE.md), [live checkpoint](WORK_STATE.md).
+
 **Current Mac checkpoint (October 4).** Immutable9.36/source9a40b9ac8
 passes bounded actual local chat, saved-context recall across a reviewed restart,
 normal exit and source/signature/runtime audits. Strict codeword-only formatting

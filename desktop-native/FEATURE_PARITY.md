@@ -2,6 +2,14 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
+**New source: native Browser destination.** Explicit operator consent and
+memory-only real JPEGs, exact viewing leases and actual browser input markers;
+whole-desktop sharing and per-task browsers remain separate. Browser 74 assertions,
+production typecheck and linked native checks pass. Combined backend 1,230 and
+separate installed-Chrome typing/masking/cursor checks pass; counts overlap.
+New 9.37 packaging/GUI acceptance is pending at this checkpoint.
+[Browser evidence](../docs/roadmap/theora-personal-agent/BROWSER_VIEW_EVIDENCE.md).
+
 **Current packaged artifact:2026.9.36/build2026100303**, exact source
 `9a40b9ac8e7d155c16a5504a3332c1dca912ad41`. Optimized build, strict ad-hoc
 signature,51 native inputs,488 packaged Python comparisons and runtime probes

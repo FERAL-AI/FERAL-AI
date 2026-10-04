@@ -36,6 +36,7 @@ The candidate advantage is the complete loop from real-world context to grounded
 
 | Document | Purpose |
 |---|---|
+| [Native browser viewing](BROWSER_VIEW_EVIDENCE.md) | Real viewport frames, input locations, explicit viewing leases, correct-field typing and remaining computer-use integration |
 | [Current work checkpoint](WORK_STATE.md) | Tested source/candidate, current evidence, worker ownership, next ready cards and external dependencies |
 | [Contributor rules](../../../AGENTS.md) | Authorization, privacy, verification, worker ownership, resource retention and clean Git publication |
 | [Codex continuation rules](../../../codex.md) | Checkpoint cadence, source/candidate distinctions and resuming the existing project |

@@ -18,7 +18,7 @@ that package. See [candidate evidence](NATIVE_9_36_ACCEPTANCE.md) and
 |---|---|
 | Conversation while agents work on several tasks | TaskFlow/turns/multi-agent; TASK-01 durable job ownership and bounded scheduling, VOICE-02 delegation |
 | Subscription/API/local choice | Shared catalog/config and existing adapters; AUTH-01 supported ChatGPT plan registration; Claude SDK eligibility separate |
-| Fast reliable browser/computer/screen sharing | Existing CDP/Playwright/AX/GUI; RESOURCE-01 targets/foreground ownership and consented preview |
+| Fast reliable browser/computer/screen sharing | Existing CDP/Playwright/AX/GUI; [native operator browser view](BROWSER_VIEW_EVIDENCE.md); RESOURCE-01 independent task targets/foreground ownership and desktop preview remain |
 | Clean local text/vision/audio model install | Ollama/vision/STT/TTS adapters; INSTALL-01 reviewed compatible runtime/download/capability/first-response verification |
 | Three product images/options in iMessage | Existing channels and preview commerce; MSG-01 receive/dedup/offer fallback, BUY-01 exact quote/Link/merchant verification |
 | CLI/web/native settings parity and two–three steps | Same catalog/config, deliberately separate default profiles; SETUP-01 string model DTO and endpoint/fallback repair |

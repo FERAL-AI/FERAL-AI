@@ -7,7 +7,44 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### October 4 Mac integration checkpoint
+### October 4 native browser integration
+
+- The frozen source adds a 22nd native destination, Browser, with explicit
+  viewing consent, exact ephemeral target/connection leases, real memory-only
+  JPEG frames and actual browser input-location markers. CDP typing now replaces
+  and verifies the intended supported text field. No new action authority,
+  implicit browser launch or per-agent browser isolation is claimed.
+  [Behavior and integration boundary](BROWSER_VIEW_EVIDENCE.md).
+- Combined verification passes 1,230 checks across 43 backend suites, with one
+  opt-in real-Chrome case skipped in that combined run. A separate explicit
+  installed-Chrome run passes 26 focused checks, including Unicode replacement,
+  password pixel masking/restoration and actual click/pointer alignment. Counts
+  overlap. All 1,297 Python inputs remained unchanged. An initial sandboxed run
+  could not bind its disposable recording socket; the permitted rerun passes.
+- Native Browser 74, Providers 50 and Onboarding 52 assertions pass, alongside 28
+  linked model/wire groups, 33 linked onboarding assertions, desktop 39/error 5
+  checks and production typecheck. Full mypy remains 809 errors in 233 files:
+  zero added or removed normalized diagnostics versus the prior baseline.
+  Core Ruff and whitespace pass. The existing screenshot-to-model wire suite
+  passes 44 isolated cases; no paid computer-use model call was made. No claim of type-cleanliness is made.
+- Last published checkpoint a334521af passes all executed required CI workflows:
+  general, native, desktop, docs, naming and version. Opt-in real-brain E2E is
+  skipped. New-source publication/CI and actual 9.37 assembly/GUI acceptance are
+  next; the current immutable package is still 9.36/source 9a40b9ac8 until audited
+  assembly completes. Keep the source/package distinction explicit.
+- The verified obsolete generated 9.34/9.35 app copies were retired, about 1.2 GB.
+  Their manifests/reports and all profiles/models remain. 9.36 will be retained
+  as the sole rollback copy during the at-most 2 GiB next build. All three source
+  workers released their exclusive paths; parent owns the frozen integration,
+  packaging, private acceptance launchers, documentation and publication.
+- Next: publish this source on the existing review branch, assemble 9.37 from
+  exact committed inputs and inspect the actual app against a separately owned
+  synthetic Chrome fixture. No personal browser profile/account, wallet or real
+  messaging/purchase has been used. Desktop sharing, provider-specific computer
+  adapters, task-owned browser/foreground resources and full-product gates remain.
+  Preserve unrelated AUDIT-FIXES.md edits unstaged.
+
+### Preceding October 4 Mac setup checkpoint
 
 - Published implementation correction:
   `213b94a3e9b21bfe44a70c63fc913570dfd144fb`, on
@@ -40,7 +77,7 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 - The final setup/status/learning integration passes695 checks across31 suites,
   native production typecheck, core Ruff and whitespace. All1,292 Python inputs
   stayed unchanged. The preceding learning-only wave passed664; counts overlap.
-  Full mypy remains809 errors in233 files with zero added/removed normalized
+  Full mypy remains809 errors in 233 files with zero added/removed normalized
   diagnostics versus the retained baseline. This is not type-clean. Automatic
   discovery now honors boot/live learning settings and the learner budget;
   explicit generation retains approval and the chat budget. Revocation cannot

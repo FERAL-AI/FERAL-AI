@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 test_cache=/private/tmp/theora-native-feature-tests-cache
-all_features=(Health Memory Oversight Configuration Providers Conversation ContextCheckpoint Attachment Operations Security Connections Voice ManagedVoice Identity Capabilities Workflow ChatTools ChatTurn VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery PreferenceArchive ProfileArchive ProfileLayout SurfaceUpdate HealthHistory RuntimeHealth Vault VaultSetup Hardware OnboardingSetup ReviewSummary SelectableText LocalActionGate)
+all_features=(Health Memory Oversight Configuration Providers Conversation ContextCheckpoint Attachment Operations Security Connections Voice ManagedVoice Identity Capabilities Workflow ChatTools ChatTurn VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery PreferenceArchive ProfileArchive ProfileLayout SurfaceUpdate HealthHistory RuntimeHealth Vault VaultSetup Hardware OnboardingSetup ReviewSummary SelectableText LocalActionGate BrowserView)
 features=("${all_features[@]}")
 if [[ $# -gt 0 ]]; then
   features=("$@")
@@ -52,7 +52,7 @@ xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
   NativeOperationsFeature.swift NativeSecurityFeature.swift NativeVaultFeature.swift NativeVaultSetupFeature.swift NativeConnectionsFeature.swift NativeHardwareFeature.swift NativeOnboardingSetupFeature.swift NativeVoiceFeature.swift \
   NativeIdentityFeature.swift NativeCapabilitiesFeature.swift NativeWorkflowFeature.swift \
   NativeChatToolsFeature.swift NativeVoiceConfigurationFeature.swift NativeIntegrationFeature.swift NativeRichChatFeature.swift NativeAmbientFeature.swift NativeAgentFeature.swift NativeKnowledgeFeature.swift NativeMemoryContextFeature.swift NativeAutomationFeature.swift NativeAppSurfaceFeature.swift NativeAppConfirmationFeature.swift NativeProviderRoutingFeature.swift NativeSurfaceUpdateFeature.swift NativeSessionRecoveryFeature.swift NativePreferenceArchiveFeature.swift NativeProfileArchiveFeature.swift NativeProfileArchiveView.swift NativeDesktopExperience.swift NativeDesktopHost.swift \
-  NativeModelTests.swift -o "$model_binary"
+  NativeBrowserViewFeature.swift NativeModelTests.swift -o "$model_binary"
 "$model_binary"
 
 desktop_binary=/private/tmp/theora-native-desktop-experience-tests

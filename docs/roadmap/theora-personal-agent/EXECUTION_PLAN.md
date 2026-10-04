@@ -14,6 +14,14 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
+The native browser viewing integration adds a 22nd destination and explicit
+operator viewing leases. Frozen source passes 1,230 combined backend checks,
+separate actual-Chrome capture/typing/cursor acceptance, native feature/model
+checks and production typecheck. Packaging and actual 9.37 GUI remain next.
+[Browser contract and evidence](BROWSER_VIEW_EVIDENCE.md). Last published a334521
+passes every executed required CI workflow. This does not supersede account,
+audio, device, migration or distribution gates.
+
 Current packaged Mac source is9a40b9ac8, version2026.9.36/build2026100303.
 Actual local chat, saved context, normal Quit, reviewed restart and remembered
 codeword passed; strict codeword-only formatting did not. Replies took71–77

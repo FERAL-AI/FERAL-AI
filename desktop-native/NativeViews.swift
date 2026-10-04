@@ -72,7 +72,7 @@ struct NativeDevice: Identifiable {
 }
 
 enum NativeDestination: String, CaseIterable, Identifiable {
-    case home = "Home", chat = "Chat", conversations = "Conversations", voice = "Voice", coding = "Coding", health = "Health", memory = "Memory", knowledge = "Knowledge", memoryContext = "Memory Context", identity = "Identity", agents = "Specialists", workflows = "Workflows", automation = "Automation", apps = "Apps", capabilities = "Skills & Store", oversight = "Oversight", operations = "Activity", devices = "Devices", providers = "AI Providers", security = "Security & Cost", settings = "Settings"
+    case home = "Home", chat = "Chat", conversations = "Conversations", voice = "Voice", coding = "Coding", browser = "Browser", health = "Health", memory = "Memory", knowledge = "Knowledge", memoryContext = "Memory Context", identity = "Identity", agents = "Specialists", workflows = "Workflows", automation = "Automation", apps = "Apps", capabilities = "Skills & Store", oversight = "Oversight", operations = "Activity", devices = "Devices", providers = "AI Providers", security = "Security & Cost", settings = "Settings"
     var id: String { rawValue }
     var icon: String {
         switch self {
@@ -84,6 +84,7 @@ enum NativeDestination: String, CaseIterable, Identifiable {
         case .voice: return "waveform"
         case .security: return "lock.shield"
         case .coding: return "curlybraces"
+        case .browser: return "globe"
         case .health: return "heart"
         case .memory: return "brain"
         case .knowledge: return "books.vertical"
@@ -169,7 +170,7 @@ struct NativeRootView: View {
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                         }.padding(.horizontal, 14)
                         List(selection: $selection) {
-                            Section("Assistant") { navigationRows([.home, .chat, .conversations, .voice, .coding]) }
+                            Section("Assistant") { navigationRows([.home, .chat, .conversations, .voice, .coding, .browser]) }
                             Section("Personal") { navigationRows([.health, .memory, .knowledge, .memoryContext, .identity, .agents]) }
                             Section("Work & tools") { navigationRows([.workflows, .automation, .apps, .capabilities, .oversight, .operations]) }
                             Section("Connections & settings") { navigationRows([.devices, .providers, .security, .settings]) }
@@ -211,6 +212,7 @@ struct NativeRootView: View {
                         case .providers:
                             NativeProvidersFeatureView(baseURL: model.featureBaseURL, onConfigurationChanged: { Task { await model.refreshProviderConfiguration() } })
                         case .coding: NativeCodingView(model: model)
+                        case .browser: NativeBrowserViewFeatureView(baseURL: model.featureBaseURL).id(model.localRuntimeGeneration)
                         case .health:
                             TabView {
                                 NativeHealthFeatureView(baseURL: model.featureBaseURL).tabItem { Label("Overview", systemImage: "heart") }

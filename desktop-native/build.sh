@@ -16,7 +16,7 @@ sources=(
   NativeSurfaceUpdateFeature.swift NativeSessionRecoveryFeature.swift NativePreferenceArchiveFeature.swift
   NativeProfileArchiveFeature.swift NativeProfileArchiveView.swift NativeDesktopExperience.swift
   NativeDesktopHost.swift NativeRichText.swift NativePlainTextEditor.swift NativeReviewSummary.swift
-  NativeErrorPresentation.swift NativeApp.swift
+  NativeErrorPresentation.swift NativeBrowserViewFeature.swift NativeApp.swift
 )
 compiler=(xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0
   -module-cache-path /private/tmp/theora-native-swift-cache -parse-as-library)
