@@ -8,6 +8,9 @@ Routes audio based on source capabilities and provider config:
 """
 
 from __future__ import annotations
+from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
+from bridges.client_voice_attempt import assert_voice_attempt_current, current_voice_attempt, require_voice_producer, voice_attempt_payload
+import asyncio
 import logging
 import os
 import time
@@ -252,6 +255,8 @@ class VoiceRouter:
         self._node_voice_config: dict[str, dict] = {}
         self._node_session_map: dict[str, str] = {}
         self._session_voice_mode: dict[str, str] = {}
+        from bridges.client_voice_attempt import VoiceAttemptLedger
+        self._client_voice_attempts: dict[str, VoiceAttemptLedger] = {}
 
         # node_id -> HUP node_type ("phone", "glasses", "desktop", ...).
         # Drives the surface-aware default provider chain; see
@@ -298,6 +303,21 @@ class VoiceRouter:
 
     def bind_node_to_session(self, node_id: str, session_id: str):
         self._node_session_map[node_id] = session_id
+
+    def session_for_node(self, node_id: str) -> str:
+        """The session this node's voice is routed to, or ``""``."""
+        return self._node_session_map.get(node_id, "")
+
+    def nodes_bound_to_session(self, session_id: str) -> list[str]:
+        """Nodes whose voice is currently routed to ``session_id``.
+
+        A phone voice session can share its session id with a web tab,
+        since both default to the primary session. The web socket's
+        disconnect must not tear that call down; the phone's own
+        disconnect does, through :meth:`stop_node_voice`, which also
+        removes the entry this reads.
+        """
+        return [n for n, s in self._node_session_map.items() if s == session_id]
 
     # ------------------------------------------------------------------
     # Provider selection helpers
@@ -657,6 +677,19 @@ class VoiceRouter:
         encoding: str = "pcm16",
         sample_rate: int = 24000,
     ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_audio_from_node(node_id=node_id, session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final, encoding=encoding, sample_rate=sample_rate)
+
+    async def _checkpoint_legacy_handle_audio_from_node(
+        self,
+        node_id: str,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int = 0,
+        is_final: bool = False,
+        encoding: str = "pcm16",
+        sample_rate: int = 24000,
+    ):
         # Wake-word gate is only appropriate for always-listening
         # desktop/background mics. When a phone user explicitly tapped
         # "Start voice" we already have voice_session_start on record
@@ -766,6 +799,18 @@ class VoiceRouter:
         encoding: str = "pcm16",
         sample_rate: int = 24000,
     ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_audio_from_client(session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final, encoding=encoding, sample_rate=sample_rate)
+
+    async def _checkpoint_legacy_handle_audio_from_client(
+        self,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int = 0,
+        is_final: bool = False,
+        encoding: str = "pcm16",
+        sample_rate: int = 24000,
+    ):
         # Mute gate. Same rule as the node path.
         if self.is_session_muted(session_id):
             return
@@ -781,7 +826,15 @@ class VoiceRouter:
             return
 
         if provider == "openai":
+            voice_attempt = current_voice_attempt(session_id)
+            assert_voice_attempt_current(voice_attempt)
+            if voice_attempt is not None:
+                selected = self._realtime.get_session(client_node)
+                if selected is not None:
+                    require_voice_producer(voice_attempt, selected)
             rs = await self._live_realtime_session(client_node)
+            if rs is not None:
+                require_voice_producer(voice_attempt, rs)
             if not rs:
                 rs = await self._realtime.start_session(
                     session_id,
@@ -790,7 +843,9 @@ class VoiceRouter:
                     input_sample_rate=sample_rate or 24000,
                 )
             if rs and rs.connected:
+                require_voice_producer(voice_attempt, rs)
                 await rs.send_audio(audio_b64)
+                assert_voice_attempt_current(voice_attempt)
             return
 
         # --- Subagent B: chained pipeline audio routing (client) ---
@@ -818,6 +873,10 @@ class VoiceRouter:
     # ------------------------------------------------------------------
 
     async def _handle_gemini_node(self, node_id: str, session_id: str, audio_b64: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_gemini_node(node_id=node_id, session_id=session_id, audio_b64=audio_b64)
+
+    async def _checkpoint_legacy_handle_gemini_node(self, node_id: str, session_id: str, audio_b64: str):
         gs = self._gemini.get_session(node_id)
         if not gs:
             gs = await self._gemini.start_session(session_id, node_id)
@@ -825,13 +884,32 @@ class VoiceRouter:
             await gs.send_audio(audio_b64)
 
     async def _handle_gemini_client(self, session_id: str, client_node: str, audio_b64: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_gemini_client(session_id=session_id, client_node=client_node, audio_b64=audio_b64)
+
+    async def _checkpoint_legacy_handle_gemini_client(self, session_id: str, client_node: str, audio_b64: str):
         gs = self._gemini.get_session(client_node)
+        voice_attempt = current_voice_attempt(session_id)
+        if gs is not None:
+            require_voice_producer(voice_attempt, gs)
         if not gs:
             gs = await self._gemini.start_session(session_id, client_node)
         if gs and gs.connected:
+            require_voice_producer(voice_attempt, gs)
             await gs.send_audio(audio_b64)
+            assert_voice_attempt_current(voice_attempt)
 
     async def handle_audio_for_gemini(
+        self,
+        session_id: str,
+        audio_b64: str,
+        *,
+        node_id: str = "",
+    ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_audio_for_gemini(session_id=session_id, audio_b64=audio_b64, node_id=node_id)
+
+    async def _checkpoint_legacy_handle_audio_for_gemini(
         self,
         session_id: str,
         audio_b64: str,
@@ -867,9 +945,24 @@ class VoiceRouter:
         sample_rate: int,
         source_node_id: str = "",
     ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_whisper_path(session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final, encoding=encoding, sample_rate=sample_rate, source_node_id=source_node_id)
+
+    async def _checkpoint_legacy_handle_whisper_path(
+        self,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int,
+        is_final: bool,
+        encoding: str,
+        sample_rate: int,
+        source_node_id: str = "",
+    ):
         """Classic STT → Orchestrator → TTS flow."""
         if not self._audio:
             return
+        voice_attempt = current_voice_attempt(session_id)
+        assert_voice_attempt_current(voice_attempt)
 
         transcript = await self._audio.process_audio_chunk(
             session_id=session_id,
@@ -879,6 +972,7 @@ class VoiceRouter:
             encoding=encoding,
             sample_rate=sample_rate,
         )
+        assert_voice_attempt_current(voice_attempt)
 
         if not transcript:
             return
@@ -907,15 +1001,17 @@ class VoiceRouter:
         if self._send_to_session:
             msg = FeralMessage(
                 session_id=session_id, hop="brain", type="transcript",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
+            assert_voice_attempt_current(voice_attempt)
 
         if source_node_id and self._send_to_node:
             await self._send_to_node(source_node_id, {
                 "type": "transcript",
-                "payload": payload,
+                "payload": voice_attempt_payload(payload, current_voice_attempt(session_id)),
             })
+            assert_voice_attempt_current(voice_attempt)
 
         if self._memory:
             self._memory.working_push(session_id, {
@@ -931,23 +1027,27 @@ class VoiceRouter:
                 text=transcript,
                 context={"source": "voice", "node_id": source_node_id} if source_node_id else {"source": "voice"},
             )
+            assert_voice_attempt_current(voice_attempt)
 
             tts_text = self._get_last_assistant_text(session_id)
             if tts_text and self._audio:
                 chunks = await self._audio.synthesize_speech(tts_text)
+                assert_voice_attempt_current(voice_attempt)
                 if chunks:
                     for chunk in chunks:
                         tts_msg = FeralMessage(
                             session_id=session_id, hop="brain", type="tts_chunk",
-                            payload=chunk,
+                            payload=voice_attempt_payload(chunk, current_voice_attempt(session_id)),
                         )
                         if self._send_to_session:
                             await self._send_to_session(session_id, tts_msg)
+                            assert_voice_attempt_current(voice_attempt)
                         if source_node_id and self._send_to_node:
                             await self._send_to_node(source_node_id, {
                                 "type": "tts_chunk",
-                                "payload": chunk,
+                                "payload": voice_attempt_payload(chunk, current_voice_attempt(session_id)),
                             })
+                            assert_voice_attempt_current(voice_attempt)
 
     def _get_last_assistant_text(self, session_id: str) -> str:
         """Pull the latest assistant response from working memory for TTS."""
@@ -964,6 +1064,10 @@ class VoiceRouter:
     # ------------------------------------------------------------------
 
     async def handle_text_from_node(self, node_id: str, session_id: str, text: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_text_from_node(node_id=node_id, session_id=session_id, text=text)
+
+    async def _checkpoint_legacy_handle_text_from_node(self, node_id: str, session_id: str, text: str):
         """Route a text command from a node — if realtime is active, send as text there."""
         provider = self._resolve_provider(node_id)
 
@@ -987,6 +1091,10 @@ class VoiceRouter:
             )
 
     async def handle_text_from_client_voice(self, session_id: str, text: str):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_text_from_client_voice(session_id=session_id, text=text)
+
+    async def _checkpoint_legacy_handle_text_from_client_voice(self, session_id: str, text: str):
         """Route a text message into an active realtime voice session."""
         provider = self._resolve_session_provider(session_id)
         client_node = f"webclient_{session_id[:8]}"
@@ -1628,7 +1736,8 @@ class VoiceRouter:
         # the newest frame, so a degraded banner that omitted ``muted``
         # would silently flip the UI back to "listening" over a
         # microphone the brain is still refusing to read.
-        meta = {**meta, "muted": self.is_session_muted(session_id)}
+        voice_attempt = current_voice_attempt(session_id)
+        meta = voice_attempt_payload({**meta, "muted": self.is_session_muted(session_id)}, voice_attempt)
         try:
             payload = VoiceStatusPayload(**meta).model_dump()
         except Exception:
@@ -1643,6 +1752,7 @@ class VoiceRouter:
         if self._send_to_session:
             try:
                 await self._send_to_session(session_id, msg)
+                assert_voice_attempt_current(voice_attempt)
                 sent = True
             except Exception:
                 logger.debug("voice_status session emit failed", exc_info=True)
@@ -1653,6 +1763,7 @@ class VoiceRouter:
                         await self._send_to_node(node_id, {
                             "type": "voice_status", "payload": payload,
                         })
+                        assert_voice_attempt_current(voice_attempt)
                         sent = True
                     except Exception:
                         logger.debug(
@@ -1676,9 +1787,12 @@ class VoiceRouter:
             return False
         if not self._audio:
             return False
+        voice_attempt = current_voice_attempt(session_id)
+        assert_voice_attempt_current(voice_attempt)
 
         try:
             chunks = await self._audio.synthesize_speech(text[:1000])
+            assert_voice_attempt_current(voice_attempt)
         except Exception:
             logger.exception("Fallback TTS synth failed for session=%s", session_id[:8])
             chunks = None
@@ -1696,11 +1810,12 @@ class VoiceRouter:
         for chunk in chunks:
             tts_msg = FeralMessage(
                 session_id=session_id, hop="brain", type="tts_chunk",
-                payload=chunk,
+                payload=voice_attempt_payload(chunk, current_voice_attempt(session_id)),
             )
             if self._send_to_session:
                 try:
                     await self._send_to_session(session_id, tts_msg)
+                    assert_voice_attempt_current(voice_attempt)
                     delivered = True
                 except Exception:
                     logger.debug("tts_chunk session emit failed", exc_info=True)
@@ -1710,8 +1825,9 @@ class VoiceRouter:
                 if self._send_to_node:
                     try:
                         await self._send_to_node(node_id, {
-                            "type": "tts_chunk", "payload": chunk,
+                            "type": "tts_chunk", "payload": voice_attempt_payload(chunk, current_voice_attempt(session_id)),
                         })
+                        assert_voice_attempt_current(voice_attempt)
                         delivered = True
                     except Exception:
                         logger.debug("tts_chunk node emit failed", exc_info=True)
@@ -1721,24 +1837,52 @@ class VoiceRouter:
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def stop_session_voice(self, session_id: str):
+    async def stop_session_voice(self, session_id: str, *, expected_attempt=None, fenced: bool = False):
         """Stop realtime voice for a web client session."""
         client_node = f"webclient_{session_id[:8]}"
+        admitted = current_voice_attempt(session_id) if fenced else None
+
+        def check(producer=None):
+            if not fenced:
+                return
+            if admitted is not None and not (admitted.current() or (admitted.active
+                    and admitted.lifecycle_pending and admitted.owner_current() and admitted.ledger_current())):
+                from bridges.client_voice_attempt import VoiceAttemptError
+                raise VoiceAttemptError("voice_attempt_superseded")
+            if producer is not None and (getattr(producer, "session_id", None) != session_id
+                                         or getattr(producer, "_voice_attempt", None) is not expected_attempt):
+                from bridges.client_voice_attempt import VoiceAttemptError
+                raise VoiceAttemptError("voice_producer_superseded")
 
         if self._gemini:
             gsid = self._gemini._node_to_session.get(client_node)
             if gsid:
+                check(self._gemini.get_session(client_node))
                 await self._gemini.stop_session(gsid)
+                check()
 
         if self._realtime:
             sid_for_node = self._realtime._node_to_session.get(client_node)
             if sid_for_node:
+                check(self._realtime.get_session(client_node))
                 await self._realtime.stop_session(sid_for_node)
+                check()
 
         # --- Subagent B: close chained session ---
         if hasattr(self, "_chained") and self._chained:
+            check(self._chained.get_session(session_id))
             await self._chained.close_session(session_id)
+            check()
         # --- end Subagent B ---
+
+        if fenced:
+            for proxy in (self._gemini, self._realtime):
+                if proxy is not None and proxy.get_session(client_node) is not None:
+                    from bridges.client_voice_attempt import VoiceAttemptError
+                    raise VoiceAttemptError("voice_producer_superseded")
+            if getattr(self, "_chained", None) is not None and self._chained.get_session(session_id) is not None:
+                from bridges.client_voice_attempt import VoiceAttemptError
+                raise VoiceAttemptError("voice_producer_superseded")
 
         self._session_voice_mode.pop(session_id, None)
         self._session_degraded.pop(session_id, None)
@@ -1803,6 +1947,10 @@ class VoiceRouter:
     #   - chained         → ChainedVoicePipeline via open_chained_session
 
     async def open_session(self, session_id: str, mode: str, provider_opts: dict | None = None):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_open_session(session_id=session_id, mode=mode, provider_opts=provider_opts)
+
+    async def _checkpoint_legacy_open_session(self, session_id: str, mode: str, provider_opts: dict | None = None):
         """High-level entry point for opening a voice session by mode.
 
         Dispatches by mode:
@@ -2056,7 +2204,47 @@ class VoiceRouter:
         self._chained = pipeline
 
     async def open_chained_session(
-        self, session_id: str, provider_opts: dict | None = None
+        self, session_id: str, provider_opts: dict | None = None,
+        *, submit_tracked_utterance: Callable[[str, str], Awaitable[dict]] | None = None,
+        abort_tracked_utterance: Callable[[str, str | None], Awaitable[dict]] | None = None,
+        assert_admission_current: Callable[[], None] | None = None,
+        managed_send_frame: Callable[[str, dict], Awaitable[None]] | None = None,
+    ):
+        callbacks = (submit_tracked_utterance, abort_tracked_utterance,
+                     assert_admission_current, managed_send_frame)
+        if any(callback is not None for callback in callbacks):
+            from bridges.client_voice_attempt import VoiceAttemptError
+            if not all(callable(callback) for callback in callbacks):
+                raise VoiceAttemptError("managed_voice_callbacks_incomplete")
+            if not self.supports_managed_chained_voice(provider_opts):
+                raise VoiceAttemptError("managed_voice_buffered_contract_unavailable")
+            assert assert_admission_current is not None
+            assert_admission_current()
+            return await self._checkpoint_legacy_open_chained_session(
+                session_id, provider_opts,
+                submit_tracked_utterance=submit_tracked_utterance,
+                abort_tracked_utterance=abort_tracked_utterance,
+                assert_admission_current=assert_admission_current,
+                managed_send_frame=managed_send_frame,
+            )
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_open_chained_session(session_id=session_id, provider_opts=provider_opts)
+
+    def supports_managed_chained_voice(self, provider_opts: dict | None = None) -> bool:
+        """Pure capability check: no provider creation or microphone admission."""
+        from voice.chained_pipeline import MANAGED_BUFFERED_STT
+        pipeline = getattr(self, "_chained", None)
+        configured = (provider_opts or {}).get("stt_provider") or self._resolve_chained_config()["stt_provider"]
+        return (configured in MANAGED_BUFFERED_STT and pipeline is not None
+                and callable(getattr(pipeline, "begin_utterance", None))
+                and callable(getattr(pipeline, "finish_utterance", None)))
+
+    async def _checkpoint_legacy_open_chained_session(
+        self, session_id: str, provider_opts: dict | None = None,
+        *, submit_tracked_utterance: Callable[[str, str], Awaitable[dict]] | None = None,
+        abort_tracked_utterance: Callable[[str, str | None], Awaitable[dict]] | None = None,
+        assert_admission_current: Callable[[], None] | None = None,
+        managed_send_frame: Callable[[str, dict], Awaitable[None]] | None = None,
     ):
         """Create a chained STT→LLM→TTS session with configured providers.
 
@@ -2135,7 +2323,13 @@ class VoiceRouter:
         )
         if stt_provider is None:
             return None
-        tts_kwargs = {
+        if assert_admission_current is not None:
+            try:
+                assert_admission_current()
+            except BaseException:
+                await stt_provider.close()
+                raise
+        tts_kwargs: dict[str, Any] = {
             "api_key": _resolve_provider_key(tts_pid, tts_env) if tts_env else "",
         }
         if tts_name == "macos_say":
@@ -2189,6 +2383,8 @@ class VoiceRouter:
             return None
 
         send_fn = self._send_to_session
+        from bridges.client_voice_attempt import current_voice_attempt, voice_attempt_payload
+        voice_attempt = current_voice_attempt(session_id)
 
         async def _send_frame(sid, frame):
             if send_fn:
@@ -2197,18 +2393,52 @@ class VoiceRouter:
                     session_id=sid,
                     hop="brain",
                     type=frame["type"],
-                    payload=frame.get("payload", {}),
+                    payload=voice_attempt_payload(frame.get("payload", {}), voice_attempt),
                 )
                 await send_fn(sid, msg)
+                if voice_attempt is not None and not voice_attempt.current():
+                    raise asyncio.CancelledError("Retired voice attempt")
 
-        session = await self._chained.open_session(
-            session_id=session_id,
-            stt_provider=stt_provider,
-            tts_provider=tts_provider_inst,
-            llm_handle=self._orchestrator,
-            send_frame=_send_frame,
-            sample_rate=stt_sample_rate,
-        )
+        pipeline = self._chained
+        try:
+            if assert_admission_current is not None:
+                assert_admission_current()
+            managed_kwargs = {}
+            if submit_tracked_utterance is not None:
+                managed_kwargs = {
+                    "submit_tracked_utterance": submit_tracked_utterance,
+                    "abort_tracked_utterance": abort_tracked_utterance,
+                    "assert_admission_current": assert_admission_current,
+                    "managed_stt_provider": stt_name,
+                }
+            session = await pipeline.open_session(
+                session_id=session_id,
+                stt_provider=stt_provider,
+                tts_provider=tts_provider_inst,
+                llm_handle=self._orchestrator,
+                send_frame=managed_send_frame or _send_frame,
+                sample_rate=stt_sample_rate,
+                voice_attempt=voice_attempt,
+                **managed_kwargs,
+            )
+            if assert_admission_current is not None:
+                assert_admission_current()
+        except BaseException:
+            # A partial open is attributable only through the providers
+            # created by this invocation. A replacement must survive.
+            current = pipeline.get_session(session_id)
+            if (current is not None and getattr(current, "stt_provider", None) is stt_provider
+                    and getattr(current, "tts_provider", None) is tts_provider_inst):
+                await pipeline.close_session(session_id)
+            elif (assert_admission_current is not None
+                  and (current is None or getattr(current, "stt_provider", None) is not stt_provider)):
+                await asyncio.gather(stt_provider.close(), tts_provider_inst.close(), return_exceptions=True)
+            raise
+        if self._chained is not pipeline or pipeline.get_session(session_id) is not session:
+            return None
+        # The actual producer also owns the immutable closure captured above.
+        # Metadata lets v1 controls refuse an unrelated direct replacement.
+        setattr(session, "_voice_attempt", voice_attempt)
         self._session_voice_mode[session_id] = "chained"
         return session
 
@@ -2253,7 +2483,7 @@ class VoiceRouter:
             return None
 
     async def cancel_chained_response(self, session_id: str) -> bool:
-        """Barge-in for the chained pipeline. Returns True if a turn was cut.
+        """Interrupt chained speech without cancelling the agent command.
 
         The counterpart to ``RealtimeSession.cancel_response`` /
         ``GeminiSession.cancel_response``, which is what
@@ -2272,8 +2502,12 @@ class VoiceRouter:
         chained = getattr(self, "_chained", None)
         if chained is None:
             return False
+        voice_attempt = current_voice_attempt(session_id)
+        selected = chained.get_session(session_id)
+        if selected is not None:
+            require_voice_producer(voice_attempt, selected)
         try:
-            return bool(await chained.cancel(session_id, reason="user_interrupt"))
+            return bool(await chained.interrupt_output(session_id, reason="user_interrupt"))
         except Exception:
             logger.warning(
                 "Chained barge-in failed for session %s", session_id[:8],
@@ -2288,9 +2522,22 @@ class VoiceRouter:
         chunk_index: int = 0,
         is_final: bool = False,
     ):
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
+            return await self._checkpoint_legacy_handle_chained_audio(session_id=session_id, audio_b64=audio_b64, chunk_index=chunk_index, is_final=is_final)
+
+    async def _checkpoint_legacy_handle_chained_audio(
+        self,
+        session_id: str,
+        audio_b64: str,
+        chunk_index: int = 0,
+        is_final: bool = False,
+    ):
         """Route audio into the chained pipeline for a session."""
         if not hasattr(self, "_chained") or self._chained is None:
             return
+        voice_attempt = current_voice_attempt(session_id)
+        selected = self._chained.get_session(session_id)
+        require_voice_producer(voice_attempt, selected)
         await self._chained.handle_audio(
             session_id=session_id,
             audio_b64=audio_b64,

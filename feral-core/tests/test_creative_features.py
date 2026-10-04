@@ -120,8 +120,10 @@ class TestHealthAutomations:
 
         engine = ProactiveEngine()
         engine._orchestrator = MagicMock()
-
-        mock_impl = AsyncMock()
+        engine._orchestrator._primary_session_id_resolver = lambda: "primary-test"
+        runner = engine._orchestrator.tool_runner
+        runner.autonomy_mode = "hybrid"
+        runner.execute_tool_call_for_llm = AsyncMock(return_value={"success": True})
         msg = ProactiveMessage(
             trigger_id="hr_elevated",
             priority=Priority.IMPORTANT,
@@ -132,15 +134,15 @@ class TestHealthAutomations:
 
         callback = AsyncMock()
         engine._callbacks.append(callback)
-        with patch("skills.impl.get_implementation", return_value=mock_impl) as mock_get:
+        with patch("skills.impl.get_implementation") as mock_get:
             await engine._deliver(msg)
-
-        mock_get.assert_called_once_with("smart_home_hue")
-        mock_impl.execute.assert_called_once_with(
-            "call_service",
-            {"domain": "scene", "service": "turn_on", "entity_id": "scene.calming"},
-            {},
-        )
+        mock_get.assert_not_called()
+        runner.execute_tool_call_for_llm.assert_awaited_once()
+        session, tool_call, history = runner.execute_tool_call_for_llm.await_args.args
+        assert session == "primary-test"
+        assert tool_call["name"] == "smart_home_hue__call_service"
+        assert tool_call["args"] == {"domain": "scene", "service": "turn_on", "entity_id": "scene.calming"}
+        assert history == []
         callback.assert_called_once_with(msg)
 
     @pytest.mark.asyncio
@@ -149,8 +151,10 @@ class TestHealthAutomations:
 
         engine = ProactiveEngine()
         engine._orchestrator = MagicMock()
-
-        mock_impl = AsyncMock()
+        engine._orchestrator._primary_session_id_resolver = lambda: "primary-test"
+        runner = engine._orchestrator.tool_runner
+        runner.autonomy_mode = "hybrid"
+        runner.execute_tool_call_for_llm = AsyncMock(return_value={"success": True})
         msg = ProactiveMessage(
             trigger_id="spo2_low",
             priority=Priority.CRITICAL,
@@ -159,13 +163,13 @@ class TestHealthAutomations:
             action_payload={"smart_home": "breathing_exercise", "duration_minutes": 3},
         )
 
-        with patch("skills.impl.get_implementation", return_value=mock_impl):
+        with patch("skills.impl.get_implementation") as mock_get:
             await engine._deliver(msg)
-        mock_impl.execute.assert_called_once_with(
-            "call_service",
-            {"domain": "scene", "service": "turn_on", "entity_id": "scene.breathing"},
-            {},
-        )
+        mock_get.assert_not_called()
+        runner.execute_tool_call_for_llm.assert_awaited_once()
+        session, tool_call, _ = runner.execute_tool_call_for_llm.await_args.args
+        assert session == "primary-test"
+        assert tool_call["args"] == {"domain": "scene", "service": "turn_on", "entity_id": "scene.breathing"}
 
     @pytest.mark.asyncio
     async def test_deliver_no_payload_skips_automation(self):
@@ -191,10 +195,11 @@ class TestHealthAutomations:
         from agents.proactive_engine import ProactiveEngine, ProactiveMessage, Priority
 
         engine = ProactiveEngine()
-        mock_executor = AsyncMock()
-        mock_executor.execute_tool_call.side_effect = RuntimeError("smart home offline")
         engine._orchestrator = MagicMock()
-        engine._orchestrator.executor = mock_executor
+        engine._orchestrator._primary_session_id_resolver = lambda: "primary-test"
+        runner = engine._orchestrator.tool_runner
+        runner.autonomy_mode = "hybrid"
+        runner.execute_tool_call_for_llm = AsyncMock(side_effect=RuntimeError("smart home offline"))
 
         msg = ProactiveMessage(
             trigger_id="hr_elevated",
@@ -207,6 +212,7 @@ class TestHealthAutomations:
         callback = AsyncMock()
         engine._callbacks.append(callback)
         await engine._deliver(msg)
+        runner.execute_tool_call_for_llm.assert_awaited_once()
         callback.assert_called_once_with(msg)
 
 

@@ -39,7 +39,7 @@
     "@types/node": "^20.11.0",
     "@types/ws": "^8.5.10",
     "typescript": "^5.4.0",
-    "vitest": "^4.1.5"
+    "vitest": "^4.1.11"
   },
   "overrides": {
     "postcss": "^8.5.23",

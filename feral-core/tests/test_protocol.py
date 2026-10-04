@@ -8,6 +8,7 @@ from models.protocol import (
     VisionRequestPayload,
     SDUIPayload,
     ExecuteCommandPayload,
+    VoiceConfigPayload,
     parse_message,
     MESSAGE_TYPES,
 )
@@ -38,6 +39,24 @@ def test_parse_audio_chunk():
     assert isinstance(payload, AudioChunkPayload)
     assert payload.encoding == "opus"
     assert payload.data_b64 == "dGVzdA=="
+
+
+def test_parse_configured_chained_voice_selection():
+    _, payload = parse_message({"type": "voice_config", "hop": "client", "payload": {
+        "mode": "chained", "provider": "configured", "supports_realtime": False,
+    }})
+    assert isinstance(payload, VoiceConfigPayload)
+    assert payload.mode == "chained" and payload.provider == "configured"
+    assert VoiceConfigPayload().provider == "openai"
+
+
+@pytest.mark.parametrize("selection", [
+    {"mode": "unknown-mode"}, {"mode": "chained", "provider": "x" * 257},
+])
+def test_invalid_voice_selection_does_not_parse(selection):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        parse_message({"type": "voice_config", "hop": "client", "payload": selection})
 
 
 def test_parse_vision_frame():

@@ -615,3 +615,28 @@ def test_set_llm_config_allows_catalog_only_with_base_url(client):
     )
     assert r.status_code == 200
     assert store["llm"]["provider"] == "bedrock"
+
+
+@pytest.mark.parametrize("previous,selected,request_base,expected", [
+    ("ollama", "ollama", None, "http://127.0.0.1:11435/v1"),
+    ("open ai", "openai", None, "http://127.0.0.1:11435/v1"),
+    ("ollama", "ollama", "", ""),
+    ("ollama", "anthropic", None, ""),
+    ("bedrock", "bedrock", None, "http://127.0.0.1:11435/v1"),
+])
+def test_model_save_keeps_same_provider_endpoint_and_clears_cross_provider_endpoint(client, previous, selected, request_base, expected):
+    c, _catalog, cfg, _vault, store = client
+    cfg.update_settings("llm", "provider", previous)
+    cfg.update_settings("llm", "base_url", "http://127.0.0.1:11435/v1")
+    from api.routes import llm as routes
+    running = MagicMock()
+    running.reconfigure = AsyncMock(return_value={"ok": True})
+    running._config = {}
+    routes.state.orchestrator = MagicMock(llm=running)
+    body = {"provider": selected, "model": "local-test-model", "fallback_providers": []}
+    if request_base is not None:
+        body["base_url"] = request_base
+    response = c.post("/api/llm/config", json=body)
+    assert response.status_code == 200, response.text
+    assert store["llm"]["base_url"] == expected
+    assert running.reconfigure.await_args.kwargs["base_url"] == expected

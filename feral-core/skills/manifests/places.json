@@ -1,0 +1,73 @@
+{
+ "skill_id": "places",
+ "version": "1.0.0",
+ "author": "feral-core",
+ "brand": {
+  "name": "Places",
+  "primary_color": "#0F9D58",
+  "secondary_color": "#0B8043",
+  "logo_url": "",
+  "icon_set": "sf_symbols"
+ },
+ "description": "Find real places near the wearer (cafes, pharmacies, ATMs) using Google Maps Grounding Lite. Searches from the device's last known location unless explicit coordinates are given. Returns name, address, distance in metres, and rating and open-now ONLY when Google returns them: never guess either. Every result carries 'sources' (title and url) that MUST be shown to the user in the same interaction the answer is given, which the phone renders while the glasses speak. If the result says reason='location_unknown', ask the user to share location or name an area; that is not an error. This returns no menus or prices: no API exposes them for independent cafes, so use the camera to read a menu.",
+ "trigger_phrases": [
+  "find a cafe near me",
+  "coffee nearby",
+  "where is the nearest pharmacy",
+  "closest atm",
+  "restaurants around here",
+  "what's open near me",
+  "find a place nearby"
+ ],
+ "categories": [
+  "places",
+  "navigation",
+  "errands",
+  "autonomy:read_only"
+ ],
+ "auth": {
+  "type": "api_key"
+ },
+ "result_budget": "feed",
+ "endpoints": [
+  {
+   "id": "find_places",
+   "method": "PYTHON",
+   "url": "python://places/find_places",
+   "description": "Search for nearby places by free text. Uses the wearer's last known location as the search centre unless lat and lon are supplied. Returns up to `limit` places sorted by distance, each with its Google Maps sources for attribution.",
+   "params": [
+    {
+     "name": "query",
+     "type": "string",
+     "required": true,
+     "description": "What to look for, e.g. 'cafe with oat milk' or 'pharmacy'."
+    },
+    {
+     "name": "radius_m",
+     "type": "number",
+     "required": false,
+     "description": "Search radius in metres around the origin. Default 1500."
+    },
+    {
+     "name": "limit",
+     "type": "number",
+     "required": false,
+     "description": "Maximum places to return, 1-10. Default 5."
+    },
+    {
+     "name": "lat",
+     "type": "number",
+     "required": false,
+     "description": "Override latitude. Omit to use the device's last known fix."
+    },
+    {
+     "name": "lon",
+     "type": "number",
+     "required": false,
+     "description": "Override longitude. Omit to use the device's last known fix."
+    }
+   ],
+   "returns_description": "{ok: true/false, reason?: not_configured | location_unknown | blocked_by_policy | unavailable | upstream_error, origin: {lat, lon, accuracy_m?, ts?, source}, radius_m, count, places: [{name, address, lat?, lon?, distance_m? (metres from the wearer), rating? (null when Google did not return one, never 0), open_now? (null when unknown), sources: [{title, url}]}], attribution_required: always true, unattributed: names of places that came back with no Google Maps source and must not be read out}"
+  }
+ ]
+}

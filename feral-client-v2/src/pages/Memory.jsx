@@ -12,7 +12,7 @@
  * substitutes an empty value for an answer it does not have, and each
  * renders ErrorState instead of EmptyState when the ask itself failed.
  */
-import React, { useCallback, useState } from 'react';
+import React, { useCallback, useEffect, useState } from 'react';
 import { Search, Plus, Network, Database, Clock, ScrollText } from 'lucide-react';
 import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
@@ -158,8 +158,33 @@ function RecentTab() {
 function SaveMemoryModal({ onClose, onSaved }) {
   const [content, setContent] = useState('');
   const [tags, setTags] = useState('');
+  const [scope, setScope] = useState('');
+  const [scopes, setScopes] = useState([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState(null);
+
+  // Scoped replication is the one thing this product does that nothing
+  // comparable does, and until now it could not be reached from the UI
+  // at all: the API, the CLI and the skill all took a scope and this
+  // dialog did not, so the only way to share a memory was to know the
+  // HTTP route by hand.
+  //
+  // Only scopes an actual peer has been granted are offered. A scope
+  // nobody holds replicates nowhere, so letting someone type one would
+  // promise sharing that silently never happens.
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const r = await apiFetch('/api/sync/scopes');
+        if (!r.ok) return;
+        const body = await r.json();
+        const names = [...new Set((body?.grants || []).map((g) => g.scope).filter(Boolean))];
+        if (alive) setScopes(names);
+      } catch { /* no peers, no scopes: the select stays private-only */ }
+    })();
+    return () => { alive = false; };
+  }, []);
 
   const submit = async (e) => {
     e.preventDefault();
@@ -170,6 +195,11 @@ function SaveMemoryModal({ onClose, onSaved }) {
         body: JSON.stringify({
           content,
           tags: tags.split(',').map((t) => t.trim()).filter(Boolean),
+          // Omitted means private. Never send an empty string: the
+          // brain treats any unrecognised value as private anyway, but
+          // sending nothing is what "the user did not ask to share"
+          // actually looks like on the wire.
+          ...(scope ? { scope } : {}),
         }),
       });
       if (!r.ok) {
@@ -206,6 +236,25 @@ function SaveMemoryModal({ onClose, onSaved }) {
         <span>Tags</span>
         <input className="v2-input" value={tags} onChange={(e) => setTags(e.target.value)} placeholder="idea, personal" />
       </label>
+      <label className="v2-step-field">
+        <span>Sharing</span>
+        <select
+          className="v2-input"
+          value={scope}
+          onChange={(e) => setScope(e.target.value)}
+          data-testid="v2-memory-scope"
+        >
+          <option value="">Private to this brain</option>
+          {scopes.map((s2) => (
+            <option key={s2} value={s2}>Share with peers granted &ldquo;{s2}&rdquo;</option>
+          ))}
+        </select>
+      </label>
+      <div className="v2-p--tiny" style={{ color: 'var(--v2-text-tertiary)' }}>
+        {scopes.length === 0
+          ? 'No peer brain has been granted a scope, so nothing can be shared yet.'
+          : 'Private is the default. A shared memory reaches only peers granted that exact scope.'}
+      </div>
       {error && <div className="v2-chip v2-chip--error">{error}</div>}
     </Modal>
   );

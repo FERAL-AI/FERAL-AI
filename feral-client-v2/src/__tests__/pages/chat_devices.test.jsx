@@ -32,7 +32,7 @@ describe('Chat', () => {
 
   it('mounts + shows the greeting message', () => {
     const { getByText } = renderV2(<Chat />, { fetch: chatResp });
-    expect(getByText(/FERAL v2 is listening/i)).toBeInTheDocument();
+    expect(getByText('How can I help?')).toBeInTheDocument();
   });
 });
 

@@ -10,6 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections.abc import Callable
+
+import httpx
+
+from agents.token_estimate import estimate_tokens
 
 logger = logging.getLogger("feral.orchestrator.context")
 
@@ -22,17 +27,190 @@ _DEFAULT_CONTEXT_WINDOW_TOKENS = 128_000
 # Share of that window the conversation may occupy. The remainder is
 # the system prompt, the tool schemas and the model's own reply.
 _HISTORY_SHARE = 0.5
+OLLAMA_TEMPLATE_RESERVE = 256
+
+
+class OllamaContextRefusal(ValueError):
+    """A local capacity/configuration failure; never an implicit failover request."""
+
+    def __init__(self, code: str, message: str):
+        self.code = code
+        self.context_capacity: int | None = None
+        super().__init__(message)
+
+
+def fit_request_history(messages: list[dict], fits: Callable[[list[dict]], bool]) -> list[dict]:
+    """Fit a wire view by removing only old whole turns, never protected input.
+
+    All system rows, the latest user turn (including current tool rounds), and
+    the nearest preceding completed assistant turn with its user are protected.
+    The transcript and message objects are not rewritten. If this minimum does
+    not fit, return it for the caller's typed refusal, never truncate content.
+    """
+    if fits(messages):
+        return messages
+    users = [i for i, row in enumerate(messages) if row.get("role") == "user"]
+    if not users:
+        return messages
+    protected = users[-1]
+    for n in range(len(users) - 2, -1, -1):
+        group = messages[users[n]:users[n + 1]]
+        if any(row.get("role") == "assistant" and not row.get("tool_calls") for row in group):
+            protected = users[n]
+            break
+    # An incomplete prior tool round must not be lost merely because it lacks
+    # a final prose answer. Keep the immediate prior user group in that case.
+    if len(users) > 1 and protected == users[-1]:
+        protected = users[-2]
+    selected = messages
+    announced = {call.get("id") for row in messages for call in row.get("tool_calls", []) or [] if isinstance(call, dict)}
+    for start in users:
+        if start > protected:
+            break
+        candidate = [row for i, row in enumerate(messages) if i >= start or row.get("role") == "system"]
+        retained = {call.get("id") for row in candidate for call in row.get("tool_calls", []) or [] if isinstance(call, dict)}
+        if any(row.get("role") == "tool" and row.get("tool_call_id") in announced - retained for row in candidate):
+            continue
+        selected = candidate
+        if fits(selected):
+            break
+    if selected != messages:
+        logger.info("Local request history view: rows=%d retained=%d; transcript unchanged", len(messages), len(selected))
+    return selected
+
+
+def declared_ollama_context_tokens() -> int | None:
+    raw = os.environ.get("FERAL_CONTEXT_WINDOW_TOKENS", "").strip()
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except ValueError:
+        value = 0
+    if not 0 < value <= 1_048_576:
+        raise OllamaContextRefusal(
+            "local_context_configuration",
+            "FERAL_CONTEXT_WINDOW_TOKENS must be an integer from 1 to 1048576. "
+            "No model inference was sent; configure a context your local runtime can actually serve.",
+        )
+    return value
+
+
+def _ollama_positive_capacity(value: object) -> int | None:
+    if type(value) is int and 0 < value <= 1_048_576:
+        return value
+    return None
+
+
+def _ollama_model_name(name: str) -> str:
+    return name if ":" in name.rsplit("/", 1)[-1] else name + ":latest"
+
+
+async def verify_ollama_request_context(client: httpx.AsyncClient, body: dict, *, fit_history: bool = False) -> int:
+    """Refuse unverified/oversized input before inference without changing allocation.
+
+    Runtime allocation is preferred. An unloaded model must declare num_ctx;
+    trained model metadata is not an allocation. This checks a heuristic full
+    request estimate plus reserved output, not an exact model tokenizer count.
+    """
+    declared = declared_ollama_context_tokens()
+    model = body.get("model")
+    if not isinstance(model, str) or not model:
+        raise OllamaContextRefusal("local_context_unverified", "Choose a local model before checking its context capacity.")
+    path = client.base_url.path.rstrip("/")
+    if path.endswith("/v1"):
+        path = path[:-3]
+    native = client.base_url.copy_with(path=path + "/api/", query=None, fragment=None)
+    capacity = None
+    try:
+        response = await client.get(native.join("ps"), timeout=5.0)
+        response.raise_for_status()
+        running = response.json()
+        rows = running.get("models") if isinstance(running, dict) else None
+        if not isinstance(rows, list):
+            raise ValueError("Invalid capacity response")
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            names = [row.get("name"), row.get("model")]
+            if any(isinstance(name, str) and _ollama_model_name(name) == _ollama_model_name(model) for name in names):
+                observed = _ollama_positive_capacity(row.get("context_length"))
+                if observed is not None:
+                    capacity = observed if capacity is None else min(capacity, observed)
+        if capacity is None:
+            response = await client.post(native.join("show"), json={"model": model}, timeout=5.0)
+            response.raise_for_status()
+            details = response.json()
+            parameters = details.get("parameters") if isinstance(details, dict) else None
+            if isinstance(parameters, str):
+                for line in parameters.splitlines():
+                    fields = line.split()
+                    if len(fields) == 2 and fields[0] == "num_ctx":
+                        try:
+                            observed = _ollama_positive_capacity(int(fields[1]))
+                        except ValueError:
+                            observed = None
+                        if observed is not None:
+                            capacity = observed if capacity is None else min(capacity, observed)
+    except (httpx.HTTPError, ValueError, TypeError):
+        # Neither private server bodies nor credential-bearing URLs are shown.
+        raise OllamaContextRefusal(
+            "local_context_unverified",
+            "Local model context capacity could not be checked. Ensure this Ollama endpoint exposes "
+            "/api/ps and /api/show, then retry. No inference was sent to this local model.",
+        ) from None
+    if capacity is None:
+        raise OllamaContextRefusal(
+            "local_context_unverified",
+            "Local model context capacity is not verified. Configure the selected Ollama model with "
+            "an explicit Modelfile PARAMETER num_ctx that fits this Mac, or load it and verify its "
+            "allocated context. FERAL will not enlarge memory allocation or send this prompt for silent truncation.",
+        )
+    if declared is not None and declared > capacity:
+        raise OllamaContextRefusal(
+            "local_context_mismatch",
+            f"FERAL declares {declared} context tokens but the selected Ollama model exposes {capacity}. "
+            "Lower FERAL_CONTEXT_WINDOW_TOKENS or explicitly configure sufficient Ollama context within "
+            "your memory budget. No model inference or fallback was sent.",
+        )
+    window = min(capacity, declared) if declared is not None else capacity
+    output = body.get("max_tokens", 1024)
+    if type(output) is not int or output <= 0:
+        raise OllamaContextRefusal("local_context_configuration", "Local max_tokens must be a positive integer; no model inference was sent.")
+    # Reserve template overhead explicitly; the estimate is not the model tokenizer.
+    template_reserve = OLLAMA_TEMPLATE_RESERVE
+    def input_tokens(rows):
+        serialized = json.dumps({"messages": rows, "tools": body.get("tools", [])},
+                                ensure_ascii=False, separators=(",", ":"), allow_nan=False)
+        return estimate_tokens(serialized)
+    if fit_history:
+        body["messages"] = fit_request_history(body.get("messages", []), lambda rows: input_tokens(rows) + output + template_reserve <= window)
+    estimated = input_tokens(body.get("messages", []))
+    required = estimated + output + template_reserve
+    logger.info("Ollama context preflight: input_estimate=%d output_reserve=%d template_reserve=%d capacity=%d tokenizer_verified=false",
+                estimated, output, template_reserve, window)
+    if required > window:
+        refusal = OllamaContextRefusal(
+            "local_context_overflow",
+            f"Local request needs an estimated {required} tokens including output and template reserve; "
+            f"the checked Ollama context budget is {window}. Shorten attached context or explicitly configure "
+            "a larger local context within your memory budget. Protected input was not truncated; no inference was sent or fallback used. "
+            "This estimate is heuristic, not an exact model tokenizer count.",
+        )
+        refusal.context_capacity = window
+        raise refusal
+    return window
 
 
 def configured_context_window_tokens() -> int:
     """Usable context window the operator has declared, in tokens.
 
-    Public because this is the only context size the process can
-    actually discover: it is read fresh from the environment on every
-    call, so a test or a relaunch that changes
+    This generic planning declaration is read fresh from the environment
+    on every call, so a test or a relaunch that changes
     ``FERAL_CONTEXT_WINDOW_TOKENS`` is honoured without a restart.
     ``memory/knowledge_graph.py`` sizes its extraction prompt against it
-    rather than hard-coding a character cap.
+    rather than hard-coding a character cap. Ollama inference additionally
+    verifies the selected runtime's capacity before sending a request.
     """
     raw = os.environ.get("FERAL_CONTEXT_WINDOW_TOKENS", "")
     if not raw.strip():

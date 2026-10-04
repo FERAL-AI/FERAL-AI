@@ -267,18 +267,27 @@ async def test_worker_unlimited_no_artificial_stop_while_progressing(monkeypatch
 
 
 @pytest.mark.asyncio
-async def test_worker_no_progress_guard_stops_identical_failing_loop(monkeypatch):
+@pytest.mark.parametrize("synthesis_available", [True, False])
+async def test_worker_no_progress_guard_stops_identical_failing_loop(monkeypatch, synthesis_available):
     """An LLM that repeats the exact same failing call forever must be
     stopped by the progress guard, not spin (the budget is unlimited)."""
     monkeypatch.setenv("FERAL_MAX_ITERATIONS", "0")
 
     llm = MagicMock()
     llm.available = True
-    llm.chat = AsyncMock(return_value={})
+    async def chat(**kwargs):
+        # Continue attempting tools after withdrawal, then optionally provide
+        # a grounded synthesis when explicitly asked to summarize the results.
+        if synthesis_available and "Summarize the outcome" in kwargs["messages"][-1]["content"]:
+            return {"summary": True}
+        return {}
+
+    llm.chat = AsyncMock(side_effect=chat)
     # Always the same tool call — never a text answer.
-    llm.extract_response = MagicMock(
-        return_value=("", [_tool_call("cutebot__explore", {})])
-    )
+    llm.extract_response = MagicMock(side_effect=lambda response: (
+        ("The robot did not move; exploration stopped.", []) if response.get("summary")
+        else ("", [_tool_call("cutebot__explore", {})])
+    ))
 
     executor = MagicMock()
     failing = {"success": False, "data": None, "error": "robot did not move"}
@@ -292,7 +301,17 @@ async def test_worker_no_progress_guard_stops_identical_failing_loop(monkeypatch
     # being cut off — but it is still bounded, never an infinite spin.
     assert executor.execute.await_count == DEFAULT_NO_PROGRESS_STOP_THRESHOLD
     assert llm.chat.await_count <= DEFAULT_NO_PROGRESS_STOP_THRESHOLD + 3
-    assert r.text  # synthesized/fallback answer, never an infinite loop
+    assert len(r.tool_results) == DEFAULT_NO_PROGRESS_STOP_THRESHOLD
+    assert all(result["success"] is False for result in r.tool_results)
+    if synthesis_available:
+        assert r.text == "The robot did not move; exploration stopped."
+        assert not r.provider_error and not r.error
+    else:
+        # A model that never produces prose must remain an explicit failure,
+        # with its tool evidence retained rather than an invented answer.
+        assert not r.text
+        assert r.provider_error
+        assert "did not generate a reply" in r.error
 
 
 @pytest.mark.asyncio
@@ -587,4 +606,3 @@ async def test_the_multi_agent_worker_stops_offering_the_dead_tool(monkeypatch):
         "once the only tool is withdrawn the worker asks for a plain answer"
     )
     assert result.text
-

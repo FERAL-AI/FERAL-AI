@@ -13,10 +13,11 @@ import json
 import logging
 import time
 import uuid
+import ipaddress
 import httpx
 from typing import Any, Optional, AsyncGenerator
 
-from config.loader import feral_data_home
+from config.loader import ChatOutputBudgetError, feral_data_home, resolve_chat_output_budget
 from config.runtime import ollama_base_url, ollama_openai_base_url
 from agents.chat_sanitizer import sanitize_assistant_display_text
 
@@ -70,8 +71,12 @@ from agents.multimodal_blocks import (
     tool_list_contains,
 )
 from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
-from agents.token_estimate import estimate_message_tokens
-from agents.context_manager import configured_context_window_tokens
+from agents.local_tool_budget import retrieve_local_tools, fit_local_request, local_input_bytes, MAX_REQUEST_BYTES, LocalRequestRefusal
+from agents.token_estimate import estimate_message_tokens, estimate_tokens
+from agents.context_manager import (
+    configured_context_window_tokens, declared_ollama_context_tokens,
+    verify_ollama_request_context, OllamaContextRefusal, fit_request_history, OLLAMA_TEMPLATE_RESERVE,
+)
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
 # public chat entry points — see ``_budget_check`` /
@@ -470,6 +475,13 @@ def _cooldown_state_path() -> str:
         return ""
 
 
+def _unsupported_live_error(provider_name: str, model: str) -> str:
+    from providers.model_classes import is_unsupported_live_model
+    if is_unsupported_live_model(provider_name, model):
+        return "unsupported_live_protocol: GPT-Live requires a dedicated Live session/delegation adapter; chat and legacy Realtime are unsupported."
+    return ""
+
+
 def _responses_endpoint_for(provider_name: str, model: str) -> bool:
     """True when ``(provider, model)`` must be served by ``/v1/responses``.
 
@@ -618,6 +630,7 @@ class LLMProvider:
         self._config: dict = {}
         self._cooldown = ProviderCooldownTracker(storage_path=_cooldown_state_path())
         self._last_budget_routing: dict[str, Any] = {}
+        self._ollama_context_observation: tuple[str, str, int, float] | None = None
         # Per-call cross-provider failover record. ``None`` means the
         # primary answered on its first hop (steady state). Populated
         # by ``chat_with_failover`` and read by ``health_snapshot`` /
@@ -837,7 +850,22 @@ class LLMProvider:
             headers["anthropic-version"] = "2023-06-01"
         elif self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        return httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=60.0)
+        # Cold local inference can spend over a minute loading/prefilling
+        # before emitting its first token. Only loopback local engines get
+        # that longer read window; cloud and remote endpoints keep 60s.
+        host = httpx.URL(self.base_url).host
+        local = host == "localhost"
+        if not local:
+            try:
+                local = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                pass
+        timeout = (
+            httpx.Timeout(60.0, connect=10.0, read=180.0)
+            if self.provider in {"ollama", "lmstudio"} and local
+            else httpx.Timeout(60.0)
+        )
+        return httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=timeout)
 
     def _get_codex_adapter(self):
         adapter = getattr(self, "_codex_adapter", None)
@@ -961,7 +989,69 @@ class LLMProvider:
             engine_window = 0
         if engine_window > 0:
             return engine_window
+        if getattr(self, "provider", "") == "ollama":
+            observed = getattr(self, "_ollama_context_observation", None)
+            if (observed is not None and observed[:2] == (str(getattr(self, "base_url", "")).rstrip("/"), self.model)
+                    and time.monotonic() - observed[3] < 30):
+                declared = declared_ollama_context_tokens()
+                return min(observed[2], declared) if declared is not None else observed[2]
+            # Planning fallback only; every actual request rechecks capacity.
+            return declared_ollama_context_tokens() or 4096
         return configured_context_window_tokens()
+
+    async def _verify_ollama_context(self, client: httpx.AsyncClient, body: dict, provider: str) -> None:
+        if provider != "ollama":
+            return
+        self._ollama_context_observation = None
+        window = await verify_ollama_request_context(client, body, fit_history=True)
+        self._ollama_context_observation = (str(client.base_url).rstrip("/"), body["model"], window, time.monotonic())
+
+    async def _prepare_local_request(self, client: httpx.AsyncClient, body: dict, provider: str, force_tool: Optional[str]) -> None:
+        if provider not in ("ollama", "lmstudio"):
+            return
+        source_messages, catalogue = body["messages"], body.get("tools")
+        def select(rows, fits=None):
+            if not catalogue:
+                return
+            body["messages"], body["tools"] = retrieve_local_tools(rows, catalogue, force_tool, request_fits=fits)
+            body["tool_choice"] = _resolve_tool_choice(provider, body["tools"], force_tool)
+        select(source_messages)
+        protected = None
+        def protected_messages():
+            nonlocal protected
+            if protected is None:
+                protected = fit_request_history(source_messages, lambda rows: False)
+            return protected
+        def byte_fits(rows, schemas):
+            return local_input_bytes(rows, schemas) <= MAX_REQUEST_BYTES
+        try:
+            fit_local_request(body, provider)
+        except LocalRequestRefusal as exc:
+            if exc.code != "local_request_byte_overflow" or not catalogue:
+                raise
+            try:
+                select(protected_messages(), byte_fits)
+            except LocalRequestRefusal:
+                raise exc from None
+            fit_local_request(body, provider)
+        try:
+            await self._verify_ollama_context(client, body, provider)
+        except OllamaContextRefusal as exc:
+            capacity = exc.context_capacity
+            if exc.code != "local_context_overflow" or capacity is None or not catalogue:
+                raise
+            def capacity_fits(rows, schemas):
+                serialized = json.dumps({"messages": rows, "tools": schemas}, ensure_ascii=False,
+                                        separators=(",", ":"), allow_nan=False)
+                return byte_fits(rows, schemas) and estimate_tokens(serialized) + body["max_tokens"] + OLLAMA_TEMPLATE_RESERVE <= capacity
+            try:
+                select(protected_messages(), capacity_fits)
+            except LocalRequestRefusal:
+                raise exc from None
+            fit_local_request(body, provider)
+            # Recheck allocation after retrieval. Runtime changes never enlarge
+            # the request or enable inference against a stale observation.
+            await self._verify_ollama_context(client, body, provider)
 
     def _init_hybrid_cloud(self):
         """In hybrid mode, cloud is used for complex reasoning."""
@@ -978,7 +1068,7 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         *,
         call_site: str = "chat",
         force_tool: Optional[str] = None,
@@ -999,6 +1089,13 @@ class LLMProvider:
         caller (digital twin, proactive, ideas engine, wherever) gains
         cross-provider failover without knowing about the distinction.
         """
+        try:
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site=call_site)
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "choices": [], "error_code": exc.code}
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            return {"error": live_error, "choices": [], "error_code": "unsupported_live_protocol"}
         # Permanent-auth short-circuit. If a previous call established
         # that the current key is invalid (HTTP 401 + "invalid_api_key"),
         # don't keep poking the wire every 60s -- return the cached
@@ -1236,6 +1333,10 @@ class LLMProvider:
         # This is the exact shape of the v2026.5.0 400s in the shipped
         # terminal log (§A5 of docs/WAVE5_HARDENING_PROMPT.md).
         apply_reasoning_fork(self.provider, self.model, body)
+        try:
+            await self._prepare_local_request(self.client, body, self.provider, force_tool)
+        except OllamaContextRefusal as exc:
+            return {"error": str(exc), "error_code": exc.code, "choices": []}
 
         from observability.metrics import increment, measure
         increment("feral.llm.calls_total", attributes={"provider": self.provider, "model": self.model})
@@ -1686,6 +1787,9 @@ class LLMProvider:
         the probe is advisory at boot time, not a circuit breaker
         for in-flight traffic.
         """
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            return False, live_error
         try:
             from providers.model_classes import classify_endpoint
             endpoint_class = classify_endpoint(self.provider, self.model)
@@ -2083,6 +2187,9 @@ class LLMProvider:
         from agents.llm_reasoning import apply_responses_param_fork
 
         model = model or self.model
+        live_error = _unsupported_live_error("openai", model)
+        if live_error:
+            raise ValueError(live_error)
         instructions, input_items = self._messages_to_responses_input(messages)
         body: dict = {
             "model": model,
@@ -2135,6 +2242,11 @@ class LLMProvider:
             else:
                 body["tool_choice"] = "auto"
         apply_responses_param_fork(model, body)
+        if model in {"gpt-6.1-sol", "gpt-6-luna"}:
+            # GPT-6 guidance rejects sampling controls with reasoning enabled.
+            if body.get("reasoning", {}).get("effort") != "none":
+                for key in ("temperature", "top_p", "top_logprobs"):
+                    body.pop(key, None)
         return body
 
     async def _post_responses(
@@ -2666,6 +2778,8 @@ class LLMProvider:
 
         if not isinstance(result, dict):
             return None
+        if result.get("error") and str(result.get("error_code") or "").startswith("local_"):
+            return [{"type": "error", "content": str(result["error"]), "error_code": result["error_code"]}]
         if result.get("error"):
             return None
         if not result.get("choices"):
@@ -2687,7 +2801,7 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         *,
         call_site: str = "chat",
         force_tool: Optional[str] = None,
@@ -2704,6 +2818,15 @@ class LLMProvider:
         into their own caps by passing ``call_site="screen_loop"``,
         ``"learner"``, etc. (Wave 2 Lane 09).
         """
+        try:
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site=call_site)
+        except ChatOutputBudgetError as exc:
+            yield {"type": "error", "content": str(exc), "error_code": exc.code}
+            return
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            yield {"type": "error", "content": live_error, "error_code": "unsupported_live_protocol"}
+            return
         if self._messages_contain_vision(messages):
             ok, reason = self._vision_support_status()
             if not ok:
@@ -2943,6 +3066,19 @@ class LLMProvider:
             )
 
         apply_reasoning_fork(self.provider, self.model, body)
+        try:
+            await self._prepare_local_request(self.client, body, self.provider, force_tool)
+        except OllamaContextRefusal as exc:
+            if exc.code == "local_context_unverified":
+                events = await self._stream_via_nonstream_failover(
+                    messages, tools, temperature, max_tokens, primary_error=exc, force_tool=force_tool,
+                )
+                if events:
+                    for event in events:
+                        yield event
+                    return
+            yield {"type": "error", "content": str(exc), "error_code": exc.code}
+            return
 
         # Ask for the usage chunk. On chat-completions this is opt-in:
         # without ``stream_options.include_usage`` the provider closes
@@ -5068,6 +5204,9 @@ class LLMProvider:
             selected_model = str(config.get("model") or self.model)
         else:
             selected_model = str(config.get("model", "") or "")
+        live_error = _unsupported_live_error(provider_name, selected_model)
+        if live_error:
+            raise RuntimeError(live_error)
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens", 1024)
 
@@ -5139,6 +5278,7 @@ class LLMProvider:
                 )
 
             apply_reasoning_fork(self.provider, selected_model, body)
+            await self._prepare_local_request(self.client, body, provider_name, force_tool)
 
             async def _do_primary():
                 resp = await self.client.post("/chat/completions", json=body)
@@ -5213,6 +5353,7 @@ class LLMProvider:
                 )
 
             apply_reasoning_fork(provider_name, model, body)
+            await self._prepare_local_request(tmp, body, provider_name, force_tool)
 
             async def _do_fb():
                 resp = await tmp.post("/chat/completions", json=body)
@@ -5258,6 +5399,13 @@ class LLMProvider:
         on providers (Gemini) that can't name a single tool on the
         wire shape we drive.
         """
+        try:
+            kwargs["max_tokens"] = resolve_chat_output_budget(
+                getattr(self, "_config", {}), kwargs.get("max_tokens"),
+                call_site=str(kwargs.get("call_site", "chat") or "chat"),
+            )
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "choices": [], "error_code": exc.code}
         # Adaptive route (kw-only ``route`` = a ``route_call`` ProviderRef).
         # Popped FIRST so it never leaks into ``self.chat(**kwargs)`` on the
         # local-engine short-circuit below. When present and concrete it
@@ -5292,7 +5440,7 @@ class LLMProvider:
         # their own call_site name. Defaults to "chat" so a missing
         # kwarg does the safe thing.
         call_site = str(kwargs.pop("call_site", "chat") or "chat")
-        max_tokens_kw = int(kwargs.get("max_tokens", 1024) or 1024)
+        max_tokens_kw = kwargs["max_tokens"]
         budget_model = route_model or self.model
         budget_block = await self._budget_check(call_site, budget_model, max_tokens_kw)
         if budget_block is not None:
@@ -5472,6 +5620,15 @@ class LLMProvider:
                         exc,
                     )
                 return result
+            except OllamaContextRefusal as exc:
+                # Preserve the existing no-failover-on-overflow policy.
+                # Unavailable metadata may use the operator's existing
+                # configured candidate chain, never an invented provider.
+                if exc.code != "local_context_unverified" or len(candidates) == 1:
+                    return {"error": str(exc), "error_code": exc.code, "choices": []}
+                last_error = exc
+                failed_candidates.append({"provider": provider_name, "reason": exc.code})
+                continue
             except Exception as e:
                 increment("feral.llm.errors_total", attributes={"provider": provider_name})
                 reason = classify_error(e)
@@ -5545,6 +5702,8 @@ class LLMProvider:
                 "reason": "exhausted",
                 "candidates_tried": list(failed_candidates),
             }
+        if isinstance(last_error, OllamaContextRefusal):
+            return {"error": str(last_error), "error_code": last_error.code, "choices": []}
         if last_error:
             raise last_error
         raise RuntimeError("All LLM providers exhausted")

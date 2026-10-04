@@ -1,0 +1,21 @@
+.coding-page { padding: 24px; max-width: 1440px; margin: auto; }
+.coding-heading { display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px; }
+.coding-heading h1 { display: flex; gap: 10px; align-items: center; margin: 0; }
+.coding-heading p,.coding-small { opacity: .72; font-size: .86rem; line-height: 1.5; }
+.coding-layout { display: grid; grid-template-columns: 310px minmax(0,1fr); gap: 20px; }
+.coding-layout aside,.coding-work { display: flex; flex-direction: column; gap: 16px; min-width: 0; }
+.coding-page label { display: flex; flex-direction: column; gap: 7px; margin: 14px 0; font-size: .9rem; }
+.coding-page input,.coding-page textarea,.coding-page select { width: 100%; box-sizing: border-box; background: rgba(127,127,127,.08); border: 1px solid rgba(127,127,127,.3); border-radius: 10px; color: inherit; padding: 10px; font: inherit; }
+.coding-page button { display: inline-flex; align-items: center; justify-content: center; gap: 7px; border: 1px solid rgba(127,127,127,.3); border-radius: 10px; padding: 9px 12px; background: rgba(127,127,127,.1); color: inherit; cursor: pointer; }
+.coding-page button:disabled { opacity: .45; cursor: default; }
+.coding-page button:focus-visible,.coding-page input:focus-visible,.coding-page textarea:focus-visible { outline: 2px solid currentColor; outline-offset: 3px; }
+.coding-error { border: 1px solid #cb6868; border-radius: 10px; padding: 12px; margin-bottom: 12px; }
+.coding-notice { padding: 10px 0; }
+.coding-output,.coding-page details pre,.coding-permission pre { white-space: pre-wrap; overflow-wrap: anywhere; font-size: .88rem; line-height: 1.55; max-height: 55vh; overflow: auto; }
+.coding-page details { border-bottom: 1px solid rgba(127,127,127,.2); padding: 10px 0; }
+.coding-permission { border: 1px solid #bc9955; border-radius: 12px; padding: 16px; margin: 16px 0; }
+.coding-permission h3 { margin: 0; }
+.coding-actions { display: flex; gap: 10px; }
+.coding-session { width: 100%; margin: 8px 0; overflow-wrap: anywhere; text-align: left; }
+.coding-page form { margin-top: 20px; }
+@media(max-width: 850px) { .coding-layout { grid-template-columns: 1fr; } .coding-page { padding: 16px; } }

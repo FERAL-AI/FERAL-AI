@@ -357,7 +357,7 @@ class AgentWorker:
         w_usage: dict = {}
         w_model = ""
 
-        tools = self.get_tools()
+        tools: list[dict] | None = self.get_tools()
         perception_ctx = ""
         if self._perception:
             frame = self._perception.get_frame(session_id)
@@ -412,8 +412,8 @@ class AgentWorker:
         messages.extend(self.replay_history(session_id))
         messages.append({"role": "user", "content": user_text})
 
-        tool_calls_made = []
-        tool_results = []
+        tool_calls_made: list[dict] = []
+        tool_results: list[dict] = []
         nudged_for_text = False
 
         # v2026.6.11 — UNLIMITED rounds by default (was a hard-coded 4,
@@ -746,8 +746,10 @@ class AgentWorker:
 
         return WorkerResult(
             worker_id=self.worker_id,
-            text="Something went wrong and I couldn't generate a reply — please try that again.",
+            error="The model did not generate a reply. Please try again or choose another model.",
+            provider_error=True,
             tool_calls_made=tool_calls_made,
+            tool_results=tool_results,
             usage=w_usage,
             model=w_model,
         )
@@ -853,6 +855,12 @@ class AgentRouter:
             "commands — those use cutebot__set_lights via the general worker.\n"
             "- research: web search, news, notes/documents lookup.\n"
             "- creative: music/media playback, calendar, reminders.\n"
+            "- memory writes ALWAYS go to general: \"remember this\", \"save\n"
+            "  that\", \"note that\", \"forget X\", or anything about sharing a\n"
+            "  note with a scope or another brain. Only general holds the\n"
+            "  notes tools. Measured 2026-09-07: \"save this to memory and\n"
+            "  share it with my work scope\" routed to creative, which has no\n"
+            "  memory tools and correctly answered that it could not.\n"
             "- general: EVERYTHING else — including writing code or files, building HTML/apps, "
             "opening applications, running commands, anything on the user's computer or desktop, "
             "and plain conversation. It has the full tool set.\n"

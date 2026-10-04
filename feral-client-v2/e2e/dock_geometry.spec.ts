@@ -1,28 +1,5 @@
-/**
- * The dock's shape and its response to the pointer.
- *
- * Reported from a screenshot: "the dock has an issue it's too round
- * which is making some of the icons eaten and it looks bad", and "the
- * design you suggested vs what you have is totally different, the
- * spacing and also the size and the way when I hover on it it makes a
- * smooth animation".
- *
- * Measured against the mockup at scratchpad/design/instrument-panel.html
- * (`.dock` and `.dk`), which is the source these numbers come from:
- *
- *                    shipped      mockup
- *   container radius  pill (999)   18px
- *   gap                2px          7px
- *   tile              40x40        44x44, radius 12
- *   icon              20px         22px
- *   hover             flat -2px    scale 1 + 0.5k^2, lift 8k^2
- *
- * A full pill curves so hard at the ends that the outer tiles sit
- * inside the curve, which is the "eaten" the report describes.
- *
- * jsdom has no layout and no getBoundingClientRect worth reading, so
- * none of this can be a vitest test.
- */
+/** Consumer dock geometry: persistent labels, six pinned destinations and
+ * More, gentle lift without resizing, and reachable controls on phones. */
 import { test, expect } from '@playwright/test';
 
 async function stub(page) {
@@ -59,7 +36,7 @@ test('the dock is a rounded bar, not a pill that eats its end tiles', async ({ p
   expect(outside, `tiles hanging outside the dock: ${outside.join(', ')}`).toEqual([]);
 });
 
-test('tiles and icons are the size the design specifies', async ({ page }) => {
+test('labeled tiles and icons meet the consumer design dimensions', async ({ page }) => {
   await stub(page);
   await page.goto('/console');
   await expect(page.locator('.v2-dock-btn').first()).toBeVisible();
@@ -77,45 +54,32 @@ test('tiles and icons are the size the design specifies', async ({ page }) => {
     };
   });
 
-  expect(m.tile).toBe(44);
+  expect(m.tile).toBe(74);
   expect(m.icon).toBe(22);
-  expect(m.gap).toBeGreaterThanOrEqual(6);
+  expect(m.gap).toBe(3);
   expect(m.radius).toBeGreaterThanOrEqual(10);
 });
 
-test('hovering magnifies the row, not just the tile under the cursor', async ({ page }) => {
-  await stub(page);
-  await page.goto('/console');
+test('hover gives a gentle lift without resizing labeled destinations', async ({ page }) => {
+  await stub(page); await page.goto('/console');
   const tiles = page.locator('.v2-dock-btn');
-  const n = await tiles.count();
-  expect(n).toBeGreaterThan(4);
-
-  const mid = Math.floor(n / 2);
-  const box = await tiles.nth(mid).boundingBox();
-  await page.mouse.move(box!.x + box!.width / 2, box!.y + box!.height / 2);
-  await page.waitForTimeout(250);
-
-  const scales = await page.evaluate(() => [...document.querySelectorAll('.v2-dock-btn')]
-    .map((t) => {
-      const m = /scale\(([\d.]+)\)/.exec((t as HTMLElement).style.transform || '');
-      return m ? parseFloat(m[1]) : 1;
-    }));
-
-  // The tile under the cursor is the largest.
-  expect(scales[mid]).toBeGreaterThan(1.3);
-  // Its neighbours are lifted too, and less. This is what makes it a
-  // lens rather than a single hover state.
-  expect(scales[mid - 1]).toBeGreaterThan(1);
-  expect(scales[mid - 1]).toBeLessThan(scales[mid]);
-  // And the far end of the row is untouched.
-  expect(scales[0]).toBeCloseTo(1, 2);
-
-  // Leaving puts everything back.
+  await expect(tiles).toHaveCount(7);
+  const before = await tiles.evaluateAll((items) => items.map((item) => {
+    const r = item.getBoundingClientRect(); return { width: r.width, height: r.height, top: r.top };
+  }));
+  await tiles.nth(3).hover();
+  const after = await tiles.evaluateAll((items) => items.map((item) => {
+    const r = item.getBoundingClientRect(); return { width: r.width, height: r.height, top: r.top };
+  }));
+  for (let i = 0; i < before.length; i += 1) {
+    expect(after[i].width).toBeCloseTo(before[i].width, 1);
+    expect(after[i].height).toBeCloseTo(before[i].height, 1);
+    expect(before[i].top - after[i].top).toBeGreaterThanOrEqual(-0.1);
+    expect(before[i].top - after[i].top).toBeLessThanOrEqual(2.1);
+  }
+  expect(before[3].top - after[3].top).toBeGreaterThan(1);
   await page.mouse.move(10, 10);
-  await page.waitForTimeout(250);
-  const after = await page.evaluate(() => [...document.querySelectorAll('.v2-dock-btn')]
-    .every((t) => !(t as HTMLElement).style.transform));
-  expect(after, 'tiles stayed magnified after the pointer left').toBe(true);
+  expect(await tiles.evaluateAll((items) => items.every((item) => !(item as HTMLElement).style.transform))).toBe(true);
 });
 
 test('the magnify is off when the operator asked for reduced motion', async ({ page }) => {
@@ -132,20 +96,18 @@ test('the magnify is off when the operator asked for reduced motion', async ({ p
   expect(anyScaled, 'the dock magnified despite prefers-reduced-motion').toBe(false);
 });
 
-test('Home is back on the dock and it goes Home', async ({ page }) => {
-  // It was dropped when the dock was cut to the design's eight, which
-  // left the whole v2 overview reachable only by remembering the
-  // palette shortcut.
-  await stub(page);
-  await page.goto('/console');
-
-  const home = page.locator('.v2-dock-btn[href="/"]');
-  await expect(home, 'no Home tile on the dock').toBeVisible();
-  await home.click();
-  await expect(page).toHaveURL(/\/$/);
-
-  // And it lights up as the active tile once you are there.
-  await expect(page.locator('.v2-dock-btn[href="/"]')).toHaveClass(/is-active/);
+test('Home remains reachable through More and marks its navigation context', async ({ page }) => {
+  await stub(page); await page.goto('/console');
+  const more = page.locator('.v2-dock-btn').filter({ hasText: 'More' });
+  await more.click();
+  const palette = page.getByRole('dialog', { name: 'Command palette' });
+  await expect(palette).toBeVisible();
+  await palette.getByRole('searchbox', { name: 'Search commands and pages' }).fill('Home');
+  await palette.getByRole('option').filter({ hasText: 'Home' }).first().click();
+  await expect(page).toHaveURL(/\/home$/);
+  await expect(more).toHaveClass(/is-active/);
+  await expect(more).toHaveAttribute('aria-pressed', 'false');
+  await expect(palette).toHaveCount(0);
 });
 
 /**
@@ -171,7 +133,8 @@ for (const width of [320, 375, 430]) {
 
     const tiles = page.locator('.v2-dock a, .v2-dock button');
     const n = await tiles.count();
-    expect(n).toBeGreaterThan(8);
+    expect(n).toBe(7);
+    await expect(page.locator('.v2-dock-btn[href="/approvals"]')).toBeVisible();
 
     // Reachable means clickable, scrolling to it if the row is a
     // scroller. It does NOT mean visible without scrolling.

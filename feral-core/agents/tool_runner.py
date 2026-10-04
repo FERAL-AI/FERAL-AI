@@ -8,6 +8,9 @@ daemon command forwarding, and subagent parallel execution.
 from __future__ import annotations
 
 import asyncio
+import copy
+from contextlib import contextmanager
+from contextvars import ContextVar
 import json
 import logging
 import os
@@ -15,6 +18,7 @@ import time
 from typing import Optional, TYPE_CHECKING
 from uuid import uuid4
 
+from security.agent_turn_lease import guard_agent_dispatch
 from security.content_defense import screen_content, wrap_external_content
 from security.exec_approvals import ApprovalManager
 from security.trust_ledger import TrustLedger, get_ledger
@@ -37,7 +41,7 @@ from agents.tool_dispatch_validator import (
     make_tool_error_envelope,
 )
 from hardware.action_frames import build_action_request
-from skills.call_context import bind_context, new_turn_id
+from skills.call_context import bind_context, current_context, new_turn_id
 
 MAX_LLM_TOOLS = 64
 
@@ -47,6 +51,67 @@ if TYPE_CHECKING:
 logger = logging.getLogger("feral.orchestrator.tool_runner")
 
 VALID_AUTONOMY_MODES = ("strict", "hybrid", "loose")
+
+
+class _ExactApproval:
+    """Internal one-call review receipt; never a JSON/model argument."""
+    def __init__(self, issuer, pending):
+        self.issuer = issuer
+        self.session_id = pending["session_id"]
+        self.tool_name = pending["tool_name"]
+        self.args = copy.deepcopy(pending["args"])
+        self.pending = copy.deepcopy(pending) if pending.get("taskflow") else None
+        self.used = False
+        self.safety_used = False
+
+
+_exact_approval: ContextVar[Optional[_ExactApproval]] = ContextVar("feral_exact_tool_approval", default=None)
+
+
+class _ExecutorAdmission:
+    """Trusted one-entry handoff, bound to the dispatching asyncio task."""
+    def __init__(self, issuer, exact, session_id, tool_name, args):
+        self.issuer = issuer
+        self.exact = exact
+        self.session_id = session_id
+        self.tool_name = tool_name
+        self.args = copy.deepcopy(args)
+        self.surface = current_context().surface
+        self.owner_task = asyncio.current_task()
+        self.used = False
+
+    def matches(self, issuer, exact, session_id, tool_name, args):
+        try:
+            current_task = asyncio.current_task()
+        except RuntimeError:
+            return False
+        return (self.issuer is issuer and self.exact is exact and self.owner_task is not None
+                and self.owner_task is current_task and self.session_id == session_id
+                and self.tool_name == tool_name and self.args == args
+                and self.surface == current_context().surface
+                and exact is not None and exact.issuer is issuer and exact.used and exact.safety_used
+                and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args)
+
+
+_executor_admission: ContextVar[Optional[_ExecutorAdmission]] = ContextVar("feral_executor_admission", default=None)
+
+
+@contextmanager
+def _bind_executor_admission(admission):
+    token = _executor_admission.set(admission)
+    try:
+        yield
+    finally:
+        _executor_admission.reset(token)
+
+
+@contextmanager
+def _bind_exact_approval(approval):
+    token = _exact_approval.set(approval)
+    try:
+        yield
+    finally:
+        _exact_approval.reset(token)
 
 # ----------------------------------------------------------------------
 # Which tool results count as external content
@@ -226,6 +291,7 @@ class ToolRunner:
         approval_manager: Optional[ApprovalManager] = None,
     ):
         self._orch = orchestrator
+        self._native_agent_dispatch_lease = None
         self._tool_repeat_state: dict[str, dict] = {}
         # Strong references to in-flight background-job reapers. The
         # loop holds tasks only weakly, so a bare create_task can be
@@ -440,11 +506,45 @@ class ToolRunner:
             registry=self._skill_registry(),
         )
 
-    def enforce_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket") -> Optional[dict]:
+    def _guard_agent_lease(self):
+        guard_agent_dispatch(getattr(self, "_native_agent_dispatch_lease", None))
+        from agents.chat_turns import _audit
+        tracked = _audit.get()
+        if tracked is not None and tracked.cancel_requested:
+            raise asyncio.CancelledError("Tracked chat turn was cancelled")
+        exact = _exact_approval.get()
+        if exact is not None and exact.issuer is self and exact.pending is not None:
+            taskflows = getattr(self._orch, "taskflows", None)
+            if taskflows is None or not taskflows.approved_dispatch_allowed(exact.pending):
+                raise RuntimeError("Workflow approval dispatch is no longer active")
+
+    def pending_context_valid(self, pending: dict) -> bool:
+        from agents.runtime_context_checkpoint import runtime_coordinator
+        coordinator = runtime_coordinator(self._orch)
+        if coordinator is None:
+            return True
+        return coordinator.review_generation_valid(str(pending.get("session_id", "")), pending.get("context_generation"))
+
+    def enforce_executor_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket") -> Optional[dict]:
+        """Recheck policy at executor entry using one trusted admission, if issued."""
+        surface = current_context().surface or surface
+        admission = _executor_admission.get()
+        exact = _exact_approval.get()
+        if admission is None:
+            return self.enforce_safety(tool_name, args, session_id, surface)
+        if (not isinstance(admission, _ExecutorAdmission) or admission.used
+                or not admission.matches(self, exact, session_id, tool_name, args)):
+            return make_tool_error_envelope(tool_call_id=current_context().call_id, error_code="invalid_approval", reason="Executor admission does not match this task and action")
+        admission.used = True
+        return self.enforce_safety(tool_name, args, session_id, surface, _admission=admission)
+
+    def enforce_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket",
+                       *, _admission=None) -> Optional[dict]:
         """
         Returns a denial dict if the action should be blocked, a pending-approval
         dict if the user must confirm, or None if the action is allowed.
         """
+        self._guard_agent_lease()
         decision = self.policy_for(tool_name, args, surface=surface)
 
         if decision.level == SafetyLevel.DENY:
@@ -486,7 +586,8 @@ class ToolRunner:
 
         needs_approval = False
         if self._autonomy_mode == "strict":
-            needs_approval = not read_only_flag
+            # A read hint or tool name cannot override resolved review policy.
+            needs_approval = level == SafetyLevel.CONFIRM or not read_only_flag
         elif self._autonomy_mode == "hybrid":
             needs_approval = level == SafetyLevel.CONFIRM
         # loose: nothing needs approval
@@ -516,6 +617,14 @@ class ToolRunner:
                 logger.info(f"Safety CONFIRM (loose mode auto-exec): {tool_name}")
             return None
 
+        exact = _exact_approval.get()
+        admitted = (isinstance(_admission, _ExecutorAdmission) and _admission is _executor_admission.get()
+                    and _admission.used and _admission.matches(self, exact, session_id, tool_name, args))
+        if (exact is not None and exact.issuer is self and exact.used and (not exact.safety_used or admitted)
+                and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args):
+            exact.safety_used = True
+            return None
+
         approved, reason = self._approval_mgr.check_approval(tool_name, session_id)
         if approved:
             logger.info(f"Standing approval for {tool_name}: {reason}")
@@ -528,6 +637,7 @@ class ToolRunner:
                 pending.get("session_id") == session_id
                 and pending.get("tool_name") == tool_name
                 and pending.get("args") == args
+                and self.pending_context_valid(pending)
             ):
                 return pending
 
@@ -540,11 +650,19 @@ class ToolRunner:
             "session_id": session_id,
             "safety_level": level,
             "created_at": time.time(),
+            # A prompt nobody answered must not stay answerable from a
+            # pocket an hour later. The phone greys its card at this
+            # time, and `get_pending` refuses a request past it.
+            "expires_at": time.time() + self._approval_ttl_seconds(),
             # Explainability for the SDUI approval card. Renderers can
             # show "Why are we asking?" using sources without re-running
             # the resolver and without leaking internal types.
             "policy_sources": dict(decision.sources),
         }
+        from agents.runtime_context_checkpoint import runtime_coordinator
+        coordinator = runtime_coordinator(self._orch)
+        if coordinator is not None and coordinator.known_managed(session_id):
+            pending["context_generation"] = coordinator.review_generation(session_id)
         self._pending_approvals[request_id] = pending
         logger.info(f"Approval required ({self._autonomy_mode}): {tool_name} → request_id={request_id}")
         return pending
@@ -609,10 +727,35 @@ class ToolRunner:
             rows = rows[:limit]
         return [dict(p) for p in rows]
 
+    @staticmethod
+    def _approval_ttl_seconds() -> float:
+        """How long a pending approval stays answerable."""
+        try:
+            from config.loader import load_settings
+            block = (load_settings() or {}).get("security") or {}
+            return max(30.0, float(block.get("approval_ttl_seconds", 300) or 300))
+        except Exception:
+            return 300.0
+
+    def _expired(self, pending: Optional[dict]) -> bool:
+        if not pending:
+            return False
+        expires_at = float(pending.get("expires_at") or 0.0)
+        return bool(expires_at) and time.time() > expires_at
+
     def get_pending(self, request_id: str) -> Optional[dict]:
-        """Return a copy of a pending approval by id, if present."""
+        """Return a copy of a pending approval by id, if present.
+
+        An expired request is dropped and reported as absent: answering
+        "yes" to a question the wearer was asked an hour ago is not
+        consent to run it now.
+        """
         pending = self._pending_approvals.get(request_id)
         if pending is None:
+            return None
+        if self._expired(pending):
+            self._pending_approvals.pop(request_id, None)
+            logger.info("Approval %s expired before it was answered", request_id)
             return None
         return dict(pending)
 
@@ -633,16 +776,20 @@ class ToolRunner:
         """Persist a per-session approval used to execute a confirmed call."""
         self._approval_mgr.grant_approval(tool_name, session_id, scope="session")
 
-    def approve_pending(self, request_id: str, *, session_id: Optional[str] = None) -> Optional[dict]:
+    def approve_pending(self, request_id: str, *, session_id: Optional[str] = None,
+                        exact_once: bool = False) -> Optional[dict]:
         """Approve a pending request; returns tool_name + args for re-execution."""
         pending = self._pending_approvals.get(request_id)
-        if pending is None:
+        if pending is None or not self.pending_context_valid(pending):
             return None
         if session_id and pending.get("session_id") != session_id:
             return None
         self._pending_approvals.pop(request_id, None)
         logger.info(f"Approved pending request {request_id} for {pending['tool_name']}")
-        return {"tool_name": pending["tool_name"], "args": pending["args"]}
+        result = {"tool_name": pending["tool_name"], "args": pending["args"]}
+        if exact_once:
+            result["approval"] = _ExactApproval(self, pending)
+        return result
 
     def deny_pending(self, request_id: str, *, session_id: Optional[str] = None) -> Optional[dict]:
         """Deny and remove a pending request."""
@@ -864,6 +1011,7 @@ class ToolRunner:
     # ─────────────────────────────────────────────
 
     async def execute_daemon_command(self, session_id: str, node_id: str, action: str, args: dict):
+        self._guard_agent_lease()
         actual_node_id = node_id.replace("daemon_", "")
         daemons = self._orch.daemons
 
@@ -886,6 +1034,7 @@ class ToolRunner:
             return
 
         self._daemon_session_map[request_id] = session_id
+        self._guard_agent_lease()
         await ws.send_json(gate.frame)
         await self._orch._send_text(session_id, f"Action sent to node '{actual_node_id}'...")
 
@@ -911,6 +1060,7 @@ class ToolRunner:
         ``device_target`` work — together they close the loop on the
         operator's complaint #8.
         """
+        self._guard_agent_lease()
         registry = getattr(self._orch, "capability_registry", None)
         if registry is None:
             # Fall back to legacy behaviour for tests / contexts that
@@ -1075,6 +1225,7 @@ class ToolRunner:
           * times out with ``success: False`` after ``timeout`` seconds so a
             misbehaving daemon can't hang the LLM loop.
         """
+        self._guard_agent_lease()
         actual_node_id = node_id.replace("daemon_", "")
         daemons = self._orch.daemons
 
@@ -1109,7 +1260,15 @@ class ToolRunner:
         self._pending_daemon_acks[request_id] = future
         self._daemon_session_map[request_id] = session_id
         try:
+            self._guard_agent_lease()
             await ws.send_json(daemon_msg)
+        except asyncio.CancelledError:
+            self._pending_daemon_acks.pop(request_id, None)
+            self._daemon_session_map.pop(request_id, None)
+            future.cancel()
+            # The transport may already have sent bytes; cancellation is not
+            # evidence of device rollback or a failed physical action.
+            raise
         except Exception as exc:
             self._pending_daemon_acks.pop(request_id, None)
             return {
@@ -1185,8 +1344,64 @@ class ToolRunner:
             if request_id:
                 msg += f"\n\nrequest_id: `{request_id}`"
             await send_text(session_id, msg)
+            await self._push_approval_request(session_id, denial)
         except Exception as exc:
             logger.debug("pending_approval user-notify failed: %s", exc)
+
+    async def _push_approval_request(self, session_id: str, denial: dict) -> None:
+        """Tell every node on this session that something needs an answer.
+
+        Until now a pending approval only reached the Mac web UI, and the
+        phone was told to go and approve it there, which is no use for
+        anything acted on while out of the house.
+
+        `speak` is built here rather than left to the client: a screenless
+        surface has to say a sentence, and one derived from a card layout
+        ends up reading a tool id aloud.
+        """
+        try:
+            from api.state import state as _state
+            push = getattr(_state, "push_to_session_nodes", None)
+            if not callable(push):
+                return
+            tool_name = str(denial.get("tool_name", "") or "")
+            args = denial.get("args") or {}
+            merchant = ""
+            url = args.get("url") if isinstance(args, dict) else ""
+            if isinstance(url, str) and url:
+                from security.commerce import merchant_from_url
+                merchant = merchant_from_url(url)
+            merchant = str(args.get("merchant") or merchant) if isinstance(args, dict) else merchant
+            # Present only when the caller already knows it. A scraped
+            # purchase does not: make_purchase is given no price and
+            # discovers one, so the amount arrives after this point.
+            amount = str(args.get("amount") or "") if isinstance(args, dict) else ""
+            currency = str(args.get("currency") or "") if isinstance(args, dict) else ""
+
+            human = tool_name.replace("__", " ").replace("_", " ").strip() or "an action"
+            if amount and currency:
+                speak = f"Approve {amount} {currency}" + (f" at {merchant}?" if merchant else "?")
+            elif merchant:
+                speak = f"Approve {human} at {merchant}?"
+            else:
+                speak = f"Approve {human}?"
+
+            await push(session_id, {"type": "approval_request", "payload": {
+                "request_id": str(denial.get("request_id", "") or ""),
+                "session_id": session_id,
+                "tool_name": tool_name,
+                "title": human,
+                "detail": str(args.get("item_description") or "") if isinstance(args, dict) else "",
+                "speak": speak,
+                "safety_level": str(denial.get("safety_level", "") or ""),
+                "merchant": merchant,
+                "amount": amount,
+                "currency": currency,
+                "created_at": float(denial.get("created_at") or 0.0),
+                "expires_at": float(denial.get("expires_at") or 0.0),
+            }})
+        except Exception as exc:
+            logger.debug("approval_request push failed: %s", exc)
 
     async def execute_tool_call_for_llm(
         self,
@@ -1195,6 +1410,7 @@ class ToolRunner:
         available_skills,
         *,
         surface: Optional[str] = None,
+        approval: Optional[_ExactApproval] = None,
     ) -> dict:
         """Bind tool-call identity, then run the call.
 
@@ -1204,6 +1420,14 @@ class ToolRunner:
         publishes the identity on a contextvar so implementations can read
         it without a signature change. See ``skills/call_context.py``.
         """
+        if approval is not None:
+            if not isinstance(approval, _ExactApproval) or approval.issuer is not self or approval.used:
+                return make_tool_error_envelope(error_code="invalid_approval", reason="Exact approval is unavailable or already consumed", tool_call_id=tool_call.get("id", ""))
+            approval.used = True
+            if (approval.session_id != session_id or approval.tool_name != tool_call.get("name")
+                    or approval.args != tool_call.get("args")):
+                return make_tool_error_envelope(error_code="invalid_approval", reason="Exact approval does not match this action", tool_call_id=tool_call.get("id", ""))
+        self._guard_agent_lease()
         effective_surface = surface or self._resolve_surface_for_session(session_id)
         # Wave 1's per-tool instrumentation. It lived at the top of the
         # body this method was split out of, so it stays here: once per
@@ -1211,17 +1435,85 @@ class ToolRunner:
         self._record_tool_invocation(
             str(tool_call.get("name") or ""), session_id, effective_surface,
         )
-        with bind_context(
+        with _bind_exact_approval(approval), bind_context(
             session_id=session_id,
             surface=effective_surface,
             tool_name=str(tool_call.get("name") or ""),
             call_id=str(tool_call.get("id") or ""),
             turn_id=self._turn_id_for(session_id),
         ):
-            return await self._execute_tool_call_for_llm_inner(
+            result = await self._execute_tool_call_for_llm_inner(
                 session_id, tool_call, available_skills,
                 effective_surface=effective_surface,
             )
+            self._record_grounding_sources(session_id, result)
+            return result
+
+    #: Attribution links kept per session, capped so one answer cannot
+    #: push an unbounded list onto the reply frame.
+    _GROUNDING_SOURCE_CAP = 10
+
+    def _record_grounding_sources(self, session_id: str, result) -> None:
+        """Keep the attribution links a grounded tool result carried.
+
+        Keyed off ``attribution_required`` rather than a tool-name
+        allowlist, so a future grounded skill is covered by saying so in
+        its result instead of by editing this file.
+
+        The links exist because a provider's terms require them shown in
+        the same interaction as the answer. The reply frame is the only
+        place that reaches the phone, and this is the last layer that
+        still knows which session a tool call belonged to.
+        """
+        if not session_id or not isinstance(result, dict):
+            return
+        payload = result.get("data") if isinstance(result.get("data"), dict) else result
+        if not isinstance(payload, dict) or payload.get("attribution_required") is not True:
+            return
+
+        collected: list[dict] = []
+        seen: set[str] = set()
+
+        def _take(entries) -> None:
+            for entry in entries or []:
+                if not isinstance(entry, dict):
+                    continue
+                url = entry.get("url")
+                title = entry.get("title")
+                if not isinstance(url, str) or not url or url in seen:
+                    continue
+                seen.add(url)
+                collected.append({"title": str(title or "Source"), "url": url})
+
+        _take(payload.get("sources"))
+        for place in payload.get("places") or []:
+            if isinstance(place, dict):
+                _take(place.get("sources"))
+        if not collected:
+            return
+
+        store = getattr(self, "_grounding_sources", None)
+        if store is None:
+            store = {}
+            self._grounding_sources = store
+        existing = store.get(session_id) or []
+        for item in collected:
+            if len(existing) >= self._GROUNDING_SOURCE_CAP:
+                break
+            if all(item["url"] != prior["url"] for prior in existing):
+                existing.append(item)
+        store[session_id] = existing
+
+    def pop_grounding_sources(self, session_id: str) -> list[dict]:
+        """Take this session's pending attribution links, clearing them.
+
+        Cleared on read on purpose: an answer that was not grounded must
+        never inherit the sources of the one before it.
+        """
+        store = getattr(self, "_grounding_sources", None)
+        if not store:
+            return []
+        return store.pop(session_id, [])
 
     async def _screen_external_result(self, tool_name: str, result):
         """Screen an external tool result and mark it if it is not clean.
@@ -1420,9 +1712,15 @@ class ToolRunner:
         if validation.fixed_args is not None:
             args = validation.fixed_args
 
-        result = await self._orch.executor.execute(
-            tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
-        )
+        self._guard_agent_lease()
+        exact = _exact_approval.get()
+        admission = None
+        if exact is not None and exact.issuer is self and exact.used and exact.safety_used:
+            admission = _ExecutorAdmission(self, exact, session_id, tool_name, args)
+        with _bind_executor_admission(admission):
+            result = await self._orch.executor.execute(
+                tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
+            )
 
         result = await self._attach_permission_remediation(session_id, tool_name, result)
 
@@ -1498,6 +1796,7 @@ class ToolRunner:
         *,
         surface: Optional[str] = None,
     ):
+        self._guard_agent_lease()
         effective_surface = surface or self._resolve_surface_for_session(session_id)
         self._record_tool_invocation(
             str(tool_call.get("name") or ""), session_id, effective_surface,
@@ -1574,6 +1873,7 @@ class ToolRunner:
             await self._orch._send_text(session_id, f"Endpoint not found: {endpoint_id}")
             return
 
+        self._guard_agent_lease()
         result = await self._orch.executor.execute(
             tool_name=tool_name, args=args, skill=skill, endpoint=endpoint,
         )
@@ -1600,6 +1900,7 @@ class ToolRunner:
 
     async def spawn_subagents(self, session_id: str, args: dict) -> dict:
         """Run multiple sub-tasks in parallel with isolated subagent contexts."""
+        self._guard_agent_lease()
         # Defence in depth. `_execute_tool_call_for_llm_inner` already
         # refuses `subagent__spawn_subagent` in plan mode, but this method
         # is public and is also reachable via

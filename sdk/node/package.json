@@ -4,19 +4,35 @@
   "description": "FERAL SDK — Build plugins, tools, and device adapters for the FERAL AI operating system.",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
-  "files": ["dist"],
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "build": "tsc",
     "dev": "tsc --watch",
+    "test": "npm run test:unit && npm run test:runtime",
+    "test:unit": "npm run build && node --test tests/client.test.cjs tests/threads.test.cjs tests/plugin.test.cjs",
+    "test:runtime": "npm run build && node --test tests/plugin_runtime.test.cjs",
     "prepublishOnly": "npm run build"
   },
-  "keywords": ["feral", "agent", "sdk", "plugin", "hardware", "genui"],
+  "keywords": [
+    "feral",
+    "agent",
+    "sdk",
+    "plugin",
+    "hardware",
+    "genui"
+  ],
   "license": "Apache-2.0",
   "repository": {
     "type": "git",
     "url": "https://github.com/FERAL-AI/FERAL-AI"
   },
   "devDependencies": {
+    "@types/node": "^22.20.5",
     "typescript": "^5.4.0"
   }
 }

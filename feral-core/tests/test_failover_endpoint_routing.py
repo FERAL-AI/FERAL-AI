@@ -512,48 +512,48 @@ def test_extract_response_success_path_unchanged():
 # ---------------------------------------------------------------------------
 
 
-def _orchestrator() -> Orchestrator:
+def _orchestrator(monkeypatch) -> tuple[Orchestrator, MagicMock, AsyncMock]:
     reg = MagicMock()
     reg.skills = {}
     reg.find_skills_for_query = MagicMock(return_value=[])
     reg.get_tools_for_skills = MagicMock(return_value=[])
+    recorder = AsyncMock()
+    provider = MagicMock()
+    provider.available = True
+    provider.model_name = "gpt-5.6-sol"
+    # Use the constructor's supported defaults for optional collaborators.
+    # These provider-error fixtures intentionally exercise in-memory history.
     orch = Orchestrator(
         skill_registry=reg,
-        send_to_client=AsyncMock(),
+        send_to_client=recorder,
         daemons={},
-        memory=None,
-        vision_buffer=None,
-        perception=None,
-        learner=None,
     )
-    orch.llm = MagicMock()
-    orch.llm.available = True
-    orch.llm.model_name = "gpt-5.6-sol"
     orch._streaming_enabled = False
     orch._multi_agent_enabled = False
-    orch._route_prompt = AsyncMock(return_value=[])
-    orch._maybe_emit_temporal_timeline = AsyncMock(return_value=False)
-    orch._build_system_prompt = AsyncMock(return_value="SYSTEM")
-    return orch
+    orch.set_llm(provider)
+    monkeypatch.setattr(orch, "_route_prompt", AsyncMock(return_value=[]))
+    monkeypatch.setattr(orch, "_maybe_emit_temporal_timeline", AsyncMock(return_value=False))
+    monkeypatch.setattr(orch, "_build_system_prompt", AsyncMock(return_value="SYSTEM"))
+    return orch, provider, recorder
 
 
-def _sent_frames(orch: Orchestrator):
-    return [call.args[1] for call in orch.send.await_args_list]
+def _sent_frames(recorder: AsyncMock):
+    return [call.args[1] for call in recorder.await_args_list]
 
 
 @pytest.mark.asyncio
-async def test_provider_error_dict_becomes_error_frame_not_assistant_text():
-    orch = _orchestrator()
-    orch.llm.chat_with_failover = AsyncMock(
+async def test_provider_error_dict_becomes_error_frame_not_assistant_text(monkeypatch):
+    orch, provider, recorder = _orchestrator(monkeypatch)
+    provider.chat_with_failover = AsyncMock(
         return_value={"error": PROVIDER_ERROR_TEXT, "choices": []},
     )
-    orch.llm.extract_response = MagicMock(return_value=(None, []))
+    provider.extract_response = MagicMock(return_value=(None, []))
     sid = "sess-provider-error"
 
     out = await orch.handle_command(sid, "Can you flash the light screen?")
 
     assert out is None
-    frames = _sent_frames(orch)
+    frames = _sent_frames(recorder)
     types = [frame.type for frame in frames]
     assert "error" in types
     assert "text_response" not in types
@@ -566,16 +566,16 @@ async def test_provider_error_dict_becomes_error_frame_not_assistant_text():
     assert [row["role"] for row in history] == ["user"]
     assert PROVIDER_ERROR_TEXT not in json.dumps(history)
     # One failing call; the empty-response retry must not fire a second one.
-    orch.llm.chat_with_failover.assert_awaited_once()
+    provider.chat_with_failover.assert_awaited_once()
 
 
 @pytest.mark.asyncio
-async def test_multi_agent_provider_error_becomes_error_frame_without_single_agent_retry():
-    orch = _orchestrator()
+async def test_multi_agent_provider_error_becomes_error_frame_without_single_agent_retry(monkeypatch):
+    orch, provider, recorder = _orchestrator(monkeypatch)
     orch._multi_agent_enabled = True
     orch._multi_agent = MagicMock()
     orch._multi_agent.run = AsyncMock(side_effect=MultiAgentProviderError(PROVIDER_ERROR_TEXT))
-    orch.llm.chat_with_failover = AsyncMock(
+    provider.chat_with_failover = AsyncMock(
         return_value={"error": PROVIDER_ERROR_TEXT, "choices": []},
     )
     sid = "sess-multi-agent-error"
@@ -583,12 +583,12 @@ async def test_multi_agent_provider_error_becomes_error_frame_without_single_age
     out = await orch.handle_command(sid, "hello Farrell")
 
     assert out is None
-    frames = _sent_frames(orch)
+    frames = _sent_frames(recorder)
     types = [frame.type for frame in frames]
     assert "error" in types
     assert "text_response" not in types
     assert "sdui" not in types
-    orch.llm.chat_with_failover.assert_not_awaited()
+    provider.chat_with_failover.assert_not_awaited()
     # The multi-agent hand-off runs before the user row is appended, so
     # this turn contributes NO transcript rows at all. What matters
     # either way: the 400 is not stored as anything the model will read
@@ -599,19 +599,19 @@ async def test_multi_agent_provider_error_becomes_error_frame_without_single_age
 
 
 @pytest.mark.asyncio
-async def test_real_text_still_delivered_as_text_response_and_recorded():
+async def test_real_text_still_delivered_as_text_response_and_recorded(monkeypatch):
     """The fix must not touch the success path."""
-    orch = _orchestrator()
-    orch.llm.chat_with_failover = AsyncMock(return_value={
+    orch, provider, recorder = _orchestrator(monkeypatch)
+    provider.chat_with_failover = AsyncMock(return_value={
         "choices": [{"message": {"role": "assistant", "content": "Lights are on."}}],
     })
-    orch.llm.extract_response = MagicMock(return_value=("Lights are on.", []))
+    provider.extract_response = MagicMock(return_value=("Lights are on.", []))
     sid = "sess-real-text"
 
     out = await orch.handle_command(sid, "turn on the lights")
 
     assert out == "Lights are on."
-    types = [frame.type for frame in _sent_frames(orch)]
+    types = [frame.type for frame in _sent_frames(recorder)]
     assert "text_response" in types
     assert "error" not in types
     assert [row["role"] for row in orch.conversation_history[sid]] == ["user", "assistant"]

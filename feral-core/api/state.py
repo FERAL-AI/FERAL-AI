@@ -60,7 +60,10 @@ from gateway.protocol import MethodRegistry, register_core_methods
 from hardware.mesh import HardwareMesh
 from identity.workspace import IdentityWorkspace
 from genui.generator import GenUIEngine, ServiceProviderRegistry
-from providers.catalog import ProviderCatalog, default_cache_path as _default_catalog_cache
+from providers.catalog import (
+    ProviderCatalog,
+    default_cache_path as _default_catalog_cache,
+)
 from skills.impl.browser_use import BrowserController
 from agents.session_handoff import SessionHandoffManager
 from agents.identity_loader import IdentityLoader
@@ -89,17 +92,19 @@ VISION_MAX_FRAME_KB = int(os.environ.get("FERAL_VISION_MAX_FRAME_KB", "512"))
 # -A13: avoid exporting channel/webhook secrets into process-global env
 # when applying ConfigLoader/export_as_env at boot. These credentials are
 # passed explicitly via config objects / channel configs instead.
-_SENSITIVE_ENV_EXPORT_KEYS = frozenset({
-    "FERAL_TELEGRAM_BOT_TOKEN",
-    "FERAL_SLACK_BOT_TOKEN",
-    "FERAL_SLACK_APP_TOKEN",
-    "FERAL_SLACK_SIGNING_SECRET",
-    "FERAL_DISCORD_BOT_TOKEN",
-    "FERAL_WHATSAPP_PHONE_NUMBER_ID",
-    "FERAL_WHATSAPP_ACCESS_TOKEN",
-    "FERAL_WHATSAPP_VERIFY_TOKEN",
-    "FERAL_WHATSAPP_APP_SECRET",
-})
+_SENSITIVE_ENV_EXPORT_KEYS = frozenset(
+    {
+        "FERAL_TELEGRAM_BOT_TOKEN",
+        "FERAL_SLACK_BOT_TOKEN",
+        "FERAL_SLACK_APP_TOKEN",
+        "FERAL_SLACK_SIGNING_SECRET",
+        "FERAL_DISCORD_BOT_TOKEN",
+        "FERAL_WHATSAPP_PHONE_NUMBER_ID",
+        "FERAL_WHATSAPP_ACCESS_TOKEN",
+        "FERAL_WHATSAPP_VERIFY_TOKEN",
+        "FERAL_WHATSAPP_APP_SECRET",
+    }
+)
 
 
 def _should_export_runtime_env_key(key: str) -> bool:
@@ -230,8 +235,12 @@ def _load_configured_vec_index_or_default():
     memory_cfg = settings.get("memory") or {}
     backend_id = memory_cfg.get("backend") or "sqlite_vec"
     MEMORY_BACKEND_STATUS.update(
-        {"configured": backend_id, "active": "sqlite_vec",
-         "fell_back": False, "error": None}
+        {
+            "configured": backend_id,
+            "active": "sqlite_vec",
+            "fell_back": False,
+            "error": None,
+        }
     )
     if backend_id == "sqlite_vec":
         # MemoryStore defaults to sqlite-vec internally; nothing for us
@@ -247,7 +256,8 @@ def _load_configured_vec_index_or_default():
         embedder = _Embedder()
         logger.info(
             "memory.backend=%s — constructing pluggable vector index (dim=%d)",
-            backend_id, embedder.dimension,
+            backend_id,
+            embedder.dimension,
         )
         backend = _load_vec(backend_id, dim=embedder.dimension, **backend_config)
         MEMORY_BACKEND_STATUS["active"] = backend_id
@@ -261,7 +271,9 @@ def _load_configured_vec_index_or_default():
             "sqlite_vec so the brain still boots. Fix the backend (e.g. "
             "`pip install feral-ai[memory-%s]`) or switch back to "
             "sqlite_vec in Settings.",
-            backend_id, exc, backend_id,
+            backend_id,
+            exc,
+            backend_id,
         )
         return None
 
@@ -296,7 +308,52 @@ class VisionBuffer:
 
 class BrainState:
     def __init__(self):
-        self._load_stored_credentials()
+        from security.vault import (
+            native_vault_deferred,
+            register_deferred_vault_coordinator,
+        )
+
+        self._native_vault_deferred = native_vault_deferred()
+        self._native_hydrated_env = {}
+        self._native_previous_llm_credentials = None
+        self._native_bootstrap_required = False
+        self._native_continuation_checkpoint = None
+        self._native_agent_hooks_complete = False
+        self._native_pending_memory_close = []
+        self._native_pending_agent_turns = []
+        self.agent_bootstrap_controller = None
+        self.vault_coordinator = None
+        self.vault_initialization_controller = None
+        self._deferred_vault_facade = None
+        if self._native_vault_deferred:
+            from security.vault_coordinator import (
+                VaultCoordinator,
+                DeferredBootVaultFacade,
+                readonly_vault_factory,
+            )
+            from security.vault_initialization_api import (
+                BoundVaultInitializer, VaultInitializationAPI,
+            )
+            from security.vault_release_acceptance import inspect_vault_release_acceptance
+
+            vault_path = feral_home().absolute() / "credentials.json"
+            self.vault_coordinator = VaultCoordinator(
+                vault_factory=readonly_vault_factory(vault_path),
+                credential_hydrator=self._hydrate_native_vault,
+                disable_dependents=self._disable_native_vault_dependents,
+                fresh_initializer=BoundVaultInitializer(vault_path),
+            )
+            acceptance = inspect_vault_release_acceptance()
+            self.vault_initialization_controller = VaultInitializationAPI(
+                self.vault_coordinator, vault_path,
+                signed_release_accepted=acceptance.accepted,
+            )
+            self._deferred_vault_facade = DeferredBootVaultFacade(
+                self.vault_coordinator
+            )
+            register_deferred_vault_coordinator(self.vault_coordinator)
+        else:
+            self._load_stored_credentials()
         self.config = ConfigLoader()
         self.config.discover()
         for env_key, env_value in self.config.export_as_env().items():
@@ -344,11 +401,19 @@ class BrainState:
         # brain chat"). The primary session also persists across
         # zero-count detaches (see `SessionSnapshotStore` below).
         self.session_attach_count: dict[str, int] = {}
+        self._runtime_context_primary_managed = False
         # Phase 3 — primary thread snapshot store. Persists the last
         # ~50 turns to disk so a brain restart rehydrates them
         # automatically. Loaded later in `init()` after `orchestrator`
         # + `memory` exist.
         self.session_snapshot: Optional[SessionSnapshotStore] = None
+        # History rows restored from the snapshot at boot, per session.
+        # Held by reference: the list keeps the dicts alive, so their id()
+        # values cannot be recycled, and trimming (`history[-N:]`) and
+        # compaction (`[*carried, summary, *preserved]`) both keep the same
+        # objects. The transcript API uses this to tell a row replayed
+        # from disk apart from a turn that happened in this process.
+        self.restored_history_rows: dict[str, list[dict]] = {}
         self.devices: dict[str, dict] = {}
         self.skill_registry = SkillRegistry()
         # Phase 5 (audit-r10 overhaul) — runtime catalog of which
@@ -365,13 +430,24 @@ class BrainState:
         # Non-default backends (``chroma``, ``qdrant``) are built in
         # ``init()`` where their constructors can fail loudly on
         # missing deps without crashing module import.
-        self.memory = MemoryStore(vec_index=_load_configured_vec_index_or_default())
+        try:
+            self.memory = MemoryStore(vec_index=_load_configured_vec_index_or_default())
+        except Exception as exc:
+            from security.vault_coordinator import VaultLockedRefusal
+
+            if not self._native_vault_deferred or not isinstance(
+                exc, VaultLockedRefusal
+            ):
+                raise
+            self.memory = None
+            self._native_bootstrap_required = True
         self.vision_buffer = VisionBuffer()
         # HUP v1.3.0 §5.4.3 — per-device ring buffer for smart-glasses
         # (and glasses-equivalent phone-camera fallback) frames. Lane
         # 11 writes via api.server._handle_glasses_frame; Lane 08
         # reads via perception/context_attach.py.
         from perception.glasses_buffer import GlassesBuffer, set_glasses_buffer
+
         self.glasses_buffer = GlassesBuffer()
         # Publish THIS instance as the process-wide buffer. The reader
         # (perception/context_attach.py) resolves the buffer through
@@ -436,6 +512,7 @@ class BrainState:
         self.activity_log: deque = deque(maxlen=100)
         self.gemini_proxy: Optional[GeminiRealtimeProxy] = None
         self.gateway_registry: Optional[MethodRegistry] = None
+        self.chat_turns = None
         self.hardware_mesh: Optional[HardwareMesh] = None
         self.hardware_orchestrator = None
         self.identity_workspace: Optional[IdentityWorkspace] = None
@@ -532,6 +609,7 @@ class BrainState:
         # Tasks are auto-discarded on completion so the set doesn't grow
         # unboundedly during a long-running brain.
         import asyncio as _aio
+
         self._background_tasks: "set[_aio.Task]" = set()
 
     # ------------------------------------------------------------------
@@ -597,7 +675,11 @@ class BrainState:
             return
         if manifest is None:
             return
-        dev_id = device_id or getattr(manifest, "device_id", "") or getattr(adapter, "device_id", "")
+        dev_id = (
+            device_id
+            or getattr(manifest, "device_id", "")
+            or getattr(adapter, "device_id", "")
+        )
         if not dev_id:
             return
         try:
@@ -682,6 +764,7 @@ class BrainState:
         shutdown can continue to the next phase (LLM close, etc.).
         """
         import asyncio as _aio
+
         tasks = [t for t in list(self._background_tasks) if not t.done()]
         for t in tasks:
             t.cancel()
@@ -694,7 +777,8 @@ class BrainState:
             except _aio.TimeoutError:
                 logger.warning(
                     "shutdown_background_tasks: %d tasks did not exit within %.1fs",
-                    len(tasks), timeout,
+                    len(tasks),
+                    timeout,
                 )
         self._background_tasks.clear()
         return len(tasks)
@@ -715,7 +799,7 @@ class BrainState:
         ``api/routes/dashboard.py:_get_dashboard_data`` — walk every
         active session's perception frame, keep the freshest sample
         per metric within the 120 s context window, and only consider
-        sources tagged as live wearables (Theora W300 glasses, Veepoo
+        sources tagged as live wearables (Theora glasses, Veepoo
         wristband, etc.). HealthKit / cloud-mirror sources are
         intentionally NOT surfaced as ``current_*`` because they're
         already reflected in the resting/recovery slots from the
@@ -781,7 +865,145 @@ class BrainState:
             snap["skin_temperature_c"] = skin_temp_c
         return snap
 
+    def _hydrate_native_vault(self, opened):
+        """Activate authenticated local credentials without probing providers.
+
+        Encrypted-memory restoration may complete, but a previously blocked
+        full agent bootstrap remains a separately reported pending action.
+        Federation and background integration jobs are not started here.
+        """
+        from security.vault_keys import _PROVIDER_ENV_KEYS, get_active_provider_key
+        from api.routes.config import _is_accepted_env_key, _should_export_to_env
+
+        credentials = {}
+        for name in opened.list_keys():
+            value = opened.get_credential(name)
+            if isinstance(value, str) and _is_accepted_env_key(name):
+                credentials[name] = value
+        for provider, env_name in _PROVIDER_ENV_KEYS.items():
+            if not os.environ.get(env_name):
+                value = get_active_provider_key(provider, vault=opened)
+                if value:
+                    credentials[env_name] = value
+        for name, value in credentials.items():
+            if (
+                _should_export_runtime_env_key(name)
+                and _should_export_to_env(name)
+                and not os.environ.get(name)
+            ):
+                previous = os.environ.get(name)
+                os.environ[name] = value
+                self._native_hydrated_env[name] = (previous, value)
+        self.config._credentials = credentials
+        if self.memory is None:
+            # Explicit authenticated injection bypasses deferred global reads;
+            # encrypted memory never opens a fallback plaintext database.
+            self.memory = MemoryStore(authenticated_vault=opened)
+        llm = getattr(getattr(self, "orchestrator", None), "llm", None)
+        if llm is not None:
+            key_name = _PROVIDER_ENV_KEYS.get(llm.provider, "")
+            key = os.environ.get(key_name, "") if key_name else ""
+            if key and llm.provider not in ("ollama", "lmstudio", "codex"):
+                previous_headers = (
+                    dict(llm.client.headers)
+                    if getattr(llm, "client", None) is not None
+                    else None
+                )
+                self._native_previous_llm_credentials = (
+                    llm,
+                    llm.api_key,
+                    key,
+                    previous_headers,
+                )
+                llm.api_key = key
+                if getattr(llm, "client", None) is not None:
+                    if llm.provider == "anthropic":
+                        llm.client.headers["x-api-key"] = key
+                    else:
+                        llm.client.headers["Authorization"] = f"Bearer {key}"
+        # Keep the facade until after coordinator readiness; load only token
+        # values, never prune pending states or start refresh/probe jobs here.
+        if getattr(self, "oauth", None) is not None:
+            self.oauth._vault = opened
+            self.oauth.reload_providers()
+            self.oauth._load_tokens()
+        self.vault = opened
+
+    def _disable_native_vault_dependents(self):
+        controller = getattr(self, "agent_bootstrap_controller", None)
+        teardown_owned = controller.invalidate() if controller is not None else False
+        from security.agent_turn_lease import invalidate_agent_turns
+
+        turns = invalidate_agent_turns(self)
+        self._native_pending_agent_turns.extend(turns)
+        teardown_owned = teardown_owned or bool(turns)
+        self.vault = None
+        if hasattr(self, "config"):
+            self.config._credentials = {}
+        if (
+            self._native_bootstrap_required
+            and getattr(self, "memory", None) is not None
+        ):
+            memory = self.memory
+            self.memory = None  # Unavailable to new actions immediately.
+            if teardown_owned:
+                # Producers may retain the restored MemoryStore. The owned
+                # continuation teardown drains them before closing this object.
+                self._native_pending_memory_close.append(memory)
+            else:
+                memory.close()
+        for name, (previous, activated) in self._native_hydrated_env.items():
+            if os.environ.get(name) == activated:
+                if previous is None:
+                    os.environ.pop(name, None)
+                else:
+                    os.environ[name] = previous
+        self._native_hydrated_env.clear()
+        oauth = getattr(self, "oauth", None)
+        if oauth is not None:
+            oauth._vault = self._deferred_vault_facade
+            oauth._tokens.clear()
+            oauth._pending_states.clear()
+        previous = self._native_previous_llm_credentials
+        if previous is not None:
+            llm, old_key, activated, headers = previous
+            if llm.api_key == activated:
+                llm.api_key = old_key
+                if headers is not None and getattr(llm, "client", None) is not None:
+                    llm.client.headers.clear()
+                    llm.client.headers.update(headers)
+        self._native_previous_llm_credentials = None
+
+    async def _checked_bootstrap_await(self, operation):
+        # Cancellation is a BaseException, so optional boot_subsystem blocks
+        # cannot swallow an identity change and continue credential use.
+        import asyncio
+
+        checkpoint = self._native_continuation_checkpoint
+        try:
+            if checkpoint is not None:
+                checkpoint()
+        except Exception:
+            close = getattr(operation, "close", None)
+            if callable(close):
+                close()
+            raise asyncio.CancelledError() from None
+        result = await operation
+        try:
+            if checkpoint is not None:
+                checkpoint()
+        except Exception:
+            raise asyncio.CancelledError() from None
+        return result
+
     async def init(self):
+        if self._native_vault_deferred and self.memory is None:
+            self._native_bootstrap_required = True
+            self._boot_report.mark_degraded(
+                "EncryptedMemory",
+                "Stored memory is locked. HTTP security remains available; no plaintext fallback or agent bootstrap was started.",
+            )
+            return
         _boot_start = time.time()
         with boot_subsystem(self._boot_report, "SkillRegistry", optional=False):
             self.skill_registry.load_builtin_skills()
@@ -793,6 +1015,7 @@ class BrainState:
                 default_personas_dir,
                 default_workflow_packs_dir,
             )
+
             self.personas = load_personas(default_personas_dir())
             self.workflow_packs = load_workflow_packs(default_workflow_packs_dir())
 
@@ -806,6 +1029,7 @@ class BrainState:
                 default_consciousness_db_path,
                 default_snapshot_path,
             )
+
             self.consciousness = ConsciousnessStore(default_consciousness_db_path())
 
             # Broadcast any state mutation to every connected v2 client
@@ -815,6 +1039,7 @@ class BrainState:
             def _on_consciousness_change(event_name: str, payload: dict) -> None:
                 try:
                     import asyncio as _aio
+
                     loop = _aio.get_running_loop()
                 except RuntimeError:
                     return  # no loop (e.g. during boot) — broadcast is optional
@@ -845,8 +1070,11 @@ class BrainState:
             if snap.exists():
                 try:
                     import json as _json
+
                     restored = self.consciousness.restore(_json.loads(snap.read_text()))
-                    logger.info("Consciousness: restored %d entities from %s", restored, snap)
+                    logger.info(
+                        "Consciousness: restored %d entities from %s", restored, snap
+                    )
                 except Exception as exc:
                     logger.warning("Consciousness snapshot restore skipped: %s", exc)
 
@@ -860,6 +1088,7 @@ class BrainState:
             def _on_subdevice_change(event_name: str, payload: dict) -> None:
                 try:
                     import asyncio as _aio
+
                     loop = _aio.get_running_loop()
                 except RuntimeError:
                     return  # no loop (e.g. boot phase) — broadcast is optional
@@ -883,6 +1112,7 @@ class BrainState:
             # tracker) so this is safe to run forever.
             async def _subdevice_liveness_loop():
                 import asyncio as _aio
+
                 while True:
                     await _aio.sleep(5.0)
                     try:
@@ -891,6 +1121,7 @@ class BrainState:
                         logger.debug("subdevice sweep failed: %s", exc)
 
             import asyncio as _aio_subdev
+
             self.register_background_task(
                 _aio_subdev.create_task(
                     _subdevice_liveness_loop(),
@@ -915,9 +1146,11 @@ class BrainState:
             # boot self-heal + classifier fix. Single source of truth
             # = single catalog.
             from providers.catalog import set_shared_catalog
+
             set_shared_catalog(self.provider_catalog)
 
         from agents.llm_provider import LLMProvider
+
         def _llm_is_coherent():
             """The config error that produced 610 silent 401s.
 
@@ -941,13 +1174,16 @@ class BrainState:
                 str(cfg.get("provider") or ""), cfg.get("base_url")
             )
 
-        with boot_subsystem(self._boot_report, "LLMProvider", optional=False,
-                            verify=_llm_is_coherent):
+        with boot_subsystem(
+            self._boot_report, "LLMProvider", optional=False, verify=_llm_is_coherent
+        ):
             _shared_llm = LLMProvider()
             if self.provider_catalog is not None:
                 _shared_llm.set_catalog(self.provider_catalog)
             try:
-                _llm_cfg = dict(self.config._merged.get("llm", {})) if self.config else {}
+                _llm_cfg = (
+                    dict(self.config._merged.get("llm", {})) if self.config else {}
+                )
             except Exception:
                 _llm_cfg = {}
             if _llm_cfg:
@@ -970,26 +1206,32 @@ class BrainState:
             # Idempotent when the vault is empty.
             try:
                 from security.vault_keys import get_active_key as _get_active_key
+
                 _labeled = _get_active_key(_shared_llm.provider)
                 if _labeled and _labeled != getattr(_shared_llm, "api_key", ""):
                     _shared_llm.api_key = _labeled
                     _old = getattr(_shared_llm, "client", None)
                     if _old is not None:
                         try:
-                            await _old.aclose()
+                            await self._checked_bootstrap_await(_old.aclose())
                         except Exception:
                             pass
                     _shared_llm.client = _shared_llm._build_client()
                     if not _shared_llm.available:
-                        _shared_llm.available = bool(_shared_llm.api_key) and bool(_shared_llm.base_url)
+                        _shared_llm.available = bool(_shared_llm.api_key) and bool(
+                            _shared_llm.base_url
+                        )
                     logger.info(
                         "vault_keys: hydrated labeled active key for provider=%s "
-                        "(available=%s)", _shared_llm.provider, _shared_llm.available,
+                        "(available=%s)",
+                        _shared_llm.provider,
+                        _shared_llm.available,
                     )
             except Exception as exc:
                 logger.warning(
                     "vault_keys: post-LLMProvider hydration failed: %s "
-                    "(brain falls back to env / legacy vault credential)", exc,
+                    "(brain falls back to env / legacy vault credential)",
+                    exc,
                 )
 
             # Self-heal contract (operator report 2026-05-09):
@@ -1007,6 +1249,7 @@ class BrainState:
             # tests/test_llm_model_self_heal.py.
             try:
                 from providers.model_classes import classify
+
                 _model = (_shared_llm.model or "").strip()
                 _provider = _shared_llm.provider
                 _cls = classify(_provider, _model) if _model else "unknown"
@@ -1015,11 +1258,14 @@ class BrainState:
                     healed = ""
                     if self.provider_catalog is not None:
                         try:
-                            healed = self.provider_catalog.default_model_for(_provider) or ""
+                            healed = (
+                                self.provider_catalog.default_model_for(_provider) or ""
+                            )
                         except Exception as exc:
                             logger.warning(
                                 "self_heal_llm_model: catalog lookup failed for %s: %s",
-                                _provider, exc,
+                                _provider,
+                                exc,
                             )
                     if healed and classify(_provider, healed) in {"chat", "reasoning"}:
                         logger.warning(
@@ -1028,7 +1274,10 @@ class BrainState:
                             "to settings.json. The original value was likely "
                             "written by an older auto-picker that pre-dated the "
                             "dated-snapshot classifier fix.",
-                            _model, _cls, _provider, healed,
+                            _model,
+                            _cls,
+                            _provider,
+                            healed,
                         )
                         _shared_llm.model = healed
                         os.environ["FERAL_LLM_MODEL"] = healed
@@ -1046,7 +1295,9 @@ class BrainState:
                             "no chat-class default was available from the catalog. "
                             "Chat completions will fail until the operator picks a "
                             "real chat/reasoning model in Settings → Providers.",
-                            _model, _cls, _provider,
+                            _model,
+                            _cls,
+                            _provider,
                         )
             except Exception as exc:
                 # Self-heal must NEVER block boot; degrade gracefully.
@@ -1085,6 +1336,7 @@ class BrainState:
                     is_supported_runtime_provider,
                     _resolve_api_key,
                 )
+
                 tracker = getattr(_shared_llm, "_cooldown", None)
                 if isinstance(tracker, ProviderCooldownTracker):
                     cleared = tracker.clear()
@@ -1103,7 +1355,9 @@ class BrainState:
                 # failover loop on a local server that isn't running).
                 cfg_fallbacks: list[str] = []
                 try:
-                    cfg_fallbacks = list(_shared_llm._config.get("fallback_providers", []) or [])
+                    cfg_fallbacks = list(
+                        _shared_llm._config.get("fallback_providers", []) or []
+                    )
                 except Exception:
                     cfg_fallbacks = []
                 seen = {_shared_llm.provider, *cfg_fallbacks}
@@ -1122,11 +1376,15 @@ class BrainState:
                         extended.append(pid)
                         seen.add(pid)
                 if extended != cfg_fallbacks:
-                    _shared_llm._config = {**_shared_llm._config, "fallback_providers": extended}
+                    _shared_llm._config = {
+                        **_shared_llm._config,
+                        "fallback_providers": extended,
+                    }
                     logger.info(
                         "llm_failover: extended fallback chain at boot from %s to %s "
                         "(every supported provider with a configured key).",
-                        cfg_fallbacks, extended,
+                        cfg_fallbacks,
+                        extended,
                     )
             except Exception as exc:
                 logger.warning("llm_failover boot self-heal skipped: %s", exc)
@@ -1140,6 +1398,7 @@ class BrainState:
         from cost.budget import CostBudget
         from cost.loop_guard import BudgetLoopGuard
         from config.loader import load_settings as _load_settings
+
         try:
             self.cost_budget = CostBudget(settings=_load_settings())
         except Exception as exc:
@@ -1177,6 +1436,7 @@ class BrainState:
         # ``service.start()`` itself.
         from memory.decay import DecayConfig, MemoryDecayService
         from config.loader import load_settings as _load_settings
+
         self.memory_decay = MemoryDecayService(
             self.memory,
             DecayConfig.from_settings(_load_settings()),
@@ -1190,7 +1450,15 @@ class BrainState:
             skill_registry=self.skill_registry,
         )
 
-        self.vault = BlindVault()
+        if self._native_vault_deferred:
+            # Native unlock already authenticated this exact object. Never
+            # replace it or perform another OS keychain read during continuation.
+            if self._native_continuation_checkpoint is not None:
+                self.vault = self.vault_coordinator.require_ready()
+            else:
+                self.vault = None
+        else:
+            self.vault = BlindVault()
         self.sandbox = ExecutionSandbox(
             max_tier=os.environ.get("FERAL_MAX_TIER", "active")
         )
@@ -1202,9 +1470,16 @@ class BrainState:
         # ``$FERAL_HOME/sync_passphrase.first_boot`` chmod 0600) so
         # the operator can pair another brain. Pre-fix, an unset env
         # var made /sync a zero-auth endpoint.
-        with boot_subsystem(self._boot_report, "SyncPassphrase"):
-            from memory.sync import ensure_sync_passphrase
-            ensure_sync_passphrase()
+        if not self._native_vault_deferred:
+            with boot_subsystem(self._boot_report, "SyncPassphrase"):
+                from memory.sync import ensure_sync_passphrase
+
+                ensure_sync_passphrase()
+        else:
+            self._boot_report.mark_degraded(
+                "SyncPassphrase",
+                "Credential-dependent federation is dormant until explicit secure activation.",
+            )
 
         self.policy = SandboxPolicy.load_default()
         self.device_registry = DeviceRegistry()
@@ -1215,10 +1490,14 @@ class BrainState:
         )
         self.mcp_client = MCPClientManager()
         with boot_subsystem(self._boot_report, "MCPClientManager"):
-            await self.mcp_client.load_and_connect()
+            await self._checked_bootstrap_await(self.mcp_client.load_and_connect())
         self.channel_manager = ChannelManager()
 
-        self.oauth = OAuthManager(vault=self.vault)
+        self.oauth = OAuthManager(
+            vault=self._deferred_vault_facade
+            if self._native_vault_deferred
+            else self.vault
+        )
         self.spotify = SpotifyIntegration(oauth_manager=self.oauth)
         self.home_assistant = HomeAssistantIntegration(oauth_manager=self.oauth)
         self.notion = NotionIntegration(oauth_manager=self.oauth)
@@ -1240,8 +1519,8 @@ class BrainState:
             # load and the integration read as unconfigured forever.
             oura = OuraClient(oauth_manager=self.oauth)
             # Operator report 2026-06-07: chat ran the health_summary
-            # tool and answered "no current data" while the W300
-            # glasses were streaming HR into the perception frame.
+            # tool and answered "no current data" while the glasses
+            # were streaming HR into the perception frame.
             # Whoop and Oura were both disconnected, so the previous
             # aggregator returned an empty snapshot. Inject a closure
             # over ``state.perception`` so the aggregator can surface
@@ -1266,6 +1545,7 @@ class BrainState:
             # BaselineEngine lookup past construction order and keeps
             # ``integrations`` free of an ``api.state`` import.
             from integrations.health_sync import WhoopDurableSync
+
             self.whoop_sync = WhoopDurableSync(
                 whoop=whoop,
                 store_provider=lambda: self.baseline_engine,
@@ -1279,17 +1559,23 @@ class BrainState:
             )
         with boot_subsystem(self._boot_report, "LocationEngine"):
             from perception.location import LocationEngine
+
             self.location_engine = LocationEngine()
         with boot_subsystem(self._boot_report, "PushChannel"):
             from channels.push import PushChannel
+
             self.push_channel = PushChannel()
         with boot_subsystem(self._boot_report, "DigitalTwin"):
             from agents.digital_twin import DigitalTwin
+
             _identity_loader = IdentityLoader(memory=self.memory)
-            self.digital_twin = DigitalTwin(memory=self.memory, identity_loader=_identity_loader, llm=_shared_llm)
+            self.digital_twin = DigitalTwin(
+                memory=self.memory, identity_loader=_identity_loader, llm=_shared_llm
+            )
 
             from skills.impl.digital_twin_skill import set_twin, DigitalTwinSkillBridge
             from skills.impl import register_instance as _register_twin
+
             set_twin(self.digital_twin)
             _register_twin("digital_twin", DigitalTwinSkillBridge())
         self.event_bus = EventBus()
@@ -1303,12 +1589,16 @@ class BrainState:
         # secrets win).
         if self.webhook_store is None:
             from integrations.webhook_store import WebhookStore
+
             self.webhook_store = WebhookStore()
         self.webhook_receiver = WebhookReceiver(
-            event_bus=self.event_bus, store=self.webhook_store,
+            event_bus=self.event_bus,
+            store=self.webhook_store,
         )
         with boot_subsystem(self._boot_report, "WebhookReceiverHydrate"):
-            await self.webhook_receiver.hydrate_from_store()
+            await self._checked_bootstrap_await(
+                self.webhook_receiver.hydrate_from_store()
+            )
         self.marketplace = MarketplaceClient(skill_registry=self.skill_registry)
 
         # v2026.5.34 (PR 2 D12): the HLC node_id is now a persistent
@@ -1318,33 +1608,44 @@ class BrainState:
         # crash got every op replayed. ``stable_node_id`` writes a
         # one-shot UUID-v7-shaped value to
         # ``~/.feral/sync_node_id`` and re-reads it on every boot.
-        from memory.sync import stable_node_id
-        sync_node_id = stable_node_id()
-        self.sync_engine = SyncEngine(node_id=sync_node_id, memory_store=self.memory)
-        # Bind the engine to THIS brain's roster rather than letting it
-        # fall back to the process global. ``/sync`` already reads
-        # ``state.peer_roster`` for authentication, and the scope
-        # grants the engine enforces have to come off the same roster
-        # or a grant an operator can see in `feral sync peer list`
-        # would not be the one the exchange honours.
-        self.sync_engine.set_peer_roster(self.peer_roster)
-        self.memory.set_sync_engine(self.sync_engine)
-        await self.sync_engine.start_discovery()
+        if not self._native_vault_deferred:
+            from memory.sync import stable_node_id
 
-        # v2026.5.34 (PR 2 D12): kick the SyncScheduler — it walks
-        # every known peer on a cadence, applies exponential
-        # backoff to flaky ones, and exposes per-peer health to
-        # /api/sync/status. start() is a no-op when
-        # settings.memory.sync.enabled is false.
-        from memory.sync_scheduler import SchedulerConfig, SyncScheduler
-        self.sync_scheduler = SyncScheduler(
-            self.sync_engine,
-            SchedulerConfig.from_settings(_load_settings()),
-        )
-        try:
-            await self.sync_scheduler.start()
-        except Exception as exc:
-            logger.warning("SyncScheduler.start() failed: %s", exc)
+            sync_node_id = stable_node_id()
+            self.sync_engine = SyncEngine(
+                node_id=sync_node_id, memory_store=self.memory
+            )
+            # Bind the engine to THIS brain's roster rather than letting it
+            # fall back to the process global. ``/sync`` already reads
+            # ``state.peer_roster`` for authentication, and the scope
+            # grants the engine enforces have to come off the same roster
+            # or a grant an operator can see in `feral sync peer list`
+            # would not be the one the exchange honours.
+            self.sync_engine.set_peer_roster(self.peer_roster)
+            self.memory.set_sync_engine(self.sync_engine)
+            await self._checked_bootstrap_await(self.sync_engine.start_discovery())
+
+            # v2026.5.34 (PR 2 D12): kick the SyncScheduler — it walks
+            # every known peer on a cadence, applies exponential
+            # backoff to flaky ones, and exposes per-peer health to
+            # /api/sync/status. start() is a no-op when
+            # settings.memory.sync.enabled is false.
+            from memory.sync_scheduler import SchedulerConfig, SyncScheduler
+
+            self.sync_scheduler = SyncScheduler(
+                self.sync_engine,
+                SchedulerConfig.from_settings(_load_settings()),
+            )
+            try:
+                await self._checked_bootstrap_await(self.sync_scheduler.start())
+            except Exception as exc:
+                logger.warning("SyncScheduler.start() failed: %s", exc)
+
+        else:
+            self._boot_report.mark_degraded(
+                "SyncScheduler",
+                "Federation remains dormant; unlock alone does not activate network synchronization.",
+            )
 
         # v2026.5.34 (PR 2 D11): kick the decay sweeper. ``start()``
         # is a no-op when ``settings.memory.decay.enabled`` is false,
@@ -1354,7 +1655,7 @@ class BrainState:
         # is unbounded episode growth, which a follow-up cron can
         # clean up.
         try:
-            await self.memory_decay.start()
+            await self._checked_bootstrap_await(self.memory_decay.start())
         except Exception as exc:
             logger.warning("MemoryDecayService.start() failed: %s", exc)
 
@@ -1366,7 +1667,9 @@ class BrainState:
         # disabling it.
         if self.orchestrator:
             try:
-                await self.orchestrator.start_consolidation_scheduler()
+                await self._checked_bootstrap_await(
+                    self.orchestrator.start_consolidation_scheduler()
+                )
             except Exception as exc:
                 logger.warning("consolidation scheduler start failed: %s", exc)
 
@@ -1380,13 +1683,18 @@ class BrainState:
         # the read/write code paths stay on the flat table.
         try:
             from config.loader import load_settings as _load_settings
+
             f1_settings = _load_settings() or {}
         except Exception:
             f1_settings = {}
-        unified = bool(((f1_settings.get("memory") or {}).get("kg") or {}).get("unified", True))
+        unified = bool(
+            ((f1_settings.get("memory") or {}).get("kg") or {}).get("unified", True)
+        )
         if unified and self.memory:
             try:
-                result = await self.memory.migrate_knowledge_to_kg()
+                result = await self._checked_bootstrap_await(
+                    self.memory.migrate_knowledge_to_kg()
+                )
                 if result.get("ported") or result.get("deprecated"):
                     logger.info(
                         "F1 KG migration: ported=%d skipped=%d deprecated=%s",
@@ -1405,11 +1713,15 @@ class BrainState:
         # FERAL_WAKE_WORD (and persists in config) when the user
         # consents. Pre-2026.5.13 builds defaulted to ON, which made
         # privacy-sensitive testers uncomfortable.
-        self.wake_word = WakeWordDetector(WakeWordConfig(
-            enabled=os.getenv("FERAL_WAKE_WORD", "false").lower() in ("true", "1", "yes"),
-        ))
+        self.wake_word = WakeWordDetector(
+            WakeWordConfig(
+                enabled=os.getenv("FERAL_WAKE_WORD", "false").lower()
+                in ("true", "1", "yes"),
+            )
+        )
 
         from skills.impl import register_instance
+
         if self.spotify:
             register_instance("spotify_music", self.spotify)
         if self.home_assistant:
@@ -1454,17 +1766,19 @@ class BrainState:
                 memory_store=self.memory,
                 skill_registry=self.skill_registry,
             )
-            await self.taskflows.start()
+            await self._checked_bootstrap_await(self.taskflows.start())
 
         with boot_subsystem(self._boot_report, "UploadStore"):
             # PR 10: canonical chat-attachment store. Lives entirely on
             # local disk under $FERAL_HOME/uploads and never auto-syncs
             # anywhere — local-first contract.
             from memory.uploads import UploadStore
+
             self.uploads = UploadStore()
 
         with boot_subsystem(self._boot_report, "ApprovalManager"):
             from security.exec_approvals import ApprovalManager
+
             self.approval_manager = ApprovalManager()
 
         with boot_subsystem(self._boot_report, "Orchestrator", optional=False):
@@ -1479,7 +1793,17 @@ class BrainState:
                 taskflows=self.taskflows,
                 approval_manager=self.approval_manager,
             )
+            # Bind this runner before any await or background subsystem can
+            # dispatch a tool. Pending reviewed startup is fenced; successful
+            # commit keeps the same generation, while lock revokes it forever.
+            from security.agent_turn_lease import attach_agent_dispatch_lease
+
+            attach_agent_dispatch_lease(self)
             self.orchestrator.set_llm(_shared_llm)
+            # Install before channels, gateway methods or legacy snapshots can
+            # hydrate/write a thread. Unknown legacy identities remain legacy;
+            # known ledger identities cannot bypass their checkpoint fence.
+            await self._checked_bootstrap_await(self.prepare_runtime_context_checkpoints())
             # Live-voice "different event loop" fix: pin the
             # orchestrator's owning loop to the brain's main loop the
             # moment the orchestrator is constructed inside ``BrainState.init``,
@@ -1494,6 +1818,7 @@ class BrainState:
             # ``device_action`` episode. See ``Orchestrator._owning_loop``.
             try:
                 import asyncio as _aio_owning
+
                 self.orchestrator.set_owning_loop(_aio_owning.get_running_loop())
             except RuntimeError:
                 # Should be unreachable inside an async ``init``; keep
@@ -1531,7 +1856,9 @@ class BrainState:
             try:
                 _autonomy_env = os.environ.get("FERAL_AUTONOMY", "").strip().lower()
                 if not _autonomy_env and self.config:
-                    cfg_get = getattr(self.config, "get_setting", None) or self.config.get
+                    cfg_get = (
+                        getattr(self.config, "get_setting", None) or self.config.get
+                    )
                     _persisted = ""
                     if cfg_get is self.config.get:
                         # `ConfigLoader.get(section, key)` is the
@@ -1564,7 +1891,9 @@ class BrainState:
             # reference back to BrainState so it can call us.
             try:
                 self.session_snapshot = SessionSnapshotStore(feral_data_home())
-                self.orchestrator.set_session_snapshot_hook(self.snapshot_primary_thread)
+                self.orchestrator.set_session_snapshot_hook(
+                    self.snapshot_primary_thread
+                )
                 self._hydrate_primary_thread_from_snapshot()
             except Exception as snap_exc:
                 logger.warning(
@@ -1593,7 +1922,9 @@ class BrainState:
             try:
                 from skills.desktop_control import BRAIN_HOST_MANIFESTS
 
-                self.capability_registry.register_brain_host_skills(BRAIN_HOST_MANIFESTS)
+                self.capability_registry.register_brain_host_skills(
+                    BRAIN_HOST_MANIFESTS
+                )
                 logger.info(
                     "Registered %d brain-host desktop_control skill manifests",
                     len(BRAIN_HOST_MANIFESTS),
@@ -1633,22 +1964,27 @@ class BrainState:
             def _broadcast_supervisor_event(frame: dict):
                 if not self.sessions:
                     return None
+
                 async def _fan():
                     for sid in list(self.sessions.keys()):
                         try:
                             await self.send_to_session(sid, frame)
                         except Exception:
                             pass
+
                 return _fan()
 
             self.supervisor = _Supervisor(broadcaster=_broadcast_supervisor_event)
             self.supervisor.wrap(self.orchestrator)
+            if self.taskflows is not None:
+                self.taskflows._supervisor = self.supervisor
 
         with boot_subsystem(self._boot_report, "TwinPolicyEngine"):
             # Digital-twin policy + approval queue. The twin's execute()
             # checks this engine before acting on the user's behalf; the
             # engine in turn respects the Supervisor kill switch.
             from agents.twin_policy import TwinPolicyEngine as _TPE
+
             self.twin_policy = _TPE(supervisor=self.supervisor)
             if self.digital_twin is not None:
                 self.digital_twin.set_policy_engine(self.twin_policy)
@@ -1656,7 +1992,9 @@ class BrainState:
         with boot_subsystem(self._boot_report, "RealtimeProxy"):
             self.realtime_proxy = RealtimeProxy(
                 skill_registry=self.skill_registry,
-                skill_executor=self.orchestrator.executor if self.orchestrator else None,
+                skill_executor=self.orchestrator.executor
+                if self.orchestrator
+                else None,
                 memory=self.memory,
                 perception=self.perception,
                 send_to_node=self._send_dict_to_node,
@@ -1706,7 +2044,9 @@ class BrainState:
         with boot_subsystem(self._boot_report, "GeminiRealtimeProxy"):
             self.gemini_proxy = GeminiRealtimeProxy(
                 skill_registry=self.skill_registry,
-                skill_executor=self.orchestrator.executor if self.orchestrator else None,
+                skill_executor=self.orchestrator.executor
+                if self.orchestrator
+                else None,
                 memory=self.memory,
                 perception=self.perception,
                 send_to_node=self._send_dict_to_node,
@@ -1757,6 +2097,8 @@ class BrainState:
             )
 
         with boot_subsystem(self._boot_report, "MethodRegistry"):
+            from agents.chat_turns import get_chat_turn_manager
+            await get_chat_turn_manager(self).start()
             self.gateway_registry = MethodRegistry()
             register_core_methods(self.gateway_registry, self)
 
@@ -1796,7 +2138,11 @@ class BrainState:
                     # runtime self-description (QtBot.capabilities()["actions"])
                     # rather than a static fallback. Registration + the generic
                     # skill then expose exactly what the device reports.
-                    connected = await adapter.connect()
+                    if self._native_continuation_checkpoint is not None:
+                        # Capture before awaiting connect so cancellation cannot
+                        # strand a connected adapter before publication.
+                        self._native_continuation_resources.append(adapter)
+                    connected = await self._checked_bootstrap_await(adapter.connect())
                     self.device_registry.register_device(adapter.manifest, adapter)
                     self._register_generic_hardware_skill(adapter)
                     if connected:
@@ -1828,6 +2174,7 @@ class BrainState:
                 is_enabled as _mock_roomba_enabled,
                 register_with_mesh as _register_mock_roomba,
             )
+
             self.mock_roomba = None
             if _mock_roomba_enabled():
                 self.mock_roomba = MockRoomba(memory=self.memory)
@@ -1839,7 +2186,11 @@ class BrainState:
 
         self.screen_loop = None
         with boot_subsystem(self._boot_report, "ScreenLoop"):
-            from perception.screen_loop import ScreenLoop
+            from perception.screen_loop import (
+                ScreenLoop,
+                ambient_screen_capture_allowed,
+            )
+
             self.screen_loop = ScreenLoop(
                 perception=self.perception,
                 memory=self.memory,
@@ -1853,8 +2204,12 @@ class BrainState:
             # regardless of ``features.vision`` / ``vision.enabled``.
             # The config loader coalesces both keys into
             # ``FERAL_VISION_ENABLED`` (see ``config/loader.py``).
-            if _feature_flag_enabled("FERAL_VISION_ENABLED"):
+            if (
+                _feature_flag_enabled("FERAL_VISION_ENABLED")
+                and ambient_screen_capture_allowed()
+            ):
                 import asyncio
+
                 self.register_background_task(
                     asyncio.create_task(
                         self.screen_loop.start(),
@@ -1864,17 +2219,19 @@ class BrainState:
             else:
                 logger.info(
                     "ScreenLoop gated off at boot "
-                    "(FERAL_VISION_ENABLED not truthy)"
+                    "(vision disabled or Screen Recording permission not already granted)"
                 )
 
         self.session_handoff = None
         with boot_subsystem(self._boot_report, "SessionHandoffManager"):
             from agents.session_handoff import SessionHandoffManager
+
             self.session_handoff = SessionHandoffManager(
                 sessions=self.sessions,
                 daemons=self.daemons,
                 memory=self.memory,
                 send_to_session=self.send_to_session,
+                orchestrator=self.orchestrator,
             )
 
         with boot_subsystem(self._boot_report, "GenUIEngine"):
@@ -1928,12 +2285,14 @@ class BrainState:
                 FAILED_IMPLEMENTATIONS,
                 report_unreachable_implementations,
             )
+
             if FAILED_IMPLEMENTATIONS:
                 logger.warning(
-                    "%d skill implementation(s) failed to load and are "
-                    "unavailable: %s",
+                    "%d skill implementation(s) failed to load and are unavailable: %s",
                     len(FAILED_IMPLEMENTATIONS),
-                    ", ".join(f"{k} ({v})" for k, v in sorted(FAILED_IMPLEMENTATIONS.items())),
+                    ", ".join(
+                        f"{k} ({v})" for k, v in sorted(FAILED_IMPLEMENTATIONS.items())
+                    ),
                 )
             report_unreachable_implementations(self.skill_registry.skills.keys())
 
@@ -1947,17 +2306,22 @@ class BrainState:
                 return "Docker not installed, code execution skill disabled"
             available = getattr(self.docker_sandbox, "available", None)
             if callable(available) and not available():
-                return ("Docker daemon not running, start Docker Desktop to "
-                        "enable code exec")
+                return (
+                    "Docker daemon not running, start Docker Desktop to "
+                    "enable code exec"
+                )
             return None
 
-        with boot_subsystem(self._boot_report, "DockerSandbox",
-                            verify=_sandbox_is_usable):
+        with boot_subsystem(
+            self._boot_report, "DockerSandbox", verify=_sandbox_is_usable
+        ):
             from security.docker_sandbox import get_sandbox
+
             self.docker_sandbox = get_sandbox()
 
         with boot_subsystem(self._boot_report, "CronService"):
             from agents.scheduler import CronService
+
             self.cron_service = CronService()
             self.scheduler = self.cron_service
             self.skill_registry.set_cron_service(self.cron_service)
@@ -1978,6 +2342,7 @@ class BrainState:
             def _on_ideas_updated(_ideas):
                 try:
                     import asyncio as _aio
+
                     loop = _aio.get_running_loop()
                 except RuntimeError:
                     return
@@ -1991,7 +2356,11 @@ class BrainState:
                 )
 
             try:
-                _settings = self.config.get_settings() if hasattr(self.config, "get_settings") else {}
+                _settings = (
+                    self.config.get_settings()
+                    if hasattr(self.config, "get_settings")
+                    else {}
+                )
             except Exception:
                 _settings = {}
             _polish_enabled = bool((_settings or {}).get("ideas_llm_polish", False))
@@ -2009,6 +2378,7 @@ class BrainState:
 
         with boot_subsystem(self._boot_report, "SomaticEngine"):
             from perception.somatic import SomaticEngine
+
             self.somatic_engine = SomaticEngine()
             if self.orchestrator:
                 self.orchestrator.set_somatic_engine(self.somatic_engine)
@@ -2025,6 +2395,7 @@ class BrainState:
 
         with boot_subsystem(self._boot_report, "ToolGenesisEngine"):
             from agents.tool_genesis import ToolGenesisEngine
+
             _genesis_db = str(feral_data_home() / "tool_genesis.db")
             self.tool_genesis = ToolGenesisEngine(llm=_shared_llm, db_path=_genesis_db)
             if self.orchestrator:
@@ -2032,25 +2403,32 @@ class BrainState:
 
         with boot_subsystem(self._boot_report, "AgentMitosisEngine"):
             from agents.agent_mitosis import AgentMitosisEngine
+
             _mitosis_db = str(feral_data_home() / "agent_mitosis.db")
-            self.agent_mitosis = AgentMitosisEngine(llm=_shared_llm, memory=self.memory, db_path=_mitosis_db)
+            self.agent_mitosis = AgentMitosisEngine(
+                llm=_shared_llm, memory=self.memory, db_path=_mitosis_db
+            )
             if self.orchestrator:
                 self.orchestrator.set_mitosis_engine(self.agent_mitosis)
 
         with boot_subsystem(self._boot_report, "IntentCompiler"):
             from agents.intent_compiler import IntentCompiler
+
             _intent_db = str(feral_data_home() / "intents.db")
             # Without user_timezone the compiler defaults to "UTC"
             # (agents/intent_compiler.py:39), so every "today"
             # boundary in the briefing and the wind-down recap was
             # UTC midnight rather than the operator's.
             from config.loader import local_timezone_name
+
             self.intent_compiler = IntentCompiler(
-                llm=_shared_llm, db_path=_intent_db,
+                llm=_shared_llm,
+                db_path=_intent_db,
                 user_timezone=local_timezone_name(),
             )
 
         if self.ideas_engine is not None:
+
             async def _ideas_daily_brief_loop():
                 while True:
                     now = time.time()
@@ -2067,8 +2445,11 @@ class BrainState:
 
             from datetime import datetime, timedelta as _timedelta
             import asyncio
+
             self.register_background_task(
-                asyncio.create_task(_ideas_daily_brief_loop(), name="feral-ideas-daily-brief")
+                asyncio.create_task(
+                    _ideas_daily_brief_loop(), name="feral-ideas-daily-brief"
+                )
             )
             try:
                 self.ideas_engine.morning_brief()
@@ -2078,6 +2459,7 @@ class BrainState:
         self.proactive = None
         with boot_subsystem(self._boot_report, "ProactiveEngine"):
             from agents.proactive_engine import ProactiveEngine
+
             self.proactive = ProactiveEngine(
                 perception=self.perception,
                 memory=self.memory,
@@ -2127,19 +2509,18 @@ class BrainState:
             # ``ProactiveEngine.start`` schedules its inner loop task
             # and returns fast (A7), so it's safe to ``await`` it.
             if _feature_flag_enabled("FERAL_PROACTIVE"):
-                await self.proactive.start()
+                await self._checked_bootstrap_await(self.proactive.start())
                 if getattr(self.proactive, "_task", None) is not None:
                     self.register_background_task(self.proactive._task)
             else:
                 logger.info(
-                    "ProactiveEngine gated off at boot "
-                    "(FERAL_PROACTIVE not truthy)"
+                    "ProactiveEngine gated off at boot (FERAL_PROACTIVE not truthy)"
                 )
 
         with boot_subsystem(self._boot_report, "MQTTBridge"):
             self.mqtt_bridge = MQTTBridge()
             if self.mqtt_bridge.configured:
-                await self.mqtt_bridge.start()
+                await self._checked_bootstrap_await(self.mqtt_bridge.start())
                 # audit-r14 finding 18 #3 — register MQTT's polling
                 # task in BrainState so shutdown_event cancels it
                 # symmetrically alongside ScreenLoop / Proactive /
@@ -2149,6 +2530,7 @@ class BrainState:
                     self.register_background_task(mqtt_task)
 
         with boot_subsystem(self._boot_report, "EmailWatcher"):
+
             async def _handle_email(incoming):
                 # audit-r14 finding 18 #4 — bounded handler. Pre-fix,
                 # every inbound email fired a full ``handle_command``
@@ -2158,9 +2540,7 @@ class BrainState:
                 # UI; the operator (or an explicit downstream rule)
                 # decides whether to escalate to a chat turn. This
                 # caps inbound-email cost at memory-write only.
-                summary = (
-                    f'Email from {incoming.sender}: "{incoming.subject}"'
-                )
+                summary = f'Email from {incoming.sender}: "{incoming.subject}"'
                 detail = incoming.body[:2000] if incoming.body else ""
                 if self.memory is not None:
                     try:
@@ -2173,7 +2553,8 @@ class BrainState:
                         )
                     except Exception as exc:  # noqa: BLE001
                         logger.debug(
-                            "email_watcher: memory write failed: %s", exc,
+                            "email_watcher: memory write failed: %s",
+                            exc,
                         )
                 # Fan out the brain event so the WebUI can render an
                 # inbox card; chat escalation is operator-driven from
@@ -2191,12 +2572,13 @@ class BrainState:
                         )
                 except Exception as exc:  # noqa: BLE001
                     logger.debug(
-                        "email_watcher: broadcast failed: %s", exc,
+                        "email_watcher: broadcast failed: %s",
+                        exc,
                     )
 
             self.email_watcher = EmailWatcher(on_email=_handle_email)
             if self.email_watcher.configured:
-                await self.email_watcher.start()
+                await self._checked_bootstrap_await(self.email_watcher.start())
                 # audit-r14 finding 18 #3 — register the watcher's
                 # task in BrainState so shutdown_event cancels it
                 # symmetrically with the other background loops.
@@ -2207,13 +2589,20 @@ class BrainState:
         with boot_subsystem(self._boot_report, "mDNS"):
             from services.mdns import advertise_brain, discover_phone_bridge
             from config.runtime import brain_port
+
             advertise_brain(port=brain_port())
 
             try:
-                settings = self.config.get_settings() if hasattr(self.config, "get_settings") else {}
+                settings = (
+                    self.config.get_settings()
+                    if hasattr(self.config, "get_settings")
+                    else {}
+                )
             except Exception:
                 settings = {}
-            phone_url = (settings or {}).get("phone_bridge_url") or os.environ.get("FERAL_PHONE_BRIDGE_URL", "")
+            phone_url = (settings or {}).get("phone_bridge_url") or os.environ.get(
+                "FERAL_PHONE_BRIDGE_URL", ""
+            )
             if phone_url == "auto":
                 discovered = discover_phone_bridge(timeout=2.5)
                 if discovered:
@@ -2221,17 +2610,23 @@ class BrainState:
                     os.environ["FERAL_PHONE_BRIDGE_URL"] = discovered
                     try:
                         if hasattr(self.config, "set_setting"):
-                            self.config.set_setting("phone_bridge_url_resolved", discovered)
+                            self.config.set_setting(
+                                "phone_bridge_url_resolved", discovered
+                            )
                     except Exception:
                         pass
                 else:
-                    logger.info("mDNS: no phone bridge found on LAN (continuing without)")
+                    logger.info(
+                        "mDNS: no phone bridge found on LAN (continuing without)"
+                    )
 
         # Wire inbound channels to the orchestrator
-        await self._start_channels()
+        await self._checked_bootstrap_await(self._start_channels())
 
         if os.environ.get("FERAL_DEMO"):
-            logger.warning("FERAL_DEMO is deprecated and ignored. Use FERAL_DEV_DEMO=1 for dev-only demo mode.")
+            logger.warning(
+                "FERAL_DEMO is deprecated and ignored. Use FERAL_DEV_DEMO=1 for dev-only demo mode."
+            )
 
         # Demo mode is opt-in dev-only. Synthetic biometrics + scripted
         # scenarios live in the optional `feral-demo-data` package, never
@@ -2263,7 +2658,7 @@ class BrainState:
         except Exception as exc:
             logger.warning("Could not determine code provenance: %s", exc)
 
-        stats = await self.memory.stats()
+        stats = await self._checked_bootstrap_await(self.memory.stats())
         demo_tag = " [DEMO MODE]" if self._demo else ""
         logger.info(
             f"Brain v{__version__} initialized{demo_tag} — {len(self.skill_registry.skills)} skills, "
@@ -2325,6 +2720,29 @@ class BrainState:
             return False
         return self.session_attach_count.get(session_id, 0) == 0
 
+    async def prepare_runtime_context_checkpoints(self) -> None:
+        """Internal boot activation after all ingress and writers are fenced.
+
+        Known primary rows, including pending/refused ones, prohibit legacy
+        plaintext hydration/saves. Database failure cannot select legacy boot.
+        Existing legacy artifacts remain for an explicit migration/retirement.
+        """
+        if self.orchestrator is None or self.memory is None:
+            raise RuntimeError("Runtime context storage and orchestrator are required")
+        # A failed ledger lookup must never enable plaintext snapshot fallback,
+        # even if a caller catches the mandatory boot failure for diagnostics.
+        self._runtime_context_primary_managed = True
+        coordinator = self.orchestrator.install_runtime_context_checkpoints(
+            self.memory, legacy_passthrough=True,
+        )
+        self._runtime_context_primary_managed = await coordinator.is_managed(self.primary_session_id)
+
+    def _primary_context_uses_checkpoints(self) -> bool:
+        from api.runtime_context import coordinator_for
+        coordinator = coordinator_for(self)
+        return (getattr(self, "_runtime_context_primary_managed", False) is True
+                or coordinator is not None and coordinator.known_managed(self.primary_session_id))
+
     def snapshot_primary_thread(self, *, force: bool = False) -> bool:
         """Save the current primary `conversation_history` +
         `working_memory` to disk so the next boot rehydrates.
@@ -2334,6 +2752,8 @@ class BrainState:
         chat loop isn't IO-bound. ``force=True`` bypasses debounce —
         used on shutdown to guarantee the last turn lands.
         """
+        if self._primary_context_uses_checkpoints():
+            return False
         if self.session_snapshot is None or not self.primary_session_id:
             return False
         sid = self.primary_session_id
@@ -2363,13 +2783,15 @@ class BrainState:
         constructed. Never raises — if anything goes wrong the brain
         boots with an empty primary thread (today's behaviour).
         """
+        if self._primary_context_uses_checkpoints():
+            return
         if self.session_snapshot is None or self.orchestrator is None:
             return
         snapshot = self.session_snapshot.load()
         if not snapshot:
             return
         sid = snapshot.get("session_id") or self.primary_session_id
-        if not sid:
+        if not sid or sid != self.primary_session_id:
             return
         # Orchestrator conversation_history (LLM tool-call format).
         ch_rows = snapshot.get("conversation_history") or []
@@ -2388,11 +2810,14 @@ class BrainState:
                 # into the next LLM request and triggers
                 # ``400 No tool call found for function call output``.
                 ch_attr[sid] = _sanitize_orphan_tool_rows(rehydrated)
+                self.restored_history_rows[sid] = list(ch_attr[sid])
         # Working-memory deque (LLM-context format).
         wm_rows = snapshot.get("working_memory") or []
         if isinstance(wm_rows, list) and wm_rows and self.memory is not None:
             try:
-                self.memory.working_replace(sid, [dict(x) for x in wm_rows if isinstance(x, dict)])
+                self.memory.working_replace(
+                    sid, [dict(x) for x in wm_rows if isinstance(x, dict)]
+                )
             except Exception:
                 pass
         logger.info(
@@ -2472,7 +2897,9 @@ class BrainState:
             )
 
         plugin_factory = demo_ep.load()
-        plugin = plugin_factory()  # returns dict with bootstrap/status_routes/cli_handler
+        plugin = (
+            plugin_factory()
+        )  # returns dict with bootstrap/status_routes/cli_handler
         bootstrap = plugin.get("bootstrap")
         if not callable(bootstrap):
             raise RuntimeError(
@@ -2487,8 +2914,12 @@ class BrainState:
 
         brain = self
 
-        async def _channel_message_handler(channel_msg: ChannelMessage) -> ChannelResponse:
-            channel_session_id = f"channel_{channel_msg.channel_type}_{channel_msg.user_id}"
+        async def _channel_message_handler(
+            channel_msg: ChannelMessage,
+        ) -> ChannelResponse:
+            channel_session_id = (
+                f"channel_{channel_msg.channel_type}_{channel_msg.user_id}"
+            )
             text = channel_msg.text or ""
             if not text:
                 return ChannelResponse(text="")
@@ -2513,12 +2944,16 @@ class BrainState:
 
             brain._channel_collectors[channel_session_id] = []
             try:
-                await brain.orchestrator.handle_command(channel_session_id, text, context={
-                    "source": "channel",
-                    "channel": channel_msg.channel_type,
-                    "user_id": channel_msg.user_id,
-                    "username": channel_msg.username,
-                })
+                await brain.orchestrator.handle_command(
+                    channel_session_id,
+                    text,
+                    context={
+                        "source": "channel",
+                        "channel": channel_msg.channel_type,
+                        "user_id": channel_msg.user_id,
+                        "username": channel_msg.username,
+                    },
+                )
             except Exception as e:
                 logger.warning(f"Channel command failed: {e}")
                 return ChannelResponse(text=f"Error: {e}")
@@ -2562,6 +2997,7 @@ class BrainState:
                 return v
             try:
                 import json as _json
+
                 creds_path = feral_home() / "credentials.json"
                 if creds_path.exists():
                     creds = _json.loads(creds_path.read_text())
@@ -2672,7 +3108,9 @@ class BrainState:
             if not self.config or not hasattr(self.config, "update_settings"):
                 return
             try:
-                current = (getattr(self.config, "_merged", {}) or {}).get("channels", {})
+                current = (getattr(self.config, "_merged", {}) or {}).get(
+                    "channels", {}
+                )
                 if not isinstance(current, dict):
                     current = {}
                 for key, value in (
@@ -2696,27 +3134,30 @@ class BrainState:
             "telegram": {
                 "bot_token": _cred("FERAL_TELEGRAM_BOT_TOKEN"),
                 "enabled": _ch_enabled("telegram")
-                           and bool(_cred("FERAL_TELEGRAM_BOT_TOKEN")),
+                and bool(_cred("FERAL_TELEGRAM_BOT_TOKEN")),
                 **_access("telegram"),
             },
             "discord": {
                 "bot_token": _cred("FERAL_DISCORD_BOT_TOKEN"),
                 "enabled": _ch_enabled("discord")
-                           and bool(_cred("FERAL_DISCORD_BOT_TOKEN")),
+                and bool(_cred("FERAL_DISCORD_BOT_TOKEN")),
                 **_access("discord"),
             },
             "slack": {
                 "bot_token": _cred("FERAL_SLACK_BOT_TOKEN"),
                 "app_token": _cred("FERAL_SLACK_APP_TOKEN"),
                 "enabled": _ch_enabled("slack")
-                           and bool(_cred("FERAL_SLACK_BOT_TOKEN")),
+                and bool(_cred("FERAL_SLACK_BOT_TOKEN")),
                 **_access("slack"),
             },
             "whatsapp": {
                 "access_token": _cred("FERAL_WHATSAPP_ACCESS_TOKEN"),
                 "phone_number_id": _cred("FERAL_WHATSAPP_PHONE_NUMBER_ID"),
                 "app_secret": _cred("FERAL_WHATSAPP_APP_SECRET"),
-                "enabled": bool(_cred("FERAL_WHATSAPP_ACCESS_TOKEN") and _cred("FERAL_WHATSAPP_PHONE_NUMBER_ID")),
+                "enabled": bool(
+                    _cred("FERAL_WHATSAPP_ACCESS_TOKEN")
+                    and _cred("FERAL_WHATSAPP_PHONE_NUMBER_ID")
+                ),
                 **_access("whatsapp"),
             },
         }
@@ -2733,14 +3174,17 @@ class BrainState:
         if started:
             logger.info(f"Channels started: {', '.join(started)}")
         else:
-            logger.debug("No messaging channels configured (set FERAL_TELEGRAM_BOT_TOKEN etc.)")
+            logger.debug(
+                "No messaging channels configured (set FERAL_TELEGRAM_BOT_TOKEN etc.)"
+            )
 
     def _register_browser_skill(self):
         """Register browser control as a skill the agent can call via tool use.
 
         ``skills/manifests/browser_use.json`` is the source of truth and is
         already loaded by ``load_builtin_skills()`` at this point. When it is
-        present we keep that manifest and only bind the bridge instance,
+        present we keep the selected registered manifest (including an
+        installed package override) and only bind the bridge instance,
         because rebuilding it from the raw dict below is LOSSY: the
         conversion carries id / method / url / description / params /
         returns_description / ui_hint and drops ``safety_tier``,
@@ -2748,7 +3192,8 @@ class BrainState:
         and ``trigger_phrases``. Overwriting the registered manifest with
         the rebuilt one therefore silently disarmed every safety
         declaration the manifest made and clamped every result back to the
-        2 000-character default tier.
+        2 000-character default tier. An intentionally empty endpoint list
+        is also valid and must not be replaced with fallback capabilities.
         """
         try:
             from skills.impl.browser_use import get_browser_skill_manifest
@@ -2763,11 +3208,12 @@ class BrainState:
             raw_manifest = get_browser_skill_manifest()
             declared_id = str(raw_manifest.get("skill_id", "browser"))
             already = self.skill_registry.skills.get(declared_id)
-            if already is not None and getattr(already, "endpoints", None):
+            if already is not None:
                 self._bind_browser_bridge(already.skill_id)
                 logger.info(
-                    "Browser skill kept from shipped manifest: %s (%d endpoints)",
-                    already.skill_id, len(already.endpoints),
+                    "Browser skill kept from registered manifest: %s (%d endpoints)",
+                    already.skill_id,
+                    len(already.endpoints),
                 )
                 return
 
@@ -2776,7 +3222,14 @@ class BrainState:
                 params = []
                 for param in endpoint.get("params", []):
                     ptype = str(param.get("type", "string"))
-                    if ptype not in {"string", "number", "integer", "boolean", "array", "object"}:
+                    if ptype not in {
+                        "string",
+                        "number",
+                        "integer",
+                        "boolean",
+                        "array",
+                        "object",
+                    }:
                         ptype = "string"
                     params.append(
                         EndpointParam(
@@ -2784,7 +3237,9 @@ class BrainState:
                             type=ptype,
                             required=bool(param.get("required", True)),
                             description=str(param.get("description", "")),
-                            default=str(param.get("default")) if param.get("default") is not None else None,
+                            default=str(param.get("default"))
+                            if param.get("default") is not None
+                            else None,
                             enum=[str(v) for v in (param.get("enum") or [])],
                             items=param.get("items"),
                         )
@@ -2798,7 +3253,9 @@ class BrainState:
                         url=endpoint.get("url", f"feral://browser/{endpoint_id}"),
                         description=str(endpoint.get("description", "")),
                         params=params,
-                        returns_description=str(endpoint.get("returns_description", "Browser action result")),
+                        returns_description=str(
+                            endpoint.get("returns_description", "Browser action result")
+                        ),
                         ui_hint=endpoint.get("ui_hint"),
                     )
                 )
@@ -2814,7 +3271,11 @@ class BrainState:
                     logo_url="",
                     icon_set="sf_symbols",
                 ),
-                description=str(raw_manifest.get("description", "Control and inspect browser pages.")),
+                description=str(
+                    raw_manifest.get(
+                        "description", "Control and inspect browser pages."
+                    )
+                ),
                 categories=["browser", "automation"],
                 auth=AuthConfig(type="none"),
                 endpoints=endpoints,
@@ -2824,7 +3285,8 @@ class BrainState:
             logger.info(
                 "Browser skill registered from in-code fallback manifest: %s "
                 "(%d endpoints, no safety metadata)",
-                manifest.skill_id, len(endpoints),
+                manifest.skill_id,
+                len(endpoints),
             )
         except Exception as e:
             logger.warning(f"Browser skill registration failed: {e}")
@@ -2838,17 +3300,22 @@ class BrainState:
         it.
         """
         from skills.impl import register_instance
+        from skills.base import BaseSkill
 
         state_ref = self
 
-        class _BrowserSkillBridge:
+        class _BrowserSkillBridge(BaseSkill):
             def __init__(self):
-                self.skill_id = skill_id
+                super().__init__(skill_id)
                 self._state = state_ref
 
             async def execute(self, endpoint_id: str, args: dict, vault: dict):
-                result = await self._state._execute_browser_action(endpoint_id, args or {})
-                success = not isinstance(result, dict) or bool(result.get("success", "error" not in result))
+                result = await self._state._execute_browser_action(
+                    endpoint_id, args or {}
+                )
+                success = not isinstance(result, dict) or bool(
+                    result.get("success", "error" not in result)
+                )
                 error = result.get("error") if isinstance(result, dict) else None
                 return {
                     "success": success,
@@ -2866,6 +3333,7 @@ class BrainState:
         # BrowserController() on first call.
         try:
             from skills.impl import get_implementation
+
             web_actions = get_implementation("web_actions")
             if web_actions is not None and hasattr(web_actions, "set_browser"):
                 web_actions.set_browser(self.browser)
@@ -3100,11 +3568,20 @@ class BrainState:
         # Non-LLM credentials (search, git, cloud) have no provider-id
         # table to derive from, so they stay enumerated.
         _NON_LLM_ENV_KEYS = [
-            "TOGETHER_API_KEY", "FIREWORKS_API_KEY",
-            "TAVILY_API_KEY", "BRAVE_API_KEY", "EXA_API_KEY",
-            "SERPER_API_KEY", "GITHUB_TOKEN", "SPOTIFY_CLIENT_ID",
-            "PERPLEXITY_API_KEY", "GOOGLE_API_KEY", "GOOGLE_CSE_ID",
-            "AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN",
+            "TOGETHER_API_KEY",
+            "FIREWORKS_API_KEY",
+            "TAVILY_API_KEY",
+            "BRAVE_API_KEY",
+            "EXA_API_KEY",
+            "SERPER_API_KEY",
+            "GITHUB_TOKEN",
+            "SPOTIFY_CLIENT_ID",
+            "PERPLEXITY_API_KEY",
+            "GOOGLE_API_KEY",
+            "GOOGLE_CSE_ID",
+            "AWS_ACCESS_KEY_ID",
+            "AWS_SECRET_ACCESS_KEY",
+            "AWS_SESSION_TOKEN",
         ]
         env_keys = list(
             dict.fromkeys(list(_PROVIDER_ENV_KEYS.values()) + _NON_LLM_ENV_KEYS)
@@ -3122,10 +3599,12 @@ class BrainState:
         if creds_path.exists():
             try:
                 import json as _json
+
                 creds = _json.loads(creds_path.read_text())
             except Exception as exc:
                 logger.warning(
-                    "credentials.json is corrupt (%s) — falling back to vault", exc,
+                    "credentials.json is corrupt (%s) — falling back to vault",
+                    exc,
                 )
 
         # Step 2 — labeled-active overlay. Runs AFTER reading the
@@ -3147,8 +3626,10 @@ class BrainState:
         try:
             from security.vault import BlindVault
             from security.vault_keys import (
-                _PROVIDER_ENV_KEYS, get_active_provider_key,
+                _PROVIDER_ENV_KEYS,
+                get_active_provider_key,
             )
+
             label_vault = BlindVault()
             for pid, env_var in _PROVIDER_ENV_KEYS.items():
                 if env_var not in env_keys:
@@ -3171,7 +3652,11 @@ class BrainState:
                         "labeled key for provider %r (%s: %s). %s stays unset, "
                         "so this provider will report unauthorized. "
                         "Check with `feral key list --provider %s`.",
-                        pid, type(exc).__name__, exc, env_var, pid,
+                        pid,
+                        type(exc).__name__,
+                        exc,
+                        env_var,
+                        pid,
                     )
                     continue
                 if labeled:
@@ -3191,7 +3676,8 @@ class BrainState:
                 "loaded; only credentials.json and default-namespace vault "
                 "entries are in effect. Run `feral doctor` to see which "
                 "providers still authenticate.",
-                type(exc).__name__, exc,
+                type(exc).__name__,
+                exc,
             )
 
         for key in env_keys:
@@ -3216,6 +3702,7 @@ class BrainState:
         if missing_keys:
             try:
                 from security.vault import BlindVault
+
                 vault = BlindVault()
             except Exception as exc:
                 # WARNING, matching the two handlers above. This is the
@@ -3234,14 +3721,18 @@ class BrainState:
                     "`/api/config/credentials` is unreadable this boot. "
                     "Run `feral doctor` to see which providers still "
                     "authenticate.",
-                    type(exc).__name__, exc, len(missing_keys),
+                    type(exc).__name__,
+                    exc,
+                    len(missing_keys),
                     ", ".join(missing_keys),
                 )
             else:
                 unreadable: list[str] = []
                 for key in missing_keys:
                     try:
-                        val = vault.retrieve(key) if hasattr(vault, "retrieve") else None
+                        val = (
+                            vault.retrieve(key) if hasattr(vault, "retrieve") else None
+                        )
                     except Exception as exc:
                         # Per-key, so one undecryptable entry cannot strand
                         # the keys after it in the loop, which is what the
@@ -3258,7 +3749,8 @@ class BrainState:
                         "will report unauthorized. Re-add them with "
                         "`feral key add`, or check the OS keychain entry the "
                         "vault master key lives in.",
-                        len(unreadable), "; ".join(unreadable),
+                        len(unreadable),
+                        "; ".join(unreadable),
                     )
 
         if loaded:
@@ -3284,6 +3776,8 @@ class BrainState:
         confirmations) can now branch on the result instead of assuming
         success.
         """
+        from agents.chat_turns import correlate_progress
+        msg = correlate_progress(session_id, msg)
         ws = self.sessions.get(session_id)
         if ws:
             await ws.send_json(msg.model_dump())
@@ -3304,7 +3798,8 @@ class BrainState:
         logger.warning(
             "undeliverable frame type=%s for session=%s: no live websocket and "
             "no channel collector; the caller will not be told",
-            getattr(msg, "type", "?"), session_id,
+            getattr(msg, "type", "?"),
+            session_id,
         )
         return False
 
@@ -3322,7 +3817,11 @@ class BrainState:
                 "Reply 'yes' to allow or 'no' to deny."
             ).strip()
         if mtype == "sdui":
-            title = payload.get("title") or payload.get("component") or "an interactive card"
+            title = (
+                payload.get("title")
+                or payload.get("component")
+                or "an interactive card"
+            )
             return f"[{title}] This surface cannot draw it; reply in words."
         return ""
 
@@ -3395,7 +3894,8 @@ class BrainState:
                 "is open and no escalation channel is configured. Set "
                 "notifications.escalate_to.{channel,chat_id} in settings.json "
                 "to receive these.",
-                msg.trigger_id, priority.name,
+                msg.trigger_id,
+                priority.name,
             )
             return
 
@@ -3405,14 +3905,18 @@ class BrainState:
             await channel.send_direct(chat_id, text)
         except Exception as exc:
             logger.warning(
-                "Proactive escalation of %r failed: %s", msg.trigger_id, exc,
+                "Proactive escalation of %r failed: %s",
+                msg.trigger_id,
+                exc,
             )
             return
 
         self._escalation_last_sent[msg.trigger_id] = now
         logger.info(
             "Escalated proactive alert %r (%s) to %s",
-            msg.trigger_id, priority.name, channel.channel_type,
+            msg.trigger_id,
+            priority.name,
+            channel.channel_type,
         )
 
     def _escalation_target(self):
@@ -3450,7 +3954,7 @@ class BrainState:
         # alert with no browser open was lost and the reason was one
         # unattributed line. Observed on the operator's brain
         # 2026-09-07 on the morning briefing.
-        for channel_type in (mgr.active_channels or []):
+        for channel_type in mgr.active_channels or []:
             channel = mgr.get_channel(channel_type)
             if channel is None:
                 continue
@@ -3494,6 +3998,32 @@ class BrainState:
     def get_sessions_for_daemon(self, node_id: str) -> set[str]:
         return self._daemon_session_bindings.get(node_id, set())
 
+    def nodes_for_session(self, session_id: str) -> list[str]:
+        """Nodes attached to this session, for pushing an unsolicited frame.
+
+        The reverse of the binding map. The operator is not necessarily
+        at the Mac, so anything that needs an answer has to be able to
+        reach whatever they are actually wearing or carrying.
+        """
+        if not session_id:
+            return []
+        return [
+            node_id
+            for node_id, sessions in self._daemon_session_bindings.items()
+            if session_id in sessions and node_id in self.daemons
+        ]
+
+    async def push_to_session_nodes(self, session_id: str, msg_dict: dict) -> int:
+        """Send one frame to every node on a session. Never raises."""
+        sent = 0
+        for node_id in self.nodes_for_session(session_id):
+            try:
+                await self.send_to_daemon(node_id, msg_dict)
+                sent += 1
+            except Exception as exc:
+                logger.debug("push to node %s failed: %s", node_id, exc)
+        return sent
+
 
 # The process-wide brain singleton.
 #
@@ -3511,8 +4041,10 @@ state: BrainState = BrainState()
 
 def _log_activity(action: str, detail: str = ""):
     """Log an activity to the brain's activity feed."""
-    state.activity_log.append({
-        "action": action,
-        "detail": detail,
-        "timestamp": time.time(),
-    })
+    state.activity_log.append(
+        {
+            "action": action,
+            "detail": detail,
+            "timestamp": time.time(),
+        }
+    )

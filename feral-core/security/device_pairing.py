@@ -228,6 +228,11 @@ class DevicePairingStore:
         with self._lock:
             conn = self._conn()
             try:
+                # Instances/processes share the database, not self._lock.
+                # Hold SQLite's writer lock across schema inspection and
+                # legacy-token migration so another startup cannot add or
+                # drop a column between this connection's checks.
+                conn.execute("BEGIN IMMEDIATE")
                 # Base table — fresh installs land here directly.
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS paired_devices (
@@ -355,8 +360,6 @@ class DevicePairingStore:
                     "CREATE INDEX IF NOT EXISTS idx_ppc_expires_at "
                     "ON pending_pair_codes(expires_at)"
                 )
-                conn.commit()
-
                 # Migrate any  rows: copy to needs_rotation_log,
                 # null out the plaintext token, drop the column.
                 self._migrate_legacy_plaintext_rows(conn)
@@ -1093,6 +1096,29 @@ class DevicePairingStore:
                 return True, "verified"
             finally:
                 conn.close()
+
+    def token_claimed(self, token: str) -> bool:
+        """Has a device already claimed this pairing token?
+
+        Read-only, unlike :meth:`verify_device`, which claims an unclaimed
+        token as a side effect. HTTP auth uses this to refuse a pairing
+        code that was issued (and perhaps shown on screen as a QR code)
+        but never attached by the device it was meant for. Does not
+        verify the token hash; callers still need :meth:`verify_device`.
+        """
+        if not token:
+            return False
+        lookup = _token_lookup(token)
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute(
+                    "SELECT claimed_at FROM paired_devices WHERE token_lookup = ?",
+                    (lookup,),
+                ).fetchone()
+            finally:
+                conn.close()
+        return row is not None and row["claimed_at"] is not None
 
     def token_pin_verified(self, token: str) -> bool:
         """Has the PIN gate been cleared for this token?

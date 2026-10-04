@@ -20,6 +20,8 @@ def _make_mock_state(tmp_path, *, with_catalog=True, with_vault=True, with_orch=
     """Build a state mock with the pieces the config + llm routes touch."""
     mock = MagicMock()
     mock.config = MagicMock()
+    settings = {("llm", "provider"): "openai", ("llm", "base_url"): "", ("llm", "fallback_providers"): []}
+    mock.config.get.side_effect = lambda section, key, default=None: settings.get((section, key), default)
     mock.config.save_credentials = MagicMock(return_value=True)
     mock.config.update_settings = MagicMock(return_value=True)
 
@@ -60,7 +62,7 @@ def client(tmp_path):
          patch("api.routes.config.state", mock), \
          patch("api.routes.llm.state", mock):
         from api.server import app
-        yield TestClient(app, raise_server_exceptions=False), mock, tmp_path
+        yield TestClient(app, raise_server_exceptions=True), mock, tmp_path
 
 
 # ── save_credentials accepts every catalog env var ───────────────
@@ -126,6 +128,7 @@ def test_llm_config_persists_gemini_key_everywhere(client):
     kwargs = mock.orchestrator.llm.reconfigure.await_args.kwargs
     assert kwargs["provider"] == "gemini"
     assert kwargs["api_key"] == "g-test"
+    mock.config.update_settings.assert_any_call("llm", "fallback_providers", ["openai"])
 
 
 def test_llm_config_without_key_still_switches(client):

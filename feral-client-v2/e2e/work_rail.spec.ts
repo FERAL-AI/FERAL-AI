@@ -70,6 +70,7 @@ async function stub(page, opts: { busy?: boolean } = {}) {
 test('sections are separated, not one run-on column', async ({ page }) => {
   await stub(page);
   await page.goto('/console');
+  await page.getByRole('button', { name: 'Show activity sidebar', exact: true }).click();
   await expect(page.locator('.v2-rail')).toBeVisible();
 
   const heads = page.locator('.v2-rail-head');
@@ -94,6 +95,7 @@ test('sections are separated, not one run-on column', async ({ page }) => {
 test('needs you and running carry their own colours when live', async ({ page }) => {
   await stub(page, { busy: true });
   await page.goto('/console');
+  await page.getByRole('button', { name: 'Show activity sidebar', exact: true }).click();
 
   const needsHead = page.locator('.v2-rail-head[data-tone="needs"]');
   const runHead = page.locator('.v2-rail-head[data-tone="running"]');
@@ -131,6 +133,7 @@ test('needs you and running carry their own colours when live', async ({ page })
 test('recent conversations are reachable from the rail', async ({ page }) => {
   await stub(page);
   await page.goto('/console');
+  await page.getByRole('button', { name: 'Show activity sidebar', exact: true }).click();
 
   const recent = page.locator('.v2-rail-recent');
   await expect(recent.first()).toBeVisible();
@@ -147,6 +150,7 @@ test('just happened means recently, not five days ago', async ({ page }) => {
   // entries stamped 126h19m under a heading that says "just happened".
   await stub(page);
   await page.goto('/console');
+  await page.getByRole('button', { name: 'Show activity sidebar', exact: true }).click();
   await expect(page.locator('.v2-rail')).toBeVisible();
   await page.waitForTimeout(600);
 
@@ -158,6 +162,7 @@ test('just happened means recently, not five days ago', async ({ page }) => {
 test('sections fold, and stay folded', async ({ page }) => {
   await stub(page, { busy: true });
   await page.goto('/console');
+  await page.getByRole('button', { name: 'Show activity sidebar', exact: true }).click();
 
   const needsHead = page.locator('.v2-rail-head').first();
   await expect(page.getByText('coding_tools__write_file')).toBeVisible();
@@ -174,4 +179,14 @@ test('sections fold, and stay folded', async ({ page }) => {
   await page.locator('.v2-rail-head').first().click();
   await expect(page.locator('.v2-rail-head').first())
     .toHaveAttribute('aria-expanded', 'true');
+});
+
+test('activity sidebar is optional, explicit and preserved across reloads', async ({ page }) => {
+  await stub(page); await page.goto('/console');
+  await expect(page.locator('.v2-rail')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Show activity sidebar', exact: true }).click();
+  await expect(page.locator('.v2-rail')).toBeVisible();
+  await page.reload(); await expect(page.locator('.v2-rail')).toBeVisible();
+  await page.getByRole('button', { name: 'Hide activity sidebar', exact: true }).click();
+  await page.reload(); await expect(page.locator('.v2-rail')).toHaveCount(0);
 });

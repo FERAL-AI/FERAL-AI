@@ -53,13 +53,24 @@ die() {
     exit 1
 }
 
-UV="$(bash "$REPO_ROOT/scripts/ensure_uv.sh")"
-# ensure_uv.sh logs to stderr and prints one path on stdout. If that
-# contract ever changes, every later use of "$UV" turns into a confusing
-# "command not found" attributed to the wrong step.
-[ -x "$UV" ] || die "scripts/ensure_uv.sh did not yield an executable uv (got: '$UV')."
+# Refuse unsupported platform profiles and incorrect cached executables before
+# downloading uv, creating output directories or changing staged resources.
+# python3 is a build-time verifier, never a user's selected runtime interpreter.
+PLATFORM_HELPER="$HERE/bundle_platform.py"
+OPENCODE_PACKAGE="$(python3 "$PLATFORM_HELPER" --select-host)" \
+    || die "Unsupported or unverifiable desktop build platform."
+OPENCODE_ROOT="$REPO_ROOT/.tools/opencode/node_modules/$OPENCODE_PACKAGE"
+OPENCODE_SOURCE="$OPENCODE_ROOT/bin/opencode"
+python3 "$PLATFORM_HELPER" --validate-package "$OPENCODE_ROOT" \
+    || die "Install the pinned platform package with npm ci --ignore-scripts --prefix .tools/opencode first."
 
+UV="$(bash "$REPO_ROOT/scripts/ensure_uv.sh")"
+[ -x "$UV" ] || die "scripts/ensure_uv.sh did not yield an executable uv."
 mkdir -p "$RESOURCES"
+mkdir -p "$RESOURCES/opencode/bin"
+cp "$OPENCODE_SOURCE" "$RESOURCES/opencode/bin/opencode"
+cp "$REPO_ROOT/.tools/opencode/node_modules/opencode-ai/LICENSE" "$RESOURCES/opencode/LICENSE"
+printf 'OpenCode 1.18.10\nhttps://github.com/anomalyco/opencode\n' > "$RESOURCES/opencode/VERSION"
 
 # ── 1. The brain source ──────────────────────────────────────────────
 #
@@ -68,7 +79,7 @@ mkdir -p "$RESOURCES"
 # older `agents/`, `api/` and `memory/` on the interpreter's path.
 # `tests/` and caches are excluded because nothing at run time reads them.
 echo "  -> $STAGED_CORE"
-rsync -a --delete \
+rsync -a --delete --delete-excluded \
     --exclude 'build/' \
     --exclude 'dist/' \
     --exclude 'tests/' \
@@ -81,7 +92,23 @@ rsync -a --delete \
     --exclude '.venv/' \
     --exclude 'node_modules/' \
     --exclude '.git/' \
+    --exclude '.DS_Store' \
+    --exclude '.regress_home/' \
+    --exclude '.env*' \
+    --exclude '*.db' \
+    --exclude '*.db-*' \
+    --exclude '*.sqlite*' \
+    --exclude '*.log' \
+    --exclude '.coverage*' \
+    --exclude 'coverage.xml' \
     "$REPO_ROOT/feral-core/" "$STAGED_CORE/"
+
+# Excluded files from older staging runs must also disappear. rsync's plain
+# --delete protects excluded destination files; --delete-excluded above is
+# essential when a previous build contained a developer's regression vault.
+for private_path in .regress_home .env .coverage .mypy_cache .ruff_cache; do
+    [ ! -e "$STAGED_CORE/$private_path" ] || die "Private development data remained in the payload: $private_path"
+done
 
 # The v2 web UI is the app's entire visible surface, and it is the one
 # part of the payload that is a BUILD ARTEFACT rather than source. A tree
@@ -296,10 +323,10 @@ PYEXE="$(staged_python_exe)"
 # meant: install into this interpreter's own site-packages. $STAGED_PY is
 # a private copy inside the build tree, so nothing shared is modified;
 # the interpreter under ~/.local/share/uv is never written to.
-echo "  -> installing feral-core[llm] into the staged interpreter"
+echo "  -> installing feral-core[llm] and the Python plugin SDK into the staged interpreter"
 "$UV" pip install --python "$PYEXE" --break-system-packages \
     --constraint "$REPO_ROOT/feral-core/requirements.lock" \
-    "$REPO_ROOT/feral-core[llm]" >&2
+    "$REPO_ROOT/feral-core[llm]" "$REPO_ROOT/sdk/python" >&2
 
 # ── 4. Prove it, here, rather than at the user's first launch ────────
 #
@@ -406,8 +433,17 @@ trap 'rm -rf "$STAGE_PROBE_HOME" "$STAGE_PROBE_LOG"' EXIT
 # files exist (step 1) and checking the brain agrees they are servable
 # are different assertions, and only the second one is the thing users
 # experience.
-if ( cd "$STAGED_CORE" && FERAL_HOME="$STAGE_PROBE_HOME" "$PYEXE" -c "
+if ( cd "$STAGED_CORE" && PYTHON_KEYRING_BACKEND=keyring.backends.null.Keyring FERAL_HOME="$STAGE_PROBE_HOME" FERAL_DATA_HOME="$STAGE_PROBE_HOME/data" FERAL_EMBED_PROVIDER=hash FERAL_LLM_PROVIDER=none "$PYEXE" -c "
 import memory.store, memory.knowledge_graph, api.server  # noqa: F401
+import feral_sdk
+from pathlib import Path
+from skills.base import BaseSkill
+sdk_file = Path(feral_sdk.__file__).resolve()
+assert sdk_file.is_relative_to(Path(__import__('sys').prefix).resolve()), 'plugin SDK is outside staged interpreter'
+class BundleSDKProbe(feral_sdk.FeralPlugin):
+    name = 'bundle_sdk_probe'
+adapter = BundleSDKProbe.runtime_skill()()
+assert isinstance(adapter, BaseSkill) and adapter.skill_id == 'bundle_sdk_probe', 'plugin adapter cannot bind bundled runtime'
 from memory.sqlite_features import interpreter_sqlite_report
 assert interpreter_sqlite_report()['fts5'], 'staged interpreter reports no FTS5'
 variant = api.server._webui_variant
@@ -417,9 +453,11 @@ assert variant == 'v2', (
     'dashboard belongs.' % (variant,)
 )
 print('     web UI variant resolved by the staged brain: %s' % variant)
+print('     Python SDK imports from staged interpreter; runtime adapter binds BaseSkill')
 " ) >"$STAGE_PROBE_LOG" 2>&1; then
     echo "     brain modules import cleanly under the staged interpreter"
     grep -a 'web UI variant resolved' "$STAGE_PROBE_LOG" || true
+    grep -a 'Python SDK imports' "$STAGE_PROBE_LOG" || true
 else
     echo "  [error] the staged brain does not import, or would not serve the" >&2
     echo "          v2 dashboard. Full output:" >&2

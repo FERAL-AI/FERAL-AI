@@ -35,6 +35,8 @@ from agents.context_manager import configured_context_window_tokens
 from agents.token_estimate import estimate_tokens
 
 from memory.fts_query import fts5_match_query
+import re
+
 from memory.sqlite_features import require_fts5
 from memory.embeddings import (
     EmbeddingDimensionMismatch,
@@ -333,6 +335,73 @@ def _stable_kg_id(*parts: str) -> str:
     import hashlib
     blob = "\0".join(parts).encode("utf-8")
     return hashlib.sha256(blob).hexdigest()[:12]
+
+
+
+# ── Absence of data is not a fact about the world ────────────────────
+#
+# On 2026-09-12 the graph held 44 triples like "Theora glasses
+# does_not_provide activity data", "assistant does not yet have HRV
+# data" and "Feral does_not_measure blood pressure". Every one was
+# extracted from an assistant turn that was accurate WHEN IT WAS SAID:
+# the phone was on an older build, or nothing had streamed yet that
+# hour. Stored as durable triples they outlive the condition that made
+# them true, and then make the brain deny capabilities it has. The
+# blood-pressure ones were contradicted by working code the same day.
+#
+# What a thing cannot do BY DESIGN is different and stays: "a shared
+# note does not grant access to the filesystem" is a property of the
+# architecture, not of what happened to be connected this afternoon.
+#
+# The distinction drawn here: a negative predicate whose object is data,
+# a reading, or a measurement is a statement about this moment's
+# availability and is dropped. Anything else is kept.
+
+#: Word-boundary patterns, NOT substrings. A `"has no" in predicate`
+#: test deletes "has north-star", which is exactly how the cleanup that
+#: prompted this guard destroyed a real fact before restoring it.
+_NEGATION_RE = re.compile(
+    r"\b(?:"
+    r"does(?:\s|_)?n[o']t|do(?:\s|_)?n[o']t|did(?:\s|_)?n[o']t|"
+    r"is(?:\s|_)?n[o']t|are(?:\s|_)?n[o']t|was(?:\s|_)?n[o']t|"
+    r"cannot|can[o']?t|lacks?|missing|without|never|"
+    r"no(?:\s|_)longer|not(?:\s|_)yet|has(?:\s|_)no|have(?:\s|_)no|"
+    r"receives(?:\s|_)no|includes?(?:\s|_)no"
+    r")\b",
+    re.IGNORECASE,
+)
+
+#: Objects that name data rather than a capability or a design property.
+_DATA_OBJECT_RE = re.compile(
+    r"\b(?:data|readings?|samples?|measurements?|metrics?|history|"
+    r"stream|streams|streaming|values?|numbers?|"
+    r"hr|hrv|spo2|spo₂|heart(?:\s|-)?rate|blood(?:\s|-)?pressure|"
+    r"sleep|recovery|readiness|strain|activity|steps|temperature|"
+    r"calories|baseline)\b",
+    re.IGNORECASE,
+)
+
+
+def is_transient_absence(subject: str, predicate: str, obj: str) -> bool:
+    """True when a triple records what was merely missing at the time.
+
+    These are accurate when said and wrong an hour later, so they are
+    never written to the graph.
+    """
+    # Underscore is a word character, so `\b` never fires inside
+    # "does_not_provide". Predicates arrive in both spellings from the
+    # extractor, so separators are normalised before matching.
+    pred = re.sub(r"[_\-]+", " ", predicate or "")
+    if not _NEGATION_RE.search(pred):
+        return False
+    # A design guarantee ("does not grant access to") is about what is
+    # permitted, not about what happened to be available.
+    if re.search(r"\bgrant|\bpermit|\ballow|\bauthoris|\bauthoriz",
+                 pred, re.IGNORECASE):
+        return False
+    return bool(_DATA_OBJECT_RE.search(obj or "")
+                or _DATA_OBJECT_RE.search(subject or ""))
+
 
 
 class KnowledgeGraph:
@@ -728,6 +797,13 @@ class KnowledgeGraph:
         ``_heuristic_extract`` can route through here without losing the
         'heuristic' provenance its own INSERT used to write.
         """
+        if is_transient_absence(source_name, relation_type, target_name):
+            logger.debug(
+                "dropping transient absence triple: %r -%s-> %r",
+                source_name, relation_type, target_name,
+            )
+            return {}
+
         source = await self.add_entity(source_name, source_type)
         target = await self.add_entity(target_name, target_type)
 

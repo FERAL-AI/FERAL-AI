@@ -22,6 +22,7 @@ import logging
 import os
 import re
 import time
+from types import SimpleNamespace
 from typing import Any, Optional, Callable, Awaitable, TYPE_CHECKING
 from uuid import uuid4
 
@@ -38,6 +39,7 @@ from models.protocol import (
 )
 from models.skill_manifest import SkillManifest
 from memory.execution_audit import claimed_by_caller, status_of as audit_status_of
+from memory.attachment_context import durable_chat_context, append_attachment_model_data
 from skills.registry import SkillRegistry
 from skills.executor import SkillExecutor
 from skills.availability import filter_unavailable_tools
@@ -53,6 +55,7 @@ from agents.multimodal_blocks import (
     should_prune_images,
 )
 from agents.llm_provider import LLMProvider
+from agents.runtime_context_checkpoint import RuntimeContextCoordinator
 from agents import llm_router
 from agents.genui_generator import GenUIGenerator
 from perception.fusion import PerceptionEngine, PerceptionFrame
@@ -60,7 +63,7 @@ from perception.fusion import PerceptionEngine, PerceptionFrame
 # Sub-modules — orchestrator delegates to these focused classes
 from agents.tool_runner import ToolRunner
 from security.dangerous_tools import resolve_surface_from_context
-from agents.context_manager import ContextManager, _chars_from
+from agents.context_manager import ContextManager, OllamaContextRefusal, _chars_from
 from agents.refusal_handler import RefusalHandler
 from agents.identity_loader import IdentityLoader
 from agents.tool_display import friendly_tool_label
@@ -106,6 +109,10 @@ def _smart_loops_enabled() -> bool:
     return str(val).strip().lower() not in ("0", "false", "no", "off", "")
 
 
+class SessionDeliveryLost(asyncio.CancelledError):
+    """A streaming turn cannot reach its owning transport; never replay it."""
+
+
 class Orchestrator:
     """
     The core agentic loop — fully wired to perception, memory, and safety.
@@ -116,6 +123,10 @@ class Orchestrator:
       - RefusalHandler   – LLM refusal detection and fallback execution
       - IdentityLoader   – ~/.feral/ identity files → system prompt
     """
+
+    # Inactive default also preserves minimal headless instances constructed
+    # without the full runtime constructor. Installation remains instance-only.
+    _context_checkpoints: RuntimeContextCoordinator | None = None
 
     # Class-level constants kept on Orchestrator for backward compat.
     #
@@ -243,6 +254,9 @@ class Orchestrator:
         # ordering. Different sessions still run fully parallel — only
         # turns on the same session are serialised.
         self._session_locks: dict[str, asyncio.Lock] = {}
+        # Installed only after every production entry/writer/cleanup adopts the
+        # lifecycle. BrainState deliberately does not activate this first slice.
+        self._context_checkpoints: RuntimeContextCoordinator | None = None
         # Image-bearing tool results (screenshots) travel OUT OF BAND.
         #
         # ``conversation_history`` stays pure text and provider-agnostic:
@@ -949,6 +963,8 @@ class Orchestrator:
 
     def _schedule_compaction(self, session_id: str, reason: str) -> bool:
         """Fire-and-forget one compaction. True when it was scheduled."""
+        if self._context_checkpoints is not None and self._context_checkpoints.known_managed(session_id):
+            return False  # Managed compaction requires a separate fenced mutator.
         if self._compaction_inflight.get(session_id):
             return False
         if not self.memory:
@@ -979,6 +995,8 @@ class Orchestrator:
                 # position: everything past the snapshot length is new,
                 # and is re-appended after the compacted prefix.
                 async with self._get_session_lock(session_id):
+                    if self._context_checkpoints is not None and await self._context_checkpoints.is_managed(session_id):
+                        return
                     history = list(self.conversation_history.get(session_id, []))
                     snapshot_len = len(history)
                 if not history:
@@ -996,9 +1014,11 @@ class Orchestrator:
                 )
 
                 async with self._get_session_lock(session_id):
+                    if self._context_checkpoints is not None and await self._context_checkpoints.is_managed(session_id):
+                        return
                     if result.get("compacted") and result.get("history"):
                         current = self.conversation_history.get(session_id, [])
-                        if len(current) >= snapshot_len:
+                        if len(current) >= snapshot_len and current[:snapshot_len] == history:
                             # Turns that landed mid-compaction. They are
                             # NOT in the summary, so they are carried
                             # over verbatim rather than dropped.
@@ -1199,6 +1219,7 @@ class Orchestrator:
             memory_filter=memory_filter,
             query=query,
             plan_mode=plan_mode,
+            compact_tool_catalog=getattr(self.llm, "provider", "") in ("ollama", "lmstudio"),
         )
 
     def _load_identity(self) -> str:
@@ -1282,17 +1303,37 @@ class Orchestrator:
         request_id: str,
         tool_name: str,
         args: dict,
+        taskflow_pending: Optional[dict] = None,
+        exact_approval=None,
     ) -> dict:
         """Execute a previously-approved pending tool call."""
-        self.tool_runner.grant_session_approval(tool_name, session_id)
+        if taskflow_pending is None:
+            self.tool_runner.grant_session_approval(tool_name, session_id)
         tool_call = {
             "name": tool_name,
             "args": args or {},
             "id": request_id,
         }
-        await self._emit_tool_start(session_id, tool_call)
-        t_start = time.time()
-        result_data = await self._execute_tool_call_for_llm(session_id, tool_call, [])
+        taskflows = self.taskflows if taskflow_pending else None
+        try:
+            await self._emit_tool_start(session_id, tool_call)
+            t_start = time.time()
+            if taskflows is not None:
+                if not taskflows.approved_dispatch_allowed(taskflow_pending):
+                    result_data = {"success": False, "error": "Workflow dispatch was cancelled or paused before execution"}
+                else:
+                    binding = taskflow_pending["taskflow"]
+                    tool_call["id"] = f"taskflow:{binding['flow_id']}:{binding['step_id']}"
+                    result_data = await self.tool_runner.execute_tool_call_for_llm(
+                        session_id, tool_call, [], surface="taskflow", approval=exact_approval
+                    )
+                await taskflows.finish_approved_dispatch(taskflow_pending, result_data)
+            else:
+                result_data = await self._execute_tool_call_for_llm(session_id, tool_call, [])
+        except (Exception, asyncio.CancelledError):
+            if taskflows is not None:
+                await taskflows.finish_approved_dispatch(taskflow_pending, uncertain=True)
+            raise
         latency_ms = (time.time() - t_start) * 1000
         await self._emit_tool_result(session_id, tool_call, result_data, latency_ms)
         await self._try_genui_for_result(session_id, tool_call, result_data)
@@ -1313,6 +1354,31 @@ class Orchestrator:
             "result": result_data,
         }
 
+    async def _push_approval_resolved(
+        self, session_id: str, request_id: str, outcome: str,
+        tool_name: str, actor: str,
+    ) -> None:
+        """Tell every node on the session to stop asking. Never raises.
+
+        Approvals are pushed to each attached surface, so one answered on
+        the phone has to disappear from the glasses rather than be asked
+        again by whichever surface did not hear the answer.
+        """
+        try:
+            from api.state import state as _state
+            push = getattr(_state, "push_to_session_nodes", None)
+            if not callable(push):
+                return
+            await push(session_id, {"type": "approval_resolved", "payload": {
+                "request_id": request_id,
+                "session_id": session_id,
+                "outcome": outcome,
+                "resolved_by": actor,
+                "tool_name": tool_name,
+            }})
+        except Exception as exc:
+            logger.debug("approval_resolved push failed: %s", exc)
+
     async def resolve_tool_approval_request(
         self,
         request_id: str,
@@ -1321,6 +1387,29 @@ class Orchestrator:
         session_id: str | None = None,
         actor: str = "api",
     ) -> dict:
+        coordinator = self._context_checkpoints
+        if coordinator is None:
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+        pending = self.tool_runner.get_pending(request_id)
+        if not pending:
+            return {"status": "not_found", "request_id": request_id}
+        sid = str(pending.get("session_id", "") or "")
+        if session_id is not None and session_id != sid:
+            return {"status": "session_mismatch", "request_id": request_id, "session_id": session_id, "pending_session_id": sid}
+        if approved and not self.tool_runner.pending_context_valid(pending):
+            return {"status": "stale_context", "request_id": request_id, "session_id": sid,
+                    "reason": "Interrupted context review requires a fresh request and approval."}
+        if coordinator.owns_writer(sid):
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+        async with coordinator.write_scope(sid):
+            pending = self.tool_runner.get_pending(request_id)
+            if approved and pending is not None and not self.tool_runner.pending_context_valid(pending):
+                return {"status": "stale_context", "request_id": request_id, "session_id": sid,
+                        "reason": "Interrupted context review requires a fresh request and approval."}
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+
+    async def _resolve_tool_approval_request_impl(self, request_id: str, *, approved: bool,
+                                                session_id: str | None = None, actor: str = "api") -> dict:
         """Resolve a pending tool approval request by id.
 
         Returns a status payload:
@@ -1357,7 +1446,12 @@ class Orchestrator:
             denied = self.tool_runner.deny_pending(request_id, session_id=effective_session)
             if denied is None:
                 return {"status": "not_found", "request_id": request_id}
+            if pending.get("taskflow") and self.taskflows is not None:
+                await self.taskflows.finish_approved_dispatch(pending, rejected=True)
             await self._send_text(effective_session, f"Cancelled `{tool_name}`.")
+            await self._push_approval_resolved(
+                effective_session, request_id, "rejected", tool_name, actor,
+            )
             return {
                 "status": "rejected",
                 "request_id": request_id,
@@ -1366,18 +1460,41 @@ class Orchestrator:
                 "resolved_by": actor,
             }
 
+        taskflow_pending = pending if pending.get("taskflow") else None
+        if taskflow_pending is not None and (
+            self.taskflows is None or not self.taskflows.prepare_approved_dispatch(pending)
+        ):
+            self.tool_runner.deny_pending(request_id, session_id=effective_session)
+            if self.taskflows is not None:
+                await self.taskflows.finish_approved_dispatch(pending, rejected=True)
+            return {"status": "rejected", "request_id": request_id,
+                    "reason": "Workflow approval is stale, cancelled, paused or does not match the action"}
+
         accepted = self.tool_runner.approve_pending(
             request_id,
             session_id=effective_session,
+            exact_once=taskflow_pending is not None,
         )
         if accepted is None:
+            if taskflow_pending is not None:
+                await self.taskflows.finish_approved_dispatch(taskflow_pending, rejected=True)
             return {"status": "not_found", "request_id": request_id}
-        return await self._execute_approved_pending_tool(
-            effective_session,
-            request_id=request_id,
-            tool_name=tool_name,
-            args=args,
-        )
+        try:
+            await self._push_approval_resolved(
+                effective_session, request_id, "approved", tool_name, actor,
+            )
+            return await self._execute_approved_pending_tool(
+                effective_session,
+                request_id=request_id,
+                tool_name=tool_name,
+                args=args,
+                taskflow_pending=taskflow_pending,
+                exact_approval=accepted.get("approval"),
+            )
+        except (Exception, asyncio.CancelledError):
+            if taskflow_pending is not None:
+                await self.taskflows.finish_approved_dispatch(taskflow_pending, uncertain=True)
+            raise
 
     async def _maybe_handle_pending_tool_approval_text(
         self,
@@ -1590,6 +1707,19 @@ class Orchestrator:
         return summary, detail
 
     @staticmethod
+    def _pending_review_response(outputs: list[dict]) -> str:
+        """Report gated actions without guessing their concurrent review outcome."""
+        count = sum(
+            audit_status_of(output.get("result") or {}) == "pending_approval"
+            for output in outputs
+        )
+        if count == 1:
+            return "That action was sent for your approval. Review the approval card for its current status."
+        if count:
+            return "Those actions were sent for your approval. Review the approval cards for their current status."
+        return ""
+
+    @staticmethod
     def _refusal_code(result_data: dict) -> str:
         """Classify a DECLINED tool result for the client. "" if it ran.
 
@@ -1627,6 +1757,8 @@ class Orchestrator:
         latency_ms: float,
     ) -> None:
         """Notify the UI a tool call has finished (clears the chip)."""
+        from agents.chat_turns import observe_tool_result
+        observe_tool_result(session_id, result_data)
         try:
             success = bool(
                 (isinstance(result_data, dict) and (result_data.get("success") or result_data.get("status") == "command_sent_to_hardware_daemon"))
@@ -2113,6 +2245,11 @@ class Orchestrator:
             "delegated": False,
         }
         self._active_turns.setdefault(session_id, []).append(turn)
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.began = True
+            turn["_feral_turn_id"] = audit.turn_id
         return turn
 
     def _note_outbound_text(self, session_id: str, text: str) -> None:
@@ -2647,6 +2784,10 @@ class Orchestrator:
         special-case the new frame type still see a sensible reply
         instead of silence.
         """
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.budget_exceeded = True
         try:
             from models.protocol import BudgetExceededPayload
         except Exception:
@@ -2893,6 +3034,37 @@ class Orchestrator:
             logger.warning("vision context attach failed", exc_info=True)
             return user_content
 
+    def install_runtime_context_checkpoints(self, store: "MemoryStore", *, legacy_passthrough: bool = False) -> RuntimeContextCoordinator:
+        """Internal integration hook; never restore arbitrary UI history here."""
+        if self._context_checkpoints is not None or self._active_turns:
+            raise RuntimeError("Runtime checkpoint lifecycle is already installed or busy")
+        coordinator = RuntimeContextCoordinator(
+            store, history=self.conversation_history, lock_for=self._get_session_lock,
+            image_call_ids=lambda sid: frozenset(self._tool_result_images.get(sid, {})),
+            clear_images=self._forget_tool_images,
+            clear_session=self._clear_checkpoint_session_locked,
+            finalize_legacy=self._learn_checkpoint_legacy_disconnect_locked,
+            legacy_passthrough=legacy_passthrough,
+        )
+        self._context_checkpoints = coordinator
+        return coordinator
+
+    async def _learn_checkpoint_legacy_disconnect_locked(self, session_id: str) -> None:
+        if session_id in self._session_finalized:
+            return
+        self._session_finalized.add(session_id)
+        if self.learner:
+            await self.learner.extract_knowledge(session_id)
+            await self.learner.summarize_session(session_id)
+
+    def _clear_checkpoint_session_locked(self, session_id: str) -> None:
+        """Coordinator calls under the existing SID lock after attachment recheck."""
+        self._last_proactive_check.pop(session_id, None)
+        self._session_surfaces.pop(session_id, None)
+        self._forget_consolidation_state(session_id)
+        self._forget_session_activity(session_id)
+        self.tool_runner.clear_session(session_id)
+
     async def handle_command(self, session_id: str, text: str, context: Optional[dict] = None):
         """Process a user command through the full agentic pipeline.
 
@@ -2901,13 +3073,18 @@ class Orchestrator:
         or interleave tool_call ordering. Different sessions proceed
         fully in parallel.
         """
+        owned_lock = False
         try:
-            async with self._get_session_lock(session_id):
+            scope = (self._context_checkpoints.command_scope(session_id)
+                     if self._context_checkpoints is not None else self._get_session_lock(session_id))
+            async with scope:
+                owned_lock = True
                 return await self._handle_command_impl(session_id, text, context)
         finally:
             # : tear down subagents tied to this parent session.
             # Lock release stays synchronous; cancellation is fire-and-forget.
-            self._w17_cancel_subsessions_nowait(session_id)
+            if owned_lock:
+                self._w17_cancel_subsessions_nowait(session_id)
 
     # ─────────────────────────────────────────────
     # Plan mode
@@ -3203,7 +3380,7 @@ class Orchestrator:
             # phone) the rest of a long message was unrecoverable once
             # compaction fired. ``episodes_fts`` indexes ``detail``
             # alongside ``summary``, so this is searchable on arrival.
-            detail=json.dumps({"text": text, "context": context or {}}),
+            detail=json.dumps({"text": text, "context": durable_chat_context(context)}),
         )
 
         # S1 live-path closure (non-stream parity). The forced-tool
@@ -3229,6 +3406,7 @@ class Orchestrator:
         # Multi-agent path
         if (
             not vision_fast_path
+            and not context_data.get("_attachment_model_data")
             and self._multi_agent_enabled
             and self._multi_agent
             and self.llm
@@ -3279,7 +3457,7 @@ class Orchestrator:
                         _model, _usage = self._pop_multi_agent_attribution(session_id)
                         await self._try_send_sdui(
                             session_id, response_text,
-                            model=_model, usage=_usage,
+                            model=_model, usage=_usage, require_delivery=True,
                         )
                         if self.memory:
                             # Full text, not [:300] — the phone's chat_response
@@ -3299,6 +3477,8 @@ class Orchestrator:
                         # chat_request handler) can carry it in chat_response
                         # instead of relying on the working-memory fallback.
                         return response_text
+                    await self._send_error(session_id, "The agent turn ended without a final answer; prior actions may have an unknown outcome.", code="multi_agent_no_output")
+                    return None
                 except MultiAgentProviderError as exc:
                     # The provider itself failed. Deliver an error
                     # frame and stop: the single-agent fallback below
@@ -3313,8 +3493,10 @@ class Orchestrator:
                     )
                     await self._send_error(session_id, str(exc))
                     return None
-                except Exception as e:
-                    logger.warning(f"Multi-agent failed, falling back to single-agent: {e}")
+                except Exception:
+                    logger.warning("Multi-agent turn interrupted; no command replay")
+                    await self._send_error(session_id, "The agent turn was interrupted; prior actions may have an unknown outcome.", code="multi_agent_interrupted")
+                    return None
 
         # Step 1: Semantic Tool Routing
         relevant_skills = await self._route_prompt(text, session_id=session_id)
@@ -3430,6 +3612,7 @@ class Orchestrator:
         user_content = self._attach_vision_context(
             user_content, context=context, session_id=session_id,
         )
+        user_content = append_attachment_model_data(user_content, context)
         user_message = {"role": "user", "content": user_content}
         self.conversation_history[session_id].append(user_message)
         turn["user_recorded"] = True
@@ -3505,6 +3688,7 @@ class Orchestrator:
         route_ref = self._route_for_tier(current_tier)
 
         sent_response = False
+        any_tool_ran = False
         final_response_text = ""
         while budget.start_iteration():
             effective_system_prompt = system_prompt
@@ -3589,7 +3773,7 @@ class Orchestrator:
                     logger.error(
                         "[%s] LLM provider failed: %s", session_id[:8], provider_error,
                     )
-                    await self._send_error(session_id, provider_error)
+                    await self._send_error(session_id, provider_error, code=str(response.get("error_code") or "llm_provider_error"))
                     sent_response = True
                     break
 
@@ -3673,14 +3857,19 @@ class Orchestrator:
                     if raw_msg.get("tool_calls"):
                         assistant_msg["tool_calls"] = raw_msg["tool_calls"]
 
-                history.append(assistant_msg)
+                if text_content or tool_calls:
+                    history.append(assistant_msg)
 
+            except OllamaContextRefusal as exc:
+                await self._send_error(session_id, str(exc), code=exc.code)
+                return
             except Exception as e:
                 logger.error(f"LLM failed: {e}")
                 await self._direct_execute(session_id, text, relevant_skills)
                 return
 
             if tool_calls:
+                any_tool_ran = True
                 # WS5 — multi-actuator ordered WS frames. Tools still
                 # execute in parallel (cap = ``FERAL_MAX_PARALLEL_TOOLS``)
                 # for speed, but the ``tool_start`` AND ``tool_result``
@@ -3851,6 +4040,18 @@ class Orchestrator:
                     tools_used = [tc["name"] for tc in tool_calls]
                     self._mitosis_engine.observe_interaction(session_id, text, tools_used)
 
+                pending_response = self._pending_review_response(tool_outputs)
+                if pending_response:
+                    # A further free-text provider round can claim that a
+                    # gated action ran. The approval result owns its outcome.
+                    history.append({"role": "assistant", "content": pending_response})
+                    if self.memory:
+                        self.memory.working_push(session_id, {"role": "assistant", "text": pending_response})
+                    await self._send_text(session_id, pending_response, model=turn_model, usage=turn_usage)
+                    sent_response = True
+                    final_response_text = pending_response
+                    break
+
                 if final_answer_only:
                     # No-progress guard: withdraw tools and steer the model
                     # to one final honest answer instead of a third
@@ -3872,8 +4073,13 @@ class Orchestrator:
             else:
                 break
 
-        if not sent_response:
-            await self._send_text(session_id, "I processed your request but have nothing to report.")
+        if not sent_response and not any_tool_ran:
+            await self._send_error(
+                session_id,
+                "The selected model returned no answer or tool call. "
+                "Retry this message or choose another model in AI Providers.",
+                code="provider_empty_response",
+            )
 
         # Write-back, session eviction, snapshot and F2 compaction all
         # live in ``_finalize_turn`` now, which the caller runs from a
@@ -3886,12 +4092,17 @@ class Orchestrator:
 
     async def handle_command_stream(self, session_id: str, text: str, context: Optional[dict] = None):
         """Streaming variant of handle_command with a per-session lock."""
+        owned_lock = False
         try:
-            async with self._get_session_lock(session_id):
+            scope = (self._context_checkpoints.command_scope(session_id)
+                     if self._context_checkpoints is not None else self._get_session_lock(session_id))
+            async with scope:
+                owned_lock = True
                 return await self._handle_command_stream_impl(session_id, text, context)
         finally:
             # : tear down subagents tied to this parent session.
-            self._w17_cancel_subsessions_nowait(session_id)
+            if owned_lock:
+                self._w17_cancel_subsessions_nowait(session_id)
 
     async def _handle_command_stream_impl(self, session_id: str, text: str, context: Optional[dict] = None):
         """Streaming variant of handle_command. Guarded by the session
@@ -3953,7 +4164,7 @@ class Orchestrator:
             # phone) the rest of a long message was unrecoverable once
             # compaction fired. ``episodes_fts`` indexes ``detail``
             # alongside ``summary``, so this is searchable on arrival.
-            detail=json.dumps({"text": text, "context": context or {}}),
+            detail=json.dumps({"text": text, "context": durable_chat_context(context)}),
         )
 
         # S1 live-path closure: the timeline side-channel scheduling
@@ -3975,6 +4186,7 @@ class Orchestrator:
         vision_fast_path = context_data.get("channel") == "vision_ask"
         if (
             not vision_fast_path
+            and not context_data.get("_attachment_model_data")
             and self._multi_agent_enabled
             and self._multi_agent
             and self.llm
@@ -3988,7 +4200,7 @@ class Orchestrator:
                     _model, _usage = self._pop_multi_agent_attribution(session_id)
                     await self._try_send_sdui(
                         session_id, response_text,
-                        model=_model, usage=_usage,
+                        model=_model, usage=_usage, require_delivery=True,
                     )
                     if self.memory:
                         # Full text (no [:300]) — see the non-stream
@@ -3997,14 +4209,12 @@ class Orchestrator:
                             session_id,
                             {"role": "assistant", "text": response_text},
                         )
-                    if self.learner:
-                        # AUDIT-FIXES F-06, same as the non-stream branch.
-                        self._track_background_task(
-                            asyncio.ensure_future(
-                                self.learner.on_message(session_id, "user", text)
-                            )
-                        )
+                    # SDUI delivery bypasses _send_text's transcript note.
+                    # The shared finalizer owns persistence and learning.
+                    turn["reply_text"] = response_text
                     return response_text
+                await self._send_error(session_id, "The agent turn ended without a final answer; prior actions may have an unknown outcome.", code="multi_agent_no_output")
+                return None
             except MultiAgentProviderError as exc:
                 # Same as the non-stream branch: error frame, no
                 # single-agent retry against the failing provider.
@@ -4014,10 +4224,10 @@ class Orchestrator:
                 )
                 await self._send_error(session_id, str(exc))
                 return None
-            except Exception as e:
-                logger.warning(
-                    f"Multi-agent (stream) failed, falling back to single-agent: {e}"
-                )
+            except Exception:
+                logger.warning("Multi-agent streaming turn interrupted; no command replay")
+                await self._send_error(session_id, "The agent turn was interrupted; prior actions may have an unknown outcome.", code="multi_agent_interrupted")
+                return None
 
         relevant_skills = await self._route_prompt(text, session_id=session_id)
         relevant_skills = self._ensure_core_skills(relevant_skills)
@@ -4114,6 +4324,7 @@ class Orchestrator:
         user_content = self._attach_vision_context(
             user_content, context=context, session_id=session_id,
         )
+        user_content = append_attachment_model_data(user_content, context)
         self.conversation_history[session_id].append({"role": "user", "content": user_content})
         turn["user_recorded"] = True
         # Per-request view; see the matching comment in the non-stream
@@ -4187,7 +4398,7 @@ class Orchestrator:
                 if _stream_buf:
                     merged = "".join(_stream_buf)
                     _stream_buf = []
-                    await self.send(session_id, FeralMessage(
+                    await self._send_stream_frame(session_id, FeralMessage(
                         session_id=session_id, hop="brain", type="stream_delta",
                         payload=StreamDeltaPayload(
                             delta=merged, stream_id=stream_id, is_final=False,
@@ -4195,9 +4406,13 @@ class Orchestrator:
                     ))
                 _stream_last_flush = time.monotonic()
 
+            terminal_received = False
             try:
                 stream_model = getattr(self.llm, 'model_name', 'llm')
-                await self._emit_brain_event(session_id, "llm_call", {"model": stream_model})
+                await self._send_stream_frame(session_id, FeralMessage(
+                    session_id=session_id, hop="brain", type="brain_event",
+                    payload={"event": "llm_call", "model": stream_model},
+                ))
                 stream_kw: dict[str, Any] = {"call_site": "chat"}
                 if forced_tool:
                     stream_kw["force_tool"] = forced_tool
@@ -4234,7 +4449,7 @@ class Orchestrator:
                         accumulated_text += piece
                         if _stream_batch_ms <= 0:
                             # Legacy per-token path (debug).
-                            await self.send(session_id, FeralMessage(
+                            await self._send_stream_frame(session_id, FeralMessage(
                                 session_id=session_id, hop="brain", type="stream_delta",
                                 payload=StreamDeltaPayload(
                                     delta=piece, stream_id=stream_id, is_final=False,
@@ -4249,6 +4464,7 @@ class Orchestrator:
                         if tc:
                             tool_calls_received.append(tc)
                     elif delta["type"] == "done":
+                        terminal_received = True
                         # Flush any buffered prose before the terminal frame.
                         await _flush_stream_prose()
                         if streamed_text:
@@ -4261,7 +4477,7 @@ class Orchestrator:
                             # "answered by hop 4 of the failover chain".
                             # Absent keys stay absent rather than rendering
                             # a fabricated zero.
-                            await self.send(session_id, FeralMessage(
+                            await self._send_stream_frame(session_id, FeralMessage(
                                 session_id=session_id, hop="brain", type="stream_delta",
                                 payload=StreamDeltaPayload(
                                     delta="", stream_id=stream_id, is_final=True,
@@ -4270,6 +4486,7 @@ class Orchestrator:
                                 ).model_dump(),
                             ))
                     elif delta["type"] == "budget_exceeded":
+                        terminal_received = True
                         # WS8 — surface as a structured frame, not a
                         # stack trace. Lane 12 renders the banner.
                         await _flush_stream_prose()
@@ -4279,6 +4496,7 @@ class Orchestrator:
                         )
                         return
                     elif delta["type"] == "error":
+                        terminal_received = True
                         await _flush_stream_prose()
                         # Error frame, not "Stream error: ..." prose:
                         # ``_send_text`` records what it sends and
@@ -4287,13 +4505,22 @@ class Orchestrator:
                         await self._send_error(
                             session_id,
                             str(delta.get("content") or "unknown stream error"),
-                            code="llm_stream_error",
+                            code=str(delta.get("error_code") or "llm_stream_error"),
                         )
                         return
                 # Safety net: flush any tail prose if the stream ended
                 # without an explicit `done` event.
                 await _flush_stream_prose()
+            except OllamaContextRefusal as exc:
+                await self._send_error(session_id, str(exc), code=exc.code)
+                return
             except Exception as e:
+                if streamed_text or tool_calls_received or terminal_received or turn.get("tool_dispatch_started"):
+                    # Once output/tool instructions/terminal state arrived,
+                    # restarting the same command can duplicate earlier-round
+                    # side effects. A dropped response is not a provider retry.
+                    logger.warning("Streaming turn interrupted after provider output; no command replay")
+                    raise SessionDeliveryLost("Streaming turn interrupted after output; outcome may be unknown") from None
                 logger.error(f"Streaming failed, falling back: {e}")
                 # The stream path already appended this turn's user
                 # row to ``conversation_history``. The non-stream body
@@ -4410,6 +4637,7 @@ class Orchestrator:
                         # own execution_log row, so it claims the call and
                         # the executor does not write a duplicate.
                         with claimed_by_caller():
+                            turn["tool_dispatch_started"] = True
                             result_data = await self._execute_tool_call_for_llm(
                                 session_id, tc, relevant_skills,
                             )
@@ -4514,6 +4742,16 @@ class Orchestrator:
                     tools_used = [tc["name"] for tc in normalized_tool_calls]
                     self._mitosis_engine.observe_interaction(session_id, text, tools_used)
 
+                pending_response = self._pending_review_response(outputs)
+                if pending_response:
+                    history.append({"role": "assistant", "content": pending_response})
+                    if self.memory:
+                        self.memory.working_push(session_id, {"role": "assistant", "text": pending_response})
+                    await self._send_text(session_id, pending_response)
+                    accumulated_text = pending_response
+                    got_final_text = True
+                    break
+
                 if final_answer_only:
                     # No-progress guard: withdraw tools, steer to one final
                     # honest answer.
@@ -4531,12 +4769,14 @@ class Orchestrator:
             break
 
         if not got_final_text and not any_tool_ran:
-            # Only surface the placeholder when the turn truly
-            # produced nothing — no streamed text AND no tool
-            # execution. Tool-only turns already emitted tool_start /
-            # tool_result chips plus any SDUI from results, so a
-            # canned "no text response" bubble would be noise.
-            await self._send_text(session_id, "I processed your request but have no text response.")
+            # Tool-only turns retain their result frames. A provider that
+            # produced neither prose nor a tool cannot certify a reply.
+            await self._send_error(
+                session_id,
+                "The selected model returned no answer or tool call. "
+                "Retry this message or choose another model in AI Providers.",
+                code="provider_empty_response",
+            )
 
         # Write-back, eviction, snapshot and F2 compaction live in
         # ``_finalize_turn``, run from a ``finally`` by the caller —
@@ -4642,10 +4882,16 @@ class Orchestrator:
         )
         to_remove = len(self.conversation_history) - self._conversation_max_sessions
         for sid in sorted_sids[:to_remove]:
+            if self._context_checkpoints is not None:
+                if (self._context_checkpoints.known_managed(sid) or self._context_checkpoints.has_attachments(sid)
+                        or self._context_checkpoints.has_writers(sid)
+                        or self._get_session_lock(sid).locked()):
+                    continue
             del self.conversation_history[sid]
             # Drop the per-session lock too so long-running brains don't
             # grow the lock dict without bound.
-            self._session_locks.pop(sid, None)
+            if self._context_checkpoints is None:
+                self._session_locks.pop(sid, None)
             self._session_surfaces.pop(sid, None)
             # Same reasoning for the consolidation clocks: the ladder's
             # background tick iterates them, so a stale entry is a
@@ -4660,6 +4906,9 @@ class Orchestrator:
 
     async def on_session_disconnect(self, session_id: str):
         """Called when a client disconnects. Summarize and learn."""
+        if self._context_checkpoints is not None:
+            await self._context_checkpoints.evict_if_unattached(session_id, clear_legacy=True)
+            return
         if session_id in self._session_finalized:
             return
         self._session_finalized.add(session_id)
@@ -4668,7 +4917,8 @@ class Orchestrator:
             await self.learner.summarize_session(session_id)
         self.conversation_history.pop(session_id, None)
         self._last_proactive_check.pop(session_id, None)
-        self._session_locks.pop(session_id, None)
+        if self._context_checkpoints is None:
+            self._session_locks.pop(session_id, None)
         self._session_surfaces.pop(session_id, None)
         self._forget_consolidation_state(session_id)
         self._forget_session_activity(session_id)
@@ -5567,7 +5817,9 @@ class Orchestrator:
         turn had already snapshotted, and the turn's write-back then
         overwrote it.
         """
-        async with self._get_session_lock(session_id):
+        scope = (self._context_checkpoints.legacy_mutation_scope((session_id,), "voice")
+                 if self._context_checkpoints is not None else self._get_session_lock(session_id))
+        async with scope:
             history = self.conversation_history.setdefault(session_id, [])
             # B7: a live-voice session never runs ``_finalize_turn``, so
             # without a stamp here it looks permanently idle to the
@@ -5865,6 +6117,7 @@ class Orchestrator:
     ) -> None:
         confirmation_id = str(uuid4())[:8]
         self._pending_confirmations[confirmation_id] = {
+            "session_id": session_id,
             "tool_call": {"name": tool_call["name"], "args": tool_call.get("args", {})},
             "skills": available_skills,
             "reason": reason,
@@ -6029,6 +6282,16 @@ class Orchestrator:
     # ─────────────────────────────────────────────
 
     async def handle_ui_event(self, session_id: str, action_id: str, event: str, value=None, app_id: str | None = None, screen_id: str | None = None):
+        coordinator = self._context_checkpoints
+        if coordinator is None or coordinator.owns_writer(session_id):
+            await self._handle_ui_event(session_id, action_id, event, value, app_id, screen_id)
+            return
+        # Confirmation consumption and generic tool/app dispatch can occur before
+        # the helper's command fallback. Fence all of them in the same SID/task.
+        async with coordinator.write_scope(session_id, command_handoff=True):
+            await self._handle_ui_event(session_id, action_id, event, value, app_id, screen_id)
+
+    async def _handle_ui_event(self, session_id: str, action_id: str, event: str, value=None, app_id: str | None = None, screen_id: str | None = None):
         await helper_handle_ui_event(
             self,
             session_id=session_id,
@@ -6064,6 +6327,20 @@ class Orchestrator:
     # Response Helpers
     # ─────────────────────────────────────────────
 
+    async def _send_stream_frame(self, session_id: str, msg: FeralMessage):
+        try:
+            delivered = await self.send(session_id, msg)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.info("Streaming delivery ended; turn cancelled without replay")
+            raise SessionDeliveryLost("Streaming delivery is unavailable") from None
+        if delivered is False:
+            logger.info("Streaming frame undeliverable; turn cancelled without replay")
+            raise SessionDeliveryLost("Streaming delivery is unavailable")
+        # Legacy injected adapters return None; production state returns bool.
+        return delivered
+
     async def _send_text(
         self,
         session_id: str,
@@ -6075,6 +6352,10 @@ class Orchestrator:
         # Record first: every path that sends text must record what it
         # sent, including the ones that return before the tool loop.
         self._note_outbound_text(session_id, text)
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.final_text = text
         # ``model``/``usage`` are supplied only by the main tool loop,
         # which is the only caller that knows what the turn actually cost.
         # The many status/error/ack sends keep the empty default, so the
@@ -6097,6 +6378,10 @@ class Orchestrator:
         or ``_finalize_turn`` commits the failure to the transcript as
         an assistant row and the next turn feeds it back to the model.
         """
+        from agents.chat_turns import turn_audit
+        audit = turn_audit(session_id)
+        if audit is not None:
+            audit.error = True
         await helper_send_error(
             self, session_id, message, code=code, recoverable=recoverable,
         )
@@ -6135,9 +6420,19 @@ class Orchestrator:
         *,
         model: str = "",
         usage: dict | None = None,
+        require_delivery: bool = False,
     ):
+        delivery = self
+        if require_delivery:
+            # Scoped proxy: concurrent turns keep their own send callbacks;
+            # do not temporarily replace shared self.send across an await.
+            delivery = SimpleNamespace(
+                send=self._send_stream_frame,
+                voice_router=getattr(self, "voice_router", None),
+                _text_response_suppressed=getattr(self, "_text_response_suppressed", {}),
+            )
         await helper_try_send_sdui(
-            self, session_id=session_id, text=text, model=model, usage=usage,
+            delivery, session_id=session_id, text=text, model=model, usage=usage,
         )
 
     async def _try_genui_for_result(self, session_id: str, tool_call: dict, result_data: dict):

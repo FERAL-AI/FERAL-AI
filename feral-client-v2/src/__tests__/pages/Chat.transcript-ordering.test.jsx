@@ -55,7 +55,7 @@ function emit(msg) {
   listeners.forEach((fn) => fn(msg));
 }
 
-const GREETING = 'FERAL v2 is listening. What do you need?';
+const GREETING = 'How can I help?';
 
 /**
  * Every row now opens with a `.v2-chat-who` speaker label ("You" /

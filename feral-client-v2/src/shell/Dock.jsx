@@ -1,13 +1,13 @@
 import React, { useCallback, useRef, useState } from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
-import { Command } from 'lucide-react';
+import { Ellipsis } from 'lucide-react';
 import { DOCK_ITEMS, isPaletteOnlyPath } from './navigation';
 import { useCommandPalette } from './PaletteContext';
 import { useMachineVitals } from '../hooks/useMachineVitals';
 import DockStack, { HOLD_MS, isStackable } from './DockStack';
 
 /**
- * Bottom dock: the eight pinned destinations plus the palette button.
+ * Bottom navigation: everyday destinations, utilities and More.
  * One clean row, always.
  *
  * The eight tiles and the membership test for the palette button both
@@ -91,7 +91,7 @@ export default function Dock() {
       const dist = Math.abs(e.clientX - (r.left + r.width / 2));
       const k = Math.max(0, 1 - dist / 118);
       const kk = k * k;
-      tile.style.transform = `scale(${(1 + 0.5 * kk).toFixed(3)}) translateY(${(-8 * kk).toFixed(2)}px)`;
+      tile.style.transform = `translateY(${(-2 * kk).toFixed(2)}px)`;
     }
   }, []);
 
@@ -137,7 +137,7 @@ export default function Dock() {
         onMouseLeave={onDockLeave}
       >
         {DOCK_ITEMS.map(({ to, label, Icon }) => (
-          <li key={to} className="v2-dock-item">
+          <li key={to} className={`v2-dock-item${['/approvals', '/settings'].includes(to) ? ' v2-dock-item--utility' : ''}`}>
             <NavLink
               to={to}
               end={to === '/'}
@@ -170,10 +170,11 @@ export default function Dock() {
             onClick={togglePalette}
             aria-pressed={open}
             aria-haspopup="dialog"
-            title="Command palette (⌘K)"
+            title="More tools and search (⌘K)"
+            aria-label="More tools and search"
           >
-            <Command size={20} aria-hidden="true" />
-            <span className="v2-dock-label">Command</span>
+            <Ellipsis size={20} aria-hidden="true" />
+            <span className="v2-dock-label">More</span>
           </button>
         </li>
       </ul>

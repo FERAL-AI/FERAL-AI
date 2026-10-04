@@ -2,6 +2,8 @@
 
 import logging
 import os
+import asyncio
+import re
 
 from fastapi import APIRouter, Request, Response
 
@@ -10,6 +12,71 @@ from api.state import state
 logger = logging.getLogger("feral.brain")
 
 router = APIRouter()
+
+
+@router.post("/api/channels/stop")
+async def stop_channel(body: dict, response: Response):
+    """Stop the captured listener and its owned tasks, without deleting credentials."""
+    channel_type = body.get("type")
+    if not isinstance(channel_type, str) or not re.fullmatch(r"[a-z][a-z0-9_-]{0,63}", channel_type):
+        response.status_code = 422
+        return {"ok": False, "reason": "invalid_type"}
+    manager = state.channel_manager
+    if manager is None:
+        response.status_code = 503
+        return {"ok": False, "reason": "manager_unavailable"}
+    raw_channels = getattr(manager, "_channels", None)
+    if not isinstance(raw_channels, dict):
+        response.status_code = 501
+        return {"ok": False, "reason": "unsupported_manager"}
+    channels = raw_channels
+    channel = channels.get(channel_type)
+    if channel is None:
+        response.status_code = 404
+        return {"ok": False, "reason": "not_active", "channel": channel_type}
+    stop = getattr(channel, "stop", None)
+    if not callable(stop):
+        response.status_code = 501
+        return {"ok": False, "reason": "unsupported_channel", "channel": channel_type}
+    http_client = getattr(channel, "_http", None)
+    try:
+        # These fields are channel-owned task registries. Never inspect or
+        # cancel the event loop's tasks, orchestrator, or shared scheduler.
+        channel._running = False
+        tasks = set(getattr(channel, "_bg_tasks", set()))
+        poll_task = getattr(channel, "_poll_task", None)
+        if poll_task is not None:
+            tasks.add(poll_task)
+        tasks = {task for task in tasks if isinstance(task, asyncio.Task)
+                 and task is not asyncio.current_task()}
+        for task in tasks:
+            if not task.done():
+                task.cancel()
+        if tasks:
+            done, pending = await asyncio.wait(tasks, timeout=5)
+            for task in done:
+                if not task.cancelled():
+                    task.exception()  # Observe failures while draining.
+            if pending:
+                raise RuntimeError("owned tasks did not drain")
+        await asyncio.wait_for(stop(), timeout=10)
+        if bool(getattr(channel, "_running", False)):
+            raise RuntimeError("listener still running")
+        if http_client is not None and getattr(http_client, "is_closed", None) is False:
+            raise RuntimeError("captured HTTP client did not close")
+    except Exception:
+        response.status_code = 502
+        return {"ok": False, "reason": "stop_failed", "channel": channel_type,
+                "runtime_outcome": "uncertain"}
+    if (state.channel_manager is not manager or getattr(manager, "_channels", None) is not channels
+            or channels.get(channel_type) is not channel):
+        response.status_code = 409
+        return {"ok": False, "reason": "channel_replaced", "channel": channel_type,
+                "captured_channel_stopped": True}
+    del channels[channel_type]
+    return {"ok": True, "channel": channel_type, "stopped": True,
+            "scope": "runtime_only", "saved_configuration_changed": False,
+            "credentials_revoked": False}
 
 
 @router.get("/api/channels")

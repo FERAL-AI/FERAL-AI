@@ -13,11 +13,16 @@ Streaming uses events with incrementing seq numbers.
 
 from __future__ import annotations
 import asyncio
-import json
 import logging
 import time
 from typing import Callable, Awaitable, Optional, Any
 from uuid import uuid4
+from contextlib import asynccontextmanager
+
+from agents.runtime_context_checkpoint import (
+    RuntimeContextCoordinator, RuntimeContextError, RuntimeContextReadiness, legacy_context_mutation, runtime_coordinator,
+)
+from memory.runtime_session_checkpoint import CheckpointFence, CheckpointValidationError
 
 from config.loader import feral_home
 
@@ -157,6 +162,8 @@ class GatewaySession:
             return
 
         try:
+            if method == "chat.send":
+                params = {**params, "_gateway_request_id": req_id}
             result = await handler(self.session_id, params, self)
             await self.send_response(req_id, result)
         except GatewayError as e:
@@ -192,30 +199,228 @@ class GatewaySession:
 def register_core_methods(registry: MethodRegistry, state):
     """Register all core gateway RPC methods."""
 
+    def context_error(exc: RuntimeContextError) -> GatewayError:
+        return GatewayError(exc.code, "Runtime context could not be confirmed; inspect the exact thread and its earlier actions.",
+                            {"retry_safe": False, "effects_may_have_occurred": exc.effects_may_have_occurred,
+                             "action_outcome": "unknown" if exc.effects_may_have_occurred else "not_asserted"})
+
+    async def attachment_guard(session_id: str, session: GatewaySession, *, unsupported: str | None = None):
+        """Respect the exact authenticated attachment even when its ledger is absent."""
+        lookup = session.metadata.get("runtime_context_readiness")
+        requested = session.metadata.get("context_checkpoint_requested") is True
+        if not callable(lookup):
+            if requested:
+                raise context_error(RuntimeContextError("context_unavailable"))
+            return
+        try:
+            readiness = await asyncio.wait_for(lookup(), timeout=10)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise context_error(RuntimeContextError("context_unavailable")) from None
+        if not isinstance(readiness, RuntimeContextReadiness) or readiness.session_id != session_id:
+            raise context_error(RuntimeContextError("context_unavailable"))
+        if requested or readiness.managed:
+            if not readiness.ready:
+                raise context_error(RuntimeContextError(f"context_{readiness.state.value}"))
+            if unsupported is not None:
+                raise context_error(RuntimeContextError(f"managed_{unsupported}_unsupported"))
+        elif readiness.state.value != "legacy":
+            raise context_error(RuntimeContextError(f"context_{readiness.state.value}"))
+
+    @asynccontextmanager
+    async def legacy_guard(identities: tuple[str, ...], operation: str):
+        try:
+            async with legacy_context_mutation(state.orchestrator, state.memory, identities, operation):
+                yield
+        except RuntimeContextError as exc:
+            raise GatewayError(exc.code, "This path cannot modify managed runtime context; use a new thread or inspect its status.") from None
+
+    @registry.method("chat.capabilities")
+    async def chat_capabilities(session_id: str, params: dict, session: GatewaySession):
+        supported = callable(session.metadata.get("tracked_chat_send")) and callable(
+            getattr(getattr(state, "memory", None), "chat_turn_claim", None)
+        )
+        result: dict[str, object] = {"turn_contract_versions": [1] if supported else [], "durable_receipts": supported,
+                  "whole_turn_terminal": supported, "session_id": session_id}
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+        managed_voice = session.metadata.get("managed_chained_voice")
+        result["managed_chained_voice_versions"] = await managed_voice.capabilities() if isinstance(managed_voice, ClientManagedChainedVoice) else []
+        lookup = session.metadata.get("runtime_context_readiness")
+        result.update({"context_checkpoint_versions": [], "context_recovery_versions": [], "context_ready": False, "context_state": "unavailable", "context_managed": False})
+        if callable(lookup):
+            readiness = await lookup()
+            if isinstance(readiness, RuntimeContextReadiness) and readiness.session_id == session_id:
+                result.update({"context_checkpoint_versions": [1], "context_ready": readiness.ready,
+                               "context_state": readiness.state.value, "context_managed": readiness.managed,
+                               "managed_unsupported_paths": ["voice", "handoff", "reset", "compact", "snapshot", "branch", "restore", "delete"]})
+                if result["managed_chained_voice_versions"] == [1]:
+                    result["managed_unsupported_paths"] = ["realtime_voice", "handoff", "reset", "compact", "snapshot", "branch", "restore", "delete"]
+                if runtime_coordinator(state.orchestrator) is not None:
+                    result["context_recovery_versions"] = [1]
+                if readiness.ready and readiness.fence is not None:
+                    checkpoint = public_checkpoint(readiness)
+                    checkpoint.pop("attempt_id")
+                    result["context_checkpoint"] = checkpoint
+                elif readiness.state.value == "in_progress" and readiness.recovery_fence is not None:
+                    result["context_recovery"] = {"contract_version": 1, "session_id": session_id,
+                        "generation": readiness.recovery_fence.generation, "revision": readiness.recovery_fence.revision,
+                        "attempt_id": readiness.recovery_fence.attempt_id, "state": "in_progress", "durable": True,
+                        "requires_unknown_effects_acknowledgement": True}
+        return result
+
+    def public_checkpoint(readiness: RuntimeContextReadiness) -> dict:
+        fence = readiness.fence
+        if not readiness.ready or fence is None:
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        return {"contract_version": 1, "session_id": readiness.session_id,
+                "generation": fence.generation, "revision": fence.revision, "attempt_id": fence.attempt_id,
+                "durable": True, "initialized": readiness.initialized, "omissions": dict(readiness.omissions)}
+
+    async def recovery_terms(session_id: str, params: dict, session: GatewaySession, *, acknowledge: bool) -> tuple[RuntimeContextCoordinator, CheckpointFence]:
+        keys = {"contract_version", "session_id", "generation", "revision", "attempt_id"}
+        if acknowledge:
+            keys.add("acknowledge_unknown_effects")
+        if not isinstance(params, dict) or set(params) != keys or type(params.get("contract_version")) is not int or params["contract_version"] != 1:
+            raise context_error(RuntimeContextError("context_recovery_invalid"))
+        if params.get("session_id") != session_id or session.session_id != session_id:
+            raise context_error(RuntimeContextError("context_recovery_session_mismatch"))
+        if acknowledge and params.get("acknowledge_unknown_effects") is not True:
+            raise context_error(RuntimeContextError("context_recovery_invalid"))
+        try:
+            fence = CheckpointFence(session_id, params["generation"], params["revision"], params["attempt_id"])
+        except CheckpointValidationError:
+            raise context_error(RuntimeContextError("context_recovery_invalid")) from None
+        lookup = session.metadata.get("runtime_context_readiness")
+        coordinator = runtime_coordinator(state.orchestrator)
+        if coordinator is None or not callable(lookup):
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        if acknowledge:
+            from agents.chat_turns import ChatTurnManager
+            manager = getattr(state, "chat_turns", None)
+            if coordinator.has_writers(session_id) or (isinstance(manager, ChatTurnManager) and manager.has_active_session(session_id)):
+                raise context_error(RuntimeContextError("context_recovery_busy"))
+        try:
+            readiness = await asyncio.wait_for(lookup(), timeout=10)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise context_error(RuntimeContextError("context_recovery_unavailable")) from None
+        if not isinstance(readiness, RuntimeContextReadiness) or readiness.session_id != session_id or not readiness.managed:
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        if runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store:
+            raise context_error(RuntimeContextError("context_recovery_unavailable"))
+        return coordinator, fence
+
+    @registry.method("session.context.recover")
+    async def context_recover(session_id: str, params: dict, session: GatewaySession):
+        from agents.chat_turns import ChatTurnManager
+        coordinator, fence = await recovery_terms(session_id, params, session, acknowledge=True)
+
+        def active_turn() -> bool:
+            manager = getattr(state, "chat_turns", None)
+            return (runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store
+                    or (isinstance(manager, ChatTurnManager) and manager.has_active_session(session_id)))
+
+        try:
+            ready = await coordinator.recover(session_id, fence, active_turn=active_turn)
+        except RuntimeContextError as exc:
+            raise context_error(exc) from None
+        if runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store:
+            raise context_error(RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True))
+        return {"contract_version": 1, "session_id": session_id, "status": "recovered", "context_ready": True,
+                "durable": True, "replayed": False, "action_outcome": "unknown", "context_checkpoint": public_checkpoint(ready)}
+
+    @registry.method("session.context.recoveryStatus")
+    async def context_recovery_status(session_id: str, params: dict, session: GatewaySession):
+        coordinator, fence = await recovery_terms(session_id, params, session, acknowledge=False)
+        try:
+            status, readiness = await coordinator.recovery_status(session_id, fence)
+        except RuntimeContextError as exc:
+            raise context_error(exc) from None
+        if runtime_coordinator(state.orchestrator) is not coordinator or state.memory is not coordinator.store:
+            raise context_error(RuntimeContextError("context_recovery_unavailable", effects_may_have_occurred=True))
+        result: dict[str, object] = {"contract_version": 1, "session_id": session_id, "status": status,
+                  "recovered": status == "recovered", "context_ready": status == "recovered" and readiness.ready,
+                  "durable": True, "replayed": False, "action_outcome": "unknown"}
+        if status == "recovered" and readiness.ready:
+            result["context_checkpoint"] = public_checkpoint(readiness)
+        return result
+
     @registry.method("chat.send")
     async def chat_send(session_id: str, params: dict, session: GatewaySession):
         text = params.get("text", "")
         context = params.get("context", {})
         if not text:
             raise GatewayError("INVALID_PARAMS", "text is required")
+        await attachment_guard(session_id, session)
 
-        if state.memory:
-            state.memory.working_push(session_id, {"role": "user", "text": text})
+        if params.get("turn_contract_version") is not None:
+            from agents.chat_turns import ChatTurnError
+            if type(params["turn_contract_version"]) is not int or params["turn_contract_version"] != 1:
+                raise GatewayError("INVALID_PARAMS", "Unsupported tracked turn contract")
+            submit = session.metadata.get("tracked_chat_send")
+            if not callable(submit):
+                raise GatewayError("UNAVAILABLE", "Tracked chat transport is unavailable")
 
-        await session.emit("chat.thinking", {"status": "processing"})
+            async def emit(kind, payload):
+                if kind == "chat_turn_terminal":
+                    await session.emit("chat.turn_terminal", payload)
+                elif kind == "error":
+                    await session.emit("chat.turn_error", payload)
 
-        if state.orchestrator:
-            await state.orchestrator.handle_command_stream(
-                session_id=session_id, text=text, context=context,
-            )
+            try:
+                return await submit(params, params.get("_gateway_request_id"), emit)
+            except ChatTurnError as exc:
+                raise GatewayError(exc.code, "Tracked chat request was not accepted") from None
+            except RuntimeContextError as exc:
+                raise GatewayError(exc.code, "Runtime context could not be confirmed; inspect the exact thread and its earlier actions.",
+                                   {"retry_safe": False, "effects_may_have_occurred": exc.effects_may_have_occurred,
+                                    "action_outcome": "unknown" if exc.effects_may_have_occurred else "not_asserted"}) from None
+
+        async def run():
+            if state.memory:
+                state.memory.working_push(session_id, {"role": "user", "text": text})
+            await session.emit("chat.thinking", {"status": "processing"})
+            if state.orchestrator:
+                await state.orchestrator.handle_command_stream(session_id=session_id, text=text, context=context)
+        coordinator = runtime_coordinator(state.orchestrator)
+        if coordinator is None:
+            await run()
+        else:
+            try:
+                async with coordinator.write_scope(session_id, command_handoff=True):
+                    await run()
+            except RuntimeContextError as exc:
+                raise GatewayError(exc.code, "Runtime context could not be confirmed; inspect the exact thread and its earlier actions.") from None
         return {"status": "delivered"}
 
     @registry.method("chat.abort")
     async def chat_abort(session_id: str, params: dict, session: GatewaySession):
-        return {"status": "aborted"}
+        from agents.chat_turns import ChatTurnError, exact_uuid, get_chat_turn_manager
+        try:
+            return await get_chat_turn_manager(state).abort(owner=session._ws, session_id=session_id,
+                                                            turn_id=exact_uuid(params.get("turn_id")), request_id=exact_uuid(params.get("request_id")))
+        except ChatTurnError as exc:
+            raise GatewayError(exc.code, "Exact tracked turn identity is required") from None
+
+    @registry.method("chat.status")
+    async def chat_status(session_id: str, params: dict, session: GatewaySession):
+        from agents.chat_turns import ChatTurnError, get_chat_turn_manager
+        try:
+            receipt = await get_chat_turn_manager(state).status(session_id=session_id,
+                                                               turn_id=params.get("turn_id", ""), request_id=params.get("request_id", ""))
+            return {"receipt": receipt, "found": receipt is not None}
+        except ChatTurnError as exc:
+            raise GatewayError(exc.code, "Exact tracked turn identity is required") from None
 
     @registry.method("session.reset")
     async def session_reset(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="reset")
+        async with legacy_guard((session_id,), "reset"):
+            return await _session_reset(session_id, params, session)
+
+    async def _session_reset(session_id: str, params: dict, session: GatewaySession):
         # F2 — end-of-session trigger. Compact whatever history we
         # have before throwing it away; that preserves the session as
         # a real episode row instead of letting it vanish.
@@ -242,6 +447,11 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.compact")
     async def session_compact(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="compact")
+        async with legacy_guard((session_id,), "compact"):
+            return await _session_compact(session_id, params, session)
+
+    async def _session_compact(session_id: str, params: dict, session: GatewaySession):
         if state.orchestrator and state.memory:
             history = state.orchestrator.conversation_history.get(session_id, [])
             result = await state.memory.compact_session(
@@ -254,6 +464,11 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.snapshot")
     async def session_snapshot(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="snapshot")
+        async with legacy_guard((session_id,), "snapshot"):
+            return await _session_snapshot(session_id, params, session)
+
+    async def _session_snapshot(session_id: str, params: dict, session: GatewaySession):
         if not state.memory:
             raise GatewayError("NOT_FOUND", "Memory store not initialized")
         history = state.orchestrator.conversation_history.get(session_id, []) if state.orchestrator else []
@@ -278,6 +493,7 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("session.branch")
     async def session_branch(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="branch")
         if not state.memory:
             raise GatewayError("NOT_FOUND", "Memory store not initialized")
 
@@ -294,26 +510,28 @@ def register_core_methods(registry: MethodRegistry, state):
         branch_name = params.get("branch_name", f"branch-{int(time.time())}")
         branch_session_id = params.get("target_session_id", f"{session_id}:{branch_name}:{str(uuid4())[:6]}")
 
-        state.memory.working_replace(branch_session_id, source_snapshot.get("working", []))
-        if state.orchestrator:
-            state.orchestrator.conversation_history[branch_session_id] = source_snapshot.get("history", [])
+        async with legacy_guard((source_snapshot["session_id"], branch_session_id), "branch"):
+            state.memory.working_replace(branch_session_id, source_snapshot.get("working", []))
+            if state.orchestrator:
+                state.orchestrator.conversation_history[branch_session_id] = source_snapshot.get("history", [])
 
-        branched_snapshot = await state.memory.snapshot_session(
-            session_id=branch_session_id,
-            history=source_snapshot.get("history", []),
-            label=params.get("label", f"branch from {source_snapshot_id}"),
-            branch_name=branch_name,
-            source_snapshot_id=source_snapshot_id,
-        )
-        return {
-            "status": "branched",
-            "source_snapshot_id": source_snapshot_id,
-            "target_session_id": branch_session_id,
-            "snapshot": branched_snapshot,
-        }
+            branched_snapshot = await state.memory.snapshot_session(
+                session_id=branch_session_id,
+                history=source_snapshot.get("history", []),
+                label=params.get("label", f"branch from {source_snapshot_id}"),
+                branch_name=branch_name,
+                source_snapshot_id=source_snapshot_id,
+            )
+            return {
+                "status": "branched",
+                "source_snapshot_id": source_snapshot_id,
+                "target_session_id": branch_session_id,
+                "snapshot": branched_snapshot,
+            }
 
     @registry.method("session.restore")
     async def session_restore(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session, unsupported="restore")
         if not state.memory:
             raise GatewayError("NOT_FOUND", "Memory store not initialized")
         snapshot_id = params.get("snapshot_id", "")
@@ -328,46 +546,113 @@ def register_core_methods(registry: MethodRegistry, state):
         if not target_session_id:
             target_session_id = f"{session_id}:restore:{str(uuid4())[:6]}" if as_new_session else session_id
 
-        state.memory.working_replace(target_session_id, snapshot.get("working", []))
-        if state.orchestrator:
-            state.orchestrator.conversation_history[target_session_id] = snapshot.get("history", [])
+        async with legacy_guard((snapshot["session_id"], target_session_id), "restore"):
+            state.memory.working_replace(target_session_id, snapshot.get("working", []))
+            if state.orchestrator:
+                state.orchestrator.conversation_history[target_session_id] = snapshot.get("history", [])
 
-        restore_snapshot = await state.memory.snapshot_session(
-            session_id=target_session_id,
-            history=snapshot.get("history", []),
-            label=params.get("label", f"restore {snapshot_id}"),
-            branch_name=snapshot.get("branch_name", "main"),
-            source_snapshot_id=snapshot_id,
-        )
-        return {
-            "status": "restored",
-            "target_session_id": target_session_id,
-            "restored_from_snapshot_id": snapshot_id,
-            "snapshot": restore_snapshot,
-        }
+            restore_snapshot = await state.memory.snapshot_session(
+                session_id=target_session_id,
+                history=snapshot.get("history", []),
+                label=params.get("label", f"restore {snapshot_id}"),
+                branch_name=snapshot.get("branch_name", "main"),
+                source_snapshot_id=snapshot_id,
+            )
+            return {
+                "status": "restored",
+                "target_session_id": target_session_id,
+                "restored_from_snapshot_id": snapshot_id,
+                "snapshot": restore_snapshot,
+            }
 
     @registry.method("voice.config")
     async def voice_config(session_id: str, params: dict, session: GatewaySession):
+        from bridges.client_voice_configuration import configure_client_voice, ClientVoiceConfigurationError
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+
         mode = params.get("mode", "realtime")
-        if state.voice_router:
-            state.voice_router.set_session_voice_mode(session_id, mode)
-            if mode == "disabled":
-                await state.voice_router.stop_session_voice(session_id)
-        return {"mode": mode, "status": "ok"}
+        async def readiness():
+            await attachment_guard(session_id, session, unsupported="voice")
+        try:
+            return await configure_client_voice(state, session_id, session._ws, params,
+                readiness_guard=readiness if mode != "disabled" else None,
+                managed_adapter=session.metadata.get("managed_chained_voice") if isinstance(session.metadata.get("managed_chained_voice"), ClientManagedChainedVoice) else None)
+        except ClientVoiceConfigurationError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
 
     @registry.method("voice.audio")
     async def voice_audio(session_id: str, params: dict, session: GatewaySession):
-        audio_b64 = params.get("data_b64", "")
-        if state.voice_router and audio_b64:
-            await state.voice_router.handle_audio_from_client(
-                session_id=session_id,
-                audio_b64=audio_b64,
-                chunk_index=params.get("chunk_index", 0),
-                is_final=params.get("is_final", False),
-                encoding=params.get("encoding", "pcm16"),
-                sample_rate=params.get("sample_rate", 24000),
-            )
-        return {"received": True}
+        from bridges.client_voice_attempt import (VoiceAttemptError, client_voice_producers,
+            require_voice_attempt, require_client_voice_producers)
+        from bridges.client_voice_control import handle_client_voice_audio
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+        try:
+            managed = session.metadata.get("managed_chained_voice")
+            if isinstance(managed, ClientManagedChainedVoice) and ("managed_chained_voice_version" in params or managed.selected is not None):
+                return await managed.audio(params)
+            binding = require_voice_attempt(state, session_id, session._ws, params)
+            media_lookup = session.metadata.get("runtime_context_voice_readiness")
+            if (binding is not None and any(producer is not None for producer in client_voice_producers(state, session_id))
+                    and callable(media_lookup) and session.metadata.get("context_checkpoint_requested") is not True):
+                require_client_voice_producers(state, session_id, binding)
+                try:
+                    ready = await asyncio.wait_for(media_lookup(), timeout=10)
+                except asyncio.TimeoutError:
+                    raise context_error(RuntimeContextError("context_unavailable")) from None
+                if not isinstance(ready, RuntimeContextReadiness) or ready.session_id != session_id:
+                    raise context_error(RuntimeContextError("context_unavailable"))
+                if ready.managed or ready.state.value != "legacy":
+                    raise context_error(RuntimeContextError(f"context_{ready.state.value}"))
+            else:
+                await attachment_guard(session_id, session, unsupported="voice")
+            return await handle_client_voice_audio(state, session_id, session._ws, params)
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
+        except RuntimeContextError as exc:
+            raise context_error(exc) from None
+
+    async def voice_utterance(session_id: str, params: dict, session: GatewaySession, *, finish: bool):
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+        from bridges.client_voice_attempt import VoiceAttemptError
+        managed = session.metadata.get("managed_chained_voice")
+        try:
+            if not isinstance(managed, ClientManagedChainedVoice):
+                raise VoiceAttemptError("managed_voice_unavailable")
+            return await (managed.finish(params) if finish else managed.begin(params))
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
+
+    @registry.method("voice.utterance.begin")
+    async def voice_utterance_begin(session_id: str, params: dict, session: GatewaySession):
+        return await voice_utterance(session_id, params, session, finish=False)
+
+    @registry.method("voice.utterance.finish")
+    async def voice_utterance_finish(session_id: str, params: dict, session: GatewaySession):
+        return await voice_utterance(session_id, params, session, finish=True)
+
+    @registry.method("voice.mute")
+    async def voice_mute(session_id: str, params: dict, session: GatewaySession):
+        from bridges.client_voice_attempt import VoiceAttemptError
+        from bridges.client_voice_control import mute_client_voice
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+        try:
+            adapter = session.metadata.get("managed_chained_voice")
+            return await mute_client_voice(state, session_id, session._ws, params,
+                managed_adapter=adapter if isinstance(adapter, ClientManagedChainedVoice) else None)
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
+
+    @registry.method("voice.interrupt")
+    async def voice_interrupt(session_id: str, params: dict, session: GatewaySession):
+        from bridges.client_voice_attempt import VoiceAttemptError
+        from bridges.client_voice_control import interrupt_client_voice_attempt
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+        try:
+            adapter = session.metadata.get("managed_chained_voice")
+            return await interrupt_client_voice_attempt(state, session_id, session._ws, params,
+                managed_adapter=adapter if isinstance(adapter, ClientManagedChainedVoice) else None)
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
 
     @registry.method("memory.search")
     async def memory_search(session_id: str, params: dict, session: GatewaySession):
@@ -530,6 +815,7 @@ def register_core_methods(registry: MethodRegistry, state):
 
     @registry.method("ui.action")
     async def ui_action(session_id: str, params: dict, session: GatewaySession):
+        await attachment_guard(session_id, session)
         action_id = params.get("action_id", "")
         event = params.get("event", "tap")
         value = params.get("value")

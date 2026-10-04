@@ -31,6 +31,7 @@ from hardware.command_contract import (
     NodeHealth,
 )
 from hardware.action_frames import build_action_request
+from hardware.reviewed_dispatch import HardwareBinding, HardwareReview, HardwareReviewError, ReviewedHardwareCoordinator
 
 logger = logging.getLogger("feral.hardware.mesh")
 
@@ -155,6 +156,10 @@ class HardwareMesh:
         # KG entity write happens in ``ingest_device_announce``.
         self._announced_devices: dict[str, dict] = {}
         self._kg = knowledge_graph
+        self._reviewed_connections: dict[str, tuple[object, str]] = {}
+        self._reviewed_tasks: dict[str, asyncio.Task] = {}
+        self._reviewed: ReviewedHardwareCoordinator | None = None
+        self._reviewed_authorizations: dict[str, HardwareReview] = {}
 
     def set_knowledge_graph(self, kg) -> None:
         """Late-bind the knowledge graph after BrainState wires memory.
@@ -210,6 +215,8 @@ class HardwareMesh:
             "node_type": node_type,
             "platform": platform,
         }
+        self._reviewed_connections[node_id] = (self._daemons.get(node_id), str(uuid4()))
+        self._node_metadata[node_id]["generation"] = self._reviewed_connections[node_id][1]
         self.node_health.record_connect(node_id)
         # Universal HUP ingress: expose the node's self-described capabilities
         # to the LLM via the SAME generic path as a USB device — no per-node
@@ -267,12 +274,114 @@ class HardwareMesh:
         except Exception as exc:  # pragma: no cover - defensive
             logger.debug("generic skill registration skipped for %s: %s", device_id, exc)
 
-    def on_node_disconnected(self, node_id: str):
-        """Unregister a daemon when it disconnects."""
+    def on_node_disconnected(self, node_id: str, *, connection=None):
+        """Unregister a daemon; a supplied stale socket cannot evict replacement."""
+        captured = self._reviewed_connections.get(node_id)
+        if connection is not None and captured is not None and captured[0] is not connection:
+            return
+        self._reviewed_connections.pop(node_id, None)
         self._registry.unregister_device(node_id)
         self._node_metadata.pop(node_id, None)
         self.node_health.record_disconnect(node_id)
         logger.info(f"Node unregistered from HUP: {node_id}")
+
+    def reviewed_binding(self, node_id: str) -> Optional[HardwareBinding]:
+        captured = self._reviewed_connections.get(node_id)
+        manifest = self._registry.get_device(node_id)
+        if captured is None or captured[0] is None or self._daemons.get(node_id) is not captured[0] or manifest is None:
+            return None
+        return HardwareBinding(node_id, captured[1], captured[0], manifest.model_dump())
+
+    def reviewed_controller(self, *, policy, grants) -> ReviewedHardwareCoordinator:
+        if self._reviewed is None:
+            self._reviewed = ReviewedHardwareCoordinator(binding=self.reviewed_binding,
+                policy=policy, grants=grants, ledger=self.ledger,
+                enqueue=self._enqueue_reviewed, authorize=self._verify_reviewed_authorization)
+        return self._reviewed
+
+    def authorize_reviewed(self, *, owner: str, review_id: str) -> str:
+        if self._reviewed is None:
+            raise HardwareReviewError("Reviewed dispatch unavailable")
+        review = self._reviewed.get_review(owner=owner, review_id=review_id)
+        # Bound, separate operator approval; never a client-supplied bool.
+        self._reviewed_authorizations = {token: item for token, item in self._reviewed_authorizations.items() if item.expires_at > time.time()}
+        if len(self._reviewed_authorizations) >= 1024:
+            raise HardwareReviewError("Authorization capacity unavailable")
+        token = str(uuid4())
+        self._reviewed_authorizations[token] = review
+        return token
+
+    def _verify_reviewed_authorization(self, review, token) -> bool:
+        return type(token) is str and self._reviewed_authorizations.get(token) == review
+
+    def dispatch_reviewed(self, *, owner: str, review_id: str, authorization=None) -> dict:
+        if self._reviewed is None:
+            raise HardwareReviewError("Reviewed dispatch unavailable")
+        # Check owner before consuming a separate authorization token.
+        review = self._reviewed.get_review(owner=owner, review_id=review_id)
+        if authorization is not None and (type(authorization) is not str or self._reviewed_authorizations.get(authorization) != review):
+            raise HardwareReviewError("Unknown exact reviewed authorization")
+        try:
+            return self._reviewed.dispatch(owner=owner, review_id=review_id, authorization=authorization)
+        finally:
+            for token, item in list(self._reviewed_authorizations.items()):
+                if item.review_id == review_id:
+                    self._reviewed_authorizations.pop(token, None)
+
+    def _enqueue_reviewed(self, binding, envelope, frame, guard) -> bool:
+        # No await between guard, exact socket reservation and owned task creation.
+        guard()
+        current = self.reviewed_binding(binding.node_id)
+        if current is None or current.connection is not binding.connection or current.generation != binding.generation:
+            raise HardwareReviewError("Exact socket reservation unavailable")
+        if envelope.command_id in self._reviewed_tasks:
+            raise HardwareReviewError("Command already reserved")
+        task = asyncio.create_task(self._send_reviewed(binding, envelope, frame))
+        self._reviewed_tasks[envelope.command_id] = task
+        task.add_done_callback(lambda finished: self._forget_reviewed_task(envelope.command_id, finished))
+        self.node_health.increment_commands(binding.node_id)
+        return True
+
+    def _forget_reviewed_task(self, command_id, task):
+        if self._reviewed_tasks.get(command_id) is task:
+            self._reviewed_tasks.pop(command_id, None)
+
+    async def _send_reviewed(self, binding, envelope, frame):
+        try:
+            # Scheduling can yield: repeat policy/grants/manifest/generation proof
+            # immediately before the captured socket's first write.
+            self._reviewed.validate_queued(binding=binding, command_id=envelope.command_id)
+            await binding.connection.send_json(frame)
+            remaining = max(0., envelope.deadline - time.time())
+            await asyncio.sleep(remaining)
+            self._reviewed.expire_due()
+        except asyncio.CancelledError:
+            # Teardown is not proof of physical cancellation.
+            self.ledger.update_state(envelope.command_id, CommandState.FAILED,
+                                     message="Owned transport task stopped; physical effect unknown")
+            raise
+        except Exception:
+            self.ledger.update_state(envelope.command_id, CommandState.FAILED,
+                                     message="Owned transport write unavailable; physical effect unknown")
+            self.node_health.increment_errors(binding.node_id)
+
+    async def close_reviewed(self):
+        """Drain only this mesh's reviewed tasks; never a shared scheduler."""
+        tasks = list(self._reviewed_tasks.values())
+        for command_id, task in list(self._reviewed_tasks.items()):
+            self.ledger.update_state(command_id, CommandState.FAILED, message="Owned transport stopped; physical effect unknown")
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        self._reviewed_authorizations.clear()
+
+    def read_reviewed(self, *, owner: str, command_id: str) -> dict:
+        if self._reviewed is None:
+            raise HardwareReviewError("Reviewed command ownership unavailable")
+        # Owner proof precedes clock-driven ledger updates.
+        self._reviewed.readback(owner=owner, command_id=command_id)
+        self._reviewed.expire_due()
+        return self._reviewed.readback(owner=owner, command_id=command_id)
 
     async def invoke(
         self,
@@ -380,13 +489,25 @@ class HardwareMesh:
             self.node_health.increment_errors(node_id)
             return {"success": False, "error": str(e), "command_id": request_id}
 
-    def resolve_invoke(self, request_id: str, result: dict):
+    def resolve_invoke(self, request_id: str, result: dict, *, connection=None, node_id=None):
         """Called when a daemon sends back an execute_result.
 
         If the result carries an ``ack`` flag we transition the ledger
         record to ACKED; otherwise we resolve the pending future which
         will trigger the SUCCEEDED/FAILED transition in ``invoke()``.
         """
+        if self._reviewed is not None and self._reviewed.has_command(request_id):
+            binding = self.reviewed_binding(node_id) if isinstance(node_id, str) else None
+            if binding is None or connection is not binding.connection:
+                return False
+            accepted = self._reviewed.receive(binding=binding, command_id=request_id, payload=result)
+            if accepted:
+                record = self.ledger.get(request_id)
+                if record is not None and record.state in {CommandState.SUCCEEDED, CommandState.FAILED, CommandState.TIMED_OUT}:
+                    task = self._reviewed_tasks.get(request_id)
+                    if task is not None and task is not asyncio.current_task():
+                        task.cancel()
+            return accepted
         if result.get("ack"):
             self.ledger.ack(request_id)
             return

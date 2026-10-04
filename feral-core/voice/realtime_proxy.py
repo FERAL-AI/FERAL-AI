@@ -20,15 +20,18 @@ The phone never talks to OpenAI directly — the Brain owns the context.
 """
 
 from __future__ import annotations
+from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
 import asyncio
 import json
 import logging
 import os
 import time
 from dataclasses import dataclass, field
-from typing import Optional, Callable, Awaitable, Any
+from contextvars import ContextVar
+from typing import Optional, Callable, Awaitable, Any, ParamSpec, TypeVar
 
 from agents.tool_display import tool_feedback_text
+from bridges.client_voice_attempt import current_voice_attempt, voice_attempt_payload, voice_attempt_scope
 from agents.tool_list import (
     OPENAI_TOOL_HARD_LIMIT,
     cap_tools_with_pins,
@@ -42,6 +45,11 @@ from voice.transcript_filter import should_commit_user_transcript
 from voice.transcript_order import TRANSCRIPT_ORDER
 
 logger = logging.getLogger("feral.voice.openai")
+
+_CallbackArgs = ParamSpec("_CallbackArgs")
+_CallbackResult = TypeVar("_CallbackResult")
+_CALLBACK_OWNER: ContextVar["RealtimeSession | None"] = ContextVar("openai_voice_callback_owner", default=None)
+_CALLBACK_RESPONSE: ContextVar["tuple[RealtimeSession, int] | None"] = ContextVar("openai_voice_callback_response", default=None)
 
 OPENAI_REALTIME_URL = "wss://api.openai.com/v1/realtime"
 # Mini by default, matching ``audio.realtime_model`` in the config
@@ -196,6 +204,15 @@ class RealtimeSession:
         # cancel_response no-op error spam when VAD fires on initial
         # speech (no response yet) or after a response completed.
         self._response_in_progress = False
+        self._active_response_id: str = ""
+        self._retired_response_ids: set[str] = set()
+        self._response_identity_required = False
+        self._response_output_cancelled = False
+        self._response_epoch = 0
+        self._retired = False
+        self._callback_guard: Callable[[], bool] | None = None
+        self._voice_attempt = current_voice_attempt(session_id)
+        self._callback_tasks: set[asyncio.Task] = set()
         self._on_error = on_error
         self._on_conversation_item = on_conversation_item
         # Soft channel for recoverable per-event rejections. Separate
@@ -470,6 +487,9 @@ class RealtimeSession:
 
     async def send_tool_result(self, call_id: str, result: str):
         """Return a tool execution result to OpenAI and continue the response."""
+        epoch = self._response_epoch
+        if not self._owns_callbacks():
+            return
         await self._send({
             "type": "conversation.item.create",
             "item": {
@@ -478,8 +498,12 @@ class RealtimeSession:
                 "output": result,
             },
         })
+        if not self._owns_callbacks() or epoch != self._response_epoch:
+            return
         if self._active_force_tool:
             await self.reset_tool_choice()
+            if not self._owns_callbacks() or epoch != self._response_epoch:
+                return
         await self._send({"type": "response.create"})
 
     async def cancel_response(self):
@@ -498,7 +522,13 @@ class RealtimeSession:
         if not getattr(self, "_response_in_progress", False):
             # No-op. Don't waste a round-trip or generate error spam.
             return
-        await self._send({"type": "response.cancel"})
+        event = {"type": "response.cancel"}
+        if self._active_response_id:
+            event["response_id"] = self._active_response_id
+            self._response_identity_required = True
+        self._response_output_cancelled = True
+        self._response_epoch += 1
+        await self._send(event)
 
     async def inject_context(self, context_text: str):
         """Inject updated perception context as a system-level message."""
@@ -515,13 +545,23 @@ class RealtimeSession:
 
     async def disconnect(self):
         """Gracefully close the realtime session."""
+        self._retired = True
+        self._response_epoch += 1
+        current = asyncio.current_task()
+        for task in tuple(self._callback_tasks):
+            if task is not current:
+                task.cancel()
         self._connected = False
-        if self._recv_task:
+        if self._recv_task and self._recv_task is not current:
             self._recv_task.cancel()
-            try:
-                await self._recv_task
-            except (asyncio.CancelledError, Exception):
-                pass
+            # A dispatched executor may resist cancellation. Do not block Stop
+            # indefinitely; exact owner/response checks reject its continuation.
+            done, _ = await asyncio.wait({self._recv_task}, timeout=1.0)
+            if done:
+                try:
+                    self._recv_task.result()
+                except (asyncio.CancelledError, Exception):
+                    pass
         if self._ws:
             try:
                 await self._ws.close()
@@ -563,6 +603,13 @@ class RealtimeSession:
                     await self._handle_event(event)
                 except json.JSONDecodeError:
                     continue
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if not self._owns_callbacks() or (task is not None and task.cancelling()):
+                        raise
+                    # A fenced response continuation is obsolete; the same
+                    # live instance must still receive the next response.
+                    continue
         except asyncio.CancelledError:
             return
         except Exception as e:
@@ -600,8 +647,34 @@ class RealtimeSession:
             previous_item_id=self._order.previous_of(self.session_id, item_id),
         )
 
+    def _owns_callbacks(self) -> bool:
+        return not self._retired and (self._callback_guard is None or self._callback_guard())
+
+    def _matches_response(self, event: dict) -> bool:
+        response = event.get("response")
+        response_id = response.get("id", "") if isinstance(response, dict) else event.get("response_id", "")
+        if response_id:
+            return bool(self._active_response_id and response_id == self._active_response_id)
+        # Legacy standalone callback fixtures have no IDs. Once a different
+        # identified response or cancellation creates ambiguity, no missing ID
+        # may be silently assigned to the current response.
+        return not self._response_identity_required
+
     async def _handle_event(self, event: dict):
+        if not self._owns_callbacks():
+            return
         event_type = event.get("type", "")
+        if event_type.startswith("response.") and event_type != "response.created":
+            if not self._matches_response(event):
+                return
+            if self._response_output_cancelled and event_type not in {
+                "response.done", "response.failed", "response.cancelled", "response.canceled",
+            }:
+                return
+            if self._active_response_id and not self._response_in_progress and event_type not in {
+                "response.done", "response.failed", "response.cancelled", "response.canceled",
+            }:
+                return
 
         if event_type == "session.created":
             logger.info("Realtime session.created — configuring...")
@@ -704,7 +777,10 @@ class RealtimeSession:
             logger.info(f"Realtime tool call: {name} (call_id={call_id})")
 
             if self._on_tool_call:
+                response_id = self._active_response_id
                 result = await self._on_tool_call(self.session_id, call_id, name, arguments)
+                if not self._owns_callbacks() or response_id != self._active_response_id or self._response_output_cancelled:
+                    return
                 if name:
                     self._turn_tools_executed.add(name)
                 await self.send_tool_result(call_id, result)
@@ -715,7 +791,6 @@ class RealtimeSession:
                 err = {"message": str(err)}
             msg = err.get("message", str(err))
             code = str(err.get("code") or "")
-            self._response_in_progress = False
             # The "no active response" cancel race is benign and
             # frequent: VAD turn-detection fires `response.cancel`
             # while OpenAI's state has already advanced past
@@ -757,6 +832,22 @@ class RealtimeSession:
                     )
 
         elif event_type == "response.created":
+            response = event.get("response")
+            response_id = response.get("id", "") if isinstance(response, dict) else ""
+            if not isinstance(response_id, str):
+                return
+            if response_id in self._retired_response_ids:
+                return
+            if not response_id and self._response_identity_required:
+                return
+            if response_id and response_id == self._active_response_id and self._response_in_progress:
+                return
+            if response_id and self._active_response_id and response_id != self._active_response_id:
+                self._retired_response_ids.add(self._active_response_id)
+                self._response_identity_required = True
+            self._active_response_id = response_id
+            self._response_epoch += 1
+            self._response_output_cancelled = False
             self._response_in_progress = True
             logger.info("Realtime response.created session=%s", self.session_id)
             if self._on_response_created:
@@ -970,7 +1061,63 @@ class RealtimeProxy:
         await self.stop_session(sid)
         return True
 
+    def _assert_callback_owner(self, session_id: str) -> None:
+        owner = _CALLBACK_OWNER.get()
+        if owner is not None and (owner.session_id != session_id or self._sessions.get(session_id) is not owner or owner._retired):
+            raise asyncio.CancelledError("Retired voice callback")
+        response = _CALLBACK_RESPONSE.get()
+        if owner is not None and owner._voice_attempt is not None and not owner._voice_attempt.current():
+            raise asyncio.CancelledError("Retired voice attempt")
+        if owner is not None and response is not None and response[0] is owner and response[1] != owner._response_epoch:
+            raise asyncio.CancelledError("Retired voice response")
+
+    def _bind_callback(
+        self, owner: RealtimeSession,
+        callback: Callable[_CallbackArgs, Awaitable[_CallbackResult]],
+        *, response_scoped: bool = False, transcript: bool = False,
+    ) -> Callable[_CallbackArgs, Awaitable[_CallbackResult]]:
+        async def bound(*args: _CallbackArgs.args, **kwargs: _CallbackArgs.kwargs) -> _CallbackResult:
+            if not owner._owns_callbacks():
+                raise asyncio.CancelledError("Retired voice callback")
+            token = _CALLBACK_OWNER.set(owner)
+            is_response = response_scoped or (transcript and len(args) > 1 and isinstance(args[1], str) and not args[1].startswith("[user] "))
+            response_token = _CALLBACK_RESPONSE.set((owner, owner._response_epoch) if is_response else None)
+            task = asyncio.current_task()
+            already_tracked = task in owner._callback_tasks if task is not None else False
+            if task is not None:
+                owner._callback_tasks.add(task)
+            try:
+                self._assert_callback_owner(owner.session_id)
+                with voice_attempt_scope(owner._voice_attempt):
+                    result = await callback(*args, **kwargs)
+                self._assert_callback_owner(owner.session_id)
+                return result
+            finally:
+                if task is not None and not already_tracked:
+                    owner._callback_tasks.discard(task)
+                _CALLBACK_OWNER.reset(token)
+                _CALLBACK_RESPONSE.reset(response_token)
+        return bound
+
+    def _track_callback_task(self, task: asyncio.Task) -> None:
+        owner = _CALLBACK_OWNER.get()
+        if owner is not None:
+            owner._callback_tasks.add(task)
+            task.add_done_callback(owner._callback_tasks.discard)
+
     async def start_session(
+        self,
+        session_id: str,
+        node_id: str,
+        model: str = DEFAULT_MODEL,
+        voice: str = "",
+        input_sample_rate: int = SAMPLE_RATE,
+        language_hint: str = "",
+    ) -> RealtimeSession:
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            return await self._checkpoint_legacy_start_session(session_id=session_id, node_id=node_id, model=model, voice=voice, input_sample_rate=input_sample_rate, language_hint=language_hint)
+
+    async def _checkpoint_legacy_start_session(
         self,
         session_id: str,
         node_id: str,
@@ -1019,8 +1166,31 @@ class RealtimeProxy:
             on_response_done=self._handle_response_done,
         )
 
-        await rs.connect()
-        if not getattr(rs, 'connected', False) and not getattr(rs, '_ws', None):
+        rs._callback_guard = lambda: self._sessions.get(session_id) is rs
+        rs._on_audio_delta = self._bind_callback(rs, self._handle_audio_delta, response_scoped=True)
+        rs._on_transcript = self._bind_callback(rs, self._handle_transcript, transcript=True)
+        rs._on_tool_call = self._bind_callback(rs, self._handle_tool_call, response_scoped=True)
+        rs._on_speech_started = self._bind_callback(rs, self._handle_speech_started)
+        rs._on_error = self._bind_callback(rs, self._handle_error)
+        rs._on_conversation_item = self._bind_callback(rs, self._handle_conversation_item)
+        rs._on_notice = self._bind_callback(rs, self._handle_notice)
+        rs._on_response_created = self._bind_callback(rs, self._handle_response_created, response_scoped=True)
+        rs._on_response_done = self._bind_callback(rs, self._handle_response_done, response_scoped=True)
+        # Publish ownership before connect starts its receive task. A failed
+        # handshake removes only this exact instance, never a replacement.
+        self._sessions[session_id] = rs
+        try:
+            await rs.connect()
+        except (asyncio.CancelledError, Exception):
+            if self._sessions.get(session_id) is rs:
+                self._sessions.pop(session_id)
+            await rs.disconnect()
+            raise
+        owns_start = self._sessions.get(session_id) is rs
+        if not owns_start or not getattr(rs, 'connected', False):
+            if owns_start:
+                self._sessions.pop(session_id)
+            await rs.disconnect()
             logger.warning("Voice session failed to connect for %s", session_id)
             # Lane 05  (AUDIT-r14 finding 15 fix #2): pre-fix the
             # connect-time failure path returned None silently and the
@@ -1036,7 +1206,7 @@ class RealtimeProxy:
             else:
                 reason = "openai_realtime_connect"
                 detail = "OpenAI Realtime WS handshake failed"
-            if self._fallback_router:
+            if owns_start and self._fallback_router:
                 try:
                     await self._fallback_router.handle_realtime_failure(
                         session_id=session_id,
@@ -1048,13 +1218,14 @@ class RealtimeProxy:
                         "Fallback router refused realtime connect failure"
                     )
             return None
-        self._sessions[session_id] = rs
         self._node_to_session[node_id] = session_id
 
         try:
             from api.state import state
             if state.orchestrator:
                 for sid in list(state.sessions.keys()):
+                    if self._sessions.get(session_id) is not rs:
+                        break
                     await state.orchestrator._emit_brain_event(sid, "voice_session", {
                         "active": True, "provider": "openai", "session_id": session_id,
                     })
@@ -1064,24 +1235,35 @@ class RealtimeProxy:
         return rs
 
     async def stop_session(self, session_id: str):
-        rs = self._sessions.pop(session_id, None)
+        self._assert_callback_owner(session_id)
+        rs = self._sessions.get(session_id)
+        pending = self._pending_replies.get(session_id)
         # A reply cut off by turn detection with no completed response
         # after it would otherwise never be written. Flush before the
         # socket goes so nothing the assistant said is lost on teardown.
         try:
             await self._flush_pending_reply(session_id, why="session_close")
         finally:
-            self._pending_replies.pop(session_id, None)
-        if rs:
-            node_id = rs.node_id
-            await rs.disconnect()
-            self._node_to_session.pop(node_id, None)
-            TRANSCRIPT_ORDER.forget(session_id)
+            if self._sessions.get(session_id) is rs:
+                self._sessions.pop(session_id, None)
+            if self._pending_replies.get(session_id) is pending:
+                self._pending_replies.pop(session_id, None)
+            if rs:
+                node_id = rs.node_id
+                await rs.disconnect()
+                replacement = self._sessions.get(session_id)
+                if replacement is None or replacement.node_id != node_id:
+                    self._node_to_session.pop(node_id, None)
+                if replacement is None:
+                    TRANSCRIPT_ORDER.forget(session_id)
 
+        if rs and session_id not in self._sessions:
             try:
                 from api.state import state
                 if state.orchestrator:
                     for sid in list(state.sessions.keys()):
+                        if session_id in self._sessions:
+                            break
                         await state.orchestrator._emit_brain_event(sid, "voice_session", {
                             "active": False, "provider": "openai", "session_id": session_id,
                         })
@@ -1240,6 +1422,7 @@ class RealtimeProxy:
 
     async def _send_tool_feedback(self, session_id: str, text: str):
         """Send transcript-style progress feedback to active voice clients."""
+        self._assert_callback_owner(session_id)
         if not text:
             return
         rs = self._sessions.get(session_id)
@@ -1265,15 +1448,20 @@ class RealtimeProxy:
             ).model_dump(),
         )
 
+        msg.payload = voice_attempt_payload(msg.payload, current_voice_attempt(session_id))
+
         if rs.node_id.startswith("webclient_") and self._send_to_session:
             await self._send_to_session(session_id, msg)
+            self._assert_callback_owner(session_id)
             return
 
         if self._send_to_node:
             await self._send_to_node(rs.node_id, msg.model_dump(mode="json"))
+            self._assert_callback_owner(session_id)
 
     async def _handle_audio_delta(self, session_id: str, audio_b64: str, is_done: bool):
         """Forward audio from OpenAI back to the connected client (web or daemon node)."""
+        self._assert_callback_owner(session_id)
         rs = self._sessions.get(session_id)
         if not rs:
             return
@@ -1300,11 +1488,13 @@ class RealtimeProxy:
                 from models.protocol import FeralMessage
                 msg = FeralMessage(
                     session_id=session_id, hop="brain", type="audio_response",
-                    payload=payload,
+                    payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
                 )
                 await self._send_to_session(session_id, msg)
+                self._assert_callback_owner(session_id)
             elif self._send_to_node:
-                await self._send_to_node(rs.node_id, {"type": "audio_response", "payload": payload})
+                await self._send_to_node(rs.node_id, {"type": "audio_response", "payload": voice_attempt_payload(payload, current_voice_attempt(session_id))})
+                self._assert_callback_owner(session_id)
         except (RuntimeError, ConnectionError) as exc:
             # Most likely the downstream WS is gone. Tear down the
             # session so the OpenAI socket stops streaming and we
@@ -1315,6 +1505,7 @@ class RealtimeProxy:
                 session_id, rs.node_id, exc,
             )
             await self.stop_session(session_id)
+            self._assert_callback_owner(session_id)
 
     async def _handle_transcript(
         self, session_id: str, text: str, is_final: bool,
@@ -1327,6 +1518,7 @@ class RealtimeProxy:
         that arrived out of order. Both default to blank: the fallback
         ``seq`` stamped in ``_forward_transcript`` is always present.
         """
+        self._assert_callback_owner(session_id)
         is_user = text.startswith("[user] ")
         pending = self._pending_replies.get(session_id)
 
@@ -1343,6 +1535,7 @@ class RealtimeProxy:
             await self._flush_pending_reply(
                 session_id, fragments_only=True, why="user_turn",
             )
+            self._assert_callback_owner(session_id)
 
         assistant_buffered = False
         if is_final and text and not is_user and pending is not None:
@@ -1358,6 +1551,7 @@ class RealtimeProxy:
                 "user" if is_user else "assistant",
                 text[len("[user] "):] if is_user else text,
             )
+            self._assert_callback_owner(session_id)
 
         # Wire emit runs BEFORE the orchestrator hooks below. Those
         # hooks await SQLite reads, tool-forcing session.update
@@ -1373,6 +1567,7 @@ class RealtimeProxy:
                 session_id, text, is_final,
                 item_id=item_id, previous_item_id=previous_item_id,
             )
+            self._assert_callback_owner(session_id)
 
         # Assistant-side counterpart of the ``note_voice_user_turn``
         # hook below. The realtime path used to write ONLY user rows to
@@ -1391,6 +1586,7 @@ class RealtimeProxy:
         # orchestrator's history sees one assistant turn per reply too.
         if is_final and text and not is_user and not assistant_buffered:
             await self._note_assistant_turn(session_id, text)
+            self._assert_callback_owner(session_id)
 
         # Bug 1 + Bug 2(B) hook: hand the final USER transcript to the
         # orchestrator so coref tracking, conversation_history, and
@@ -1412,6 +1608,7 @@ class RealtimeProxy:
                 self._apply_voice_turn_hooks(session_id, text[len("[user] "):]),
                 name="voice-turn-hooks",
             )
+            self._track_callback_task(_t)
             self._bg_tasks.add(_t)
             _t.add_done_callback(self._bg_tasks.discard)
 
@@ -1420,6 +1617,7 @@ class RealtimeProxy:
     # ------------------------------------------------------------------
 
     async def _handle_response_created(self, session_id: str) -> None:
+        self._assert_callback_owner(session_id)
         pending = self._pending_replies.get(session_id)
         if pending is None:
             pending = self._pending_replies[session_id] = _PendingAssistantReply()
@@ -1429,12 +1627,14 @@ class RealtimeProxy:
     async def _handle_response_done(
         self, session_id: str, status: str, reason: str,
     ) -> None:
+        self._assert_callback_owner(session_id)
         pending = self._pending_replies.get(session_id)
         if pending is None:
             return
         pending.in_progress = False
         if status == "completed":
             await self._flush_pending_reply(session_id, why="completed")
+            self._assert_callback_owner(session_id)
             return
         if status == "cancelled" and reason == "turn_detected":
             # OpenAI's server VAD heard speech and cut the reply. Whether
@@ -1454,10 +1654,12 @@ class RealtimeProxy:
         # failed / incomplete / cancelled for any other reason: whatever
         # transcript exists is all this reply will ever be.
         await self._flush_pending_reply(session_id, why=status or "unknown")
+        self._assert_callback_owner(session_id)
 
     async def _flush_pending_reply(
         self, session_id: str, *, fragments_only: bool = False, why: str = "",
     ) -> None:
+        self._assert_callback_owner(session_id)
         pending = self._pending_replies.get(session_id)
         if pending is None:
             return
@@ -1469,12 +1671,23 @@ class RealtimeProxy:
             session_id, why, len(text),
         )
         await self._store_transcript_row(session_id, "assistant", text)
+        self._assert_callback_owner(session_id)
         await self._note_assistant_turn(session_id, text)
+        self._assert_callback_owner(session_id)
 
     async def _store_transcript_row(
         self, session_id: str, role: str, clean_text: str,
     ) -> None:
+        self._assert_callback_owner(session_id)
+        async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+            self._assert_callback_owner(session_id)
+            return await self._checkpoint_legacy_store_transcript_row(session_id=session_id, role=role, clean_text=clean_text)
+
+    async def _checkpoint_legacy_store_transcript_row(
+        self, session_id: str, role: str, clean_text: str,
+    ) -> None:
         """Write one final transcript to working memory and the durable thread."""
+        self._assert_callback_owner(session_id)
         if not self._memory:
             return
         self._memory.working_push(session_id, {
@@ -1494,14 +1707,17 @@ class RealtimeProxy:
                     source="voice_realtime_openai",
                     title=f"Voice session {session_id[:8]}",
                 )
+                self._assert_callback_owner(session_id)
         except Exception as exc:
             logger.debug("voice transcript persistence skipped: %s", exc)
 
     async def _note_assistant_turn(self, session_id: str, text: str) -> None:
+        self._assert_callback_owner(session_id)
         if self._orchestrator is None:
             return
         try:
             await self._orchestrator.note_voice_assistant_turn(session_id, text)
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.exception(
                 "realtime: note_voice_assistant_turn failed (non-fatal)"
@@ -1525,12 +1741,14 @@ class RealtimeProxy:
         and opportunistically from turn N when the response is still
         in flight.
         """
+        self._assert_callback_owner(session_id)
         voice_tools = self._get_tools()
         try:
             hook_out = await self._orchestrator.note_voice_user_turn(
                 session_id, clean, emit_temporal_timeline=True,
                 tools=voice_tools,
             )
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.exception(
                 "realtime: note_voice_user_turn failed (non-fatal)"
@@ -1543,6 +1761,7 @@ class RealtimeProxy:
             if rs_for_force is not None:
                 try:
                     await rs_for_force.force_tool_for_turn(forced_tool)
+                    self._assert_callback_owner(session_id)
                     logger.info(
                         "realtime: forced %s for schedule intent session=%s",
                         forced_tool, session_id,
@@ -1558,6 +1777,7 @@ class RealtimeProxy:
             if rs is not None:
                 try:
                     await rs.inject_context(context_hint)
+                    self._assert_callback_owner(session_id)
                 except Exception:
                     logger.debug(
                         "realtime: inject_context for active-subject hint failed",
@@ -1582,6 +1802,7 @@ class RealtimeProxy:
             from agents.orchestrator import Orchestrator as _Orch
             if _Orch._R_MEMORY.search(clean) and self._memory:
                 await self._refresh_memory_context(session_id, clean)
+                self._assert_callback_owner(session_id)
         except Exception:
             logger.debug(
                 "realtime: per-turn memory refresh failed",
@@ -1593,6 +1814,7 @@ class RealtimeProxy:
         *, item_id: str = "", previous_item_id: str = "",
     ) -> None:
         """Emit one transcript frame to the web session or the daemon node."""
+        self._assert_callback_owner(session_id)
         rs = self._sessions.get(session_id)
 
         # The ``[user] `` prefix is an INTERNAL sentinel set by the
@@ -1638,9 +1860,10 @@ class RealtimeProxy:
             if is_web_client and self._send_to_session:
                 msg = FeralMessage(
                     session_id=session_id, hop="brain", type="transcript",
-                    payload=payload,
+                    payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
                 )
                 await self._send_to_session(session_id, msg)
+                self._assert_callback_owner(session_id)
             elif rs and self._send_to_node:
                 # Node path now ships the same ``FeralMessage`` envelope
                 # the web path uses, serialized to a dict. It used to
@@ -1650,9 +1873,10 @@ class RealtimeProxy:
                 # client did, for the same conversation.
                 msg = FeralMessage(
                     session_id=session_id, hop="brain", type="transcript",
-                    payload=payload,
+                    payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
                 )
                 await self._send_to_node(rs.node_id, msg.model_dump(mode="json"))
+                self._assert_callback_owner(session_id)
         except (RuntimeError, ConnectionError) as exc:
             logger.warning(
                 "voice_transcript_forward dropped: downstream WS closed for "
@@ -1660,6 +1884,7 @@ class RealtimeProxy:
                 session_id, exc,
             )
             await self.stop_session(session_id)
+            self._assert_callback_owner(session_id)
 
     async def _refresh_memory_context(self, session_id: str, query: str) -> None:
         """Pull the freshest memory context relevant to ``query`` and
@@ -1671,6 +1896,7 @@ class RealtimeProxy:
         tool calls in this session, instead of the stale once-per-session
         context built when the realtime WS was opened.
         """
+        self._assert_callback_owner(session_id)
         rs = self._sessions.get(session_id)
         if not rs or not self._memory:
             return
@@ -1678,6 +1904,7 @@ class RealtimeProxy:
             ctx = await self._memory.build_context_for_llm(
                 session_id, query=query, max_tokens_budget=600,
             )
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.debug(
                 "realtime: build_context_for_llm failed for refresh",
@@ -1688,6 +1915,7 @@ class RealtimeProxy:
             return
         try:
             await rs.inject_context(f"[Memory Context — query: {query[:80]}]\n{ctx}")
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.debug(
                 "realtime: inject_context for memory refresh failed",
@@ -1717,7 +1945,19 @@ class RealtimeProxy:
     async def _handle_tool_call(
         self, session_id: str, call_id: str, name: str, arguments: str,
     ) -> str:
+        self._assert_callback_owner(session_id)
+        try:
+            async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
+                self._assert_callback_owner(session_id)
+                return await self._checkpoint_legacy_handle_tool_call(session_id=session_id, call_id=call_id, name=name, arguments=arguments)
+        except RuntimeContextError as exc:
+            return json.dumps({"success": False, "error": "Managed realtime tools are unavailable", "code": exc.code})
+
+    async def _checkpoint_legacy_handle_tool_call(
+        self, session_id: str, call_id: str, name: str, arguments: str,
+    ) -> str:
         """Execute a tool call through the local skill executor."""
+        self._assert_callback_owner(session_id)
         if not self._skill_executor or not self._skill_registry:
             return json.dumps({"error": "No skill executor available"})
 
@@ -1741,6 +1981,7 @@ class RealtimeProxy:
 
         logger.info(f"Realtime tool execution: {name} -> {args}")
         await self._send_tool_feedback(session_id, self._tool_feedback_text(name))
+        self._assert_callback_owner(session_id)
 
         # PR9: emit the same tool_start/tool_result envelopes the chat
         # path emits so the v2 ToolTrace component renders voice tools
@@ -1752,6 +1993,7 @@ class RealtimeProxy:
         if self._orchestrator is not None:
             try:
                 await self._orchestrator._emit_tool_start(session_id, tool_call)
+                self._assert_callback_owner(session_id)
             except Exception:
                 # Never let trace emission abort a voice tool call. The
                 # legacy transcript path above stays as the fallback.
@@ -1783,6 +2025,7 @@ class RealtimeProxy:
                 call_id=call_id,
             ):
                 result = await self._skill_executor.execute(name, args, skill, endpoint)
+                self._assert_callback_owner(session_id)
 
         if self._orchestrator is not None:
             latency_ms = (time.time() - t0) * 1000.0
@@ -1790,6 +2033,7 @@ class RealtimeProxy:
                 await self._orchestrator._emit_tool_result(
                     session_id, tool_call, result, latency_ms,
                 )
+                self._assert_callback_owner(session_id)
             except Exception:
                 logger.exception("voice tool_result emit failed")
 
@@ -1816,6 +2060,7 @@ class RealtimeProxy:
         # ``episode_save`` directly).
         try:
             await self._record_voice_tool_episode(session_id, name, args, result)
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.debug(
                 "realtime: voice tool episode persistence skipped",
@@ -1941,15 +2186,18 @@ class RealtimeProxy:
         except RuntimeError:
             await _runner()
         else:
+            self._track_callback_task(_t)
             self._bg_tasks.add(_t)
             _t.add_done_callback(self._bg_tasks.discard)
 
     async def _handle_speech_started(self, session_id: str):
         """User started speaking — cancel current response and notify client."""
+        self._assert_callback_owner(session_id)
         rs = self._sessions.get(session_id)
         if not rs:
             return
         await rs.cancel_response()
+        self._assert_callback_owner(session_id)
         payload = {"action": "stop_playback"}
         if rs.node_id.startswith("webclient_") and self._send_to_session:
             from models.protocol import FeralMessage
@@ -1958,16 +2206,18 @@ class RealtimeProxy:
                 session_id=session_id,
                 hop="brain",
                 type="speech_started",
-                payload=payload,
+                payload=voice_attempt_payload(payload, current_voice_attempt(session_id)),
             )
             await self._send_to_session(session_id, msg)
+            self._assert_callback_owner(session_id)
             return
 
         if self._send_to_node:
             await self._send_to_node(rs.node_id, {
                 "type": "speech_started",
-                "payload": payload,
+                "payload": voice_attempt_payload(payload, current_voice_attempt(session_id)),
             })
+            self._assert_callback_owner(session_id)
 
     async def _handle_conversation_item(self, session_id: str, item_event: dict):
         """Handle GA conversation.item.added / conversation.item.done events.
@@ -1977,6 +2227,7 @@ class RealtimeProxy:
         callback, because a transcript for the same item can arrive in
         the very next frame.
         """
+        self._assert_callback_owner(session_id)
         action = item_event.get("action", "")
         item = item_event.get("item", {})
         logger.debug("Conversation item %s in session %s: role=%s type=%s",
@@ -1991,6 +2242,7 @@ class RealtimeProxy:
         on the wire and keeps the client from rendering a stale
         "degraded" banner for an event-level hiccup.
         """
+        self._assert_callback_owner(session_id)
         logger.warning(
             "Realtime notice [%s]: code=%s detail=%s",
             session_id, code, str(detail)[:200],
@@ -2006,6 +2258,7 @@ class RealtimeProxy:
                 reason=f"openai_realtime_{code or 'event_rejected'}",
                 detail=str(detail)[:200],
             )
+            self._assert_callback_owner(session_id)
         except Exception:
             logger.exception("Fallback router refused realtime notice")
 
@@ -2023,6 +2276,7 @@ class RealtimeProxy:
             session is already dead, so emitting *something* lets the
             client surface a banner instead of silent failure).
         """
+        self._assert_callback_owner(session_id)
         err_lc = (error or "").lower()
         if "insufficient_quota" in err_lc or "1013" in err_lc or "exceeded your current quota" in err_lc:
             reason = "openai_realtime_quota"
@@ -2045,5 +2299,6 @@ class RealtimeProxy:
                     reason=reason,
                     detail=str(error)[:200],
                 )
+                self._assert_callback_owner(session_id)
             except Exception:
                 logger.exception("Fallback router refused realtime failure handoff")

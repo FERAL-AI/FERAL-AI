@@ -21,6 +21,7 @@ Three things are proved here, and two of them need a real subprocess:
 from __future__ import annotations
 
 import json
+import asyncio
 import os
 import sys
 import tempfile
@@ -38,6 +39,7 @@ from bridges.sessions import SessionRegistry  # noqa: E402
 from memory import agent_activity  # noqa: E402
 from memory.store import MemoryStore  # noqa: E402
 from skills.impl.external_agent import ExternalAgentSkill  # noqa: E402
+from skills.call_context import bind_context  # noqa: E402
 from skills.impl.timeline_fusion import timeline_fusion  # noqa: E402
 
 
@@ -91,14 +93,14 @@ def a_real_sized_stream(workspace: str) -> list[Event]:
 
 
 @pytest.fixture
-def store():
+async def store():
     fd, path = tempfile.mkstemp(suffix=".db")
     os.close(fd)
     memory = MemoryStore(db_path=path)
     yield memory
     # Closed explicitly, or aiosqlite's worker thread outlives the loop
     # and prints a teardown traceback that has nothing to do with the test.
-    memory.close()
+    await memory.aclose()
     os.unlink(path)
 
 
@@ -579,7 +581,7 @@ def marker_events(marker: Path) -> list[dict]:
 
 
 @pytest.fixture
-def wired(monkeypatch, tmp_path):
+async def wired(monkeypatch, tmp_path):
     """A skill with an isolated registry, index and memory store."""
     fd, db = tempfile.mkstemp(suffix=".db")
     os.close(fd)
@@ -595,7 +597,8 @@ def wired(monkeypatch, tmp_path):
         "skills.impl.external_agent._memory", lambda: store, raising=False
     )
     yield ExternalAgentSkill(), registry, store
-    store.close()
+    await registry.close_all()
+    await store.aclose()
     os.unlink(db)
 
 
@@ -894,6 +897,204 @@ class TestContinuityAcrossADeadProcess:
         assert await registry.sweep() == [handle]
         assert registry.get(handle) is None
         assert registry.index.get(handle) is not None
+
+
+class TestConversationScopedContinuity:
+    @staticmethod
+    async def call(skill, caller, endpoint="run_task", **args):
+        if caller:
+            with bind_context(session_id=caller, surface="websocket"):
+                return await skill.execute(endpoint, args, {})
+        return await skill.execute(endpoint, args, {})
+
+    async def test_concurrent_calls_keep_task_local_identity(
+        self, wired, agent_factory, tmp_path, monkeypatch
+    ):
+        skill, registry, store = wired
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        agent_factory(resumable=True)
+        try:
+            replies = await asyncio.gather(*(
+                self.call(skill, caller, prompt=f"concurrent {caller}",
+                          workspace_dir=str(tmp_path), wait_seconds=30)
+                for caller in ("chat-a", "chat-b")
+            ))
+            handles = [reply["data"]["session_handle"] for reply in replies]
+            assert handles[0] != handles[1]
+            assert [registry.get(handle).conversation_id for handle in handles] == [
+                "chat-a", "chat-b",
+            ]
+            assert [registry.index.get(handle).conversation_id for handle in handles] == [
+                "chat-a", "chat-b",
+            ]
+        finally:
+            await registry.close_all()
+
+    async def test_interleaved_chats_share_repo_but_never_coding_session(
+        self, wired, agent_factory, tmp_path, monkeypatch
+    ):
+        skill, registry, store = wired
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        marker = agent_factory(resumable=True)
+        try:
+            handles = {}
+            for caller in ("chat-a", "chat-b", "chat-a", "chat-b"):
+                result = await self.call(skill, caller, prompt=f"task for {caller}",
+                                         workspace_dir=str(tmp_path), wait_seconds=30)
+                assert result["success"] is True
+                handle = result["data"]["session_handle"]
+                if caller in handles:
+                    assert handle == handles[caller]
+                    assert result["data"]["continuity"]["mechanism"] == "live"
+                    assert registry.get(handle).turns == 2
+                else:
+                    handles[caller] = handle
+                assert registry.index.get(handle).conversation_id == caller
+            assert handles["chat-a"] != handles["chat-b"]
+            assert len(registry.list()) == 2
+            assert not any(e["event"] == "resume" for e in marker_events(marker))
+            # Deliberately shared long-lived activity is not removed by
+            # scoped continuity; each completed turn still has one episode.
+            rows = await store.episode_recent(limit=10)
+            assert len(rows) == 4
+        finally:
+            await registry.close_all()
+
+    @pytest.mark.parametrize("state", ["live", "dead", "persisted"])
+    @pytest.mark.parametrize("caller", ["chat-b", ""])
+    async def test_foreign_handle_refused_before_run_close_or_recording(
+        self, wired, agent_factory, tmp_path, monkeypatch, state, caller
+    ):
+        skill, registry, store = wired
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        marker = agent_factory(resumable=True)
+        try:
+            started = await self.call(skill, "chat-a", prompt="owner task",
+                                      workspace_dir=str(tmp_path), wait_seconds=30)
+            handle = started["data"]["session_handle"]
+            managed = registry.get(handle)
+            if state == "dead":
+                managed.process.proc.kill()
+                await managed.process.proc.wait()
+            elif state == "persisted":
+                await registry.close(handle, forget=False)
+            before_events = marker_events(marker)
+            before_record = registry.index.get(handle).to_dict()
+            before_rows = await store.episode_recent(limit=10)
+            run = await self.call(skill, caller, prompt="foreign task",
+                                  session_handle=handle, wait_seconds=30)
+            close = await self.call(skill, caller, "close_session",
+                                    session_handle=handle, cancel_first=True)
+            assert run["status_code"] == close["status_code"] == 403
+            assert marker_events(marker) == before_events
+            assert registry.index.get(handle).to_dict() == before_record
+            assert await store.episode_recent(limit=10) == before_rows
+            assert registry.get(handle) is (None if state == "persisted" else managed)
+        finally:
+            await registry.close_all()
+
+    @pytest.mark.parametrize("resumable", [True, False])
+    @pytest.mark.parametrize("state", ["dead", "persisted"])
+    async def test_owner_no_handle_recovers_only_own_session(
+        self, wired, agent_factory, tmp_path, monkeypatch, resumable, state
+    ):
+        skill, registry, store = wired
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        marker = agent_factory(resumable=resumable)
+        try:
+            handles = {}
+            for caller in ("chat-a", "chat-b"):
+                started = await self.call(skill, caller, prompt=f"first {caller}",
+                                          workspace_dir=str(tmp_path), wait_seconds=30)
+                handles[caller] = started["data"]["session_handle"]
+            managed = registry.get(handles["chat-a"])
+            if state == "dead":
+                managed.process.proc.kill()
+                await managed.process.proc.wait()
+            else:
+                await registry.close(managed.handle, forget=False)
+            again = await self.call(skill, "chat-a", prompt="owner follow-up",
+                                    workspace_dir=str(tmp_path), wait_seconds=30)
+            assert again["success"] is True
+            assert again["data"]["session_handle"] == handles["chat-a"]
+            continuity = again["data"]["continuity"]
+            assert continuity["reattached"] is True
+            assert continuity["mechanism"] == ("resume" if resumable else "new")
+            assert registry.index.get(handles["chat-a"]).conversation_id == "chat-a"
+            assert registry.get(handles["chat-b"]).turns == 1
+            if not resumable:
+                assert continuity["briefed_from_memory"] is True
+                assert any("recorded by FERAL" in e["detail"]
+                           for e in marker_events(marker) if e["event"] == "prompt")
+        finally:
+            await registry.close_all()
+
+    async def test_unscoped_legacy_record_is_not_adopted_by_scoped_chat(
+        self, wired, agent_factory, tmp_path, monkeypatch
+    ):
+        skill, registry, store = wired
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        agent_factory(resumable=True)
+        try:
+            old = await self.call(skill, "", prompt="legacy task",
+                                  workspace_dir=str(tmp_path), wait_seconds=30)
+            old_handle = old["data"]["session_handle"]
+            await registry.close(old_handle, forget=False)
+            denied = await self.call(skill, "chat-a", prompt="take over old handle",
+                                     session_handle=old_handle)
+            assert denied["status_code"] == 403
+            scoped = await self.call(skill, "chat-a", prompt="separate scoped task",
+                                     workspace_dir=str(tmp_path), wait_seconds=30)
+            scoped_handle = scoped["data"]["session_handle"]
+            assert scoped_handle != old_handle
+            legacy = await self.call(skill, "", prompt="legacy follow-up",
+                                     workspace_dir=str(tmp_path), wait_seconds=30)
+            assert legacy["data"]["session_handle"] == old_handle
+            assert registry.index.get(old_handle).conversation_id == ""
+            assert registry.index.get(scoped_handle).conversation_id == "chat-a"
+        finally:
+            await registry.close_all()
+
+    async def test_listings_hide_foreign_handles_without_hiding_shared_activity(
+        self, wired, agent_factory, tmp_path, monkeypatch
+    ):
+        skill, registry, store = wired
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        agent_factory(resumable=True)
+        try:
+            handles = {}
+            for caller in ("chat-a", "chat-b", ""):
+                started = await self.call(skill, caller, prompt=f"task {caller}",
+                                          workspace_dir=str(tmp_path), wait_seconds=30)
+                handles[caller] = started["data"]["session_handle"]
+            for caller, handle in handles.items():
+                listed = await self.call(skill, caller, "list_agents")
+                recalled = await self.call(skill, caller, "recall_activity",
+                                           window_label="today")
+                assert [r["handle"] for r in listed["data"]["live_sessions"]] == [handle]
+                assert [r["handle"] for r in recalled["data"]["live_sessions"]] == [handle]
+                assert [r["handle"] for r in recalled["data"]["resumable_sessions"]] == [handle]
+                assert len(recalled["data"]["sessions"]) == 3
+        finally:
+            await registry.close_all()
+
+    async def test_disabled_context_does_not_grant_access_to_scoped_handle(
+        self, wired, agent_factory, tmp_path, monkeypatch
+    ):
+        skill, registry, store = wired
+        monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "on")
+        agent_factory(resumable=True)
+        try:
+            started = await self.call(skill, "chat-a", prompt="owner task",
+                                      workspace_dir=str(tmp_path), wait_seconds=30)
+            handle = started["data"]["session_handle"]
+            monkeypatch.setenv("FERAL_TOOL_CALL_CONTEXT", "off")
+            denied = await self.call(skill, "chat-a", prompt="continuation",
+                                     session_handle=handle)
+            assert denied["status_code"] == 403
+            assert registry.index.get(handle).conversation_id == "chat-a"
+        finally:
+            await registry.close_all()
 
 
 # Both spellings are built rather than written out, because this file is
