@@ -2,13 +2,20 @@
 
 import asyncio
 from types import MethodType, SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 from uuid import uuid4
 
 import pytest
 from tests.test_runtime_context_attached_scope import attached as _attached_fixture, scope
 
 attached = _attached_fixture
+
+
+@pytest.fixture(autouse=True)
+def automatic_discovery_enabled(monkeypatch):
+    monkeypatch.setenv("FERAL_SELF_LEARNING", "true")
+    # Automatic learning does not require the independent proactive loop.
+    monkeypatch.setenv("FERAL_PROACTIVE", "false")
 
 
 def retained_state(**kwargs):
@@ -133,7 +140,8 @@ async def test_completed_receipt_precedes_optional_detection_and_survives_follow
         turn_audit("exact-A").began = True
         return "31 + 11 equals 42."
 
-    async def detect(history):
+    async def detect(history, *, call_site):
+        assert call_site == "learner"
         # Actual SQLite terminal and its notification exist before any secondary
         # LLM; no foreground audit/writer authority is inherited by the followup.
         assert turn_audit("exact-A") is None
@@ -190,7 +198,8 @@ async def test_optional_detection_uses_captured_history_and_revoked_owner_cannot
     ws = SimpleNamespace(send_json=AsyncMock())
     exact_history = [{"role": "user", "text": "exact-session capability"}]
     store.working_get = lambda sid: exact_history if sid == "exact-A" else [{"role": "user", "text": "FOREIGN_SESSION_SENTINEL"}]
-    async def detect(history):
+    async def detect(history, *, call_site):
+        assert call_site == "learner"
         entered.set()
         await release.wait()
         assert history == [{"role": "user", "text": "exact-session capability"}]
@@ -249,7 +258,8 @@ async def test_managed_followup_requires_its_exact_committed_receipt_and_checkpo
     async def prepare(**kwargs):
         return "fixture", {}, "fixture"
 
-    async def detect(history):
+    async def detect(history, *, call_site):
+        assert call_site == "learner"
         assert not coordinator.owns_writer("thread-A")
         assert turn_audit("thread-A") is None
         terminal = await store.chat_turn_get(session_id="thread-A", request_id=request_id)
@@ -388,4 +398,231 @@ async def test_missing_terminal_commit_cannot_start_optional_discovery(tmp_path,
         ws.send_json.assert_not_awaited()
     finally:
         await state.shutdown_background_tasks()
+        await store.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("tracked", [False, True])
+async def test_configured_self_learning_false_prevents_automatic_discovery_before_any_allocation(tmp_path, monkeypatch, tracked):
+    import api.server as server
+    from agents.chat_turns import ChatTurnManager
+    from config.loader import ConfigLoader
+    from memory.store import MemoryStore
+
+    settings = ConfigLoader(project_dir=str(tmp_path / "project"))
+    settings._merged = {"features": {"self_learning": False}}
+    monkeypatch.setenv("FERAL_SELF_LEARNING", settings.export_as_env()["FERAL_SELF_LEARNING"])
+    store = MemoryStore(db_path=str(tmp_path / "memory.db"))
+    store.working_get = Mock(side_effect=AssertionError("Disabled discovery must not capture history"))
+    ws = SimpleNamespace(send_json=AsyncMock())
+    generator = SimpleNamespace(detect_unmet_need=AsyncMock(), generate_skill=AsyncMock())
+    state = retained_state(memory=store, orchestrator=SimpleNamespace(handle_command_stream=AsyncMock(return_value="done")),
+                           skill_gen=generator, sessions={"exact-A": ws})
+    state.register_background_task = Mock(wraps=state.register_background_task)
+    monkeypatch.setattr(server, "state", state)
+    manager = ChatTurnManager(state)
+    async def run():
+        return await server._build_chat_turn_runner(ws=ws, session_id="exact-A", refined_text="fixture", ctx={}, tracked=tracked)
+    try:
+        if tracked:
+            accepted = await manager.submit(owner=ws, session_id="exact-A", request_id=str(uuid4()),
+                                            terms={"text": "fixture"}, run=run, emit=AsyncMock())
+            await asyncio.gather(*(live.task for live in manager._live.values() if live.task is not None))
+            assert (await manager.status(session_id="exact-A", request_id=accepted["request_id"]))["processing_outcome"] == "completed"
+        else:
+            assert await run() == "done"
+        assert not state._background_tasks
+        state.register_background_task.assert_not_called()
+        store.working_get.assert_not_called()
+        generator.detect_unmet_need.assert_not_awaited()
+        generator.generate_skill.assert_not_awaited()
+        ws.send_json.assert_not_awaited()
+    finally:
+        await state.shutdown_background_tasks()
+        await store.aclose()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("revocation", ["terminal", "detection", "generation"])
+async def test_self_learning_revocation_stops_later_automatic_work_and_proposals(tmp_path, monkeypatch, revocation):
+    import api.server as server
+    from agents.chat_turns import ChatTurnManager
+    from agents.skill_generator import SkillGenerator
+    from memory.store import MemoryStore
+
+    store = MemoryStore(db_path=str(tmp_path / "memory.db"))
+    entered, release = asyncio.Event(), asyncio.Event()
+    ws = SimpleNamespace(send_json=AsyncMock())
+    llm_calls = []
+    class LLM:
+        available = True
+        async def chat(self, **kwargs):
+            llm_calls.append(kwargs)
+            assert revocation == "generation"
+            entered.set()
+            await release.wait()
+            return {}
+        def extract_response(self, response):
+            return '{"skill_id":"revoked-fixture","endpoints":[]}', []
+    registry = SimpleNamespace(register_skill=Mock())
+    generator = SkillGenerator(LLM(), registry, skills_dir=str(tmp_path / "skills"))
+    async def detect(history, *, call_site):
+        assert call_site == "learner"
+        if revocation == "detection":
+            entered.set()
+            await release.wait()
+        return {"capability": "fixture"}
+    generator.detect_unmet_need = AsyncMock(side_effect=detect)
+    state = retained_state(memory=store, orchestrator=SimpleNamespace(handle_command_stream=AsyncMock(return_value="done")),
+                           skill_gen=generator, sessions={"exact-A": ws})
+    monkeypatch.setattr(server, "state", state)
+    manager = ChatTurnManager(state)
+    async def emit(kind, payload):
+        if kind == "chat_turn_terminal" and revocation == "terminal":
+            monkeypatch.setenv("FERAL_SELF_LEARNING", "false")
+    async def run():
+        return await server._build_chat_turn_runner(ws=ws, session_id="exact-A", refined_text="fixture", ctx={}, tracked=True)
+    try:
+        accepted = await manager.submit(owner=ws, session_id="exact-A", request_id=str(uuid4()),
+                                        terms={"text": "fixture"}, run=run, emit=emit)
+        if revocation != "terminal":
+            await asyncio.wait_for(entered.wait(), 3)
+            monkeypatch.setenv("FERAL_SELF_LEARNING", "false")
+            release.set()
+        else:
+            tasks = tuple(live.task for live in manager._live.values() if live.task is not None)
+            await asyncio.gather(*tasks)
+        await drain_followups(state)
+        if revocation == "terminal":
+            generator.detect_unmet_need.assert_not_awaited()
+        else:
+            generator.detect_unmet_need.assert_awaited_once()
+        assert len(llm_calls) == (1 if revocation == "generation" else 0)
+        assert generator.get_pending_skills() == []
+        registry.register_skill.assert_not_called()
+        ws.send_json.assert_not_awaited()
+        assert not (tmp_path / "skills").exists()
+        assert (await manager.status(session_id="exact-A", request_id=accepted["request_id"]))["processing_outcome"] == "completed"
+    finally:
+        await state.shutdown_background_tasks()
+        await store.aclose()
+
+
+@pytest.mark.asyncio
+async def test_explicit_skill_generation_still_requires_approval_when_automatic_learning_is_disabled(monkeypatch):
+    from fastapi import Response
+    from api.routes import skills as routes
+
+    monkeypatch.setenv("FERAL_SELF_LEARNING", "false")
+    generator = SimpleNamespace(generate_skill=AsyncMock(return_value={"skill_id": "explicit-fixture"}),
+                                approve_skill=AsyncMock())
+    monkeypatch.setattr(routes, "state", SimpleNamespace(skill_gen=generator))
+    result = await routes.generate_skill({"capability": "explicit user request", "service": "fixture"}, Response())
+    assert result == {"ok": True, "manifest": {"skill_id": "explicit-fixture"}, "needs_approval": True}
+    generator.generate_skill.assert_awaited_once_with("explicit user request", "fixture")
+    generator.approve_skill.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_legacy_automatic_learning_revocation_discards_its_undelivered_draft(monkeypatch):
+    import api.server as server
+    pending = {}
+    manifest = {"skill_id": "legacy-revoked-fixture"}
+    async def generate(**kwargs):
+        pending[manifest["skill_id"]] = manifest
+        monkeypatch.setenv("FERAL_SELF_LEARNING", "false")
+        return manifest
+    generator = SimpleNamespace(detect_unmet_need=AsyncMock(return_value={"capability": "fixture"}),
+                                generate_skill=AsyncMock(side_effect=generate), _pending_skills=pending,
+                                reject_skill=Mock(side_effect=lambda skill_id: pending.pop(skill_id)))
+    ws = SimpleNamespace(send_json=AsyncMock())
+    monkeypatch.setattr(server, "state", SimpleNamespace(
+        memory=SimpleNamespace(working_get=lambda sid: []), skill_gen=generator,
+        orchestrator=SimpleNamespace(handle_command_stream=AsyncMock(return_value="done"))))
+    assert await server._build_chat_turn_runner(ws=ws, session_id="legacy-A", refined_text="fixture", ctx={}) == "done"
+    assert pending == {}
+    generator.reject_skill.assert_called_once_with("legacy-revoked-fixture")
+    ws.send_json.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["automatic", "blocked_automatic", "explicit"])
+async def test_skill_generation_uses_real_provider_and_correct_call_site_cost_cap(tmp_path, monkeypatch, mode):
+    import json
+    import httpx
+    import api.server as server
+    from agents.chat_turns import ChatTurnManager
+    from agents.llm_provider import LLMProvider
+    from agents.skill_generator import SkillGenerator
+    from api.routes import skills as skill_routes
+    from cost.budget import CostBudget
+    from fastapi import Response
+    from memory.store import MemoryStore
+    from tests.test_chat_output_budget import make_provider
+
+    class Transport:
+        def __init__(self):
+            self.bodies = []
+        def respond(self, request):
+            if request.url.path == "/api/ps":
+                return httpx.Response(200, json={"models": [{"name": "fixture-model", "context_length": 16384}]})
+            assert request.url.path == "/v1/chat/completions"
+            body = json.loads(request.content)
+            self.bodies.append(body)
+            content = ({"skill_id": "cost-fixture", "endpoints": []} if body["messages"][0]["role"] == "system"
+                       else {"needs_skill": True, "capability": "fixture", "confidence": 1.0})
+            return httpx.Response(200, json={"choices": [{"message": {"role": "assistant", "content": json.dumps(content)}}],
+                                             "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
+    transport = Transport()
+    provider = make_provider(transport, {"max_tokens": 512, "fallback_providers": []})
+    # Actual provider preflight and SQLite cost recording, not mocked budget
+    # methods: the automatic path must bypass the deliberately tiny chat cap.
+    budget = CostBudget(db_path=tmp_path / "cost.db", settings={
+        "chat": {"per_hour_usd": 1.0 if mode == "explicit" else 0.0000001},
+        "learner": {"per_hour_usd": 0.0 if mode == "blocked_automatic" else 1.0},
+    }, pricing=SimpleNamespace(lookup=lambda model: {"input": 0.001, "output": 0.001}))
+    provider._cost_budget = budget
+    provider._budget_check = MethodType(LLMProvider._budget_check, provider)
+    provider._budget_record = MethodType(LLMProvider._budget_record, provider)
+    store = MemoryStore(db_path=str(tmp_path / "memory.db"))
+    generator = SkillGenerator(provider, SimpleNamespace(skills={}), skills_dir=str(tmp_path / "skills"))
+    generator._need_min_hits = 1  # Admit the synthetic need without a second turn.
+    ws = SimpleNamespace(send_json=AsyncMock())
+    state = retained_state(memory=store, orchestrator=SimpleNamespace(handle_command_stream=AsyncMock(return_value="done")),
+                           skill_gen=generator, sessions={"exact-A": ws})
+    monkeypatch.setattr(server, "state", state)
+    monkeypatch.setattr(skill_routes, "state", state)
+    manager = ChatTurnManager(state)
+    async def run():
+        return await server._build_chat_turn_runner(ws=ws, session_id="exact-A", refined_text="fixture", ctx={}, tracked=True)
+    try:
+        if mode == "explicit":
+            monkeypatch.setenv("FERAL_SELF_LEARNING", "false")
+            response = await skill_routes.generate_skill({"capability": "explicit fixture"}, Response())
+            assert response["ok"] and response["needs_approval"]
+        else:
+            accepted = await manager.submit(owner=ws, session_id="exact-A", request_id=str(uuid4()),
+                                            terms={"text": "fixture"}, run=run, emit=AsyncMock())
+            tasks = tuple(live.task for live in manager._live.values() if live.task is not None)
+            await asyncio.gather(*tasks)
+            await drain_followups(state)
+            assert (await manager.status(session_id="exact-A", request_id=accepted["request_id"]))["processing_outcome"] == "completed"
+        expected_count = {"automatic": 2, "blocked_automatic": 0, "explicit": 1}[mode]
+        assert len(transport.bodies) == expected_count
+        assert [body["max_tokens"] for body in transport.bodies] == ({"automatic": [200, 1500], "blocked_automatic": [], "explicit": [1500]}[mode])
+        await budget.ensure_ready()
+        async with budget._conn.execute("SELECT call_site FROM cost_events ORDER BY id") as cursor:
+            recorded = [row[0] for row in await cursor.fetchall()]
+        assert recorded == (["chat"] if mode == "explicit" else ["learner"] * expected_count)
+        if mode == "automatic":
+            ws.send_json.assert_awaited_once()
+        else:
+            ws.send_json.assert_not_awaited()
+        if mode == "blocked_automatic":
+            assert generator.get_pending_skills() == []
+        assert not (tmp_path / "skills").exists()  # All generation stays unapproved.
+    finally:
+        await state.shutdown_background_tasks()
+        await provider.close()
+        await budget.close()
         await store.aclose()

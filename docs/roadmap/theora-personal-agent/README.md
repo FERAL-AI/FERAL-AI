@@ -1,15 +1,14 @@
 # Theora personal agent: product and engineering plan
 
-**Current implementation checkpoint: October 3, 2026.** Published backend source
-`c8651d16bff8dd633587c999fd908084f65f66c2` repairs foreground terminal commitment
-and configured chat output allowances; 623 isolated integration checks pass.
-The immutable 9.35 app contains the preceding implementation `12cc62c4`, exposes
-21 destinations and passes actual avatar selection and single-stage provider
-setup. Its whole-turn chat acceptance failed; later source fixes are not yet in
-that app. Native passive-health recovery is being integrated before the next
-build. Storage cleanup preserved useful history and recovered disk headroom.
-Mac acceptance leads; Linux expansion and Gen-UI are deferred. Start with
-[current work](WORK_STATE.md), [completion plan](EXECUTION_PLAN.md),
+**Current checkpoint: October 4, 2026.** Native9.36/source9a40b9ac8
+passes bounded actual local chat, saved-context restart and normal shutdown.
+Strict response formatting and71–77-second latency remain issues; actual audio,
+accounts/devices and distribution are still open. Current source corrections are
+separate from that immutable package. The new
+[multitasking and setup plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) covers background
+jobs during voice, subscription/API/local access, three-step installation,
+computer/browser ownership, Messages shopping offers and phone/glasses handoff.
+Start with [current work](WORK_STATE.md), [completion plan](EXECUTION_PLAN.md),
 [request coverage](REQUEST_COVERAGE.md), [release readiness](RELEASE_READINESS.md)
 and [native inventory](../../../desktop-native/FEATURE_PARITY.md).
 
@@ -40,7 +39,11 @@ The candidate advantage is the complete loop from real-world context to grounded
 | [Current work checkpoint](WORK_STATE.md) | Tested source/candidate, current evidence, worker ownership, next ready cards and external dependencies |
 | [Contributor rules](../../../AGENTS.md) | Authorization, privacy, verification, worker ownership, resource retention and clean Git publication |
 | [Codex continuation rules](../../../codex.md) | Checkpoint cadence, source/candidate distinctions and resuming the existing project |
-| [Latest native candidate](NATIVE_9_35_ACCEPTANCE.md) | Exact packaged source, actual setup success, failed whole-turn chat and preserved resource evidence |
+| [Latest native candidate](NATIVE_9_36_ACCEPTANCE.md) | Exact source, actual local chat/context/restart, normal exit and remaining latency/audio/release gates |
+| [Multitasking and easy setup](MULTITASKING_AND_EASY_SETUP_PLAN.md) | Current subscription/voice research and source-backed installation, durable jobs, browser/resources, shopping and iOS acceptance cards |
+| [Automatic learning switch](SELF_LEARNING_SWITCH_EVIDENCE.md) | Boot/live revocation, learner cost authority and664-check source integration outside9.36 |
+| [Setup and status integration](SETUP_PARITY_EVIDENCE.md) | Model-list/CLI parity, asynchronous terminal fixtures and695-check combined integration outside9.36 |
+| [Preceding candidate](NATIVE_9_35_ACCEPTANCE.md) | Preserved actual setup success and failed whole-turn chat |
 | [Chat completion and output allowance](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md) | Published backend repairs, 623 integration checks and remaining rebuilt-app acceptance |
 | [Managed chained voice integration](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md) | Durable voice/chat ownership and source fixtures; actual audio remains separate |
 | [Single-stage Mac onboarding](MAC_SINGLE_STAGE_ONBOARDING_EVIDENCE.md) | Shared reviewed provider setup and prevention of duplicate onboarding |

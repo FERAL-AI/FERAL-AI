@@ -1,22 +1,24 @@
 # Theora / FERAL full-product release readiness
 
-**Current Mac checkpoint (October 3).**
-Published backend source is `c8651d16bff8dd633587c999fd908084f65f66c2`; main
-remains unchanged. Its desktop/docs/naming/version checks pass; native/general
-CI are running at the snapshot. Preceding12cc passes native and general CI. Candidate 9.35 is
-assembled, signature/runtime audited, and matches51 native inputs and 488 Python
-files. Actual avatar selection and single-stage provider setup pass. The main
-chat answer was generated, but optional skill discovery delayed its committed
-terminal; a later health-related disconnect produced a cancelled receipt. Whole-
-turn chat acceptance therefore failed. The final backend correction passes630 frozen
-checks, including null-delete configuration precedence, and awaits rebuilt-app
-acceptance. Native passive-health suspension passes Health62/gate46 and all
-linked model checks; these fixes are outside immutable9.35. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
-storage pressure was removed with verified history-preserving cleanup. Actual
-voice, cloud accounts, migration, clean installation and signed distribution
-remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
-[current checkpoint](WORK_STATE.md) own the active status. Older paragraphs are
-historical and do not supersede these results.
+**Current Mac checkpoint (October 4).** Immutable9.36/source9a40b9ac8
+passes bounded actual local chat, saved-context recall across a reviewed restart,
+normal exit and source/signature/runtime audits. Strict codeword-only formatting
+failed and response latency71–77 seconds remains open. Current source corrections
+for disabled learning, setup parity and asynchronous disconnect test timing are
+outside this package. [Actual evidence](NATIVE_9_36_ACCEPTANCE.md),
+[learning evidence](SELF_LEARNING_SWITCH_EVIDENCE.md), and
+[current work](WORK_STATE.md) own the source/candidate distinction.
+
+Baseline native/desktop/docs/naming/version CI pass; general CI had one
+managed-voice fixture failure with13,361 passes/83 skipped/75.45% coverage.
+New-head CI remains required. Real audio, cloud accounts, glasses, Messages,
+payment, migration, clean installation, updates and signed distribution remain
+open. The [new integration plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) adds explicit
+durable-job/voice, provider/subscription, local install and shopping/resource
+cards. No preview, fixture or documentation fact is full-product acceptance.
+Mac leads; Linux expansion and Gen-UI remain deferred.
+
+## Historical checkpoint records
 
 **Reconciled Mac-first checkpoint (October 3): published `f41c204fe`.**
 General CI, docs, naming, version and the corrected automatic Linux desktop build

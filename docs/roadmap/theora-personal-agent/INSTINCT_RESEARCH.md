@@ -5,6 +5,13 @@ account connection, message sending or payment was performed for this report.
 Recommendations below are engineering decisions; third-party capabilities are
 documentation claims until the named integration tests pass.
 
+**October 4 research extension:** [multitasking and easy setup](MULTITASKING_AND_EASY_SETUP_PLAN.md)
+adds three evidence-backed shopping options, task-owned browser/desktop
+resources, basic Messages text/image delivery versus an optional iOS extension,
+and current Link wallet eligibility/unknown-effect reconciliation. No receive
+adapter, wallet login or purchase was implemented or tested by that audit. The
+original five verdicts below remain bounded research, not completed integration.
+
 **Verdict: reuse FERAL's running agent, browser tools, memory and authorization.
 Add an iMessage transport and a narrowly scoped payment adapter.** This does not
 require a replacement brain or a new application. The purchase helper currently

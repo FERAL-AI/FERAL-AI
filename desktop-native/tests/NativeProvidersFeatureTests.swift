@@ -54,6 +54,36 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) thro
     @MainActor static func waitFor(_ path: String) async throws { for _ in 0..<100 { if ProviderWire.count(path) > 0 { return }; try await Task.sleep(nanoseconds: 10_000_000) }; throw ProviderAssertion(message: "Held request missing") }
     @MainActor static func main() async {
         do {
+            ProviderWire.reset(fixtures)
+            ProviderWire.set("/api/llm/providers/ollama/models", ["provider_id": "ollama", "models": ["fixture-local:latest", "fixture-local:latest"], "source": "cache", "warning": ""])
+            let actualShape = make(); await actualShape.refresh()
+            try check(actualShape.models == ["fixture-local:latest"] && actualShape.modelsSource == "cache" && actualShape.error == nil, "actual string model IDs load and deduplicate")
+            try check(actualShape.model == "local-test" && ProviderWire.mutations() == 0, "discovery cannot replace the manually saved active model or write settings")
+            for source in ["live", "cache", "fallback"] {
+                ProviderWire.reset(fixtures)
+                ProviderWire.set("/api/llm/providers/ollama/models", ["models": [], "source": source])
+                let empty = make(); await empty.refresh()
+                try check(empty.models.isEmpty && empty.modelsSource == source && empty.error == nil && empty.model == "local-test", "empty \(source) model list permits manual selection")
+            }
+            let malformedLists: [[String: Any]] = [
+                ["models": ["good", ["id": "legacy"]], "source": "cache"],
+                ["models": [["id": "good"], [:]], "source": "cache"],
+                ["models": [["id": 1]], "source": "cache"],
+                ["models": [""], "source": "cache"],
+                ["models": ["bad model"], "source": "cache"],
+                ["models": ["bad\nmodel"], "source": "cache"],
+                ["models": [String(repeating: "x", count: 257)], "source": "cache"],
+                ["models": [1], "source": "cache"],
+                ["models": ["good"], "source": "unknown"],
+                ["models": ["good"], "source": "cache", "provider_id": "openai"],
+                ["models": ["good"], "source": "cache", "warning": true],
+                ["models": Array(repeating: "good", count: 2001), "source": "cache"]
+            ]
+            for payload in malformedLists {
+                ProviderWire.reset(fixtures); ProviderWire.set("/api/llm/providers/ollama/models", payload)
+                let invalid = make(); await invalid.refresh()
+                try check(invalid.error != nil && invalid.models.isEmpty && ProviderWire.mutations() == 0, "malformed model catalogue refuses rather than silently dropping rows")
+            }
             ProviderWire.reset(fixtures); let draftGuard = make(); await draftGuard.refresh()
             ProviderWire.set("/api/llm/providers/ollama/configure", ["success": true, "persisted": ["ok": true]])
             let staleDraft = draftGuard.review(.configure)

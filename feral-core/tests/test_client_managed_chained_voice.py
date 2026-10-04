@@ -527,9 +527,29 @@ def test_raw_wire_ack_is_not_acceptance_and_user_transcript_precedes_task(
         assert len(requests) == 1
 
 
-def test_disconnect_status_read_does_not_synthesize_or_replay_request(managed_client):
+@pytest.mark.parametrize("defer_terminal_commit", [False, True])
+def test_disconnect_status_read_does_not_synthesize_or_replay_request(
+    managed_client, monkeypatch, defer_terminal_commit
+):
     client, _, orch, store, requests, _, speakers = managed_client
     entered = threading.Event()
+    terminal_waiting = threading.Event()
+    terminal_committed = threading.Event()
+    release_terminal = asyncio.Event()
+    original_update = store.chat_turn_update
+
+    async def observe_update(**kwargs):
+        terminal = kwargs["session_id"] == "voice-A" and kwargs["status"] == "terminal"
+        if terminal and defer_terminal_commit:
+            terminal_waiting.set()
+            await release_terminal.wait()
+        changed = await original_update(**kwargs)
+        if terminal and changed:
+            # Observe the real SQLite commit, not socket context-manager exit.
+            terminal_committed.set()
+        return changed
+
+    monkeypatch.setattr(store, "chat_turn_update", observe_update)
 
     async def stream(messages, **kwargs):
         requests.append(messages)
@@ -544,12 +564,37 @@ def test_disconnect_status_read_does_not_synthesize_or_replay_request(managed_cl
         identity = configure(ws)
         capture(ws, identity)
         assert rpc(ws, "voice.utterance.finish", identity)["ok"]
-        until(ws, lambda frame: frame.get("type") == "chat_turn_accepted")
+        accepted, _ = until(ws, lambda frame: frame.get("type") == "chat_turn_accepted")
         assert entered.wait(3)
+    # Surface teardown is retained asynchronously and gives running work a
+    # two-second grace period. A reconnect is allowed to see its running
+    # receipt until cancellation has actually committed.
+    if defer_terminal_commit:
+        assert terminal_waiting.wait(5)
+    else:
+        assert terminal_committed.wait(5)
     with client.websocket_connect(
         "/v1/session?session_id=voice-A&context_checkpoint_version=1"
     ) as ws:
+        if defer_terminal_commit:
+            try:
+                pending = rpc(ws, "chat.status", {"request_id": identity["request_id"]})
+                assert pending["ok"] and pending["payload"]["found"]
+                receipt = pending["payload"]["receipt"]
+                assert receipt["durable"] is True and receipt["status"] == "running"
+                assert receipt["request_id"] == identity["request_id"]
+                assert receipt["turn_id"] == accepted["payload"]["turn_id"]
+                assert "processing_outcome" not in receipt
+                assert not speakers[0].texts and len(requests) == 1
+            finally:
+                client.portal.call(release_terminal.set)
+            assert terminal_committed.wait(5)
         status = rpc(ws, "chat.status", {"request_id": identity["request_id"]})
+        receipt = status["payload"]["receipt"]
+        assert status["ok"] and status["payload"]["found"]
+        assert receipt["durable"] is True
+        assert receipt["request_id"] == identity["request_id"]
+        assert receipt["turn_id"] == accepted["payload"]["turn_id"]
         assert status["payload"]["receipt"]["processing_outcome"] == "cancelled"
         assert status["payload"]["receipt"]["action_outcome"] == "unknown"
         assert (

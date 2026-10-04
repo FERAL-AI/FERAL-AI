@@ -29,6 +29,7 @@ from api.runtime_context import (
     session_query,
 )
 from agents.runtime_context_checkpoint import RuntimeContextAttachment, RuntimeContextError, RuntimeContextScopeReceipt
+from agents.learner import _self_learning_enabled
 from memory.runtime_session_checkpoint import CheckpointFence
 
 from fastapi import (
@@ -2311,6 +2312,15 @@ async def _prepare_chat_turn_context(
     return refined_text, ctx, user_msg_text
 
 
+def _discard_undelivered_skill_manifest(generator, manifest) -> None:
+    """Discard only the unapproved draft created by this automatic attempt."""
+    pending = getattr(generator, "_pending_skills", None)
+    if isinstance(manifest, dict) and isinstance(pending, dict):
+        skill_id = manifest.get("skill_id")
+        if isinstance(skill_id, str) and pending.get(skill_id) is manifest:
+            generator.reject_skill(skill_id)
+
+
 def _schedule_chat_skill_followup(*, ws: WebSocket, session_id: str) -> None:
     """Optional discovery cannot delay or change a durable foreground receipt."""
     from agents.chat_turns import turn_audit
@@ -2322,7 +2332,8 @@ def _schedule_chat_skill_followup(*, ws: WebSocket, session_id: str) -> None:
     register = getattr(captured, "register_background_task", None)
     foreground = asyncio.current_task()
     generator = getattr(captured, "skill_gen", None)
-    if audit is None or foreground is None or generator is None or not callable(register):
+    if (not _self_learning_enabled() or audit is None or foreground is None
+            or generator is None or not callable(register)):
         return
     store, orchestrator = captured.memory, captured.orchestrator
     coordinator = coordinator_for(captured)
@@ -2339,7 +2350,7 @@ def _schedule_chat_skill_followup(*, ws: WebSocket, session_id: str) -> None:
 
     def current() -> bool:
         guard_agent_dispatch()
-        return (state is captured and captured.memory is store
+        return (_self_learning_enabled() and state is captured and captured.memory is store
                 and captured.orchestrator is orchestrator and captured.skill_gen is generator
                 and captured.sessions.get(session_id) is ws
                 and coordinator_for(captured) is coordinator
@@ -2375,11 +2386,11 @@ def _schedule_chat_skill_followup(*, ws: WebSocket, session_id: str) -> None:
             async with asyncio.timeout(60):
                 if not await fenced(checkpoint):
                     return
-                need = await generator.detect_unmet_need(history)
+                need = await generator.detect_unmet_need(history, call_site="learner")
                 if not need or not await fenced(checkpoint):
                     return
                 manifest = await generator.generate_skill(
-                    capability=need.get("capability", ""), service=need.get("service", ""))
+                    capability=need.get("capability", ""), service=need.get("service", ""), call_site="learner")
                 if manifest is None or not await fenced(checkpoint):
                     return
                 payload = {"manifest": manifest, "reason": need.get("capability", ""),
@@ -2397,11 +2408,8 @@ def _schedule_chat_skill_followup(*, ws: WebSocket, session_id: str) -> None:
             # generate_skill stages a proposal, not an installed skill. Discard
             # only this task's undelivered object; never another proposal sharing
             # its skill_id, and never approve or execute generated code here.
-            pending = getattr(generator, "_pending_skills", None)
-            if not delivered and isinstance(manifest, dict) and isinstance(pending, dict):
-                skill_id = manifest.get("skill_id")
-                if isinstance(skill_id, str) and pending.get(skill_id) is manifest:
-                    generator.reject_skill(skill_id)
+            if not delivered:
+                _discard_undelivered_skill_manifest(generator, manifest)
 
     # Do not inherit the closed turn audit or an operation-local writer scope.
     # The existing lease runner captures this exact reviewed agent generation.
@@ -2451,18 +2459,23 @@ def _build_chat_turn_runner(
                     _schedule_chat_skill_followup(ws=ws, session_id=session_id)
                 except Exception:
                     logger.debug("Optional skill discovery could not be scheduled")
-            elif state.skill_gen:
+            elif state.skill_gen and _self_learning_enabled():
+                generator = state.skill_gen
                 history = state.memory.working_get(session_id) or []
-                need = await state.skill_gen.detect_unmet_need(history)
+                need = await generator.detect_unmet_need(history, call_site="learner")
                 if scope_receipt is not None:
                     scope_receipt.assert_current()
-                if need:
-                    manifest = await state.skill_gen.generate_skill(
+                if need and _self_learning_enabled():
+                    manifest = await generator.generate_skill(
                         capability=need.get("capability", ""),
                         service=need.get("service", ""),
+                        call_site="learner",
                     )
                     if scope_receipt is not None:
                         scope_receipt.assert_current()
+                    if not _self_learning_enabled():
+                        _discard_undelivered_skill_manifest(generator, manifest)
+                        return result
                     if manifest:
                         await send_progress(
                             FeralMessage(

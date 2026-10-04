@@ -2,22 +2,26 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
-**Current packaged artifact:2026.9.35/build 2026100302**, exact source
-`12cc62c480422a3d844eada816d9cdf29c79fbef`. Assembly, strict ad-hoc signature,
-51 compiled-input comparisons,488 packaged Python comparisons and bundled
-runtime probes pass. Actual FERAL/Orb selection and single-stage reviewed setup
-reach the connected main app. A normal arithmetic answer was generated, but
-optional skill discovery delayed the committed foreground terminal and a later
-disconnect left a cancelled/unknown receipt. Whole-turn chat acceptance failed;
-the final backend correction passes630 frozen checks and awaits rebuilt-app acceptance.
-Native passive-health suspension passes Health62/gate46 and linked model checks.
-These later fixes are outside this immutable candidate.
-[Integration evidence](../docs/roadmap/theora-personal-agent/MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Exact-source native CI passes, including
-28 real process-ownership assertions. General backend CI for12cc also passes. [9.35 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_35_ACCEPTANCE.md).
-Source/fixture managed-voice and provider checks do not prove physical audio,
-cloud-account behavior, clean installation or signed distribution. Those gates
-remain open; Mac usability leads and Linux/Gen-UI engineering is deferred.
-[Current work](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+**Current packaged artifact:2026.9.36/build2026100303**, exact source
+`9a40b9ac8e7d155c16a5504a3332c1dca912ad41`. Optimized build, strict ad-hoc
+signature,51 native inputs,488 packaged Python comparisons and runtime probes
+pass. Actual avatar/single-stage local setup, durable ordinary/saved-context chat,
+normal Quit, reviewed restart and remembered-codeword recall pass. Strict
+codeword-only output did not pass; responses took71–77 seconds. Current-candidate
+GUI Stop, actual audio/accounts/devices and signed distribution remain open.
+[9.36 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_36_ACCEPTANCE.md).
+
+Current source corrections for disabled learning and setup/test parity are
+outside9.36. [Source evidence](../docs/roadmap/theora-personal-agent/SELF_LEARNING_SWITCH_EVIDENCE.md)
+and [current work](../docs/roadmap/theora-personal-agent/WORK_STATE.md) own exact
+status. Baseline native/desktop/docs/naming/version CI pass; general CI had one
+managed-voice fixture failure. The
+[new integration plan](../docs/roadmap/theora-personal-agent/MULTITASKING_AND_EASY_SETUP_PLAN.md)
+adds durable voice/jobs, provider/local installation, browser/resource and shopping
+contracts. It does not mark these features shipping. Mac leads; Linux/Gen-UI
+remain deferred. No inventory row is release-certified.
+
+## Historical artifact checkpoints
 
 **Preceding verified artifact:2026.9.33/build2026100207**, exact source
 `7f818da08139952b1698644469e7016563512cd5`. Packaged local-model recovery and

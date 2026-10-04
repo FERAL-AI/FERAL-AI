@@ -176,10 +176,9 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
     private func loadDetails(_ id: String) async throws {
         let started = generation
         let value = try await request("/api/llm/providers/\(try safeID(id))/models", query: [URLQueryItem(name: "live", value: "false")])
-        guard let rows = value["models"] as? [[String: Any]] else { throw ProviderFeatureError(message: "Model catalog is incomplete.") }
-        var modelIDs = Set<String>()
-        models = rows.compactMap { $0["id"] as? String }.filter { modelIDs.insert($0).inserted }
-        modelsSource = value["source"] as? String ?? "Unknown source"
+        let parsed = try modelCatalog(value, provider: id)
+        models = parsed.ids
+        modelsSource = parsed.source
         if !(value["warning"] as? String ?? "").isEmpty { modelsSource += " · backend reports a discovery warning" }
         if providers.first(where: { $0.id == id })?.needsKey == true {
             do {
@@ -189,6 +188,29 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
         }
         do { cachedVault = try vaultSnapshot(await request("/api/security/vault/status")) }
         catch { if started == generation { cachedVault = [:]; notice = (notice.map { $0 + " " } ?? "") + "Credential storage status is unavailable. Credential-free local use remains available; key writes require a fresh authenticated storage readback." } }
+    }
+    private func modelCatalog(_ raw: [String: Any], provider: String) throws -> (ids: [String], source: String) {
+        guard let rows = raw["models"] as? [Any], rows.count <= 2000,
+              let source = raw["source"] as? String, ["live", "cache", "fallback"].contains(source),
+              raw["provider_id"] == nil || raw["provider_id"] as? String == provider,
+              raw["warning"] == nil || (raw["warning"] as? String).map({ $0.utf8.count <= 4096 }) == true else {
+            throw ProviderFeatureError(message: "Model catalog is unsupported.")
+        }
+        // The registered backend returns string IDs. Retain homogeneous
+        // object/id rows for historical clients, never silently drop bad rows.
+        let ids: [String]
+        if let strings = rows as? [String] { ids = strings }
+        else if let objects = rows as? [[String: Any]] {
+            ids = try objects.map { row in
+                guard let id = row["id"] as? String else { throw ProviderFeatureError(message: "Model catalog is unsupported.") }
+                return id
+            }
+        } else { throw ProviderFeatureError(message: "Model catalog is unsupported.") }
+        guard ids.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 256 && !$0.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.union(.controlCharacters).contains($0) }) }) else {
+            throw ProviderFeatureError(message: "Model catalog is unsupported.")
+        }
+        var seen = Set<String>()
+        return (ids.filter { seen.insert($0).inserted }, source)
     }
     func review(_ operation: NativeProviderOperation, label: String = "", secret: String = "") -> NativeProviderReview {
         NativeProviderReview(createdUptime: uptime(), origin: baseURL, connection: generation, provider: selected, model: model, endpoint: endpoint, fallbacks: fallbacks.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }, label: label, secret: secret, operation: operation, config: cachedConfig, descriptor: providers.first { $0.id == selected }, keys: keys, vault: cachedVault)

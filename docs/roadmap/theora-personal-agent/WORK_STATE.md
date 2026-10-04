@@ -1,76 +1,75 @@
 # FERAL completion checkpoint
 
-Updated October 3, 2026. Parent/integrator owns this file. Reconcile it with actual
+Updated October 4, 2026. Parent/integrator owns this file. Reconcile it with actual
 Git, CI and processes after resuming; it is a checkpoint, not a live process lock.
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
 ## Current status at a glance
 
-### Current Mac integration checkpoint
+### October 4 Mac integration checkpoint
 
-- Published implementation before the native recovery integration is
-  `c8651d16bff8dd633587c999fd908084f65f66c2` on the
-  existing review branch in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-  Backend contracts and typed empty-response handling are included from
-  `9e9ac51fdd1f569f95afe79c17973beab6c93de2`. Main remains unchanged.
-- Exact-source native CI 37166186400 passes production typecheck, full feature/
-  linked checks, lifeline and 28 actual process-ownership assertions. Desktop,
-  documentation, naming and version checks pass. General CI 37166186552 now passes. Current c865 native/general checks are
-  running at the snapshot; its desktop, docs, naming and version checks pass.
-  The preceding 9e native ownership timeout is retained historical failure,
-  without claiming its root cause was proved.
-- Immutable 9.35/build 2026100302 is assembled and audited. All 51 native build
-  inputs and 488 packaged production Python files match 12cc. Runtime probes and
-  strict ad-hoc signature verification pass. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md).
-- Actual fresh-profile GUI acceptance passes portrait/logo rendering, FERAL/Orb
-  selection, reviewed single-stage provider setup and entry into the connected
-  main app. Normal tool-enabled arithmetic generated the correct transcript
-  answer, but the exact tracked receipt is cancelled/unknown with empty final
-  text after health timeouts and disconnect. This is failed whole-turn acceptance.
-  Optional skill discovery runs after the main answer but is awaited before
-  foreground terminal commitment; the observed disconnect cancelled that wait.
-  The backend correction now passes parent integration. Do not relabel a cancelled receipt completed
-  from transcript text. The app exited normally with host code 0.
-- The final frozen terminal/output-budget integration passes 630 tests with 1,291
-  unchanged Python inputs, including deletion revealing project/local precedence.
-  Full mypy 809 has zero added/removed diagnostics versus retained 809, and core
-  Ruff passes. The preceding 623-check backend wave is published as c865; final
-  native/configuration integration and rebuilt actual-app acceptance are next. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md).
-  The preceding voice wave passed 471 before these corrections. Native production typecheck and 28 linked groups pass, with
-  Voice 55, ManagedVoice 50, ChatTurn/ContextCheckpoint, OnboardingSetup 34,
-  additional linked onboarding 33, desktop 39 and error 5 assertions. These checks
-  prove source/fixture behavior, not microphone, account or physical-device use.
-  [Voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md),
-  [onboarding evidence](MAC_SINGLE_STAGE_ONBOARDING_EVIDENCE.md).
-- Critical host storage exhaustion blocked GUI/profile/SQLite diagnostics.
-  Cleanup removed 477,917 verified unreferenced loose blobs and seven abandoned
-  temporary files from the separate home-directory Git store. All 54 commits,
-  refs, reflogs and every worktree index were protected; all 68 retained metadata
-  files stayed identical and full Git fsck passed. That store is now 847 MiB,
-  with zero loose objects/garbage; disk free space was 30 GiB at verification.
-  Working files, FERAL history, profiles and models were preserved. A reversible
-  home-only untracked-discovery boundary passes 9 checks, but cannot stop forced
-  or explicit hash-object writers. The original object-flood writer is unproven.
-- Obsolete generated 9.32/9.33 app copies were removed after identity and process
-  checks; all their manifests, logs and profiles remain. The canonical9.35 app
-  and preceding 9.34 copy are retained. Artifact/resource rules are in AGENTS.md.
-- Parent owns integration, shared contracts, documents and publication. Backend
-  terminal sequencing, configured output-budget and null-delete precedence
-  corrections are integrated and frozen. Typed native passive-health suspension
-  passes Health62/gate46 and all linked model checks, preserving live turn
-  control while blocking new action admission. Desktop39/error5 also pass.
-  Worker source ownership is released; parent owns packaging and publication. These source
-  changes are outside immutable 9.35. The output setting defect is independent
-  of the earlier 25-token empty generation. Resource/docs checkpoint b3995e02a
-  is published; prior work is preserved.
-- Next: publish the verified native/configuration integration and build
-  9.36/build2026100303. Free disk is31 GiB; the build budget is at most2 GiB,
-  with cached dependencies/models and one retained preceding generated app.
-  Sources stay frozen during checks/compilation. Repeat actual tool-enabled chat/recovery with
-  ample headroom, checking durable receipt and transcript together. Microphone/speaker,
-  cloud accounts, migration, clean installation and signed distribution remain
-  acceptance gates. Mac usability remains first; Linux and Gen-UI are deferred.
+- Implementation baseline and immutable packaged source:
+  `9a40b9ac8e7d155c16a5504a3332c1dca912ad41`, on
+  `feat/native-product-release-foundation-20261001` in
+  [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Main remains unchanged.
+  The correction revision containing this checkpoint is separate from the package.
+  Resolve current Git/remote identity before resuming rather than treating a
+  baseline SHA as the latest HEAD.
+- Actual candidate **2026.9.36/build2026100303** is built and audited:51 native
+  inputs and488 packaged Python files matched9a40. Normal tool-enabled local
+  arithmetic and saved-context chat completed with durable receipts. Normal Quit,
+  same-profile reviewed restart and remembered-codeword recall passed. The recall
+  added an extra ACK, so strict response formatting did not pass. Replies took
+  71–77 seconds. Current-candidate GUI Stop and real audio remain open.
+  [Actual evidence](NATIVE_9_36_ACCEPTANCE.md).
+- On resumption both exact acceptance host/backend were absent; the held restart
+  host receipt reports normal exit0. No unknown app was killed or relaunched.
+  Account, microphone/speaker, glasses, Messages, payment, migration, clean-machine
+  install and signed distribution were not verified by this reconciliation.
+- Baseline9a40 native, desktop, docs, naming and version CI pass. General CI
+  `37170582632` had one managed-voice disconnect fixture failure,13,361 passes,
+  83 skipped and75.45% coverage; all other executed jobs pass. Its test assumed
+  terminal commit immediately after asynchronous surface cleanup. A controlled
+  commit barrier now proves running status before exact cancelled/unknown status,
+  retaining no-TTS/no-replay checks. New-head CI remains required.
+- The final setup/status/learning integration passes695 checks across31 suites,
+  native production typecheck, core Ruff and whitespace. All1,292 Python inputs
+  stayed unchanged. The preceding learning-only wave passed664; counts overlap.
+  Full mypy remains809 errors in233 files with zero added/removed normalized
+  diagnostics versus the retained baseline. This is not type-clean. Automatic
+  discovery now honors boot/live learning settings and the learner budget;
+  explicit generation retains approval and the chat budget. Revocation cannot
+  undo already incurred model cost. [Learning evidence](SELF_LEARNING_SWITCH_EVIDENCE.md) and
+  [combined evidence](SETUP_PARITY_EVIDENCE.md).
+- Three parallel read-only audits completed provider/setup, voice/multitasking
+  and browser/messaging/commerce research. The new
+  [integration plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) includes subscription/API/
+  local choice, three-step installation, durable background jobs while talking,
+  task-owned browser/desktop resources, three verified shopping offers, exact
+  payment review, scoped shared memory, CLI oversight and iOS/glasses handoff.
+  New feature APIs/models/account/device behavior are proposals or documentation
+  confirmation until their specific gates pass.
+- Native catalog shape and CLI provider-switch defects are repaired. The native
+  Providers/Onboarding fixtures pass50/52 assertions, and CLI targeted checks
+  pass30. All worker source ownership is released; parent owns the frozen
+  integration and publication. No new runtime, wallet, account or model
+  was installed by the audits. Keep unrelated AUDIT-FIXES.md edits unstaged.
+- Storage is approximately30 GiB free at the October4 check. The separate home
+  Git store previously fell from approximately33 GiB to847 MiB with all54 commits,
+  refs/reflogs/worktree indexes protected and full fsck passed. Later recurrence
+  was881 MiB; the forced-object writer remains unproven. Do not clean recent
+  objects from timestamps alone. Working data/models/history remain preserved.
+- Parent owns documentation, shared contracts and publication. The setup/status/learning sources are
+  integrated, frozen and checked. Commit and push explicit reviewed files. Assemble that exact source before claiming
+  packaged fixes. Preserve9.36 evidence and keep at most one preceding generated
+  app copy after bounded ownership/retention review.
+- Next engineering order: Mac setup/recovery/latency and packaged learning gates;
+  reviewed local installation; supported ChatGPT plan adapter; durable task/
+  resource ownership; conversational voice; enrolled messaging and quote-bound
+  payments; physical phone/glasses and proactive acceptance. Independent ready
+  cards can run in parallel; shared authority contracts integrate sequentially.
+  Mac remains first; Linux expansion and Gen-UI stay deferred.
 
 ### Earlier reconciliations
 

@@ -33,6 +33,17 @@ enum NativeSetupWire {
     static func id(_ value:Any?)->String?{guard let id=text(value,limit:80),id.range(of:"^[A-Za-z0-9_.-]+$",options:.regularExpression) != nil else{return nil};return id}
     static func endpoint(_ raw:String)throws->String{let clean=raw.trimmingCharacters(in:.whitespacesAndNewlines);if clean.isEmpty{return ""};guard clean.utf8.count<=2048,!clean.contains("{"),!clean.contains("}"),let url=URLComponents(string:clean),["http","https"].contains(url.scheme ?? ""),url.host != nil,url.user==nil,url.password==nil,url.query==nil,url.fragment==nil else{throw NativeSetupFailure("Enter a clean HTTP(S) provider endpoint without embedded credentials or query parameters.")};return clean}
     static func equal(_ a:[String:Any],_ b:[String:Any])->Bool{guard JSONSerialization.isValidJSONObject(a),JSONSerialization.isValidJSONObject(b),let x=try? JSONSerialization.data(withJSONObject:a,options:.sortedKeys),let y=try? JSONSerialization.data(withJSONObject:b,options:.sortedKeys) else{return false};return x==y}
+    static func models(_ raw:[String:Any],provider:String)throws->(ids:[String],source:String){
+        guard let rows=raw["models"] as? [Any],rows.count<=2000,let source=raw["source"] as? String,["live","cache","fallback"].contains(source),raw["provider_id"] == nil || raw["provider_id"] as? String==provider,raw["warning"] == nil || (raw["warning"] as? String).map({$0.utf8.count<=4096})==true else{throw NativeSetupFailure("Cached model list is unsupported.")}
+        let ids:[String]
+        // String IDs are the actual route contract; object/id rows remain a
+        // homogeneous legacy format, not an excuse to discard malformed rows.
+        if let strings=rows as? [String]{ids=strings}
+        else if let objects=rows as? [[String:Any]]{ids=try objects.map{row in guard let id=row["id"] as? String else{throw NativeSetupFailure("Cached model list is unsupported.")};return id}}
+        else{throw NativeSetupFailure("Cached model list is unsupported.")}
+        guard ids.allSatisfy({!$0.isEmpty && $0.utf8.count<=256 && !$0.unicodeScalars.contains(where:{CharacterSet.whitespacesAndNewlines.union(.controlCharacters).contains($0)})}) else{throw NativeSetupFailure("Cached model IDs are unsupported.")}
+        var seen:Set<String>=[];return(ids.filter{seen.insert($0).inserted},source)
+    }
     static func providers(_ raw:[String:Any])throws->[NativeSetupProvider]{
         guard let rows=raw["providers"] as? [[String:Any]],rows.count<=100 else{throw NativeSetupFailure("Provider catalogue is unavailable or unsupported.")};var seen:Set<String>=[]
         return try rows.map{row in guard let id=id(row["id"]),seen.insert(id).inserted,let name=text(row["display_name"],limit:160),let local=bool(row["supports_local"]),let key=bool(row["requires_api_key"]),let configured=bool(row["configured"]),let chat=bool(row["chat_ready"]),let model=text(row["default_model"],limit:256,empty:true),let endpoint=text(row["default_base_url"],limit:2048,empty:true) else{throw NativeSetupFailure("Provider catalogue metadata is unsupported.")};if let reachable=row["reachable"],!(reachable is NSNull),bool(reachable)==nil{throw NativeSetupFailure("Provider reachability status is unsupported.")};// The actual Qwen descriptor is informational until its workspace is resolved.
@@ -85,7 +96,7 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
     }
     private func loadModels(_ base:URL,provider:String,started:UUID)async throws{
         let raw=try await request(base,path:"/api/llm/providers/"+provider+"/models",query:[URLQueryItem(name:"live",value:"false")]);guard generation==started,selected==provider else{return}
-        guard raw["provider_id"] as? String==provider,let rows=raw["models"] as? [[String:Any]],rows.count<=2000,let source=raw["source"] as? String,["cache","fallback","live"].contains(source) else{throw NativeSetupFailure("Cached model list is unsupported.")};var ids:Set<String>=[];models=try rows.map{row in guard let id=NativeSetupWire.text(row["id"],limit:256),ids.insert(id).inserted else{throw NativeSetupFailure("Cached model IDs are unsupported.")};return id};modelsSource=source=="live" ? "Previously discovered models; this request did not probe" : source
+        let parsed=try NativeSetupWire.models(raw,provider:provider);models=parsed.ids;modelsSource=parsed.source=="live" ? "Previously discovered models; this request did not probe" : parsed.source
     }
     func select(_ id:String)async {guard !busy,let choice=providers.first(where:{$0.id==id}),let base=baseURL else{return};generation=UUID();let started=generation,op=UUID();operation=op;busy=true;selected=id;models=[];modelsSource="Not loaded";model=(saved["provider"] as? String)==id ? saved["model"] as? String ?? "" : choice.defaultModel;endpoint=(saved["provider"] as? String)==id ? saved["base_url"] as? String ?? "" : choice.defaultEndpoint;defer{if operation==op{operation=nil;busy=false}};do{try await loadModels(base,provider:id,started:started)}catch{guard generation==started else{return};self.error="Cached models could not be read. No live discovery was requested; enter a model explicitly."}}
     func review(_ action:NativeSetupOperation,secret:String="")throws->NativeSetupReview {

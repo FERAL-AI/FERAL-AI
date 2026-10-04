@@ -1,26 +1,39 @@
 # User request coverage and next implementation work
 
-Reconciled October 3, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
+Reconciled October 4, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
 
 The detailed contracts and acceptance work packages remain in [release readiness](RELEASE_READINESS.md), the [native inventory](../../../desktop-native/FEATURE_PARITY.md) and the [iOS handoff](IOS_AGENT_HANDOFF.md). The implementation branch is published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310); publication is not a release or a passing acceptance matrix.
 
 ## Current verified boundary
 
-Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef`; main remains
-unchanged. Exact-source native CI, desktop, docs, naming and version pass. General
-backend coverage was still running at its recorded snapshot. Candidate 9.35 is
-assembled, signature/runtime audited, and matches51 native inputs and 488 Python
-files. Actual avatar selection and single-stage provider setup pass. The main
-chat answer was generated, but optional skill discovery delayed its committed
-terminal; a later health-related disconnect produced a cancelled receipt. Whole-
-turn chat acceptance therefore failed. The backend correction passes 623 frozen
-checks and awaits rebuilt-app acceptance; native passive-health suspension is
-active. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
-storage pressure was removed with verified history-preserving cleanup. Actual
-voice, cloud accounts, migration, clean installation and signed distribution
-remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
-[current checkpoint](WORK_STATE.md) own the active status. Older paragraphs are
-historical and do not supersede these results.
+Actual9.36/source9a40b9ac8 passes local chat, saved-context restart and normal
+exit; response-format precision, latency, actual audio/account/device/migration/
+distribution gates remain. Source corrections and research are separate from
+that package. See [candidate evidence](NATIVE_9_36_ACCEPTANCE.md) and
+[WORK_STATE](WORK_STATE.md) for exact verification and publication.
+
+## October4 additions and integration coverage
+
+| Requirement | Existing foundation and next card |
+|---|---|
+| Conversation while agents work on several tasks | TaskFlow/turns/multi-agent; TASK-01 durable job ownership and bounded scheduling, VOICE-02 delegation |
+| Subscription/API/local choice | Shared catalog/config and existing adapters; AUTH-01 supported ChatGPT plan registration; Claude SDK eligibility separate |
+| Fast reliable browser/computer/screen sharing | Existing CDP/Playwright/AX/GUI; RESOURCE-01 targets/foreground ownership and consented preview |
+| Clean local text/vision/audio model install | Ollama/vision/STT/TTS adapters; INSTALL-01 reviewed compatible runtime/download/capability/first-response verification |
+| Three product images/options in iMessage | Existing channels and preview commerce; MSG-01 receive/dedup/offer fallback, BUY-01 exact quote/Link/merchant verification |
+| CLI/web/native settings parity and two–three steps | Same catalog/config, deliberately separate default profiles; SETUP-01 string model DTO and endpoint/fallback repair |
+| Mac/phone/glasses voice sync, interruptions/noise | Managed utterance/receipt/HUP foundation; VOICE-02 acoustic/audio ownership, IOS-02 correlated frame and offline handoff |
+| Affordable persistent/proactive operation | Existing proactive switches/cost/cooldowns; PROACTIVE-02 event-driven bounded inference; Mac sleep is unavailable local execution |
+| Scoped memory and opt-in CLI agent oversight | Existing checkpoints/episodes/sync/ACP; CODE-02 provenance/grants/redaction and reviewed standalone adapters |
+
+Detailed source, current primary links, executed versus documentation evidence,
+blockers and acceptance for every row are in
+[MULTITASKING_AND_EASY_SETUP_PLAN](MULTITASKING_AND_EASY_SETUP_PLAN.md).
+Earlier avatar, social/multiplayer, health, memory, developer extension and
+open-source release requirements below remain in scope. New model/API availability
+is not proof of a working FERAL adapter.
+
+### Historical evidence
 
 - Latest publication is `4eded179e2060c226739511fc53f5a8bde0eaa16`.
   General CI passes13,013 backend tests/83 skipped/75.24% coverage and web/SDK/type

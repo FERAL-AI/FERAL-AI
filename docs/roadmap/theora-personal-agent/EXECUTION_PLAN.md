@@ -14,55 +14,45 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Published source is `c8651d16bff8dd633587c999fd908084f65f66c2`; main remains
-unchanged. Its desktop, docs, naming and version checks pass; native/general CI
-are running at the recorded snapshot. Preceding implementation `12cc62c4`
-passes both native and general CI. Candidate 9.35 is
-assembled, signature/runtime audited, and matches51 native inputs and 488 Python
-files. Actual avatar selection and single-stage provider setup pass. The main
-chat answer was generated, but optional skill discovery delayed its committed
-terminal; a later health-related disconnect produced a cancelled receipt. Whole-
-turn chat acceptance therefore failed. The backend correction passes 623 frozen
-checks on the published wave; the final configuration follow-up passes630.
-Native passive-health suspension passes Health62/gate46 and linked model checks,
-with actual rebuilt-app acceptance still pending. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
-storage pressure was removed with verified history-preserving cleanup. Actual
-voice, cloud accounts, migration, clean installation and signed distribution
-remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
-[current checkpoint](WORK_STATE.md) own the active status. Older paragraphs are
-historical and do not supersede these results.
+Current packaged Mac source is9a40b9ac8, version2026.9.36/build2026100303.
+Actual local chat, saved context, normal Quit, reviewed restart and remembered
+codeword passed; strict codeword-only formatting did not. Replies took71–77
+seconds. [Candidate evidence](NATIVE_9_36_ACCEPTANCE.md) records identity and
+limits. Current revision adds the learning-switch/cost correction, deterministic
+managed-voice disconnect fixture and setup parity repairs outside that package.
+Final combined source integration passes695 checks across31 suites, native
+production typecheck and Ruff with unchanged inputs. Full typing remains809
+without new diagnostics. [Combined evidence](SETUP_PARITY_EVIDENCE.md).
 
-The output-budget source correction now passes actual mock-HTTP request bodies,
-real orchestrator retry and failover checks. Saved chat limits are resolved when
-ordinary chat omits an explicit limit; explicit background budgets and thinking
-provider transformations remain authoritative. This does not establish a universal
-hard output or cost cap and does not explain the preceding empty generation.
-It is outside immutable 9.35. The next integration combines its 623-check backend
-wave with native passive-health suspension before rebuilt actual-app acceptance.
-Post-integration review identified a null-delete configuration-layer mismatch:
-removing a user output override must reveal the actual project/local allowance,
-both immediately and after reload. Its narrow correction is verified in the final630-check integration.
+Baseline native/desktop/docs/naming/version CI pass. General CI had one premature
+terminal-status fixture assumption with13,361 passed/83 skipped/75.45% coverage;
+its controlled correction and new-head CI are tracked in [WORK_STATE](WORK_STATE.md).
+Actual audio, accounts, device use, clean install, migration and signed release
+remain open. Mac usability leads; CI is a release gate and does not block every
+independent local card.
 
-### Current integration assignments
+### Current ready cards and ownership
 
-| Owner | Exclusive work | Completion check |
-|---|---|---|
-| Native recovery worker | Native health coordinator, model admission, local gate and their fixtures | Keep live Stop/status/terminal during delayed HTTP proof; refuse new actions; resume exact owner without replay; retain definite-death fences |
-| Backend worker | Configuration loader and output-budget fixtures | Verified: removing a user override uses real configuration precedence and preserves unrelated live state |
-| Acceptance worker | Private next-candidate launcher/preparation | Bind future source/artifact identity; isolated normal-tools chat, durable receipts, saved context, restart and Stop |
-| Parent | Integration, docs, publication, packaging and actual Mac GUI | Review/freeze inputs, publish coherent source, assemble matching app and record observed outcomes |
+The [October4 integration plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) adds explicit
+cards for setup parity/local installation, ChatGPT plan access, durable concurrent
+jobs, browser/desktop resources, full-duplex voice, Messages offers, Link checkout,
+phone/glasses handoff, event-driven proactivity and opt-in CLI oversight. It
+preserves all earlier product/developer/social/health/memory requirements. These
+new features are not claimed implemented by documentation or model availability.
 
-Worker production sources are frozen and released; the parent now owns them.
-The next build uses cached dependencies/models, needs at least10 GiB free and
-allows at most2 GiB of new temporary payloads. Keep the canonical app and one
-preceding generated candidate; retain all small evidence and isolated profiles.
-Do not mutate another worker's files while its checks are active.
+Parent owns shared contracts, integration, docs, publication and packaging.
+The setup and voice workers released their bounded source/test corrections after
+focused checks; all research audits are complete. Parent owns the frozen sources
+and passed combined verification. Reconcile this allocation with
+actual workers before reuse. Freeze production/test sources for integration.
+Keep caches/models,10 GiB minimum start headroom and at most2 GiB new packaging
+budget; canonical app plus one preceding copy by default.
 
-Follow-on card: generated skill proposals are currently indexed/approved by
-`skill_id`. Concurrent sessions can collide on that identifier. Before claiming
-multi-session proposal isolation, bind draft approval to proposal/session/request
-identity and test replacement, stale delivery and approval races. This is a
-separate existing gap; the foreground terminal correction does not close it.
+Follow-on generated-skill proposals still collide on skill_id across sessions.
+Bind immutable proposal/content identity to trusted proposer/session/turn and
+one-use review before claiming concurrent skill approval isolation. Persist before
+live registration and preserve reviewed routine authority. The learning-switch
+fix does not close that separate gap.
 
 ### Historical checkpoints
 

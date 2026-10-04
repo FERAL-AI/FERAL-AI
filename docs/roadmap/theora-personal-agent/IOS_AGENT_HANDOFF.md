@@ -2,6 +2,51 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
+## October 4 integration additions
+
+The current Mac artifact is [9.36](NATIVE_9_36_ACCEPTANCE.md), which completes
+local chat, saved-context recall and normal restart with bounded evidence.
+It does not certify phone/audio/glasses behavior. The following extends the
+existing iOS tickets; older desktop checkpoints below are historical.
+See [multitasking and setup](MULTITASKING_AND_EASY_SETUP_PLAN.md).
+
+- Negotiate durable job subscriptions, ordered event cursors, revision/status
+  readback and exact cancellation separately from conversational/media sockets.
+  Background task ownership and audio ownership are proposed contracts, not
+  existing fields to send to an unmodified server. Socket reconnect must not
+  resubmit an uncertain action or replay old speech.
+- Add generation-fenced audio route handoff: a selected phone can relay the
+  selected glasses mic/output; drain/revoke the old route, verify the new route,
+  then resume. Keep microphone mute, speech interruption, task cancellation and
+  ending a call distinct. Test calls, Bluetooth changes, locked/offline phones,
+  permissions and OS suspension on actual devices.
+- Bind selected owner/node/device, frame request/sequence/time, voice utterance
+  and task revision. Current generic freshest-frame attachment is insufficient
+  for “get me that” across devices. Reject stale/wrong-device evidence and request
+  product confirmation when ambiguous.
+- Render the same typed offer/quote revision as desktop: product/variant/image
+  source, merchant, currency, known fees, final total or unknown, availability,
+  fulfillment and observation time. Selecting an offer is not payment approval.
+  Forward approval only through an authenticated owner/task/quote-bound contract.
+- Basic Mac Messages delivery is text/files/links. Interactive live bubbles need
+  an optional native Messages extension with a supported fallback; neither
+  arbitrary channel buttons nor AppleScript implement that extension.
+  [Apple live layout](https://developer.apple.com/documentation/messages/msmessagelivelayout).
+- Treat ChatGPT plan inference and cloud voice as separate entitlements. The
+  documented plan-usage preview excludes audio/transcription; do not reuse its
+  token for an assumed voice endpoint. Keep durable provider keys on the chosen
+  trusted brain, use supported short-lived media credentials where applicable,
+  and fence account/profile switches. Local phone/Mac models need real asset,
+  capacity and route acceptance rather than a shared brand label.
+- Preserve the existing durable capture outbox, private sync scope and explicit
+  camera/ambient/proactive controls. Mac asleep means local execution unavailable;
+  offline capture can queue bounded requests, not promise always-on execution.
+
+No iOS files or hardware behavior were changed by this update. The iOS agent
+owns implementation after the parent reviews shared versioned contracts and
+supplies fixtures; release requires the existing reproducible-build and actual
+phone/glasses acceptance gates.
+
 ## October 1 implementation contract notes
 
 Use [release readiness](RELEASE_READINESS.md) alongside this handoff. REL-01/02/03 define proposed owner/task/memory boundaries; REL-05 maps to the iOS/glasses work here, while REL-08/09 separate messaging/payment authority. Proposed ledger fields and future handoff contracts are not implemented APIs. Mac operator authority and shared session memory are not proof of phone-owner isolation.
