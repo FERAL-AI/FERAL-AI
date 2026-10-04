@@ -9,13 +9,15 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ### October 4 Mac integration checkpoint
 
-- Implementation baseline and immutable packaged source:
-  `9a40b9ac8e7d155c16a5504a3332c1dca912ad41`, on
+- Published implementation correction:
+  `213b94a3e9b21bfe44a70c63fc913570dfd144fb`, on
   `feat/native-product-release-foundation-20261001` in
   [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Main remains unchanged.
-  The correction revision containing this checkpoint is separate from the package.
-  Resolve current Git/remote identity before resuming rather than treating a
-  baseline SHA as the latest HEAD.
+  The immutable package remains source
+  `9a40b9ac8e7d155c16a5504a3332c1dca912ad41`. The later setup/status/learning
+  corrections and research are published but not assembled into that package.
+  Resolve current Git/remote identity before resuming; documentation-only
+  checkpoint revisions may follow the implementation commit.
 - Actual candidate **2026.9.36/build2026100303** is built and audited:51 native
   inputs and488 packaged Python files matched9a40. Normal tool-enabled local
   arithmetic and saved-context chat completed with durable receipts. Normal Quit,
@@ -33,6 +35,8 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   terminal commit immediately after asynchronous surface cleanup. A controlled
   commit barrier now proves running status before exact cancelled/unknown status,
   retaining no-TTS/no-replay checks. New-head CI remains required.
+  At the213b94 snapshot docs/naming/version pass, desktop/native/general CI are
+  running and real-brain E2E is skipped. Do not interpret running as passed.
 - The final setup/status/learning integration passes695 checks across31 suites,
   native production typecheck, core Ruff and whitespace. All1,292 Python inputs
   stayed unchanged. The preceding learning-only wave passed664; counts overlap.
@@ -60,9 +64,10 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   refs/reflogs/worktree indexes protected and full fsck passed. Later recurrence
   was881 MiB; the forced-object writer remains unproven. Do not clean recent
   objects from timestamps alone. Working data/models/history remain preserved.
-- Parent owns documentation, shared contracts and publication. The setup/status/learning sources are
-  integrated, frozen and checked. Commit and push explicit reviewed files. Assemble that exact source before claiming
-  packaged fixes. Preserve9.36 evidence and keep at most one preceding generated
+- Parent owns documentation, shared contracts and publication. Setup/status/
+  learning sources are integrated, frozen, checked and published with explicit
+  reviewed files. Assemble that exact source before claiming packaged fixes.
+  Preserve9.36 evidence and keep at most one preceding generated
   app copy after bounded ownership/retention review.
 - Next engineering order: Mac setup/recovery/latency and packaged learning gates;
   reviewed local installation; supported ChatGPT plan adapter; durable task/
