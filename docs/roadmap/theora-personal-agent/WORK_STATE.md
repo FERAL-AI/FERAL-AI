@@ -53,7 +53,12 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   is pushed and the remote SHA verified; draft PR310 describes the final browser
   behavior and limits. At publication review, docs/naming/version CI passed;
   general/native/desktop CI remained in progress and real-brain E2E was skipped.
-- Next: the two follow-up cards, desktop viewing/foreground ownership and
+- Existing-profile Chrome research is documented in the
+  [browser contract](BROWSER_VIEW_EVIDENCE.md). Installed Chrome with a separate
+  FERAL profile already exists; Chrome 144+ permission-based MCP autoConnect is
+  documentation-confirmed and remains an unimplemented, untested adapter.
+  No personal profile/browser setting/account was changed.
+- Next: the two follow-up cards, explicit existing-Chrome connection, desktop viewing/foreground ownership and
   task-linked browser takeover. Full product audio/accounts/devices/Messages/
   commerce/migration/distribution gates remain explicit. Preserve unrelated
   AUDIT-FIXES.md edits unstaged. [Browser contract](BROWSER_VIEW_EVIDENCE.md).

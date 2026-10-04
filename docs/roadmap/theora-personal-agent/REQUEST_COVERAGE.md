@@ -6,10 +6,12 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-Actual9.36/source9a40b9ac8 passes local chat, saved-context restart and normal
-exit; response-format precision, latency, actual audio/account/device/migration/
-distribution gates remain. Source corrections and research are separate from
-that package. See [candidate evidence](NATIVE_9_36_ACCEPTANCE.md) and
+Actual9.37/sourceb9af passes bounded native browser consent, real masked frames,
+correct-field text, coordinate marker, Stop/navigation/expiry clearing and normal
+exit. Earlier9.36 passes local chat and saved-context restart; 9.37 does not
+certify new chat latency, audio/account/device/migration/distribution acceptance.
+Source corrections and research are separate from actual task outcomes.
+See [current candidate evidence](NATIVE_9_37_ACCEPTANCE.md) and
 [WORK_STATE](WORK_STATE.md) for exact verification and publication.
 
 ## October4 additions and integration coverage

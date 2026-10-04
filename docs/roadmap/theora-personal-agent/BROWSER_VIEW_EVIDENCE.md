@@ -25,6 +25,41 @@ presentation and may interfere with interacting with masked controls. Stop viewi
 before manually using those controls. This slice does not provide whole-desktop
 screen sharing, interactive remote control or independent per-agent browsers.
 
+## Installed Chrome and existing-profile connection
+
+Source inspection confirms that `BrowserController._auto_launch_chrome` uses the
+installed Mac Chrome binary with a persistent FERAL-owned `chrome-profile` under
+FERAL home. It does not inherit the personal default profile or its logins. The
+controller can attach to an existing configured CDP endpoint. Actual acceptance
+used disposable profiles; personal-profile access has not been tested.
+
+Current primary documentation confirms two possible existing-profile bridges:
+
+- Chrome DevTools MCP `--autoConnect` supports Chrome 144+ through the user's
+  `chrome://inspect/#remote-debugging` opt-in and Chrome permission dialog. The
+  documented connection chooses Chrome's default profile and can access all its
+  open windows; page routing alone is not a FERAL authorization boundary.
+  [Official connection guide](https://github.com/ChromeDevTools/chrome-devtools-mcp/blob/main/docs/advanced-usage.md#connecting-to-a-running-chrome-instance).
+- An extension using `chrome.debugger` can address tabs by ID with supported CDP
+  domains. The current FERAL extension exposes chat and page context and has no
+  debugger permission/control transport. Reusing it would require an implemented
+  bridge and actual acceptance, rather than a manifest-only permission change.
+  [Chrome debugger API](https://developer.chrome.com/docs/extensions/reference/api/debugger).
+
+The old remote-debugging-port approach requires a non-default data directory on
+Chrome 136+; it is distinct from the newer permission-based autoConnect path.
+[Chrome profile restriction](https://developer.chrome.com/blog/remote-debugging-port).
+
+Proposed order: retain the working FERAL profile mode, evaluate a version-pinned
+official MCP adapter for explicitly granted existing-profile use, and retain the
+extension transport as an alternative if tab-scoped UX or compatibility requires
+it. Disable optional telemetry for the adapter and preserve central task/approval
+identity, exact target leases, revocation and actual observations. Do not expose
+unrestricted MCP tools directly to bypass existing authority. Acceptance must
+cover selected profile/tab, detach and revoke, login/2FA handoff, account writes,
+concurrent-task ownership, native viewing and visible takeover. No MCP package,
+browser setting, personal profile or account was changed by this research.
+
 ## Headless contract
 
 | Route | Contract |
