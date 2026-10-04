@@ -359,3 +359,7 @@ async def browser_action(body: dict):
     elif action == "wait":
         return await state.browser.wait(body.get("ms", 1000))
     return {"error": f"Unknown action: {action}"}
+
+
+from api.routes.existing_chrome import router as existing_chrome_router
+router.include_router(existing_chrome_router)

@@ -14,9 +14,12 @@ and requests revocation; it does not cancel the underlying task.
 Frames are actual viewport JPEGs, held in memory, with a sequential maximum of
 two refreshes per second. The image dimensions are bounded to 1280 pixels and
 the encoded payload to 2 MiB. The input-location marker uses actual recorded
-browser mouse coordinates, scaled to the returned image. Coordinate and CDP selector actions have markers; Playwright selector click/hover
-currently do not. No marker is invented for a selector fill that does not move a pointer. This is a browser input marker,
-not a claim that the operating system cursor moved.
+browser mouse coordinates, scaled to the returned image. Coordinate and CDP
+selector actions have markers. The current integration tree also observes trusted
+Playwright selector click/hover events; this later repair is outside immutable
+9.37/source b9af. No marker is invented for selector fill or missing input
+observations. This is a browser input marker, not a claim that the operating
+system cursor moved or a requested task succeeded.
 
 The driver masks ordinary password controls and hides child frames during capture.
 Unsupported website shadow-root pages refuse viewing. Other page content remains visible;
@@ -50,15 +53,20 @@ The old remote-debugging-port approach requires a non-default data directory on
 Chrome 136+; it is distinct from the newer permission-based autoConnect path.
 [Chrome profile restriction](https://developer.chrome.com/blog/remote-debugging-port).
 
-Proposed order: retain the working FERAL profile mode, evaluate a version-pinned
-official MCP adapter for explicitly granted existing-profile use, and retain the
-extension transport as an alternative if tab-scoped UX or compatibility requires
-it. Disable optional telemetry for the adapter and preserve central task/approval
-identity, exact target leases, revocation and actual observations. Do not expose
-unrestricted MCP tools directly to bypass existing authority. Acceptance must
-cover selected profile/tab, detach and revoke, login/2FA handoff, account writes,
-concurrent-task ownership, native viewing and visible takeover. No MCP package,
-browser setting, personal profile or account was changed by this research.
+The current integration implements direct discovery and selected-session CDP
+connection to existing Chrome. It reuses the documented endpoint discovery;
+it does not install or run Chrome DevTools MCP. Strict local consent precedes
+bounded in-memory title labels, and each selection rotates the connection
+identity owned by the selected chat. Existing task policy/approval/executor
+checks capture that exact session, connection and target. Unsupported global
+operations refuse without fallback. Disconnect closes FERAL's sockets, restores
+its captured backing and never closes Chrome or clears its cookies.
+[Exact implementation and acceptance limits](EXISTING_CHROME_PLAN.md).
+
+The existing-profile permission flow and personal account outcomes remain
+documentation/release gates. Controlled transport/route/native fixtures do not
+certify them. Immutable 9.37 acceptance used a disposable independently started
+Chrome profile; it does not contain or validate this later connection adapter.
 
 ## Headless contract
 
@@ -91,6 +99,39 @@ refuses unresolved or ambiguous targets, checks focus, inserts Unicode text and
 checks the result without returning inspected private field values. A dispatch
 whose result cannot be verified is not automatically repeated.
 
+## Observed Playwright selector markers
+
+The selector click/hover repair retains Playwright's original dispatch methods,
+selectors and five-second action timeout. A temporary closure observes trusted
+click or mousemove events on the resolved element and records their actual
+viewport coordinates. It does not guess a bounding-box center. Observation
+failure preserves action behavior with no marker. Instrumentation has bounded
+waits and cleanup, plus an expiring listener for an uncertain installation reply.
+
+Markers bind the same Playwright page, selected target, CDP connection and both
+Document and document-element backend IDs. Actual Chrome testing showed that
+`document.open()` can replace HTML while retaining the Document ID; the stronger
+fence retires those markers. Fill, failed/cancelled actions, navigation, rebind
+and crossed observation revisions discard stale markers. Child-frame pointer
+observations are unsupported. Independent trusted user input on the same element
+can also be observed during this window: a marker is not proof of exclusive
+agent-origin input and never authorizes an action.
+
+Five focused suites passed **402 cases**, with three opt-in cases skipped. A
+separate explicit installed-Chrome run passed the selector case: an offscreen
+button scrolled into view, moved after listener installation, received real
+trusted click/hover events and returned matching screenshot coordinates. The
+changed button pixels, fill without a marker, failed selector and document
+replacement were checked. Receipt:
+`/private/tmp/feral-playwright-pointer-real-9x7y0cwv/receipt.json`; log:
+`/private/tmp/feral-playwright-pointer-real-9x7y0cwv/pytest.log`.
+Both source hashes remained unchanged; the owned runner exited normally, no
+forced kill was required and the debug listener closed. The initial real
+failure at `/private/tmp/feral-playwright-pointer-real-0cbkzdj1/` is retained.
+Ruff passes; narrow typing retains six existing diagnostics, not a clean typing
+claim. This is controlled browser/input acceptance, not packaged native or account
+acceptance.
+
 ## OpenAI integration boundary
 
 OpenAI documents two distinct integrations. Its local computer-use interface lets
@@ -119,11 +160,14 @@ actual packaged GUI acceptance are recorded separately in
 [WORK_STATE](WORK_STATE.md). A unit/transport pass does not certify a merchant,
 cloud account, payment, hardware device or release installer.
 
-Frozen combined backend checks pass 1,230 with one opt-in real-Chrome case skipped.
+Historical frozen 9.37 integration checks pass 1,230 with one opt-in real-Chrome case skipped.
 The separate installed-Chrome run passes 26 focused cases, including the real
 browser case. These counts overlap. Native Browser 74/Providers 50/Onboarding 52
 assertions and linked model/desktop checks pass; production typecheck passes.
-Full mypy remains 809 diagnostics in 233 files, unchanged from the baseline.
+That historical integration's full mypy reported 809 diagnostics in 233 files,
+unchanged from its baseline. These results do not certify the later
+existing-Chrome integration; its current evidence is recorded separately in
+[the existing-Chrome contract](EXISTING_CHROME_PLAN.md).
 Packaged 9.37/source b9af now passes actual native consent, real masked frames,
 intended-field Unicode, approved coordinate marker, Stop, navigation retirement,
 expiry/error clearing and normal Quit. [Exact acceptance](NATIVE_9_37_ACCEPTANCE.md)

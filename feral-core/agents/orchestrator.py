@@ -1307,7 +1307,7 @@ class Orchestrator:
         exact_approval=None,
     ) -> dict:
         """Execute a previously-approved pending tool call."""
-        if taskflow_pending is None:
+        if taskflow_pending is None and exact_approval is None:
             self.tool_runner.grant_session_approval(tool_name, session_id)
         tool_call = {
             "name": tool_name,
@@ -1329,7 +1329,12 @@ class Orchestrator:
                     )
                 await taskflows.finish_approved_dispatch(taskflow_pending, result_data)
             else:
-                result_data = await self._execute_tool_call_for_llm(session_id, tool_call, [])
+                if exact_approval is not None:
+                    result_data = await self.tool_runner.execute_tool_call_for_llm(
+                        session_id, tool_call, [], approval=exact_approval,
+                    )
+                else:
+                    result_data = await self._execute_tool_call_for_llm(session_id, tool_call, [])
         except (Exception, asyncio.CancelledError):
             if taskflows is not None:
                 await taskflows.finish_approved_dispatch(taskflow_pending, uncertain=True)

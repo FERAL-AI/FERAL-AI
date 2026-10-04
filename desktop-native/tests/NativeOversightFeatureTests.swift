@@ -83,6 +83,30 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
             try require(OversightWire.body("/api/supervisor/pause")["paused"] as? Bool == true, "pause POST must use JSON boolean")
             print("PASS pending queue, audit, and authoritative pause result")
 
+            for invalidSession in ["", " ", " caller", "caller ", "caller\u{0000}", String(repeating: "x", count: 1025)] {
+                var unbound = approval; unbound["session_id"] = invalidSession
+                var invalidFixtures = fixtures
+                invalidFixtures["/api/approvals"] = (200, ["approvals": [unbound], "count": 1])
+                OversightWire.reset(invalidFixtures)
+                let invalid = model(); await invalid.refresh()
+                try require(invalid.queueFresh && invalid.approvals.count == 1, "legacy invalid-session rows must remain visible")
+                let request = invalid.approvals[0]
+                try require(request.sessionIssue?.contains("original caller") == true, "invalid-session row must explain exact-session resubmission without replay")
+                await invalid.decide(request, approve: true)
+                await invalid.decide(request, approve: false)
+                try require(OversightWire.count("/api/approvals/req-real/approve") == 0 && OversightWire.count("/api/approvals/req-real/reject") == 0, "invalid-session decisions must not dispatch or manufacture an identity")
+                try require(invalid.decisionError != nil && invalid.receipt == nil && !invalid.acting, "invalid session cannot claim a decision receipt")
+            }
+            print("PASS six invalid-session rows remain visible and produce zero decision dispatches")
+
+            var unicodeApproval = approval; unicodeApproval["session_id"] = String(repeating: "🦦", count: 1024)
+            var unicodeFixtures = fixtures
+            unicodeFixtures["/api/approvals"] = (200, ["approvals": [unicodeApproval], "count": 1])
+            OversightWire.reset(unicodeFixtures)
+            let unicode = model(); await unicode.refresh()
+            try require(unicode.approvals[0].sessionIssue == nil, "canonical Unicode sessions must use backend scalar-length limits, not bytes")
+            print("PASS canonical Unicode session remains decision-capable")
+
             OversightWire.reset(fixtures)
             let unknown = model(); await unknown.refresh(); let heldReview = unknown.approvals[0]
             OversightWire.set("/api/supervisor/stats", ["paused": 1]); await unknown.refresh()
@@ -147,7 +171,7 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
             try require(lateAction.receipt == nil && lateAction.decisionError == nil && lateAction.approvals.isEmpty && !lateAction.acting, "late action receipt must not mutate new backend state")
             try require(OversightWire.count() == count, "old action must not refresh new backend")
             print("PASS delayed old-backend action receipt is discarded")
-            print("NATIVE_OVERSIGHT_TESTS_PASSED: 10 fixture groups; mocked HTTP only, no real approvals executed")
+            print("NATIVE_OVERSIGHT_TESTS_PASSED: 12 fixture groups; mocked HTTP only, no real approvals executed")
         } catch { fputs("NATIVE_OVERSIGHT_TESTS_FAILED: \(error)\n", stderr); exit(1) }
     }
 }

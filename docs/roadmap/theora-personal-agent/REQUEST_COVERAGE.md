@@ -1,5 +1,14 @@
 # User request coverage and next implementation work
 
+**Existing-Chrome integration (October 4).** Direct consented connection to an
+already running Chrome, selected-chat/tab controls and exact resource-bound
+approvals are implemented. Frozen backend integration passes 1,468 tests with
+three opt-in skips; native Browser 115 and Oversight 12 fixture groups pass.
+Typing retains the unchanged baseline; exact-source 9.38 packaging and actual native
+connection controls remain pending. Personal-profile permission/account behavior
+is untested. [Connection contract](EXISTING_CHROME_PLAN.md), [current checkpoint](WORK_STATE.md).
+
+
 Reconciled October 4, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
 
 The detailed contracts and acceptance work packages remain in [release readiness](RELEASE_READINESS.md), the [native inventory](../../../desktop-native/FEATURE_PARITY.md) and the [iOS handoff](IOS_AGENT_HANDOFF.md). The implementation branch is published in [draft PR #310](https://github.com/FERAL-AI/FERAL-AI/pull/310); publication is not a release or a passing acceptance matrix.

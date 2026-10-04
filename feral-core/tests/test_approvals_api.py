@@ -131,6 +131,83 @@ def test_unknown_approval_returns_404(approvals_client):
     assert r.status_code == 404
 
 
+def test_rest_bound_dispatch_to_native_shaped_approval_executes_once(monkeypatch):
+    from api.routes import tools
+    from api.state import state
+    from models.skill_manifest import BrandProfile, SkillEndpoint, SkillManifest
+    from skills.base import BaseSkill
+    from skills.call_context import current_context
+    from skills.impl import SKILL_IMPLEMENTATIONS
+    from skills.registry import SkillRegistry
+
+    class RecordingAction(BaseSkill):
+        def __init__(self):
+            super().__init__(skill_id="rest_bound_contract")
+            self.calls = []
+
+        async def execute(self, endpoint_id, args, vault):
+            self.calls.append((endpoint_id, dict(args), current_context().session_id))
+            return {"success": True, "data": {"verified": True}}
+
+    reg = SkillRegistry()
+    reg.register(SkillManifest(
+        skill_id="rest_bound_contract", brand=BrandProfile(name="Synthetic action", primary_color="#111"),
+        description="Isolated approval contract", endpoints=[SkillEndpoint(
+            id="write", method="PYTHON", url="python://rest_bound_contract/write",
+            description="Synthetic mutation", safety_tier="confirm",
+        )],
+    ))
+    action = RecordingAction()
+    monkeypatch.setitem(SKILL_IMPLEMENTATIONS, "rest_bound_contract", action)
+    orch = Orchestrator(skill_registry=reg, send_to_client=AsyncMock(), daemons={}, memory=None,
+                        vision_buffer=None, perception=None, learner=None,
+                        approval_manager=ApprovalManager(db_path=":memory:"))
+    orch.tool_runner._autonomy_mode = "strict"
+    orch._send_text = AsyncMock()
+    orch._try_genui_for_result = AsyncMock()
+    monkeypatch.setattr(state, "orchestrator", orch)
+    monkeypatch.setattr(state, "skill_registry", reg)
+    fake_state = SimpleNamespace(orchestrator=orch)
+    monkeypatch.setattr("api.routes.approvals.state", fake_state)
+    app = FastAPI()
+    app.include_router(tools.router)
+    app.include_router(approvals_router)
+    with patch.dict("os.environ", {"FERAL_TOOL_CALL_CONTEXT": "on"}), TestClient(app) as client:
+        dispatch = {"tool_name": "rest_bound_contract__write", "confirm": True}
+        invalid = client.post("/api/tools/execute", json=dispatch).json()
+        assert invalid["error_code"] == "context_invalid_session"
+        assert orch.tool_runner.list_pending() == [] and action.calls == []
+        with patch.dict("os.environ", {"FERAL_TOOL_CALL_CONTEXT": "off"}):
+            disabled = client.post("/api/tools/execute", json={**dispatch, "session_id": "real-caller"}).json()
+            assert disabled["error_code"] == "context_binding_disabled"
+            assert orch.tool_runner.list_pending() == [] and action.calls == []
+        pending = client.post("/api/tools/execute", json={**dispatch, "session_id": "real-caller"}).json()
+        assert pending["status"] == "pending_approval" and pending["session_id"] == "real-caller"
+        assert action.calls == []
+        row = client.get("/api/approvals").json()["approvals"][0]
+        assert row["request_id"] == pending["request_id"] and row["session_id"] == "real-caller"
+        path = f"/api/approvals/{row['request_id']}/approve"
+        foreign = client.post(path, json={"session_id": "foreign-caller"})
+        assert foreign.status_code == 409 and action.calls == []
+        assert orch.tool_runner.get_pending(row["request_id"]) is not None
+        approved = client.post(path, json={"session_id": row["session_id"]})
+        assert approved.status_code == 200
+        assert approved.json()["status"] == "approved"
+        assert approved.json()["result"]["success"] is True
+        assert action.calls == [("write", {}, "real-caller")]
+        assert client.post(path, json={"session_id": row["session_id"]}).status_code == 404
+        assert len(action.calls) == 1
+
+
+def test_legacy_empty_session_cannot_be_approved_by_native_body(approvals_client):
+    client, orch = approvals_client
+    pending = _new_pending(orch, "")
+    response = client.post(f"/api/approvals/{pending['request_id']}/approve", json={"session_id": ""})
+    assert response.status_code == 422
+    orch._execute_tool_call_for_llm.assert_not_awaited()
+    assert orch.tool_runner.get_pending(pending["request_id"]) is not None
+
+
 def test_list_surfaces_policy_sources(approvals_client):
     """The inbox must return the field ToolRunner records for it.
 

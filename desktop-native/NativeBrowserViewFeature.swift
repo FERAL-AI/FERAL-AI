@@ -225,14 +225,162 @@ private final class BrowserViewRedirectGuard: NSObject, URLSessionTaskDelegate {
         } catch { return false }
     }
 }
+@MainActor final class NativeExistingChromeModel: ObservableObject {
+    @Published private(set) var connected = false
+    @Published private(set) var connectionID: String?
+    @Published private(set) var selected: String?
+    @Published private(set) var targets: [NativeBrowserViewTarget] = []
+    @Published var draft = ""
+    @Published private(set) var busy = false
+    @Published private(set) var error: String?
+    private var origin: URL?
+    private var owner: String?
+    private var ready = false
+    private var generation = UUID()
+    private let session: URLSession
+    private var stateConfirmed = false
+    private var reviewedConnect: UUID?
+    private var reviewedSelect: (UUID, String, String)?
+    init(session: URLSession? = nil) {
+        self.session = session ?? URLSession(configuration: .ephemeral, delegate: BrowserViewRedirectGuard(), delegateQueue: nil)
+    }
+    static func validOwner(_ text: String?) -> Bool {
+        guard let text, !text.isEmpty, text.count <= 1024, text.trimmingCharacters(in: .whitespacesAndNewlines) == text else { return false }
+        return !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
+    }
+    var canConnect: Bool { !busy && stateConfirmed && ready && owner != nil && !connected && connectionID == nil }
+    var canSelect: Bool { !busy && stateConfirmed && ready && connected && connectionID != nil && targets.contains(where: { $0.id == draft }) }
+    var canDisconnect: Bool { !busy && owner != nil && connectionID != nil }
+    func configure(origin: URL?, owner: String?, ready: Bool) async {
+        guard self.origin != origin || self.owner != owner || self.ready != ready else { return }
+        generation = UUID(); stateConfirmed = false; reviewedConnect = nil; reviewedSelect = nil; self.origin = origin; self.owner = Self.validOwner(owner) ? owner : nil; self.ready = ready
+        connected = false; connectionID = nil; selected = nil; targets = []; draft = ""; error = nil; busy = false
+        await refresh()
+    }
+    private func request(_ operation: String, origin: URL, owner: String, extra: [String: Any] = [:]) async throws -> [String: Any] {
+        guard ["127.0.0.1", "::1", "[::1]"].contains(origin.host ?? ""), ["http", "https"].contains(origin.scheme ?? ""),
+              origin.user == nil, origin.password == nil, var parts = URLComponents(url: origin, resolvingAgainstBaseURL: false) else { throw NativeBrowserViewFailure(message: "Connect to the app-owned local agent.") }
+        parts.percentEncodedPath = "/api/browser/existing/" + operation; parts.queryItems = nil; parts.fragment = nil
+        guard let url = parts.url else { throw NativeBrowserViewFailure(message: "The Chrome connection address is invalid.") }
+        var request = URLRequest(url: url); request.httpMethod = "POST"; request.timeoutInterval = 35
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("native-v1", forHTTPHeaderField: "X-FERAL-Browser-View")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: extra.merging(["session_id": owner]) { _, new in new })
+        let (data, response) = try await session.feralLocalData(for: request)
+        guard data.count <= 100_000, let http = response as? HTTPURLResponse, let body = try JSONSerialization.jsonObject(with: data) as? [String: Any] else { throw NativeBrowserViewFailure(message: "The Chrome response could not be read.") }
+        guard (200..<300).contains(http.statusCode), NativeBrowserViewWire.bool(body["success"]) == true else {
+            let code = body["error_code"] as? String ?? ""
+            let message: String
+            switch code {
+            case "existing_chrome_unavailable": message = "Open Chrome and enable its remote debugging option at chrome://inspect/#remote-debugging, then review the connection again."
+            case "existing_chrome_owner_required": message = "Chrome belongs to another chat. Return to its owning chat to disconnect it."
+            case "existing_chrome_busy": message = "Another browser connection is active. Stop that connection before changing browser mode."
+            case "existing_chrome_connection_changed": message = "The Chrome connection changed. Refresh and review the current tab."
+            case "existing_chrome_context_disabled", "existing_chrome_authority_unavailable": message = "Browser task identity is unavailable. No new Chrome connection was granted."
+            case "existing_chrome_unsupported_version": message = "This Chrome version does not support the existing-profile connection."
+            default: message = "The Chrome operation was not confirmed. Refresh its state before making another request."
+            }
+            throw NativeBrowserViewFailure(message: message)
+        }
+        return body
+    }
+    private func apply(_ body: [String: Any], owner: String) throws {
+        guard body["mode"] as? String == "existing_chrome", let connected = NativeBrowserViewWire.bool(body["connected"]),
+              let rows = body["targets"] as? [[String: Any]], rows.count <= 100 else { throw NativeBrowserViewFailure(message: "Chrome connection state is unreadable.") }
+        let id = body["connection_id"] as? String
+        guard body["connection_id"] == nil || body["connection_id"] is NSNull || body["connection_id"] is String,
+              body["selected_target_id"] == nil || body["selected_target_id"] is NSNull || body["selected_target_id"] is String else { throw NativeBrowserViewFailure(message: "Chrome connection identifiers are malformed.") }
+        if let id { guard UUID(uuidString: id)?.uuidString.lowercased() == id, body["owner_session_id"] as? String == owner else { throw NativeBrowserViewFailure(message: "Chrome connection identity does not match this chat.") } }
+        else { guard !connected, body["owner_session_id"] == nil || body["owner_session_id"] is NSNull else { throw NativeBrowserViewFailure(message: "Chrome owner identity is missing.") } }
+        var targets: [NativeBrowserViewTarget] = []
+        for row in rows {
+            guard let id = NativeBrowserViewWire.identifier(row["id"], limit: 128), let label = row["label"] as? String,
+                  !label.isEmpty, label.utf8.count <= 256, !label.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { throw NativeBrowserViewFailure(message: "Chrome tab identity is unreadable.") }
+            targets.append(.init(id: id, label: label))
+        }
+        let selected = body["selected_target_id"] as? String
+        guard Set(targets.map(\.id)).count == targets.count, selected == nil || targets.contains(where: { $0.id == selected }), connected || (targets.isEmpty && selected == nil) else { throw NativeBrowserViewFailure(message: "Chrome tab selection could not be verified.") }
+        self.connected = connected; connectionID = id; self.selected = selected; self.targets = targets; draft = selected ?? targets.first?.id ?? ""; error = nil; stateConfirmed = true
+    }
+    func refresh() async { await perform("status") }
+    func cancelReview() { reviewedConnect = nil; reviewedSelect = nil }
+    func prepareConnect() -> Bool { guard canConnect else { return false }; reviewedConnect = generation; return true }
+    func prepareSelect() -> Bool { guard canSelect, let id = connectionID else { return false }; reviewedSelect = (generation, id, draft); return true }
+    func connect() async {
+        guard canConnect, reviewedConnect == generation else { error = "Review this chat's Chrome connection again."; return }
+        reviewedConnect = nil; await perform("connect", extra: ["consent": true])
+    }
+    func select() async {
+        guard canSelect, let id = connectionID, let review = reviewedSelect, review.0 == generation, review.1 == id, review.2 == draft else { error = "The selected Chrome tab changed. Review it again."; return }
+        reviewedSelect = nil; await perform("select", extra: ["connection_id": id, "target_id": draft])
+    }
+    func disconnect() async { guard canDisconnect, let id = connectionID else { return }; await perform("disconnect", extra: ["connection_id": id]) }
+    private func perform(_ operation: String, extra: [String: Any] = [:]) async {
+        guard !busy, let origin, let owner else { return }
+        let current = generation; busy = true; defer { if generation == current { busy = false } }
+        do {
+            let body = try await request(operation, origin: origin, owner: owner, extra: extra)
+            guard generation == current else {
+                if operation == "connect", let id = body["connection_id"] as? String {
+                    let cleanup = Task { _ = try? await self.request("disconnect", origin: origin, owner: owner, extra: ["connection_id": id]) }
+                    await cleanup.value
+                }
+                return
+            }
+            if operation == "select" {
+                guard NativeBrowserViewWire.bool(body["connected"]) == true,
+                      let expected = extra["target_id"] as? String, body["selected_target_id"] as? String == expected,
+                      let fresh = body["connection_id"] as? String, fresh != extra["connection_id"] as? String else {
+                    throw NativeBrowserViewFailure(message: "The selected Chrome tab was not confirmed. Refresh before reviewing another attachment.")
+                }
+            } else if operation == "connect" {
+                guard NativeBrowserViewWire.bool(body["connected"]) == true else {
+                    throw NativeBrowserViewFailure(message: "Chrome did not confirm a connection. Refresh its state before retrying.")
+                }
+            } else if operation == "disconnect" {
+                guard NativeBrowserViewWire.bool(body["connected"]) == false,
+                      body["connection_id"] == nil || body["connection_id"] is NSNull else {
+                    throw NativeBrowserViewFailure(message: "Chrome disconnect was not confirmed. Refresh its state before retrying.")
+                }
+            }
+            try apply(body, owner: owner)
+        } catch {
+            if generation == current {
+                stateConfirmed = false; reviewedConnect = nil; reviewedSelect = nil
+                self.error = error.localizedDescription
+            }
+        }
+    }
+}
+
 struct NativeBrowserViewFeatureView: View {
     let baseURL: URL?
+    var sessionID: String? = nil
+    var taskReady = true
     @StateObject private var model = NativeBrowserViewModel()
+    @StateObject private var chrome = NativeExistingChromeModel()
     @State private var review = false
+    @State private var chromeReview = false
+    @State private var tabReview = false
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("Browser").font(.title2.bold()); Spacer(); Button("Refresh") { Task { await model.refresh() } }.disabled(model.busy || model.watching) }
             Text("Watch FERAL work in the attached browser tab.").foregroundStyle(.secondary)
+            HStack {
+                Button("Use my Chrome…") { chromeReview = chrome.prepareConnect() }.disabled(!chrome.canConnect || model.watching)
+                Button("Refresh Chrome") { Task { await chrome.refresh() } }.disabled(chrome.busy || sessionID == nil)
+                if chrome.connectionID != nil { Button("Disconnect Chrome") { Task { await model.stop(); await chrome.disconnect(); await model.refresh() } }.disabled(!chrome.canDisconnect) }
+            }
+            if chrome.connected {
+                HStack {
+                    Picker("Chrome tab", selection: $chrome.draft) { ForEach(chrome.targets) { Text($0.label).tag($0.id) } }.disabled(chrome.busy || model.watching)
+                    Button("Attach selected tab…") { tabReview = chrome.prepareSelect() }.disabled(!chrome.canSelect || model.watching)
+                }
+                Text("This Chrome connection belongs to the selected chat. Task approvals remain separate.").font(.caption).foregroundStyle(.secondary)
+            }
+            if sessionID == nil { Text("Choose a chat before connecting your Chrome.").font(.caption).foregroundStyle(.secondary) }
+            if let error = chrome.error { NativeSelectableText(text: error, font: .systemFont(ofSize: 12), color: .systemRed) }
             HStack {
                 Picker("Browser page", selection: $model.selectedTarget) {
                     Text("Choose the attached page").tag("")
@@ -258,8 +406,24 @@ struct NativeBrowserViewFeatureView: View {
             if let error = model.error { NativeSelectableText(error).foregroundStyle(.red) }
             Text("Viewing this browser tab does not stop or authorize agent tasks. Use Chat or Oversight for task Stop.").font(.caption).foregroundStyle(.secondary)
         }.padding(24)
-        .task(id: baseURL?.absoluteString ?? "") { review = false; await model.configure(baseURL: baseURL) }
-        .onDisappear { review = false; Task { await model.stop() } }
+        .task(id: "\(baseURL?.absoluteString ?? "")|\(sessionID ?? "")|\(taskReady)") {
+            review = false; chromeReview = false; tabReview = false
+            await model.stop(); await model.configure(baseURL: baseURL)
+            await chrome.configure(origin: baseURL, owner: sessionID, ready: taskReady)
+        }
+        .onDisappear { review = false; chromeReview = false; tabReview = false; Task { await model.stop() } }
+        .alert("Connect your Chrome to this chat?", isPresented: $chromeReview) {
+            Button("Cancel", role: .cancel) { chrome.cancelReview() }
+            Button("Connect Chrome") { Task { await chrome.connect() } }
+        } message: {
+            Text("FERAL will request access to the Chrome profile already running on this Mac. Chrome may ask you to allow debugging access to its open windows. You then choose a tab for this chat; its account sessions remain in Chrome. This does not launch a browser, copy a profile or authorize a purchase. Agent actions retain your task approval policy. Disconnect revokes FERAL's connection and leaves Chrome open.")
+        }
+        .alert("Attach the selected Chrome tab?", isPresented: $tabReview) {
+            Button("Cancel", role: .cancel) { chrome.cancelReview() }
+            Button("Attach tab") { Task { await model.stop(); await chrome.select(); await model.refresh() } }
+        } message: {
+            Text("This chat will use the selected tab under your existing action policy. Changing tabs retires the old connection identity and invalidates its pending approvals. Viewing still requires a separate Start review.")
+        }
         .alert("View the attached browser page?", isPresented: $review) {
             Button("Cancel", role: .cancel) { }
             Button("Start viewing") { Task { await model.start() } }

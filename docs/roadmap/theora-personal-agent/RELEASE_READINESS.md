@@ -1,5 +1,14 @@
 # Theora / FERAL full-product release readiness
 
+**Existing-Chrome integration (October 4).** Direct consented connection to an
+already running Chrome, selected-chat/tab controls and exact resource-bound
+approvals are implemented. Frozen backend integration passes 1,468 tests with
+three opt-in skips; native Browser 115 and Oversight 12 fixture groups pass.
+Typing retains the unchanged baseline; exact-source 9.38 packaging and actual native
+connection controls remain pending. Personal-profile permission/account behavior
+is untested. [Connection contract](EXISTING_CHROME_PLAN.md), [current checkpoint](WORK_STATE.md).
+
+
 **Native browser source integration (October 4).** Explicit viewing leases, real
 memory-only viewport images and actual input locations are implemented; CDP field
 typing is corrected. Combined backend 1,230 and separate installed-Chrome checks

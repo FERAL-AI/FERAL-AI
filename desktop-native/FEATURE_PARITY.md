@@ -1,5 +1,14 @@
 # FERAL Native Preview: feature parity inventory
 
+**Existing-Chrome integration (October 4).** Direct consented connection to an
+already running Chrome, selected-chat/tab controls and exact resource-bound
+approvals are implemented. Frozen backend integration passes 1,468 tests with
+three opt-in skips; native Browser 115 and Oversight 12 fixture groups pass.
+Typing retains the unchanged baseline; exact-source 9.38 packaging and actual native
+connection controls remain pending. Personal-profile permission/account behavior
+is untested. [Connection contract](../docs/roadmap/theora-personal-agent/EXISTING_CHROME_PLAN.md), [current checkpoint](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+
+
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
 **New source: native Browser destination.** Explicit operator consent and

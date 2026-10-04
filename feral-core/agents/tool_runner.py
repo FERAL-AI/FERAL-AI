@@ -14,9 +14,10 @@ from contextvars import ContextVar
 import json
 import logging
 import os
+import re
 import time
 from typing import Optional, TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 from security.agent_turn_lease import guard_agent_dispatch
 from security.content_defense import screen_content, wrap_external_content
@@ -60,12 +61,49 @@ class _ExactApproval:
         self.session_id = pending["session_id"]
         self.tool_name = pending["tool_name"]
         self.args = copy.deepcopy(pending["args"])
+        self.browser_resource = copy.deepcopy(pending.get("browser_resource"))
         self.pending = copy.deepcopy(pending) if pending.get("taskflow") else None
         self.used = False
         self.safety_used = False
 
 
 _exact_approval: ContextVar[Optional[_ExactApproval]] = ContextVar("feral_exact_tool_approval", default=None)
+
+
+class _BrowserResourceError(RuntimeError):
+    """Redacted refusal; supplier diagnostics may contain account metadata."""
+
+
+class _BrowserResourceDispatch:
+    def __init__(self, issuer, tool_name, session_id, binding):
+        self.issuer = issuer
+        self.tool_name = tool_name
+        self.session_id = session_id
+        self.binding = copy.deepcopy(binding)
+        self.active = True
+
+
+_browser_resource_dispatch: ContextVar[Optional[_BrowserResourceDispatch]] = ContextVar(
+    "feral_browser_resource_dispatch", default=None,
+)
+
+
+def current_browser_resource_binding() -> Optional[dict]:
+    """Trusted backing-task read of a captured resource; never infer a new one.
+
+    SkillExecutor's bounded backing task inherits this context. The enclosing
+    dispatch deactivates it on exit, including cancellation, so retained tasks
+    cannot continue using it. This is observation of admission, not a new grant.
+    """
+    dispatch = _browser_resource_dispatch.get()
+    if dispatch is None:
+        return None
+    context = current_context()
+    if (not dispatch.active or context.session_id != dispatch.session_id
+            or context.tool_name != dispatch.tool_name):
+        raise _BrowserResourceError("Browser resource dispatch is no longer current")
+    dispatch.issuer._check_browser_resource(dispatch.tool_name, dispatch.session_id)
+    return copy.deepcopy(dispatch.binding)
 
 
 class _ExecutorAdmission:
@@ -76,6 +114,7 @@ class _ExecutorAdmission:
         self.session_id = session_id
         self.tool_name = tool_name
         self.args = copy.deepcopy(args)
+        self.browser_resource = copy.deepcopy(exact.browser_resource)
         self.surface = current_context().surface
         self.owner_task = asyncio.current_task()
         self.used = False
@@ -85,12 +124,17 @@ class _ExecutorAdmission:
             current_task = asyncio.current_task()
         except RuntimeError:
             return False
+        try:
+            current_resource = issuer._check_browser_resource(tool_name, session_id)
+        except _BrowserResourceError:
+            return False
         return (self.issuer is issuer and self.exact is exact and self.owner_task is not None
                 and self.owner_task is current_task and self.session_id == session_id
                 and self.tool_name == tool_name and self.args == args
                 and self.surface == current_context().surface
                 and exact is not None and exact.issuer is issuer and exact.used and exact.safety_used
-                and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args)
+                and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args
+                and self.browser_resource == exact.browser_resource == current_resource)
 
 
 _executor_admission: ContextVar[Optional[_ExecutorAdmission]] = ContextVar("feral_executor_admission", default=None)
@@ -518,7 +562,72 @@ class ToolRunner:
             if taskflows is None or not taskflows.approved_dispatch_allowed(exact.pending):
                 raise RuntimeError("Workflow approval dispatch is no longer active")
 
+    @staticmethod
+    def _browser_tool(tool_name: str) -> bool:
+        return isinstance(tool_name, str) and tool_name.startswith(("browser__", "web_actions__"))
+
+    def _capture_browser_resource(self, tool_name: str, session_id: str) -> Optional[dict]:
+        if not self._browser_tool(tool_name):
+            return None
+        # Opt-in instance field: mocks/older embeddings must not invent a supplier.
+        supplier = vars(self._orch).get("_browser_resource_supplier")
+        if supplier is None:
+            return None
+        if not callable(supplier):
+            raise _BrowserResourceError("Browser resource supplier is unavailable")
+        try:
+            binding = supplier()
+            if binding is None:
+                return None
+            if (not isinstance(binding, dict)
+                    or set(binding) != {"connection_id", "target_id", "owner_session_id"}
+                    or not all(type(value) is str for value in binding.values())
+                    or str(UUID(binding["connection_id"])) != binding["connection_id"]
+                    or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", binding["target_id"]) is None):
+                raise ValueError("Invalid binding")
+            from memory.runtime_session_checkpoint import validate_session_id
+            validate_session_id(binding["owner_session_id"])
+            if binding["owner_session_id"] != session_id:
+                raise ValueError("Foreign binding")
+            return copy.deepcopy(binding)
+        except Exception:
+            raise _BrowserResourceError("Browser resource is unavailable or belongs to another session") from None
+
+    def _check_browser_resource(self, tool_name: str, session_id: str) -> Optional[dict]:
+        resource = self._capture_browser_resource(tool_name, session_id)
+        if not self._browser_tool(tool_name):
+            return None
+        dispatch = _browser_resource_dispatch.get()
+        if dispatch is not None and (not dispatch.active or dispatch.issuer is not self
+                or dispatch.tool_name != tool_name or dispatch.session_id != session_id
+                or dispatch.binding != resource):
+            raise _BrowserResourceError("Browser resource changed after dispatch admission")
+        exact = _exact_approval.get()
+        if exact is not None and exact.issuer is self and exact.browser_resource != resource:
+            raise _BrowserResourceError("Browser resource changed after approval")
+        return resource
+
+    @contextmanager
+    def browser_resource_scope(self, tool_name: str, session_id: str):
+        """Pin browser admission across dispatcher/executor awaits; not permission."""
+        binding = self._capture_browser_resource(tool_name, session_id)
+        dispatch = _BrowserResourceDispatch(self, tool_name, session_id, binding) if self._browser_tool(tool_name) else None
+        token = _browser_resource_dispatch.set(dispatch)
+        try:
+            yield
+        finally:
+            if dispatch is not None:
+                dispatch.active = False
+            _browser_resource_dispatch.reset(token)
+
     def pending_context_valid(self, pending: dict) -> bool:
+        tool = pending.get("tool_name", "")
+        if self._browser_tool(tool):
+            try:
+                if self._capture_browser_resource(tool, pending.get("session_id", "")) != pending.get("browser_resource"):
+                    return False
+            except _BrowserResourceError:
+                return False
         from agents.runtime_context_checkpoint import runtime_coordinator
         coordinator = runtime_coordinator(self._orch)
         if coordinator is None:
@@ -545,6 +654,11 @@ class ToolRunner:
         dict if the user must confirm, or None if the action is allowed.
         """
         self._guard_agent_lease()
+        try:
+            browser_resource = self._check_browser_resource(tool_name, session_id)
+        except _BrowserResourceError:
+            return make_tool_error_envelope(tool_call_id=current_context().call_id,
+                error_code="browser_resource_changed", reason="Review the exact browser connection, tab and caller session before submitting a new action. Nothing was dispatched.")
         decision = self.policy_for(tool_name, args, surface=surface)
 
         if decision.level == SafetyLevel.DENY:
@@ -626,7 +740,7 @@ class ToolRunner:
             return None
 
         approved, reason = self._approval_mgr.check_approval(tool_name, session_id)
-        if approved:
+        if approved and browser_resource is None:
             logger.info(f"Standing approval for {tool_name}: {reason}")
             return None
 
@@ -659,6 +773,8 @@ class ToolRunner:
             # the resolver and without leaking internal types.
             "policy_sources": dict(decision.sources),
         }
+        if browser_resource is not None:
+            pending["browser_resource"] = copy.deepcopy(browser_resource)
         from agents.runtime_context_checkpoint import runtime_coordinator
         coordinator = runtime_coordinator(self._orch)
         if coordinator is not None and coordinator.known_managed(session_id):
@@ -787,7 +903,7 @@ class ToolRunner:
         self._pending_approvals.pop(request_id, None)
         logger.info(f"Approved pending request {request_id} for {pending['tool_name']}")
         result = {"tool_name": pending["tool_name"], "args": pending["args"]}
-        if exact_once:
+        if exact_once or pending.get("browser_resource") is not None:
             result["approval"] = _ExactApproval(self, pending)
         return result
 
@@ -1435,19 +1551,23 @@ class ToolRunner:
         self._record_tool_invocation(
             str(tool_call.get("name") or ""), session_id, effective_surface,
         )
-        with _bind_exact_approval(approval), bind_context(
-            session_id=session_id,
-            surface=effective_surface,
-            tool_name=str(tool_call.get("name") or ""),
-            call_id=str(tool_call.get("id") or ""),
-            turn_id=self._turn_id_for(session_id),
-        ):
-            result = await self._execute_tool_call_for_llm_inner(
-                session_id, tool_call, available_skills,
-                effective_surface=effective_surface,
-            )
-            self._record_grounding_sources(session_id, result)
-            return result
+        try:
+            with self.browser_resource_scope(str(tool_call.get("name") or ""), session_id), _bind_exact_approval(approval), bind_context(
+                session_id=session_id,
+                surface=effective_surface,
+                tool_name=str(tool_call.get("name") or ""),
+                call_id=str(tool_call.get("id") or ""),
+                turn_id=self._turn_id_for(session_id),
+            ):
+                result = await self._execute_tool_call_for_llm_inner(
+                    session_id, tool_call, available_skills,
+                    effective_surface=effective_surface,
+                )
+                self._record_grounding_sources(session_id, result)
+                return result
+        except _BrowserResourceError:
+            return make_tool_error_envelope(tool_call_id=tool_call.get("id", ""),
+                error_code="browser_resource_changed", reason="Browser admission is no longer current. Inspect the exact connection and action before retrying.")
 
     #: Attribution links kept per session, capped so one answer cannot
     #: push an unbounded list onto the reply frame.

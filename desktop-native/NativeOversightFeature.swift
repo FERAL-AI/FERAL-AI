@@ -11,6 +11,15 @@ struct NativeGlobalApproval: Identifiable {
     let arguments: String
     let policy: String
     let status: String
+
+    var sessionIssue: String? {
+        guard !sessionID.isEmpty, sessionID.unicodeScalars.count <= 1024,
+              sessionID.trimmingCharacters(in: .whitespacesAndNewlines) == sessionID,
+              !sessionID.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
+            return "This request has no valid caller session. It cannot be approved or denied here. The original caller must submit a fresh request with its exact session; this action will not be replayed."
+        }
+        return nil
+    }
 }
 
 struct NativeOversightEvent: Identifiable {
@@ -175,6 +184,7 @@ private func oversightBool(_ value: Any?) -> Bool? {
     }
 
     func decide(_ reviewed: NativeGlobalApproval, approve: Bool) async {
+        if let issue = reviewed.sessionIssue { decisionError = issue; receipt = nil; return }
         guard !acting && !loading, queueFresh,
               reviewed.connectionID == generation,
               let current = approvals.first(where: { $0.id == reviewed.id }), current.status == "pending",
@@ -268,11 +278,12 @@ struct NativeOversightFeatureView: View {
                             Text(request.created.formatted(date: .abbreviated, time: .standard)).font(.caption).foregroundStyle(.secondary)
                             oversightCode("Proposed arguments", text: request.arguments)
                             DisclosureGroup("Policy that held this request") { oversightCode("Policy sources", text: request.policy) }
+                            if let issue = request.sessionIssue { oversightNotice(issue) }
                             HStack {
                                 Button("Approve for this session…") { confirmation = request; approve = true }
-                                    .disabled(!model.queueFresh || model.paused != false || model.loading || model.acting)
+                                    .disabled(request.sessionIssue != nil || !model.queueFresh || model.paused != false || model.loading || model.acting)
                                 Button("Deny request…") { confirmation = request; approve = false }
-                                    .disabled(!model.queueFresh || model.loading || model.acting)
+                                    .disabled(request.sessionIssue != nil || !model.queueFresh || model.loading || model.acting)
                             }
                         }.frame(maxWidth: .infinity, alignment: .leading).padding(16)
                             .background(RoundedRectangle(cornerRadius: 12).fill(Color.secondary.opacity(0.06)))

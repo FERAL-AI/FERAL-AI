@@ -12,6 +12,16 @@ The supported baseline is a single-user local installation. Account-isolated hos
 
 The existing installed app and personal data stay intact while the native candidate is isolated. Migration must be explicit and reversible. Source implementations, fixture results, actual app/account/device outcomes and distribution acceptance are separate columns in the evidence ledger.
 
+## Active existing-Chrome integration
+
+The direct connection adapter, explicit native reviews and strict selected-chat
+resource approvals are implemented. The frozen 53-suite integration passes
+1,468 tests; Browser 115 and Oversight 12 fixture groups pass. Exact-source
+packaging and actual new native controls are not yet certified. See the
+[connection contract](EXISTING_CHROME_PLAN.md) and [current state](WORK_STATE.md)
+for this wave. Concurrent independent browser resources/foreground takeover,
+whole-desktop sharing and account/commerce outcomes retain separate exit gates.
+
 ## Current verification checkpoint
 
 The native browser viewing integration adds a 22nd destination and explicit

@@ -258,6 +258,9 @@ private final class BrowserViewHeldResponse {
         expect(model.frame == nil, "expiry timer retires media while frame transport is still pending")
         held.release(frame()); await pending.value
         expect(model.frame == nil && !model.watching, "post-expiry response cannot re-enable expired lease")
+        // Local media retires before the independent revoke task completes.
+        // Observe its acknowledged terminal state rather than racing scheduling.
+        await wait { model.error?.contains("expired") == true }
         expect(BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/stop") }, "expiry independently revokes grant")
     }
     @MainActor private static func automaticPollingPace() async {
@@ -278,10 +281,106 @@ private final class BrowserViewHeldResponse {
         await model.stop()
         expect(model.frame == nil && !model.watching, "Stop clears automatic frame immediately")
     }
+    private static func chromeState() -> [String: Any] {
+        ["success": true, "mode": "existing_chrome", "connected": true, "connection_id": viewID, "owner_session_id": "chat-owner", "selected_target_id": NSNull(), "targets": [["id": "tab-A", "label": "Chrome tab 1"], ["id": "tab-B", "label": "Chrome tab 2"]]]
+    }
+    private static func disconnectedChrome() -> [String: Any] {
+        ["success": true, "mode": "existing_chrome", "connected": false, "connection_id": NSNull(), "owner_session_id": NSNull(), "selected_target_id": NSNull(), "targets": []]
+    }
+    @MainActor private static func chromeConsent() async {
+        BrowserViewTestProtocol.reset { instance, request in
+            if request.url!.lastPathComponent == "select" {
+                var reply = chromeState(); reply["selected_target_id"] = body(request)["target_id"]
+                reply["connection_id"] = "dddddddd-dddd-4ddd-8ddd-dddddddddddd"; instance.reply(reply)
+            } else { instance.reply(["status", "disconnect"].contains(request.url!.lastPathComponent) ? disconnectedChrome() : chromeState()) }
+        }
+        let model = NativeExistingChromeModel(session: session()), origin = URL(string: "http://127.0.0.1:49120")!
+        await model.configure(origin: origin, owner: nil, ready: true); await model.connect()
+        expect(BrowserViewTestProtocol.requests.isEmpty && !model.canConnect, "no synthesized Chrome owner")
+        await model.configure(origin: origin, owner: "chat-owner", ready: true)
+        expect(BrowserViewTestProtocol.requests.count == 1 && model.canConnect, "status does not connect")
+        await model.connect()
+        expect(BrowserViewTestProtocol.requests.count == 1, "connection requires explicit review")
+        expect(model.prepareConnect(), "connection review captured")
+        model.cancelReview(); await model.connect()
+        expect(BrowserViewTestProtocol.requests.count == 1, "cancelled review cannot grant connection")
+        expect(model.prepareConnect(), "connection reviewed again after cancel")
+        await model.connect()
+        let connect = BrowserViewTestProtocol.requests.last!
+        expect(Set(body(connect).keys) == ["session_id", "consent"] && body(connect)["session_id"] as? String == "chat-owner", "exact connection owner body")
+        expect(NativeBrowserViewWire.bool(body(connect)["consent"]) == true && model.connected && model.connectionID == viewID, "only confirmed connection published")
+        expect(connect.value(forHTTPHeaderField: "X-FERAL-Browser-View") == "native-v1", "operator header retained")
+        expect(model.prepareSelect(), "tab review captured")
+        model.draft = "tab-B"; await model.select()
+        expect(BrowserViewTestProtocol.requests.last!.url!.lastPathComponent == "connect", "changed tab cannot reuse review")
+        expect(model.prepareSelect(), "new tab reviewed")
+        await model.select()
+        let selection = BrowserViewTestProtocol.requests.last!
+        expect(Set(body(selection).keys) == ["session_id", "connection_id", "target_id"] && body(selection)["target_id"] as? String == "tab-B" && body(selection)["connection_id"] as? String == viewID, "exact reviewed tab and connection")
+        let count = BrowserViewTestProtocol.requests.count; await model.select()
+        expect(BrowserViewTestProtocol.requests.count == count, "review is single use")
+        await model.disconnect()
+        expect(!model.connected && model.connectionID == nil && model.targets.isEmpty, "confirmed disconnect clears authority")
+        expect(body(BrowserViewTestProtocol.requests.last!)["connection_id"] as? String == "dddddddd-dddd-4ddd-8ddd-dddddddddddd", "disconnect uses exact rotated identity")
+        await model.configure(origin: origin, owner: "chat-owner", ready: false)
+        expect(!model.canConnect && !model.prepareConnect(), "chat policy disables new connection")
+        BrowserViewTestProtocol.reset { instance, _ in instance.reply(disconnectedChrome()) }
+        let remote = NativeExistingChromeModel(session: session())
+        await remote.configure(origin: URL(string: "http://example.com:9090")!, owner: "chat-owner", ready: true)
+        expect(BrowserViewTestProtocol.requests.isEmpty && remote.error != nil, "remote origin refused before transport")
+        expect(!NativeExistingChromeModel.validOwner(" chat-owner") && !NativeExistingChromeModel.validOwner("a\nb") && NativeExistingChromeModel.validOwner(String(repeating: "x", count: 1024)), "canonical owner bounds")
+    }
+    @MainActor private static func chromeResponseRaces() async {
+        for (key, value) in [("owner_session_id", "foreign" as Any), ("connection_id", viewID.uppercased()), ("connection_id", 42), ("selected_target_id", 1), ("selected_target_id", "absent"), ("connected", 1)] {
+            var reply = chromeState(); reply[key] = value
+            BrowserViewTestProtocol.reset { instance, _ in instance.reply(reply) }
+            let model = NativeExistingChromeModel(session: session())
+            await model.configure(origin: URL(string: "http://127.0.0.1:49121")!, owner: "chat-owner", ready: true)
+            expect(!model.connected && model.connectionID == nil && model.error != nil, "malformed response cannot publish authority")
+        }
+        for invalid in ["missing", "wrong", "unrotated"] {
+            BrowserViewTestProtocol.reset { instance, request in
+                var reply = chromeState()
+                if request.url!.lastPathComponent == "select" {
+                    reply["selected_target_id"] = invalid == "missing" ? NSNull() : invalid == "wrong" ? "tab-B" : "tab-A"
+                    if invalid != "unrotated" { reply["connection_id"] = "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee" }
+                }
+                instance.reply(reply)
+            }
+            let model = NativeExistingChromeModel(session: session())
+            await model.configure(origin: URL(string: "http://127.0.0.1:49123")!, owner: "chat-owner", ready: true)
+            expect(model.prepareSelect(), "attachment initially reviewed")
+            await model.select()
+            expect(model.selected == nil && model.error != nil && !model.canSelect && !model.prepareSelect(), "unconfirmed exact selection requires reconciliation")
+            expect(model.canDisconnect && model.connectionID == viewID, "uncertain selection preserves captured cleanup identity")
+            await model.refresh()
+            expect(model.canSelect, "confirmed status restores attachment admission")
+        }
+        let held = BrowserViewHeldResponse()
+        BrowserViewTestProtocol.reset { instance, request in
+            if request.url!.lastPathComponent == "connect" { held.hold(instance) } else { instance.reply(disconnectedChrome()) }
+        }
+        let model = NativeExistingChromeModel(session: session()), origin = URL(string: "http://127.0.0.1:49122")!
+        await model.configure(origin: origin, owner: "chat-owner", ready: true)
+        expect(model.prepareConnect(), "late connection review captured")
+        let pending = Task { await model.connect() }; await wait { held.ready }
+        await model.configure(origin: origin, owner: "new-owner", ready: true)
+        held.release(chromeState()); await pending.value
+        expect(!model.connected && model.connectionID == nil, "late connection cannot attach to replacement owner")
+        let cleanup = BrowserViewTestProtocol.requests.last!
+        expect(cleanup.url!.lastPathComponent == "disconnect" && body(cleanup)["session_id"] as? String == "chat-owner" && body(cleanup)["connection_id"] as? String == viewID, "late successful grant revoked with original identity")
+        BrowserViewTestProtocol.reset { instance, request in
+            if request.url!.lastPathComponent == "disconnect" { instance.reply(["success": false, "error": "private details"], status: 502) } else { instance.reply(chromeState()) }
+        }
+        let uncertain = NativeExistingChromeModel(session: session())
+        await uncertain.configure(origin: origin, owner: "chat-owner", ready: true); await uncertain.disconnect()
+        expect(uncertain.connectionID == viewID && uncertain.error != nil && uncertain.error?.contains("private details") == false, "unconfirmed disconnect retains retry identity and redacts upstream")
+    }
     @MainActor static func main() async throws {
         try wireValidation(); await transportAndConsent(); await refusalAndExpiry(); await duplicateAndForeignFrames()
         await delayedFrameAndNonoverlap(); await cleanupAndOriginRace(); await staleGrantAndRuntimeFence(); await automaticPollingStopsCleanly()
         await expiryWhileFramePending(); await automaticPollingPace()
+        await chromeConsent(); await chromeResponseRaces()
         print("NativeBrowserViewFeatureTests: \(checks) checks passed")
     }
 }
