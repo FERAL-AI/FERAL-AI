@@ -14,17 +14,29 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Current verification checkpoint
 
-Backend source is published as `9e9ac51fd`; main remains unchanged. Actual isolated
-Mac9.34 GUI setup and avatar selection were exercised, but the first local-model
-chat returned an empty-response fallback. The app remained connected and Quit
-removed its owned processes. Raw reproduction confirms an upstream empty result;
-the typed-failure repair and managed chained voice pass471 backend checks with
-no new typing diagnostics. Final native checks pass28 linked groups plus33
-onboarding assertions, including readiness revocation and exact Stop. Native
-publication and packaging are next. Source fixtures do not establish reliable actual
-chat, microphone or provider acceptance. Candidate9.34 remains immutable
-and predates these changes. [Current checkpoint](WORK_STATE.md) owns live status;
-the following paragraphs are historical verification records.
+Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef`; main remains
+unchanged. Exact-source native CI, desktop, docs, naming and version pass. General
+backend coverage was still running at its recorded snapshot. Candidate 9.35 is
+assembled, signature/runtime audited, and matches51 native inputs and 488 Python
+files. Actual avatar selection and single-stage provider setup pass. The main
+chat answer was generated, but optional skill discovery delayed its committed
+terminal; a later health-related disconnect produced a cancelled receipt. Whole-
+turn chat acceptance therefore failed and the scoped repair is active. Critical
+storage pressure was removed with verified history-preserving cleanup. Actual
+voice, cloud accounts, migration, clean installation and signed distribution
+remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
+[current checkpoint](WORK_STATE.md) own the active status. Older paragraphs are
+historical and do not supersede these results.
+
+Next provider-contract hardening card, after exact-source Mac acceptance:
+`llm.max_tokens` is currently stored but has no production reader. Normal chat
+requests use1024; a synthetic capture confirmed saved512 produced wire1024.
+This does not explain the observed empty generation, which stopped after25
+completion tokens. Add a validated chat-output setting and forward it through
+both orchestrator paths with adapter request-body, retry and failover tests.
+Preserve explicit background budgets and provider-specific thinking adjustments;
+do not represent the setting as a universal hard cap. No source change for this
+card is included in candidate 9.35.
 
 Mac-first reconciliation: published `f41c204fe` passes general CI, docs, naming,
 version and the corrected automatic Linux desktop build. Further Linux engineering
@@ -101,7 +113,7 @@ No speculative calendar deadline or source-only completion claim closes a gate.
 
 | Owner | Exclusive workstream | Required outcome |
 |---|---|---|
-| Native reviewer | Read-only native archive host/runtime/UI and CI review | Report regressions before publication;280 controller and28 genuine Process assertions already pass; GUI and actual NativeModel archive-host acceptance remain open |
+| Native reviewer | Read-only native archive host/runtime/UI and CI review | Report regressions before publication;280 controller and 28 genuine Process assertions already pass; GUI and actual NativeModel archive-host acceptance remain open |
 | Distribution reviewer | Read-only Linux staging/workflow/smoke review |20 unit checks pass; actual Debian payload build/relocation/smoke must run on the new head; bundled-update guard is the next independent source card |
 | Voice reviewer | Read-only frozen attempt/liveness review |455 combined backend tests include the repaired registered deadlock; managed chained-voice turn/checkpoint adapter is the next coordinated source card |
 | Parent | Native integration, docs/Git and artifact acceptance | Publish reviewed source, run exact-head CI and assemble9.34; freeze sources during packaging and retain GUI/signing/migration gates |

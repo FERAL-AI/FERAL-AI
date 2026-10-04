@@ -51,8 +51,18 @@ deployment, accounts, saved data or autonomy settings.
   Edits or formatting during a run invalidate affected results and can break
   source-inspection fixtures. Integrate workers before starting those checks.
 - Check available disk space before packaging or large parallel compilations.
-  Reuse build caches and bound retained generated app copies. Cleanup needs exact
-  inspected paths; preserve profiles, models, source, Git history and test evidence.
+  Begin large build waves with at least 10 GiB available and a written estimate for
+  new payloads/copies. Below 5 GiB, pause new large writes and recover headroom
+  before continuing. Record actual free space rather than Finder estimates.
+- Keep the canonical candidate and at most one preceding generated app copy by
+  default. Retain small manifests, hashes, logs and profiles separately. Reuse
+  dependency/model caches; do not download or duplicate a model for every test.
+  Additional retained copies need a concrete acceptance purpose and space budget.
+- Cleanup uses an inspected, explicit path/object plan with ownership checks and
+  before/after receipts. Preserve personal files, models, profile data and useful
+  Git history. Never remove a Git object merely because its timestamp is recent
+  or its containing directory is large. Verify refs, reflogs, every worktree index
+  and commit reachability before any object-store cleanup; verify integrity after.
 - Report source inspection, fixture tests, real integration checks and physical
   device tests separately. Never claim unperformed tests or production readiness.
 - Update public documentation and the release-readiness evidence with behavior
@@ -70,8 +80,12 @@ deployment, accounts, saved data or autonomy settings.
   paraphrase private conversations, personal remarks, frustration or business
   ambitions. Review the wording as well as the diff before publication. Leave
   existing public history unchanged unless a separate history cleanup is authorized.
-- Stage explicit reviewed paths. Exclude ignored internal dossiers, credentials,
-  runtime homes, downloaded dependencies and generated app bundles.
+- Before every Git mutation, verify the exact repository root. Never stage the
+  enclosing workspace or home directory automatically. Use explicit reviewed
+  paths, not broad `git add -A` from an uncertain working directory.
+- Exclude ignored internal dossiers, credentials, runtime homes, downloaded
+  dependencies, model/cache data and generated app bundles. A push publishes
+  commits; it does not reclaim local object-store storage.
 - Review the staged diff, whitespace and sensitive-data exposure before committing.
   Commit coherent changes with their tests and documentation.
 - Fetch before publication. Publish reviewable branches to the existing repository;

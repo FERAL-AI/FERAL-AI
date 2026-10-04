@@ -9,58 +9,58 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ### Current Mac integration checkpoint
 
-- Published source before this integration wave is `6ff22c285e150b5951b9895ffd10cba1e6bb4695` on the existing
-  review branch in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-  Main is unchanged. This commit includes provider-review binding, committed
-  conversation receipts and startup diagnostics. Its general CI, docs, naming,
-  version and desktop build passed. Native production typecheck, feature/linked
-  suites and lifeline passed; archive ownership still failed its original30s
-  fixture. Retained diagnostics show child launch followed by HTTP-server startup
-  stall. The generated fixture now skips unused reverse DNS and passes its
-  original28 assertions/30s deadline locally; remote cause remains unproven.
-- Actual isolated9.34 GUI acceptance reached avatar selection, provider setup and
-  the connected main app. Its first synthetic local-model chat returned the
-  empty-response fallback. This is a failed chat journey, not successful app
-  acceptance. The app remained connected and Quit removed its owned processes.
-  Candidate9.34/source4eded remains unchanged and excludes6ff and current edits.
-- Raw-provider reproduction confirms HTTP200 with zero text/tool/reasoning before
-  display sanitization. The unchanged bundled parser passes four synthetic SSE
-  fixtures. Exhausted empty generations now emit `provider_empty_response` and
-  fail the tracked turn without fake assistant history. Model reliability and
-  rebuilt actual-app acceptance remain open. [Reply evidence](MAC_LOCAL_REPLY_DIAGNOSTIC_EVIDENCE.md).
-- Local managed chained voice is integrated across engine, WebSocket adapter,
-  canonical protocol and native client. Parent backend integration passes471
-  tests with1290 frozen inputs unchanged; full mypy809 has zero new diagnostics
-  versus the retained812 baseline, and core Ruff passes. Native production
-  typecheck and linked28 groups pass, alongside Voice55, ManagedVoice50,
-  ChatTurn/ContextCheckpoint, OnboardingSetup34, additional linked onboarding33,
-  desktop39 and error5 assertions. Final review fixed a stale native capability
-  flag and pending-context Stop dispatch; their actual linked fixture journey
-  passes. All122 native source/test/harness inputs stayed unchanged in final runs.
-  These are source/fixture results, not microphone, account or audio acceptance.
-  [Voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md).
-- Backend contracts and typed empty-response handling are published as
-  `9e9ac51fdd1f569f95afe79c17973beab6c93de2` in the existing review branch. Main
-  remains unchanged. Native readiness/onboarding changes now pass final combined
-  checks and are ready for their reviewed integration commit.
-- The parent owns canonical contracts, documentation and publication. Workers
-  own final native readiness/Stop review and duplicate onboarding diagnosis.
-  Mac usability remains first; Linux engineering and Gen-UI are deferred.
-- Inspected obsolete generated9.29/9.30/9.31 app copies and completed fixture
-  compiler caches were removed. Their receipts and manifests remain;9.32/9.33,
-  the current9.34 app, profiles, models and source were retained. The separate
-  home-directory Git repository was inspected read-only and remains untouched.
-- Candidate9.34 is also preserved in a verified disposable copy before replacing
-  the canonical build. Its binary, signature and487-source comparison passed.
-- Single-stage onboarding passes local/cloud, skip and stale-completion linked
-  cases. The final wrapper's initial sandbox runs failed Swift macro-server
-  startup; sources were unchanged. The permitted outside-sandbox retry passed.
-  Production typecheck has zero warnings; linked fixtures retain18 async-lock
-  warnings under Swift5, without a Swift6 migration claim.
-  [Onboarding evidence](MAC_SINGLE_STAGE_ONBOARDING_EVIDENCE.md).
-- Next: publish the reviewed native change, then assemble and test
-  an exact-source Mac candidate. Distribution, real accounts and hardware remain
-  separate acceptance gates in RELEASE_READINESS.
+- Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef` on the
+  existing review branch in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
+  Backend contracts and typed empty-response handling are included from
+  `9e9ac51fdd1f569f95afe79c17973beab6c93de2`. Main remains unchanged.
+- Exact-source native CI 37166186400 passes production typecheck, full feature/
+  linked checks, lifeline and 28 actual process-ownership assertions. Desktop,
+  documentation, naming and version checks pass. General CI 37166186552 was
+  still running backend coverage at the recorded snapshot; 12 other jobs passed.
+  The preceding 9e native ownership timeout is retained historical failure,
+  without claiming its root cause was proved.
+- Immutable 9.35/build 2026100302 is assembled and audited. All 51 native build
+  inputs and 488 packaged production Python files match 12cc. Runtime probes and
+  strict ad-hoc signature verification pass. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md).
+- Actual fresh-profile GUI acceptance passes portrait/logo rendering, FERAL/Orb
+  selection, reviewed single-stage provider setup and entry into the connected
+  main app. Normal tool-enabled arithmetic generated the correct transcript
+  answer, but the exact tracked receipt is cancelled/unknown with empty final
+  text after health timeouts and disconnect. This is failed whole-turn acceptance.
+  Optional skill discovery runs after the main answer but is awaited before
+  foreground terminal commitment; the observed disconnect cancelled that wait.
+  A scoped backend repair is active. Do not relabel a cancelled receipt completed
+  from transcript text. The app exited normally with host code 0.
+- Final frozen backend integration before this repair passes 471 tests with 1290
+  unchanged inputs. Full mypy 809 adds zero diagnostics versus retained 812;
+  core Ruff passes. Native production typecheck and 28 linked groups pass, with
+  Voice 55, ManagedVoice 50, ChatTurn/ContextCheckpoint, OnboardingSetup 34,
+  additional linked onboarding 33, desktop 39 and error 5 assertions. These checks
+  prove source/fixture behavior, not microphone, account or physical-device use.
+  [Voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md),
+  [onboarding evidence](MAC_SINGLE_STAGE_ONBOARDING_EVIDENCE.md).
+- Critical host storage exhaustion blocked GUI/profile/SQLite diagnostics.
+  Cleanup removed 477,917 verified unreferenced loose blobs and seven abandoned
+  temporary files from the separate home-directory Git store. All 54 commits,
+  refs, reflogs and every worktree index were protected; all 68 retained metadata
+  files stayed identical and full Git fsck passed. That store is now 847 MiB,
+  with zero loose objects/garbage; disk free space was 30 GiB at verification.
+  Working files, FERAL history, profiles and models were preserved. A reversible
+  home-only untracked-discovery boundary passes 9 checks, but cannot stop forced
+  or explicit hash-object writers. The original object-flood writer is unproven.
+- Obsolete generated 9.32/9.33 app copies were removed after identity and process
+  checks; all their manifests, logs and profiles remain. The canonical9.35 app
+  and preceding 9.34 copy are retained. Artifact/resource rules are in AGENTS.md.
+- Parent owns integration, shared contracts, documents and publication. One
+  worker owns optional skill-discovery terminal sequencing; another prepares
+  the output-budget correction privately. The ignored `llm.max_tokens` setting
+  is confirmed separately and is not the cause of the earlier 25-token empty
+  generation. Neither new repair is in immutable 9.35.
+- Next: integrate the exact-receipt repair with meaningful cancellation and
+  stale-context tests, then repeat actual tool-enabled chat/recovery with ample
+  headroom. Review the output-budget patch independently. Microphone/speaker,
+  cloud accounts, migration, clean installation and signed distribution remain
+  acceptance gates. Mac usability remains first; Linux and Gen-UI are deferred.
 
 ### Earlier reconciliations
 
@@ -220,14 +220,14 @@ devices, clean installation, signing and managed saved-context voice are open.
   one POST before repair and zero after pause or same-address replacement with
   the shared HTTP epoch guard. Gate34, Agent42, Workflow83, Integration80,
   Configuration checks, archive280 and voice55 pass in the final integrated
-  runner, plus27 mocked model groups/desktop39/error5. Complete production
+  runner, plus27 mocked model groups/desktop 39/error 5. Complete production
   typecheck passes. The private exact final-save path remains available while
   all new native actions are fenced. [Admission evidence](NATIVE_ACTION_ADMISSION_EVIDENCE.md).
 - **Active ownership:** worker sources and parent native wiring are frozen and
   reviewed. Other workers prepared bounded disposable packaged archive and
   recovery probes. Parent now publishes the coherent wave and assembles exact
   source9.34/build2026100301; 9.34 is not yet built. Staging completed with cached
-  CPython3.11.15/SQLite3.53.1/FTS5, OpenCode1.18.10, v2 assets and Python SDK import
+  CPython 3.11.15/SQLite 3.53.1/FTS5, OpenCode 1.18.10, v2 assets and Python SDK import
   containment. New-head CI and actual bundled probes remain required. Computer
   Use was retried after restoring documentation and still reports its native-pipe
   startup failure; no current GUI/audio certification is available.
@@ -391,7 +391,7 @@ call848 unchanged debt or claim the type ratchet passed.
 Immutable **2026.9.29/build2026100203** was built from that source, executable
 SHA256`013ccc1250f6ed8c58bf80254ff332f93e0957226691f72c6c41f5c388f2f102`.
 All481 production Python files match the commit; bundle audit passed13,060files,
-265Mach-O/9internal links, Python3.11.15/SQLite3.53.1/FTS5/OpenCode1.18.10.
+265Mach-O/9internal links, Python 3.11.15/SQLite 3.53.1/FTS5/OpenCode 1.18.10.
 Ad-hoc signing is separate from Developer-ID/notarization. Actual isolated GUI
 has now passed the previous Security layout crash path, rich/code Copy, three
 real tracked local-model replies, exact Stop, deliberate Quit/backend-child
@@ -473,8 +473,8 @@ Built **2026.9.30/build2026100204**, source
 `dd69c7bf5175517966a363591fa8137782358535`, executable SHA256
 `421d9756b42b3fd55a88102c396994112da561841b49e07171fe58d3aaf915b4`.
 All482 production Python files match that commit. Bounded bundle audit passed
-13,089 files/265 Mach-O/9 internal links; CPython3.11.15/SQLite3.53.1/FTS5 and
-OpenCode1.18.10 probes passed. Strict ad-hoc signature verification passed.
+13,089 files/265 Mach-O/9 internal links; CPython 3.11.15/SQLite 3.53.1/FTS5 and
+OpenCode 1.18.10 probes passed. Strict ad-hoc signature verification passed.
 Actual packaged SDK0.1 import/location and BaseSkill factory probe also passed.
 Prior9.29 artifact is preserved at `/private/tmp/feral-candidate-9-29-preserved.app`
 with its original executable hash. No release/signing certification follows.
@@ -544,8 +544,8 @@ attributed receipt follow-up diagnostics are absent; ratchet is not green.
 Native **2026.9.28/build2026100202** was built/signed on that frozen source;
 executable SHA256`dba3785d53634fb699986c2ade9290f42ff5c0631c63224510bfb34350d165f0`.
 All479 production Python files match that commit. Bundle audit passed13,054
-files/265 Mach-O/9 internal links, pinned Python3.11.15/SQLite3.53.1/FTS5 and
-OpenCode1.18.10. Ad-hoc verification is not Developer-ID/notarization.
+files/265 Mach-O/9 internal links, pinned Python 3.11.15/SQLite 3.53.1/FTS5 and
+OpenCode 1.18.10. Ad-hoc verification is not Developer-ID/notarization.
 Actual isolated app acceptance ended **failed**. Original New conversation/
 retained-error AX path survives, real42 reply passed, and growing context now
 narrows complete optional schemas below the byte budget. **A new SIGTRAP during
@@ -565,8 +565,8 @@ candidate acceptance remain open; disk space is not an established cause.
 The next reviewed source wave passed **235 integrated backend tests,7 warnings
 in9.38s**. It includes the inactive trusted runtime-context lifecycle, direct
 owner progress and explicit interval automation follow-up. The frozen complete
-native fixture runner passed all36 feature suites, linked25 groups, desktop39
-and error5 assertions. Production typecheck and18 child-lifeline/auditor/source-
+native fixture runner passed all36 feature suites, linked25 groups, desktop 39
+and error 5 assertions. Production typecheck and18 child-lifeline/auditor/source-
 equality regression tests passed. The next assembly is
 9.29/build2026100203 (subsequently built and tested above). See
 [integration evidence](NATIVE_CONTEXT_INTEGRATION_EVIDENCE.md). Production
@@ -609,7 +609,7 @@ Immutable native **2026.9.27 /2026100201**, executable SHA256
 stages runtime source **34a43e640597ca721fb915149f29c9b73b51394a**. Parent compared
 all478 bundled production Python files against that Git source: no missing files
 or mismatches. Bounded bundle audit passed13,052 files/265 Mach-O/9 internal links,
-Python3.11.15/SQLite3.53.1/FTS5/OpenCode1.18.10. Ad-hoc signing passes;
+Python 3.11.15/SQLite 3.53.1/FTS5/OpenCode 1.18.10. Ad-hoc signing passes;
 Developer ID/notarization remain open. Current CORE04/SDK edits are absent from
 this candidate. [Actual9.27 results](NATIVE_9_27_ACCEPTANCE.md) remain separately
 owned and frozen by the native worker: reviewed Deny/Allow and exact file readback
@@ -716,7 +716,7 @@ dated record instead of overwriting them as if they had passed.
 - Native source is frozen. Production typecheck and actual AppKit probe copy,
   Markdown/link/code behavior passed. Parent registered SelectableText in the
   default native CI fixture inventory; initial Bash empty-array failure was
-  corrected, final component+linked20/desktop39/error5 checks passed. [Evidence](NATIVE_ACCESSIBILITY_EVIDENCE.md).
+  corrected, final component+linked20/desktop 39/error 5 checks passed. [Evidence](NATIVE_ACCESSIBILITY_EVIDENCE.md).
 - CORE04 audit reproduced queued-turn cancellation tearing down an active
   same-session turn's children. Next wave must fix lock ownership before
   claiming exact-turn abort, persist receipts before durable claims and dedupe
@@ -739,7 +739,7 @@ Ruff passed. The failed full run remains failed; new exact-source remote coverag
 must pass before closing that gate.
 
 Staging first failed when sandbox blocked OpenCode's normal cache initialization;
-properly escalated staging passed pinned Python3.11.15/SQLite3.53.1/FTS5/loadable
+properly escalated staging passed pinned Python 3.11.15/SQLite 3.53.1/FTS5/loadable
 extensions/module imports/webUIv2 and OpenCode version checks. Initial production
 build was blocked by Swift macro sandbox; the escalated build is separate.
 
@@ -807,8 +807,8 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
   pass. Regenerated web assets are byte-identical. Default-branch alerts remain
   open until that branch receives the fixes. [Evidence](SECURITY_DEPENDENCY_EVIDENCE.md).
 - Native172-expression AppKit migration passes production typecheck and final
-  selected fixture runner, exit0: component groups plus linked20/desktop39/
-  error5. First runner failed because the standalone desktop fixture omitted
+  selected fixture runner, exit0: component groups plus linked20/desktop 39/
+  error 5. First runner failed because the standalone desktop fixture omitted
   the new shared text dependency; parent repaired that compile source list,
   and the rerun passed. A minimal New conversation/error disclosure A/B
   reproduces original SIGSEGV and passes exact AppKit copy with normal exit.

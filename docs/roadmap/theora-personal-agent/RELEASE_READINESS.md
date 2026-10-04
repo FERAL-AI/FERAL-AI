@@ -1,20 +1,19 @@
 # Theora / FERAL full-product release readiness
 
-**Current Mac checkpoint (October 3): backend published `9e9ac51fd`.**
-The preceding6ff general CI, docs, naming, version and desktop build pass. Native production
-typecheck, feature/linked suites and lifeline pass, but its archive-ownership
-fixture still times out. Actual immutable9.34 GUI selection/setup reached the
-connected app, then its first local chat returned an empty-response fallback.
-Raw-provider reproduction confirms a zero-text HTTP200 response on matching
-synthetic wording. The actionable failure repair and managed chained voice pass
-471 backend checks, with zero added typing diagnostics; native typecheck and
-28 linked groups plus33 onboarding assertions pass. Capability revocation,
-pending-context Stop and duplicate onboarding are repaired and verified locally.
-Native publication and packaging are next. These source changes are not in9.34. Reliable actual chat/audio,
-cloud accounts, clean installation/migration and signed distribution remain open.
-[Reply evidence](MAC_LOCAL_REPLY_DIAGNOSTIC_EVIDENCE.md),
-[voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md), [current work](WORK_STATE.md).
-The following records are historical checkpoints.
+**Current Mac checkpoint (October 3).**
+Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef`; main remains
+unchanged. Exact-source native CI, desktop, docs, naming and version pass. General
+backend coverage was still running at its recorded snapshot. Candidate 9.35 is
+assembled, signature/runtime audited, and matches51 native inputs and 488 Python
+files. Actual avatar selection and single-stage provider setup pass. The main
+chat answer was generated, but optional skill discovery delayed its committed
+terminal; a later health-related disconnect produced a cancelled receipt. Whole-
+turn chat acceptance therefore failed and the scoped repair is active. Critical
+storage pressure was removed with verified history-preserving cleanup. Actual
+voice, cloud accounts, migration, clean installation and signed distribution
+remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
+[current checkpoint](WORK_STATE.md) own the active status. Older paragraphs are
+historical and do not supersede these results.
 
 **Reconciled Mac-first checkpoint (October 3): published `f41c204fe`.**
 General CI, docs, naming, version and the corrected automatic Linux desktop build
@@ -127,7 +126,7 @@ and registry fixes have the local measurement above; remote verification is pend
 
 New **9.30/build2026100204** contains that exact published source:482 production
 Python files matched Git; bounded audit passed13,089 files/265 Mach-O/9 internal
-links, CPython3.11.15/SQLite3.53.1/FTS5/OpenCode1.18.10 and strict ad-hoc signing.
+links, CPython 3.11.15/SQLite 3.53.1/FTS5/OpenCode 1.18.10 and strict ad-hoc signing.
 The packaged Python SDK0.1 import/location and BaseSkill adapter probe passed.
 Saved-context native UI and final stale-receipt checks passed their documented
 fixture/typecheck runs. **Actual9.30 GUI is not run**: Computer Use native pipe
@@ -171,7 +170,7 @@ live-field mutation while measuring selectable text; focused invariants and
 small actual Security/copy probes pass, but full new-candidate acceptance remains.
 
 The next integrated wave passed235 backend tests and all36 native feature suites,
-linked25 groups, desktop39/error5 assertions. It adds exact-turn native status/
+linked25 groups, desktop 39/error 5 assertions. It adds exact-turn native status/
 Stop/reconciliation, Forge proposal/statistics/drafting, explicit-interval
 scheduling and an inactive trusted context lifecycle. Production activation and
 legacy migration remain open.9.29/build2026100203 is the next assembly version;

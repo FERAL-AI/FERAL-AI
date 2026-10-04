@@ -23,3 +23,11 @@ During active work, give concise progress updates at least every minute. At each
 integration checkpoint, state what is published, what remains local, what is
 blocked and what comes next. Follow the public-publication wording rules in
 AGENTS.md; technical records must not reproduce private conversations.
+
+Resource and retention rules are in AGENTS.md. Before a build wave, record source,
+free disk space, estimated new artifacts, exclusive ownership and the acceptance
+command. Keep one active status summary in WORK_STATE; mark preceding summaries
+as historical. Update the current artifact, verified outcomes, failures, remaining
+work and next assignments together so documentation cannot imply that a stale
+candidate contains later source changes. Resource failures belong in the evidence
+ledger and must not be reported as application failures without diagnosis.

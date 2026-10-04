@@ -6,16 +6,19 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-- Current backend publication is `9e9ac51fd`; preceding6ff general CI and desktop build pass.
-  Native CI fails the archive startup fixture, whose local narrow repair now
-  passes its original deadline. Actual9.34 GUI avatar/setup reached the app but
-  local chat failed with an upstream empty response. The current typed-failure
-  and managed chained-voice integration passes471 backend checks and native
-  linked28 groups plus33 onboarding assertions. Readiness and Stop repairs pass;
-  native publication and exact-source packaging remain.
-  [Current checkpoint](WORK_STATE.md) and
-  [voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md).
-  The following bullets are historical and do not supersede this boundary.
+Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef`; main remains
+unchanged. Exact-source native CI, desktop, docs, naming and version pass. General
+backend coverage was still running at its recorded snapshot. Candidate 9.35 is
+assembled, signature/runtime audited, and matches51 native inputs and 488 Python
+files. Actual avatar selection and single-stage provider setup pass. The main
+chat answer was generated, but optional skill discovery delayed its committed
+terminal; a later health-related disconnect produced a cancelled receipt. Whole-
+turn chat acceptance therefore failed and the scoped repair is active. Critical
+storage pressure was removed with verified history-preserving cleanup. Actual
+voice, cloud accounts, migration, clean installation and signed distribution
+remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
+[current checkpoint](WORK_STATE.md) own the active status. Older paragraphs are
+historical and do not supersede these results.
 
 - Latest publication is `4eded179e2060c226739511fc53f5a8bde0eaa16`.
   General CI passes13,013 backend tests/83 skipped/75.24% coverage and web/SDK/type
@@ -118,7 +121,7 @@ The detailed contracts and acceptance work packages remain in [release readiness
   a local reply, but reproduced a separate Permissions and Cost SIGTRAP,
   an unexplained normal exit and early timeout. App acceptance remains open.
 - Next frozen integration passed235 backend tests and all36 native feature
-  suites, with linked25 groups and desktop39/error5 assertions. Exact native
+  suites, with linked25 groups and desktop 39/error 5 assertions. Exact native
   task status/Stop, layout repair, Forge drafting and structured intervals are
   implemented. Trusted checkpoint lifecycle passes restart/no-replay tests but
   stays inactive until every writer/cleanup is covered.9.29 is the next assembly,

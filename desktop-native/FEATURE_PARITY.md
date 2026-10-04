@@ -2,34 +2,25 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
-**Current packaged artifact:2026.9.34/build2026100301**, source
-`4eded179e2060c226739511fc53f5a8bde0eaa16`. Assembly, strict ad-hoc signature,
-51 compiled native input comparisons and487 packaged Python comparisons pass.
-Actual offline backup/restore and production readers pass with synthetic data;
-actual local-model recovery has no completed9.34 receipt. Actual isolated GUI
-avatar/setup acceptance reached the connected main app, but its first local chat
-returned an empty-response fallback. Raw-provider reproduction confirms an empty
-HTTP200 result on matching synthetic wording; a reliable-chat gate remains open.
-[Reply investigation](../docs/roadmap/theora-personal-agent/MAC_LOCAL_REPLY_DIAGNOSTIC_EVIDENCE.md).
-Newer published6ff general CI and desktop package checks pass; its native archive
-ownership fixture still times out. Provider-review integration passes21 groups/33 assertions;
-committed-turn broader checks pass567 tests and unchanged812 full mypy diagnostics.
-Those source changes are not in9.34. Current managed chained voice and typed
-empty-response integration pass471 backend checks with no new typing diagnostics.
-Native production typecheck and28 linked groups plus33 onboarding assertions
-pass, alongside55 voice and50 managed-voice assertions. Capability revocation,
-pending-context Stop and single-stage onboarding repairs are verified locally;
-native publication and packaging are next. These
-source fixtures do not establish actual microphone/provider acceptance.
-[Voice evidence](../docs/roadmap/theora-personal-agent/MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md).
-Isolated actual Mac journeys take priority. GUI/audio and distribution gates
-remain open; further Linux and Gen-UI engineering is deferred.
-[9.34 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_34_ACCEPTANCE.md).
+**Current packaged artifact:2026.9.35/build 2026100302**, exact source
+`12cc62c480422a3d844eada816d9cdf29c79fbef`. Assembly, strict ad-hoc signature,
+51 compiled-input comparisons,488 packaged Python comparisons and bundled
+runtime probes pass. Actual FERAL/Orb selection and single-stage reviewed setup
+reach the connected main app. A normal arithmetic answer was generated, but
+optional skill discovery delayed the committed foreground terminal and a later
+disconnect left a cancelled/unknown receipt. Whole-turn chat acceptance failed;
+the scoped backend repair is active. Exact-source native CI passes, including
+28 real process-ownership assertions. General backend CI was still running at
+its recorded snapshot. [9.35 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_35_ACCEPTANCE.md).
+Source/fixture managed-voice and provider checks do not prove physical audio,
+cloud-account behavior, clean installation or signed distribution. Those gates
+remain open; Mac usability leads and Linux/Gen-UI engineering is deferred.
+[Current work](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
 
 **Preceding verified artifact:2026.9.33/build2026100207**, exact source
 `7f818da08139952b1698644469e7016563512cd5`. Packaged local-model recovery and
 restart passed with485 unchanged production Python files, executable hash and
-strict ad-hoc signature; its verified copy is preserved.
+strict ad-hoc signature; its historical manifests/logs remain; its obsolete generated copy was removed.
 [9.33 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_33_ACCEPTANCE.md).
 Published `ec1c301` passes all executed CI jobs, including generated assets.
 Frozen later source adds Settings backup/restore, portable native preferences,
@@ -73,7 +64,7 @@ from GUI acceptance. Historical9.26 onboarding/quit/relaunch and earlier imports
 coding/synthetic hardware remain bounded earlier results. Hardware evidence is
 synthetic; real encrypted-profile/OS Keychain and full parity remain open.
 No row is release-certified. The next source wave passes all36 native feature
-suites, linked25 groups and desktop39/error5 checks. It adds exact-turn native
+suites, linked25 groups and desktop 39/error 5 checks. It adds exact-turn native
 status/Stop/reconciliation, shared text measurement repair, Forge drafting and
 explicit-interval schedules.9.29/build2026100203 is the next assembly version,
 not yet a built/accepted artifact.
