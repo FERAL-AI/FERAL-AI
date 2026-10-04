@@ -49,8 +49,11 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 - Canonical 9.37 and one 9.36 rollback copy remain; obsolete generated 9.34/9.35
   copies were retired, about 1.2 GB. Personal profiles/models/history were retained.
   All source workers released their paths; parent owns evidence/publication.
-- Next: publish the passing harness/evidence checkpoint, then the two follow-up
-  cards, desktop viewing/foreground ownership and
+- Harness/evidence publication `9f6edaced543a8dbc374efb8d757f29a0b9dfc91`
+  is pushed and the remote SHA verified; draft PR310 describes the final browser
+  behavior and limits. At publication review, docs/naming/version CI passed;
+  general/native/desktop CI remained in progress and real-brain E2E was skipped.
+- Next: the two follow-up cards, desktop viewing/foreground ownership and
   task-linked browser takeover. Full product audio/accounts/devices/Messages/
   commerce/migration/distribution gates remain explicit. Preserve unrelated
   AUDIT-FIXES.md edits unstaged. [Browser contract](BROWSER_VIEW_EVIDENCE.md).
