@@ -252,7 +252,7 @@ async def actual_acceptance(args, root, receipt):
         checks.extend(["selector_focus_exact", "ax_ref_focus_exact", "missing_and_ambiguous_refusal"])
 
         receipt["phase"] = "mask_pixel_control"
-        password_box = await evaluate(controller, "(()=>{const r=password.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+r.height/2}})()")
+        password_box = await evaluate(controller, "(()=>{const r=password.getBoundingClientRect();return {x:r.left+r.width/2,y:r.top+8}})()")
         viewport = await evaluate(controller, "({width:innerWidth,height:innerHeight})")
         baseline = await command(controller, "Page.captureScreenshot", {
             "format": "jpeg", "captureBeyondViewport": False, "fromSurface": True,
@@ -261,10 +261,22 @@ async def actual_acceptance(args, root, receipt):
         })
         from PIL import Image
         with Image.open(io.BytesIO(base64.b64decode(baseline["data"], validate=True))) as image:
-            pixel = image.convert("RGB").getpixel((round(password_box["x"]*image.width/viewport["width"]),
-                                                   round(password_box["y"]*image.height/viewport["height"])))
-            require(pixel[0] >= 180 and pixel[1] <= 70 and pixel[2] >= 180,
+            # Sample the upper interior, away from rendered password bullets.
+            # The identical 9x9 patch must be magenta here and white when masked.
+            x = round(password_box["x"] * image.width / viewport["width"])
+            y = round(password_box["y"] * image.height / viewport["height"])
+            region = image.convert("RGB").crop((x - 4, y - 4, x + 5, y + 5))
+            require(all(pixel[0] >= 180 and pixel[1] <= 70 and pixel[2] >= 180
+                        for pixel in region.getdata()),
                     "synthetic_unmasked_password_control_missing")
+            receipt["unmasked_control"] = {
+                "sample_x": password_box["x"], "sample_y": password_box["y"],
+                "patch_width": 9, "patch_height": 9,
+                "viewport_width": viewport["width"], "viewport_height": viewport["height"],
+                "image_width": image.width, "image_height": image.height,
+                "sha256": hashlib.sha256(base64.b64decode(baseline["data"], validate=True)).hexdigest(),
+            }
+            checks.append("actual_unmasked_password_patch")
 
         # Only the route's browser holder is isolated. No mocked CDP, screenshot,
         # manager, token check or FastAPI handler, and no full brain initialization.

@@ -7,10 +7,12 @@ memory-only real JPEGs, exact viewing leases and actual browser input markers;
 whole-desktop sharing and per-task browsers remain separate. Browser 74 assertions,
 production typecheck and linked native checks pass. Combined backend 1,230 and
 separate installed-Chrome typing/masking/cursor checks pass; counts overlap.
-New 9.37 packaging/GUI acceptance is pending at this checkpoint.
+9.37/source b9af is packaged and passes actual consent, frames, typing, coordinate
+marker, Stop/navigation/expiry clearing and normal Quit.
+[Exact acceptance](../docs/roadmap/theora-personal-agent/NATIVE_9_37_ACCEPTANCE.md).
 [Browser evidence](../docs/roadmap/theora-personal-agent/BROWSER_VIEW_EVIDENCE.md).
 
-**Current packaged artifact:2026.9.36/build2026100303**, exact source
+**Preceding packaged artifact:2026.9.36/build2026100303**, exact source
 `9a40b9ac8e7d155c16a5504a3332c1dca912ad41`. Optimized build, strict ad-hoc
 signature,51 native inputs,488 packaged Python comparisons and runtime probes
 pass. Actual avatar/single-stage local setup, durable ordinary/saved-context chat,

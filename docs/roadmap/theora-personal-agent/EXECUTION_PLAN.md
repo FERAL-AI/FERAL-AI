@@ -4,7 +4,7 @@ Reconciled October 3, 2026 by parallel source/research audits and the parent int
 
 ## Starting point and scope
 
-FERAL already has an orchestration runtime, tools, approvals, persisted conversations, session working memory, long-lived memory/wiki/episodes, CRDT peer sync, workflow storage, voice engines, device transport, channel adapters, managed coding agents, plugin/app/device SDKs and a complete web client. The SwiftUI/AppKit app exposes **21 destinations**, not an empty replacement shell. Its searchable command palette, menu-bar access, login-registration adapter, bounded app confirmations and surface updates already have implementations.
+FERAL already has an orchestration runtime, tools, approvals, persisted conversations, session working memory, long-lived memory/wiki/episodes, CRDT peer sync, workflow storage, voice engines, device transport, channel adapters, managed coding agents, plugin/app/device SDKs and a complete web client. The SwiftUI/AppKit app exposes **22 destinations**, not an empty replacement shell. Its searchable command palette, menu-bar access, login-registration adapter, bounded app confirmations and surface updates already have implementations.
 
 The engineering job is to preserve and expose the existing system, complete genuine omissions, verify the assembled app, and extend these interfaces for the requested new experiences. Do not create another agent, memory database, coding engine or independent payment authority.
 
@@ -17,12 +17,14 @@ The existing installed app and personal data stay intact while the native candid
 The native browser viewing integration adds a 22nd destination and explicit
 operator viewing leases. Frozen source passes 1,230 combined backend checks,
 separate actual-Chrome capture/typing/cursor acceptance, native feature/model
-checks and production typecheck. Packaging and actual 9.37 GUI remain next.
-[Browser contract and evidence](BROWSER_VIEW_EVIDENCE.md). Last published a334521
+checks and production typecheck. 9.37/source b9af is packaged and passes bounded actual native viewing acceptance;
+[exact artifact and limits](NATIVE_9_37_ACCEPTANCE.md) retain the session-ingress
+and Playwright marker follow-up cards.
+[Browser contract and evidence](BROWSER_VIEW_EVIDENCE.md). Published implementation b9afadb
 passes every executed required CI workflow. This does not supersede account,
 audio, device, migration or distribution gates.
 
-Current packaged Mac source is9a40b9ac8, version2026.9.36/build2026100303.
+Preceding packaged Mac source is9a40b9ac8, version2026.9.36/build2026100303.
 Actual local chat, saved context, normal Quit, reviewed restart and remembered
 codeword passed; strict codeword-only formatting did not. Replies took71–77
 seconds. [Candidate evidence](NATIVE_9_36_ACCEPTANCE.md) records identity and

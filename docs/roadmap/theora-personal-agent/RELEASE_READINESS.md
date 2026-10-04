@@ -4,12 +4,13 @@
 memory-only viewport images and actual input locations are implemented; CDP field
 typing is corrected. Combined backend 1,230 and separate installed-Chrome checks
 pass, native Browser 74 and production/linked checks pass, and full typing stays 809
-without added diagnostics. Last published a334521 passes all executed required CI.
-New 9.37 package/actual GUI acceptance is next. Desktop sharing, concurrent browser
+without added diagnostics. Published implementation b9afadb passes all executed required CI.
+Immutable 9.37/source b9af passes bounded actual browser GUI acceptance.
+[Artifact and limits](NATIVE_9_37_ACCEPTANCE.md). Desktop sharing, concurrent browser
 ownership and a provider-specific computer-use adapter remain open.
 [Browser evidence](BROWSER_VIEW_EVIDENCE.md), [live checkpoint](WORK_STATE.md).
 
-**Current Mac checkpoint (October 4).** Immutable9.36/source9a40b9ac8
+**Preceding Mac checkpoint (October 4).** Immutable9.36/source9a40b9ac8
 passes bounded actual local chat, saved-context recall across a reviewed restart,
 normal exit and source/signature/runtime audits. Strict codeword-only formatting
 failed and response latency71–77 seconds remains open. Current source corrections

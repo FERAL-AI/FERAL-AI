@@ -120,3 +120,5 @@ These are design questions, not permission to enable cloud processing, recording
 The focused existing suite for spend caps, wearer approvals, paired-token REST authentication, scoped sharing and relay behavior passed **138 tests** after running with permitted local socket access. The initial sandbox run had 119 passes and localhost-bind failures/errors; the permitted rerun resolved them. Tests used isolated temporary FERAL storage and the hash embedding provider. This verifies existing mocked/local behavior, not live merchant payments, a production relay, a clinical sensor, or a built iPhone/desktop release.
 
 Earlier project exploration passed 161 selected backend/client/website tests. No iOS builds, vendor-device tests or live purchases were performed. Release evidence still required is enumerated in [the release plan](EXECUTION_AND_RELEASE_GATES.md).
+
+- [Native 9.37 browser acceptance](NATIVE_9_37_ACCEPTANCE.md) — exact artifact and actual GUI results.

@@ -14,8 +14,8 @@ and requests revocation; it does not cancel the underlying task.
 Frames are actual viewport JPEGs, held in memory, with a sequential maximum of
 two refreshes per second. The image dimensions are bounded to 1280 pixels and
 the encoded payload to 2 MiB. The input-location marker uses actual recorded
-browser mouse coordinates, scaled to the returned image. No marker is invented
-for a selector fill that does not move a pointer. This is a browser input marker,
+browser mouse coordinates, scaled to the returned image. Coordinate and CDP selector actions have markers; Playwright selector click/hover
+currently do not. No marker is invented for a selector fill that does not move a pointer. This is a browser input marker,
 not a claim that the operating system cursor moved.
 
 The driver masks ordinary password controls and hides child frames during capture.
@@ -89,8 +89,12 @@ The separate installed-Chrome run passes 26 focused cases, including the real
 browser case. These counts overlap. Native Browser 74/Providers 50/Onboarding 52
 assertions and linked model/desktop checks pass; production typecheck passes.
 Full mypy remains 809 diagnostics in 233 files, unchanged from the baseline.
-Packaged 9.37 and actual native viewing acceptance are the next gates at this
-source checkpoint. Earlier 9.36 GUI results do not certify this new screen.
+Packaged 9.37/source b9af now passes actual native consent, real masked frames,
+intended-field Unicode, approved coordinate marker, Stop, navigation retirement,
+expiry/error clearing and normal Quit. [Exact acceptance](NATIVE_9_37_ACCEPTANCE.md)
+records synthetic task dispatch, approval-button limits and the existing
+empty-session REST mismatch. The corrected committed Chrome harness awaits its
+exact-source rerun; a private corrected run passed.
 
 Remaining integration work: task-owned browser contexts and account-write leases;
 one common foreground lease for AX/GUI desktop control; a consented desktop view;

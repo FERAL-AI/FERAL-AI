@@ -7,42 +7,51 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### October 4 native browser integration
+### October 4 native browser integration and packaged acceptance
 
-- The frozen source adds a 22nd native destination, Browser, with explicit
-  viewing consent, exact ephemeral target/connection leases, real memory-only
-  JPEG frames and actual browser input-location markers. CDP typing now replaces
-  and verifies the intended supported text field. No new action authority,
-  implicit browser launch or per-agent browser isolation is claimed.
-  [Behavior and integration boundary](BROWSER_VIEW_EVIDENCE.md).
-- Combined verification passes 1,230 checks across 43 backend suites, with one
-  opt-in real-Chrome case skipped in that combined run. A separate explicit
-  installed-Chrome run passes 26 focused checks, including Unicode replacement,
-  password pixel masking/restoration and actual click/pointer alignment. Counts
-  overlap. All 1,297 Python inputs remained unchanged. An initial sandboxed run
-  could not bind its disposable recording socket; the permitted rerun passes.
-- Native Browser 74, Providers 50 and Onboarding 52 assertions pass, alongside 28
-  linked model/wire groups, 33 linked onboarding assertions, desktop 39/error 5
-  checks and production typecheck. Full mypy remains 809 errors in 233 files:
-  zero added or removed normalized diagnostics versus the prior baseline.
-  Core Ruff and whitespace pass. The existing screenshot-to-model wire suite
-  passes 44 isolated cases; no paid computer-use model call was made. No claim of type-cleanliness is made.
-- Last published checkpoint a334521af passes all executed required CI workflows:
-  general, native, desktop, docs, naming and version. Opt-in real-brain E2E is
-  skipped. New-source publication/CI and actual 9.37 assembly/GUI acceptance are
-  next; the current immutable package is still 9.36/source 9a40b9ac8 until audited
-  assembly completes. Keep the source/package distinction explicit.
-- The verified obsolete generated 9.34/9.35 app copies were retired, about 1.2 GB.
-  Their manifests/reports and all profiles/models remain. 9.36 will be retained
-  as the sole rollback copy during the at-most 2 GiB next build. All three source
-  workers released their exclusive paths; parent owns the frozen integration,
-  packaging, private acceptance launchers, documentation and publication.
-- Next: publish this source on the existing review branch, assemble 9.37 from
-  exact committed inputs and inspect the actual app against a separately owned
-  synthetic Chrome fixture. No personal browser profile/account, wallet or real
-  messaging/purchase has been used. Desktop sharing, provider-specific computer
-  adapters, task-owned browser/foreground resources and full-product gates remain.
-  Preserve unrelated AUDIT-FIXES.md edits unstaged.
+- Implementation `b9afadb236e6e39d798a311d38955bb9e8051e74` is pushed to
+  `feat/native-product-release-foundation-20261001` in
+  [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310); main is unchanged.
+  Native Browser is the 22nd destination. Existing tools/image delivery remain;
+  no new action authority or implicit browser launch was introduced.
+- Immutable **2026.9.37/build2026100401** now contains b9af, including the preceding
+  setup/learning corrections. Its 52 native inputs and 489 packaged Python files,
+  optimized build, bundled-runtime probes and strict ad-hoc signature pass.
+  Native SHA `a661c5f8ca32b96b12a447224cf8c7f8e1704c789599349b5ad2c253f2f91142`.
+- Actual isolated GUI: avatar/local setup, retained navigation, consent, real
+  masked Chrome frames, intended-field Unicode, synthetic click outcome,
+  approved coordinate input marker, Stop, navigation retirement and expiry/error
+  clearing passed. Both hosts quit normally with exit 0; exact backend/browser
+  listeners closed. Tasks were synthetic/manual/headless, not model-selected.
+  [Artifact and actual limits](NATIVE_9_37_ACCEPTANCE.md).
+- Frozen combined backend: 1,230 passed across 43 suites, one opt-in Chrome skip;
+  1,297 Python inputs unchanged. Separate 26 focused/real-Chrome checks and 44
+  screenshot-to-model wire checks pass; counts overlap. Browser 74, Providers 50,
+  Onboarding 52 and linked model/desktop/error checks plus production typecheck
+  pass. Ruff passes. Full mypy remains 809 errors in 233 files, no normalized
+  additions/removals; type-cleanliness is not claimed.
+- All executed required b9af CI workflows pass: general `37226066225`, native
+  `37226066257`, desktop `37226066246`, docs `37226066274`, naming `37226066277`,
+  version `37226066240`. Real-brain E2E `37226066229` is skipped. Later harness/docs
+  revisions do not change the immutable package identity.
+- A pixel-control defect in the committed acceptance harness was diagnosed in real
+  Chrome; a private corrected harness passed 11 checks. Parent integrated its
+  strict 9-by-9 patch repair; committed exact-source rerun is next. Failed evidence
+  is retained. GUI launcher preflight defects stopped before dispatch and were
+  corrected independently of product source.
+- Two follow-up cards: reject unbound mutating REST calls before an empty-session
+  approval is queued, preserving existing strict identity/approval gates; add
+  actual verified Playwright selector input markers. Current explicit-session
+  coordinate execution works. Native approval-button acceptance remains open for
+  duplicate-label Computer Use targeting. No unknown effect was replayed.
+- Canonical 9.37 and one 9.36 rollback copy remain; obsolete generated 9.34/9.35
+  copies were retired, about 1.2 GB. Personal profiles/models/history were retained.
+  All source workers released their paths; parent owns evidence/publication.
+- Next: publish the harness/evidence checkpoint and run its exact committed Chrome
+  probe, then the two follow-up cards, desktop viewing/foreground ownership and
+  task-linked browser takeover. Full product audio/accounts/devices/Messages/
+  commerce/migration/distribution gates remain explicit. Preserve unrelated
+  AUDIT-FIXES.md edits unstaged. [Browser contract](BROWSER_VIEW_EVIDENCE.md).
 
 ### Preceding October 4 Mac setup checkpoint
 
