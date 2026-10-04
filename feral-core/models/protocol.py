@@ -212,33 +212,76 @@ class VoiceAttemptPayload(BaseModel):
     """Optional negotiated client voice identity. Legacy frames omit both."""
     voice_attempt_version: Literal[1] | None = None
     voice_attempt_id: str | None = Field(default=None, max_length=36)
+    managed_chained_voice_version: Literal[1] | None = None
+    request_id: str | None = Field(default=None, max_length=36)
+    turn_id: str | None = Field(default=None, max_length=36)
+    context_generation: str | None = Field(default=None, max_length=36)
+    context_revision: int | None = Field(default=None, strict=True, ge=1, lt=2**63 - 1)
+    context_checkpoint: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def negotiated_managed_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        # Previously unknown fields must remain ignored on legacy frames. Only
+        # the explicit negotiated version opts a frame into these new contracts.
+        if "managed_chained_voice_version" not in value:
+            value = dict(value)
+            for name in ("request_id", "turn_id", "context_generation",
+                         "context_revision", "context_checkpoint"):
+                value.pop(name, None)
+        return value
 
     @model_serializer(mode="wrap")
     def omit_absent_voice_identity(self, handler: Callable[[object], dict]) -> dict:
         serialized = handler(self)
-        for name in ("voice_attempt_version", "voice_attempt_id", "voice_request_id"):
+        for name in ("voice_attempt_version", "voice_attempt_id", "voice_request_id",
+                     "managed_chained_voice_version", "request_id", "turn_id",
+                     "context_generation", "context_revision", "context_checkpoint"):
             if serialized.get(name) is None:
                 serialized.pop(name, None)
         return serialized
 
-    @field_validator("voice_attempt_version", mode="before")
+    @field_validator("voice_attempt_version", "managed_chained_voice_version", mode="before")
     @classmethod
     def strict_voice_attempt_version(cls, value: object) -> int:
         if type(value) is not int or value != 1:
             raise ValueError("Unsupported voice attempt version")
         return value
 
-    @field_validator("voice_attempt_id", mode="before")
+    @field_validator("voice_attempt_id", "request_id", "turn_id", "context_generation", mode="before")
     @classmethod
     def strict_voice_attempt_id(cls, value: object) -> str:
         if not isinstance(value, str) or len(value) != 36 or str(UUID(value)) != value:
             raise ValueError("Voice attempt must be a lowercase UUID")
         return value
 
+    @field_validator("context_checkpoint", mode="before")
+    @classmethod
+    def committed_voice_checkpoint(cls, value: object) -> dict[str, Any]:
+        # The checkpoint class is defined later in this module and resolved
+        # when a frame is parsed, after module initialization has completed.
+        return ChatTurnContextCheckpoint.model_validate(value).model_dump()
+
+    @field_validator("context_revision", mode="before")
+    @classmethod
+    def exact_context_revision(cls, value: object) -> int:
+        if type(value) is not int or not 1 <= value < 2**63 - 1:
+            raise ValueError("Managed voice requires an exact positive revision")
+        return value
+
     @model_validator(mode="after")
     def paired_voice_attempt(self) -> Self:
         if (self.voice_attempt_version is None) != (self.voice_attempt_id is None):
             raise ValueError("Voice attempt identity requires both fields")
+        if self.managed_chained_voice_version is not None:
+            if self.voice_attempt_id is None:
+                raise ValueError("Managed voice requires a voice attempt")
+            if (self.context_generation is None) != (self.context_revision is None):
+                raise ValueError("Managed voice review requires generation and revision")
+            if self.turn_id is not None and self.request_id is None:
+                raise ValueError("Managed voice turn requires a request")
         return self
 
 
@@ -1629,13 +1672,120 @@ class VoiceConfigPayload(VoiceAttemptPayload):
     sample_rate: int = Field(default=24000, ge=1)
     encoding: str = Field(default="pcm16", max_length=32)
 
+    @model_validator(mode="after")
+    def managed_configuration(self) -> Self:
+        if self.managed_chained_voice_version is not None and self.mode != "disabled":
+            if (self.mode != "chained" or self.provider != "configured"
+                    or self.context_generation is None):
+                raise ValueError("Managed voice requires reviewed chained configuration")
+        return self
+
 
 class VoiceConfigAckPayload(VoiceAttemptPayload):
     mode: str = Field(default="", max_length=MAX_NAME_LEN)
     provider: str = Field(default="", max_length=MAX_NAME_LEN)
-    status: Literal["ok", "error"]
+    status: Literal["ok", "error", "configured"]
     code: str = Field(default="", max_length=MAX_NAME_LEN)
     message: str = ""
+    task_cancellation: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_cancellation(self, handler: Callable[[object], dict]) -> dict:
+        serialized = super().omit_absent_voice_identity(handler)
+        if serialized.get("task_cancellation") is None:
+            serialized.pop("task_cancellation", None)
+        return serialized
+
+    @model_validator(mode="after")
+    def configured_is_not_admission(self) -> Self:
+        if self.status == "configured" and (
+            self.managed_chained_voice_version is None or self.mode != "chained"
+            or self.context_checkpoint is None
+        ):
+            raise ValueError("Configured voice requires its exact managed checkpoint")
+        return self
+
+
+class VoiceUtterancePayload(VoiceAttemptPayload):
+    """Client begin/finish request; carries review identity, not task authority."""
+
+    @model_validator(mode="after")
+    def exact_utterance_review(self) -> Self:
+        if (self.managed_chained_voice_version is None or self.request_id is None
+                or self.context_generation is None or self.turn_id is not None
+                or self.context_checkpoint is not None):
+            raise ValueError("Utterance requires a managed request and reviewed fence")
+        return self
+
+
+class VoiceUtteranceAckPayload(VoiceAttemptPayload):
+    code: str = Field(default="", max_length=MAX_NAME_LEN)
+    retry_safe: Literal[False] | None = None
+
+    @field_validator("retry_safe", mode="before")
+    @classmethod
+    def refusal_never_grants_replay(cls, value: object) -> bool:
+        if value is not False:
+            raise ValueError("Utterance refusal does not grant automatic retry")
+        return False
+
+    @model_serializer(mode="wrap")
+    def omit_absent_refusal(self, handler: Callable[[object], dict]) -> dict:
+        serialized = super().omit_absent_voice_identity(handler)
+        if serialized.get("retry_safe") is None:
+            serialized.pop("retry_safe", None)
+        if not serialized.get("code"):
+            serialized.pop("code", None)
+        if serialized.get("task_accepted") is None:
+            serialized.pop("task_accepted", None)
+        return serialized
+
+    def validate_refusal(self) -> None:
+        if not self.code or self.retry_safe is not False or self.context_checkpoint is not None or self.turn_id is not None:
+            raise ValueError("Utterance refusal requires a code and no task authority")
+
+
+class VoiceUtteranceBeginAckPayload(VoiceUtteranceAckPayload):
+    status: Literal["collecting", "error"]
+
+    @model_validator(mode="after")
+    def exact_collecting_receipt(self) -> Self:
+        if self.status == "error":
+            self.validate_refusal()
+            return self
+        if (self.managed_chained_voice_version is None or self.request_id is None
+                or self.context_checkpoint is None or self.turn_id is not None):
+            raise ValueError("Collecting requires a managed request checkpoint")
+        return self
+
+
+class VoiceUtteranceFinishAckPayload(VoiceUtteranceAckPayload):
+    status: Literal["submitted_processing", "error"]
+    task_accepted: Literal[False] | None = None
+
+    @field_validator("task_accepted", mode="before")
+    @classmethod
+    def not_task_acceptance(cls, value: object) -> bool:
+        if value is not False:
+            raise ValueError("Finish ACK is not task acceptance")
+        return False
+
+    @model_validator(mode="after")
+    def exact_processing_receipt(self) -> Self:
+        if self.status == "error":
+            self.validate_refusal()
+            return self
+        if (self.managed_chained_voice_version is None or self.request_id is None
+                or self.task_accepted is not False
+                or self.turn_id is not None or self.context_checkpoint is not None):
+            raise ValueError("Processing ACK requires a managed request only")
+        return self
+
+
+class VoiceStatePayload(VoiceAttemptPayload):
+    state: str = Field(..., min_length=1, max_length=MAX_NAME_LEN)
+    mode: str = Field(default="chained", max_length=MAX_NAME_LEN)
+    error: str = ""
 
 
 class VoiceInterruptAckPayload(VoiceInterruptPayload):
@@ -2035,6 +2185,11 @@ MESSAGE_TYPES = {
     # Voice Pipeline
     "voice_config": VoiceConfigPayload,
     "voice_config_ack": VoiceConfigAckPayload,
+    "voice_utterance_begin": VoiceUtterancePayload,
+    "voice_utterance_finish": VoiceUtterancePayload,
+    "voice_utterance_begin_ack": VoiceUtteranceBeginAckPayload,
+    "voice_utterance_finish_ack": VoiceUtteranceFinishAckPayload,
+    "voice_state": VoiceStatePayload,
     "voice_interrupt_ack": VoiceInterruptAckPayload,
     "voice_mute": VoiceMutePayload,
     "audio_response": AudioResponsePayload,
@@ -2056,5 +2211,11 @@ def parse_message(raw: dict) -> tuple[FeralMessage, BaseModel | None]:
     msg = FeralMessage(**raw)
     payload_cls = MESSAGE_TYPES.get(msg.type)
     if payload_cls:
-        return msg, payload_cls(**msg.payload)
+        payload = payload_cls(**msg.payload)
+        if (isinstance(payload, VoiceAttemptPayload)
+                and payload.managed_chained_voice_version is not None
+                and payload.context_checkpoint is not None
+                and payload.context_checkpoint["session_id"] != msg.session_id):
+            raise ValueError("Managed voice checkpoint belongs to another session")
+        return msg, payload
     return msg, None

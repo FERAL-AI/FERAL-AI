@@ -2204,13 +2204,47 @@ class VoiceRouter:
         self._chained = pipeline
 
     async def open_chained_session(
-        self, session_id: str, provider_opts: dict | None = None
+        self, session_id: str, provider_opts: dict | None = None,
+        *, submit_tracked_utterance: Callable[[str, str], Awaitable[dict]] | None = None,
+        abort_tracked_utterance: Callable[[str, str | None], Awaitable[dict]] | None = None,
+        assert_admission_current: Callable[[], None] | None = None,
+        managed_send_frame: Callable[[str, dict], Awaitable[None]] | None = None,
     ):
+        callbacks = (submit_tracked_utterance, abort_tracked_utterance,
+                     assert_admission_current, managed_send_frame)
+        if any(callback is not None for callback in callbacks):
+            from bridges.client_voice_attempt import VoiceAttemptError
+            if not all(callable(callback) for callback in callbacks):
+                raise VoiceAttemptError("managed_voice_callbacks_incomplete")
+            if not self.supports_managed_chained_voice(provider_opts):
+                raise VoiceAttemptError("managed_voice_buffered_contract_unavailable")
+            assert assert_admission_current is not None
+            assert_admission_current()
+            return await self._checkpoint_legacy_open_chained_session(
+                session_id, provider_opts,
+                submit_tracked_utterance=submit_tracked_utterance,
+                abort_tracked_utterance=abort_tracked_utterance,
+                assert_admission_current=assert_admission_current,
+                managed_send_frame=managed_send_frame,
+            )
         async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice", command_handoff=True):
             return await self._checkpoint_legacy_open_chained_session(session_id=session_id, provider_opts=provider_opts)
 
+    def supports_managed_chained_voice(self, provider_opts: dict | None = None) -> bool:
+        """Pure capability check: no provider creation or microphone admission."""
+        from voice.chained_pipeline import MANAGED_BUFFERED_STT
+        pipeline = getattr(self, "_chained", None)
+        configured = (provider_opts or {}).get("stt_provider") or self._resolve_chained_config()["stt_provider"]
+        return (configured in MANAGED_BUFFERED_STT and pipeline is not None
+                and callable(getattr(pipeline, "begin_utterance", None))
+                and callable(getattr(pipeline, "finish_utterance", None)))
+
     async def _checkpoint_legacy_open_chained_session(
-        self, session_id: str, provider_opts: dict | None = None
+        self, session_id: str, provider_opts: dict | None = None,
+        *, submit_tracked_utterance: Callable[[str, str], Awaitable[dict]] | None = None,
+        abort_tracked_utterance: Callable[[str, str | None], Awaitable[dict]] | None = None,
+        assert_admission_current: Callable[[], None] | None = None,
+        managed_send_frame: Callable[[str, dict], Awaitable[None]] | None = None,
     ):
         """Create a chained STT→LLM→TTS session with configured providers.
 
@@ -2289,7 +2323,13 @@ class VoiceRouter:
         )
         if stt_provider is None:
             return None
-        tts_kwargs = {
+        if assert_admission_current is not None:
+            try:
+                assert_admission_current()
+            except BaseException:
+                await stt_provider.close()
+                raise
+        tts_kwargs: dict[str, Any] = {
             "api_key": _resolve_provider_key(tts_pid, tts_env) if tts_env else "",
         }
         if tts_name == "macos_say":
@@ -2361,15 +2401,28 @@ class VoiceRouter:
 
         pipeline = self._chained
         try:
+            if assert_admission_current is not None:
+                assert_admission_current()
+            managed_kwargs = {}
+            if submit_tracked_utterance is not None:
+                managed_kwargs = {
+                    "submit_tracked_utterance": submit_tracked_utterance,
+                    "abort_tracked_utterance": abort_tracked_utterance,
+                    "assert_admission_current": assert_admission_current,
+                    "managed_stt_provider": stt_name,
+                }
             session = await pipeline.open_session(
                 session_id=session_id,
                 stt_provider=stt_provider,
                 tts_provider=tts_provider_inst,
                 llm_handle=self._orchestrator,
-                send_frame=_send_frame,
+                send_frame=managed_send_frame or _send_frame,
                 sample_rate=stt_sample_rate,
                 voice_attempt=voice_attempt,
+                **managed_kwargs,
             )
+            if assert_admission_current is not None:
+                assert_admission_current()
         except BaseException:
             # A partial open is attributable only through the providers
             # created by this invocation. A replacement must survive.
@@ -2377,6 +2430,9 @@ class VoiceRouter:
             if (current is not None and getattr(current, "stt_provider", None) is stt_provider
                     and getattr(current, "tts_provider", None) is tts_provider_inst):
                 await pipeline.close_session(session_id)
+            elif (assert_admission_current is not None
+                  and (current is None or getattr(current, "stt_provider", None) is not stt_provider)):
+                await asyncio.gather(stt_provider.close(), tts_provider_inst.close(), return_exceptions=True)
             raise
         if self._chained is not pipeline or pipeline.get_session(session_id) is not session:
             return None

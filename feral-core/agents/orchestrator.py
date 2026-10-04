@@ -3688,6 +3688,7 @@ class Orchestrator:
         route_ref = self._route_for_tier(current_tier)
 
         sent_response = False
+        any_tool_ran = False
         final_response_text = ""
         while budget.start_iteration():
             effective_system_prompt = system_prompt
@@ -3856,7 +3857,8 @@ class Orchestrator:
                     if raw_msg.get("tool_calls"):
                         assistant_msg["tool_calls"] = raw_msg["tool_calls"]
 
-                history.append(assistant_msg)
+                if text_content or tool_calls:
+                    history.append(assistant_msg)
 
             except OllamaContextRefusal as exc:
                 await self._send_error(session_id, str(exc), code=exc.code)
@@ -3867,6 +3869,7 @@ class Orchestrator:
                 return
 
             if tool_calls:
+                any_tool_ran = True
                 # WS5 — multi-actuator ordered WS frames. Tools still
                 # execute in parallel (cap = ``FERAL_MAX_PARALLEL_TOOLS``)
                 # for speed, but the ``tool_start`` AND ``tool_result``
@@ -4070,8 +4073,13 @@ class Orchestrator:
             else:
                 break
 
-        if not sent_response:
-            await self._send_text(session_id, "I processed your request but have nothing to report.")
+        if not sent_response and not any_tool_ran:
+            await self._send_error(
+                session_id,
+                "The selected model returned no answer or tool call. "
+                "Retry this message or choose another model in AI Providers.",
+                code="provider_empty_response",
+            )
 
         # Write-back, session eviction, snapshot and F2 compaction all
         # live in ``_finalize_turn`` now, which the caller runs from a
@@ -4761,12 +4769,14 @@ class Orchestrator:
             break
 
         if not got_final_text and not any_tool_ran:
-            # Only surface the placeholder when the turn truly
-            # produced nothing — no streamed text AND no tool
-            # execution. Tool-only turns already emitted tool_start /
-            # tool_result chips plus any SDUI from results, so a
-            # canned "no text response" bubble would be noise.
-            await self._send_text(session_id, "I processed your request but have no text response.")
+            # Tool-only turns retain their result frames. A provider that
+            # produced neither prose nor a tool cannot certify a reply.
+            await self._send_error(
+                session_id,
+                "The selected model returned no answer or tool call. "
+                "Retry this message or choose another model in AI Providers.",
+                code="provider_empty_response",
+            )
 
         # Write-back, eviction, snapshot and F2 compaction live in
         # ``_finalize_turn``, run from a ``finally`` by the caller —

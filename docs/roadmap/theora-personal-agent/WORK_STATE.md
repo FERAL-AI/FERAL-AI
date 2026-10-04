@@ -7,7 +7,58 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### Reconciled Mac-first status
+### Current Mac integration checkpoint
+
+- Published source before this integration wave is `6ff22c285e150b5951b9895ffd10cba1e6bb4695` on the existing
+  review branch in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
+  Main is unchanged. This commit includes provider-review binding, committed
+  conversation receipts and startup diagnostics. Its general CI, docs, naming,
+  version and desktop build passed. Native production typecheck, feature/linked
+  suites and lifeline passed; archive ownership still failed its original30s
+  fixture. Retained diagnostics show child launch followed by HTTP-server startup
+  stall. The generated fixture now skips unused reverse DNS and passes its
+  original28 assertions/30s deadline locally; remote cause remains unproven.
+- Actual isolated9.34 GUI acceptance reached avatar selection, provider setup and
+  the connected main app. Its first synthetic local-model chat returned the
+  empty-response fallback. This is a failed chat journey, not successful app
+  acceptance. The app remained connected and Quit removed its owned processes.
+  Candidate9.34/source4eded remains unchanged and excludes6ff and current edits.
+- Raw-provider reproduction confirms HTTP200 with zero text/tool/reasoning before
+  display sanitization. The unchanged bundled parser passes four synthetic SSE
+  fixtures. Exhausted empty generations now emit `provider_empty_response` and
+  fail the tracked turn without fake assistant history. Model reliability and
+  rebuilt actual-app acceptance remain open. [Reply evidence](MAC_LOCAL_REPLY_DIAGNOSTIC_EVIDENCE.md).
+- Local managed chained voice is integrated across engine, WebSocket adapter,
+  canonical protocol and native client. Parent backend integration passes471
+  tests with1290 frozen inputs unchanged; full mypy809 has zero new diagnostics
+  versus the retained812 baseline, and core Ruff passes. Native production
+  typecheck and linked28 groups pass, alongside Voice55, ManagedVoice50,
+  ChatTurn/ContextCheckpoint, desktop39 and error5 assertions. Final review fixed
+  a stale native capability flag and pending-context Stop dispatch. Their merged
+  linked run is next after the single-stage onboarding repair is frozen.
+  These are source/fixture results, not microphone, account or audio acceptance.
+  [Voice evidence](MANAGED_CHAINED_VOICE_INTEGRATION_EVIDENCE.md).
+- Backend contracts and typed empty-response handling are frozen for a separate
+  coherent publication. Native readiness/onboarding changes remain local until
+  their final linked checks and reviewed integration commit.
+- The parent owns canonical contracts, documentation and publication. Workers
+  own final native readiness/Stop review and duplicate onboarding diagnosis.
+  Mac usability remains first; Linux engineering and Gen-UI are deferred.
+- Inspected obsolete generated9.29/9.30/9.31 app copies and completed fixture
+  compiler caches were removed. Their receipts and manifests remain;9.32/9.33,
+  the current9.34 app, profiles, models and source were retained. The separate
+  home-directory Git repository was inspected read-only and remains untouched.
+- Candidate9.34 is also preserved in a verified disposable copy before replacing
+  the canonical build. Its binary, signature and487-source comparison passed.
+- Next: publish the tested backend change, finish the native onboarding integration
+  and its combined checks, then assemble and test
+  an exact-source Mac candidate. Distribution, real accounts and hardware remain
+  separate acceptance gates in RELEASE_READINESS.
+
+### Earlier reconciliations
+
+The records below describe preceding checkpoints. They do not supersede the
+current publication, worker allocation or actual GUI result above.
 
 #### Latest integration and actual-app priority
 

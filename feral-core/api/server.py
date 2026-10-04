@@ -14,7 +14,7 @@ import os
 import re
 import secrets
 import time
-from collections.abc import Awaitable, Coroutine  # noqa: F401 — quoted coroutine annotations
+from collections.abc import Awaitable, Callable, Coroutine  # noqa: F401 — quoted coroutine annotations
 from pathlib import Path
 from uuid import uuid4
 
@@ -28,6 +28,7 @@ from api.runtime_context import (
     session_query,
 )
 from agents.runtime_context_checkpoint import RuntimeContextAttachment, RuntimeContextError, RuntimeContextScopeReceipt
+from memory.runtime_session_checkpoint import CheckpointFence
 
 from fastapi import (
     FastAPI,
@@ -2407,7 +2408,9 @@ def _build_chat_turn_runner(
 
 async def _submit_tracked_chat_turn(*, ws, session_id: str, request_id: str,
                                     text: str, raw_context=None, attachments=None, emit=None,
-                                    attachment: RuntimeContextAttachment | None = None):
+                                    attachment: RuntimeContextAttachment | None = None,
+                                    expected_fence: CheckpointFence | None = None,
+                                    admission_current: Callable[[], bool] | None = None):
     """Reuse the existing preparation/runner under a committed receipt."""
     from agents.chat_turns import CommittedChatResult, get_chat_turn_manager
     if emit is None:
@@ -2416,7 +2419,8 @@ async def _submit_tracked_chat_turn(*, ws, session_id: str, request_id: str,
 
     async def run():
         async with prepared_scope(state, session_id, attachment=attachment,
-                current_owner=lambda: state.sessions.get(session_id) is ws) as scope_receipt:
+                current_owner=lambda: state.sessions.get(session_id) is ws and (admission_current is None or admission_current() is True),
+                expected_fence=expected_fence) as scope_receipt:
             refined_text, ctx, _ = await _prepare_chat_turn_context(
                 session_id=session_id, text=text, raw_context=raw_context, attachments=attachments or [],
                 scope_receipt=scope_receipt,
@@ -2543,6 +2547,7 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                                                    attachment=attachment)
 
         gw_session.metadata["tracked_chat_send"] = gateway_submit
+        managed_voice = None
         if coordinator is not None and attachment is not None:
             async def current_readiness():
                 return await attachment_readiness(coordinator, attachment)
@@ -2551,6 +2556,18 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                 return await established_legacy_media_readiness(state, coordinator, attachment)
             gw_session.metadata["runtime_context_voice_readiness"] = current_voice_readiness
             gw_session.metadata["context_checkpoint_requested"] = checkpoint_version is not None
+            if checkpoint_version == 1:
+                from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+                captured_state = state
+                async def submit_voice(request_id, text, emit, expected_fence, admission_current):
+                    if state is not captured_state:
+                        raise RuntimeContextError("context_attachment_superseded")
+                    return await _submit_tracked_chat_turn(ws=ws, session_id=session_id, request_id=request_id,
+                        text=text, raw_context={"source": "managed_chained_voice"}, emit=emit,
+                        attachment=attachment, expected_fence=expected_fence, admission_current=admission_current)
+                managed_voice = ClientManagedChainedVoice(captured_state, session_id, ws, coordinator, attachment,
+                    submit_voice, lambda: state is captured_state and gw_session.metadata.get("managed_chained_voice") is managed_voice)
+                gw_session.metadata["managed_chained_voice"] = managed_voice
 
         # Lane 08 WS9 — track in-flight orchestrator tasks per WS so the
         # message loop doesn't block on long-running turns (AUDIT-r13
@@ -2674,7 +2691,7 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                     from bridges.client_voice_control import mute_client_voice
                     params = raw.get("payload", {})
                     try:
-                        await mute_client_voice(state, session_id, ws, params)
+                        await mute_client_voice(state, session_id, ws, params, managed_adapter=managed_voice)
                     except VoiceAttemptError as exc:
                         await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="voice_status",
                             payload={"state": "unavailable", "reason": exc.code,
@@ -2758,6 +2775,7 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                             state, session_id, ws, vcfg,
                             start_realtime=_start_direct_gemini if provider == "gemini" and mode == "realtime" and state.gemini_proxy else None,
                             readiness_guard=_voice_readiness if mode != "disabled" else None,
+                            managed_adapter=managed_voice,
                         )
                     except ClientVoiceConfigurationError as exc:
                         await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type="voice_config_ack",
@@ -2775,12 +2793,34 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                     )
                     logger.info(f"Web client voice mode: {mode} (provider: {provider})")
 
+                elif msg.type in {"voice_utterance_begin", "voice_utterance_finish"}:
+                    from bridges.client_voice_attempt import VoiceAttemptError, voice_attempt_error_identity
+                    from agents.chat_turns import ChatTurnError, exact_uuid
+                    params = raw.get("payload", {})
+                    try:
+                        if managed_voice is None:
+                            raise VoiceAttemptError("managed_voice_unavailable")
+                        operation = managed_voice.begin if msg.type == "voice_utterance_begin" else managed_voice.finish
+                        result = await operation(params)
+                    except VoiceAttemptError as exc:
+                        identity = voice_attempt_error_identity(params)
+                        result = {"status": "error", "code": exc.code, "retry_safe": False, **identity}
+                        if identity and type(params.get("managed_chained_voice_version")) is int and params["managed_chained_voice_version"] == 1:
+                            result["managed_chained_voice_version"] = 1
+                            try:
+                                result["request_id"] = exact_uuid(params.get("request_id"))
+                            except ChatTurnError:
+                                # An invalid reference cannot be echoed as an
+                                # authoritative request identity, even on refusal.
+                                result.pop("request_id", None)
+                    await ws.send_json(FeralMessage(session_id=session_id, hop="brain", type=msg.type + "_ack", payload=result).model_dump())
+
                 elif msg.type == "voice_interrupt":
                     from bridges.client_voice_attempt import VoiceAttemptError, voice_attempt_error_identity
                     from bridges.client_voice_control import interrupt_client_voice_attempt
                     params = raw.get("payload", {})
                     try:
-                        result = await interrupt_client_voice_attempt(state, session_id, ws, params)
+                        result = await interrupt_client_voice_attempt(state, session_id, ws, params, managed_adapter=managed_voice)
                     except VoiceAttemptError as exc:
                         status = "superseded" if exc.code == "voice_owner_superseded" and "voice_attempt_version" not in params else exc.code
                         result = {"status": status, "cancel_requested": False, "session_preserved": True,
@@ -2801,6 +2841,9 @@ async def _run_client_surface(ws: WebSocket, session_id: str, explicit_session: 
                     from bridges.client_voice_control import handle_client_voice_audio
                     params = raw.get("payload", {})
                     try:
+                        if managed_voice is not None and ("managed_chained_voice_version" in params or managed_voice.selected is not None):
+                            await managed_voice.audio(params)
+                            continue
                         binding = require_voice_attempt(state, session_id, ws, params)
                         if (binding is not None and coordinator is not None and attachment is not None
                                 and checkpoint_version is None

@@ -243,6 +243,9 @@ def register_core_methods(registry: MethodRegistry, state):
         )
         result: dict[str, object] = {"turn_contract_versions": [1] if supported else [], "durable_receipts": supported,
                   "whole_turn_terminal": supported, "session_id": session_id}
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+        managed_voice = session.metadata.get("managed_chained_voice")
+        result["managed_chained_voice_versions"] = await managed_voice.capabilities() if isinstance(managed_voice, ClientManagedChainedVoice) else []
         lookup = session.metadata.get("runtime_context_readiness")
         result.update({"context_checkpoint_versions": [], "context_recovery_versions": [], "context_ready": False, "context_state": "unavailable", "context_managed": False})
         if callable(lookup):
@@ -251,6 +254,8 @@ def register_core_methods(registry: MethodRegistry, state):
                 result.update({"context_checkpoint_versions": [1], "context_ready": readiness.ready,
                                "context_state": readiness.state.value, "context_managed": readiness.managed,
                                "managed_unsupported_paths": ["voice", "handoff", "reset", "compact", "snapshot", "branch", "restore", "delete"]})
+                if result["managed_chained_voice_versions"] == [1]:
+                    result["managed_unsupported_paths"] = ["realtime_voice", "handoff", "reset", "compact", "snapshot", "branch", "restore", "delete"]
                 if runtime_coordinator(state.orchestrator) is not None:
                     result["context_recovery_versions"] = [1]
                 if readiness.ready and readiness.fence is not None:
@@ -563,13 +568,15 @@ def register_core_methods(registry: MethodRegistry, state):
     @registry.method("voice.config")
     async def voice_config(session_id: str, params: dict, session: GatewaySession):
         from bridges.client_voice_configuration import configure_client_voice, ClientVoiceConfigurationError
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
 
         mode = params.get("mode", "realtime")
         async def readiness():
             await attachment_guard(session_id, session, unsupported="voice")
         try:
             return await configure_client_voice(state, session_id, session._ws, params,
-                readiness_guard=readiness if mode != "disabled" else None)
+                readiness_guard=readiness if mode != "disabled" else None,
+                managed_adapter=session.metadata.get("managed_chained_voice") if isinstance(session.metadata.get("managed_chained_voice"), ClientManagedChainedVoice) else None)
         except ClientVoiceConfigurationError as exc:
             raise GatewayError(exc.code, str(exc)) from None
 
@@ -578,7 +585,11 @@ def register_core_methods(registry: MethodRegistry, state):
         from bridges.client_voice_attempt import (VoiceAttemptError, client_voice_producers,
             require_voice_attempt, require_client_voice_producers)
         from bridges.client_voice_control import handle_client_voice_audio
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
         try:
+            managed = session.metadata.get("managed_chained_voice")
+            if isinstance(managed, ClientManagedChainedVoice) and ("managed_chained_voice_version" in params or managed.selected is not None):
+                return await managed.audio(params)
             binding = require_voice_attempt(state, session_id, session._ws, params)
             media_lookup = session.metadata.get("runtime_context_voice_readiness")
             if (binding is not None and any(producer is not None for producer in client_voice_producers(state, session_id))
@@ -600,12 +611,34 @@ def register_core_methods(registry: MethodRegistry, state):
         except RuntimeContextError as exc:
             raise context_error(exc) from None
 
+    async def voice_utterance(session_id: str, params: dict, session: GatewaySession, *, finish: bool):
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
+        from bridges.client_voice_attempt import VoiceAttemptError
+        managed = session.metadata.get("managed_chained_voice")
+        try:
+            if not isinstance(managed, ClientManagedChainedVoice):
+                raise VoiceAttemptError("managed_voice_unavailable")
+            return await (managed.finish(params) if finish else managed.begin(params))
+        except VoiceAttemptError as exc:
+            raise GatewayError(exc.code, str(exc)) from None
+
+    @registry.method("voice.utterance.begin")
+    async def voice_utterance_begin(session_id: str, params: dict, session: GatewaySession):
+        return await voice_utterance(session_id, params, session, finish=False)
+
+    @registry.method("voice.utterance.finish")
+    async def voice_utterance_finish(session_id: str, params: dict, session: GatewaySession):
+        return await voice_utterance(session_id, params, session, finish=True)
+
     @registry.method("voice.mute")
     async def voice_mute(session_id: str, params: dict, session: GatewaySession):
         from bridges.client_voice_attempt import VoiceAttemptError
         from bridges.client_voice_control import mute_client_voice
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
         try:
-            return await mute_client_voice(state, session_id, session._ws, params)
+            adapter = session.metadata.get("managed_chained_voice")
+            return await mute_client_voice(state, session_id, session._ws, params,
+                managed_adapter=adapter if isinstance(adapter, ClientManagedChainedVoice) else None)
         except VoiceAttemptError as exc:
             raise GatewayError(exc.code, str(exc)) from None
 
@@ -613,8 +646,11 @@ def register_core_methods(registry: MethodRegistry, state):
     async def voice_interrupt(session_id: str, params: dict, session: GatewaySession):
         from bridges.client_voice_attempt import VoiceAttemptError
         from bridges.client_voice_control import interrupt_client_voice_attempt
+        from bridges.client_managed_chained_voice import ClientManagedChainedVoice
         try:
-            return await interrupt_client_voice_attempt(state, session_id, session._ws, params)
+            adapter = session.metadata.get("managed_chained_voice")
+            return await interrupt_client_voice_attempt(state, session_id, session._ws, params,
+                managed_adapter=adapter if isinstance(adapter, ClientManagedChainedVoice) else None)
         except VoiceAttemptError as exc:
             raise GatewayError(exc.code, str(exc)) from None
 

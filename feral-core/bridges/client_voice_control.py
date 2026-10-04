@@ -8,6 +8,10 @@ from __future__ import annotations
 
 import inspect
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bridges.client_managed_chained_voice import ClientManagedChainedVoice
 
 from bridges.client_voice_attempt import (VoiceAttemptBinding, VoiceAttemptError, client_voice_producers, require_client_voice_producers, require_voice_attempt, require_voice_producer,
     voice_attempt_scope)
@@ -52,7 +56,10 @@ async def client_voice_control_scope(state, session_id: str, owner: object, para
             raise VoiceAttemptError("voice_attempt_superseded")
 
 
-async def handle_client_voice_audio(state, session_id: str, owner: object, params: dict) -> dict:
+async def handle_client_voice_audio(state, session_id: str, owner: object, params: dict,
+                                    *, managed_adapter: ClientManagedChainedVoice | None = None) -> dict:
+    if managed_adapter is not None and ("managed_chained_voice_version" in params or managed_adapter.selected is not None):
+        return await managed_adapter.audio(params)
     try:
         payload = AudioChunkPayload(**params)
     except ValueError:
@@ -79,6 +86,8 @@ async def handle_client_voice_audio(state, session_id: str, owner: object, param
                 require_voice_producer(binding, selected)
                 if provider == "chained":
                     pipeline = state.voice_router._chained
+                    if getattr(selected, "submit_tracked_utterance", None) is not None:
+                        raise VoiceAttemptError("managed_voice_adapter_required")
                     await pipeline.handle_audio_for_session(selected, payload.data_b64,
                         payload.chunk_index, payload.is_final, wait_for_turn=False)
                 elif provider in {"openai", "gemini"}:
@@ -94,7 +103,10 @@ async def handle_client_voice_audio(state, session_id: str, owner: object, param
         return {"received": True, **(binding.identity() if binding is not None else {})}
 
 
-async def mute_client_voice(state, session_id: str, owner: object, params: dict) -> dict:
+async def mute_client_voice(state, session_id: str, owner: object, params: dict,
+                             *, managed_adapter: ClientManagedChainedVoice | None = None) -> dict:
+    if managed_adapter is not None and managed_adapter.selected is not None:
+        managed_adapter.require_utterance(params)
     try:
         parsed = VoiceMutePayload(**params)
     except ValueError:
@@ -109,7 +121,10 @@ async def mute_client_voice(state, session_id: str, owner: object, params: dict)
         return {"muted": parsed.muted, **(binding.identity() if binding is not None else {})}
 
 
-async def interrupt_client_voice_attempt(state, session_id: str, owner: object, params: dict) -> dict:
+async def interrupt_client_voice_attempt(state, session_id: str, owner: object, params: dict,
+                                         *, managed_adapter: ClientManagedChainedVoice | None = None) -> dict:
+    if managed_adapter is not None and managed_adapter.selected is not None:
+        managed_adapter.require_utterance(params)
     try:
         parsed = VoiceInterruptPayload(**params)
     except ValueError:

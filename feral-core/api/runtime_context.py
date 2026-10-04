@@ -16,6 +16,7 @@ from agents.runtime_context_checkpoint import (
     RuntimeContextScopeReceipt,
 )
 from memory.runtime_session_checkpoint import validate_session_id
+from memory.runtime_session_checkpoint import CheckpointFence
 from starlette.websockets import WebSocket
 
 logger = logging.getLogger(__name__)
@@ -50,9 +51,12 @@ def session_query(query: Mapping[str, str], primary: str) -> tuple[str, bool, in
 @asynccontextmanager
 async def prepared_scope(state: BrainState, session_id: str, *,
                          attachment: RuntimeContextAttachment | None = None,
-                         current_owner: Callable[[], bool] | None = None
+                         current_owner: Callable[[], bool] | None = None,
+                         expected_fence: CheckpointFence | None = None
                          ) -> AsyncIterator[RuntimeContextScopeReceipt | None]:
     """Keep preparation and the one command in the same exact task and SID lock."""
+    if expected_fence is not None and attachment is None:
+        raise RuntimeContextError("context_review_invalid")
     coordinator = coordinator_for(state)
     if coordinator is None:
         if attachment is not None:
@@ -66,7 +70,7 @@ async def prepared_scope(state: BrainState, session_id: str, *,
             return (coordinator_for(state) is coordinator and state.memory is store
                     and current_owner() is True)
         async with coordinator.attached_write_scope(attachment.token, expected_store=store,
-                current_owner=owner_current, command_handoff=True) as receipt:
+                current_owner=owner_current, command_handoff=True, expected_fence=expected_fence) as receipt:
             yield receipt
     else:
         async with coordinator.write_scope(session_id, command_handoff=True) as receipt:

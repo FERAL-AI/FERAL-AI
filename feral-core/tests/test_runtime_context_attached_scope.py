@@ -34,6 +34,84 @@ def scope(state, attachment, owner):
                           current_owner=lambda: state.sessions.get("thread-A") is owner)
 
 
+async def test_reviewed_fence_can_commit_its_own_next_revision(attached):
+    state, coordinator, attachment, owner, store = attached
+    expected = (await store.runtime_checkpoint_read("thread-A")).record.fence
+    async with prepared_scope(state, "thread-A", attachment=attachment,
+            current_owner=lambda: state.sessions.get("thread-A") is owner,
+            expected_fence=expected) as receipt:
+        coordinator.history["thread-A"] = [{"role": "user", "content": "reviewed utterance"}]
+    assert receipt.committed_fence.generation == expected.generation
+    assert receipt.committed_fence.revision == expected.revision + 2
+
+
+async def test_stale_reviewed_fence_refuses_without_starting_another_attempt(attached):
+    state, _coordinator, attachment, owner, store = attached
+    expected = (await store.runtime_checkpoint_read("thread-A")).record.fence
+    async with scope(state, attachment, owner):
+        pass
+    current = (await store.runtime_checkpoint_read("thread-A")).record.fence
+    with pytest.raises(RuntimeContextError, match="context_review_superseded"):
+        async with prepared_scope(state, "thread-A", attachment=attachment,
+                current_owner=lambda: state.sessions.get("thread-A") is owner,
+                expected_fence=expected):
+            pytest.fail("Stale reviewed context entered its command")
+    assert (await store.runtime_checkpoint_read("thread-A")).record.fence == current
+
+
+async def test_queued_review_rechecks_durable_fence_after_lock_admission(attached):
+    from uuid import uuid4
+    from memory.runtime_session_checkpoint import encode_context
+    state, coordinator, attachment, owner, store = attached
+    expected = (await store.runtime_checkpoint_read("thread-A")).record.fence
+    lock = coordinator.lock_for("thread-A")
+    await lock.acquire()
+    async def queued():
+        async with prepared_scope(state, "thread-A", attachment=attachment,
+                current_owner=lambda: state.sessions.get("thread-A") is owner,
+                expected_fence=expected):
+            pytest.fail("Queued stale review entered its command")
+    task = asyncio.create_task(queued())
+    try:
+        await asyncio.sleep(0)
+        assert not task.done()
+        begun = await store.runtime_checkpoint_begin("thread-A", attempt_id=str(uuid4()), expected=expected)
+        assert begun.status == CheckpointStatus.APPLIED
+        committed = await store.runtime_checkpoint_commit(begun.record.fence, encode_context([], []))
+        assert committed.status == CheckpointStatus.APPLIED
+    finally:
+        lock.release()
+    with pytest.raises(RuntimeContextError, match="checkpoint_conflict"):
+        await task
+    assert (await store.runtime_checkpoint_read("thread-A")).record.fence == committed.record.fence
+
+
+async def test_queued_review_refuses_after_another_coordinated_turn_commits(attached):
+    state, _coordinator, attachment, owner, store = attached
+    expected = (await store.runtime_checkpoint_read("thread-A")).record.fence
+    entered, release = asyncio.Event(), asyncio.Event()
+    async def first():
+        async with scope(state, attachment, owner):
+            entered.set()
+            await release.wait()
+    first_task = asyncio.create_task(first())
+    await asyncio.wait_for(entered.wait(), 2)
+    async def queued():
+        async with prepared_scope(state, "thread-A", attachment=attachment,
+                current_owner=lambda: state.sessions.get("thread-A") is owner,
+                expected_fence=expected):
+            pytest.fail("Review from before the other turn entered a command")
+    task = asyncio.create_task(queued())
+    await asyncio.sleep(0)
+    assert not task.done()
+    release.set()
+    await first_task
+    current = (await store.runtime_checkpoint_read("thread-A")).record.fence
+    with pytest.raises(RuntimeContextError, match="context_review_superseded"):
+        await task
+    assert (await store.runtime_checkpoint_read("thread-A")).record.fence == current
+
+
 async def test_exact_scope_captures_its_commit_not_latest_sid(attached):
     state, coordinator, attachment, owner, store = attached
     async with scope(state, attachment, owner) as receipt:

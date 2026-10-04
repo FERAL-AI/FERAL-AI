@@ -4,6 +4,10 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from bridges.client_managed_chained_voice import ClientManagedChainedVoice
 
 from agents.runtime_context_checkpoint import RuntimeContextError, runtime_coordinator
 from bridges.client_voice_attempt import (VoiceAttemptError, begin_voice_attempt, require_client_voice_producers,
@@ -91,7 +95,19 @@ async def _configuration_scope(state, session_id: str, *, disabled: bool):
 
 async def configure_client_voice(state, session_id: str, owner, params: dict,
                                  *, start_realtime: Callable[[], Awaitable[object]] | None = None,
-                                 readiness_guard: Callable[[], Awaitable[None]] | None = None) -> dict:
+                                 readiness_guard: Callable[[], Awaitable[None]] | None = None,
+                                 managed_adapter: ClientManagedChainedVoice | None = None) -> dict:
+    if "managed_chained_voice_version" in params or (managed_adapter is not None and managed_adapter.selected is not None):
+        if managed_adapter is None:
+            raise ClientVoiceConfigurationError("managed_voice_unavailable")
+        try:
+            return await managed_adapter.configure(params)
+        except VoiceAttemptError as exc:
+            raise ClientVoiceConfigurationError(exc.code) from None
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ClientVoiceConfigurationError("managed_voice_configuration_failed") from None
     mode = params.get("mode", "realtime")
     provider = params.get("provider", "openai")
     if not isinstance(mode, str) or mode not in {"realtime", "chained", "whisper", "auto", "disabled"}:
