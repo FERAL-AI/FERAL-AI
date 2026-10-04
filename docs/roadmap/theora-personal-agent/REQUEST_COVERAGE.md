@@ -13,7 +13,9 @@ assembled, signature/runtime audited, and matches51 native inputs and 488 Python
 files. Actual avatar selection and single-stage provider setup pass. The main
 chat answer was generated, but optional skill discovery delayed its committed
 terminal; a later health-related disconnect produced a cancelled receipt. Whole-
-turn chat acceptance therefore failed and the scoped repair is active. Critical
+turn chat acceptance therefore failed. The backend correction passes 623 frozen
+checks and awaits rebuilt-app acceptance; native passive-health suspension is
+active. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
 storage pressure was removed with verified history-preserving cleanup. Actual
 voice, cloud accounts, migration, clean installation and signed distribution
 remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and

@@ -15,6 +15,7 @@ import re
 import secrets
 import time
 from collections.abc import Awaitable, Callable, Coroutine  # noqa: F401 — quoted coroutine annotations
+from contextvars import Context
 from pathlib import Path
 from uuid import uuid4
 
@@ -2310,6 +2311,104 @@ async def _prepare_chat_turn_context(
     return refined_text, ctx, user_msg_text
 
 
+def _schedule_chat_skill_followup(*, ws: WebSocket, session_id: str) -> None:
+    """Optional discovery cannot delay or change a durable foreground receipt."""
+    from agents.chat_turns import turn_audit
+    from memory.runtime_session_checkpoint import CheckpointStatus
+    from security.agent_turn_lease import guard_agent_dispatch, spawn_agent_turn
+
+    captured = state
+    audit = turn_audit(session_id)
+    register = getattr(captured, "register_background_task", None)
+    foreground = asyncio.current_task()
+    generator = getattr(captured, "skill_gen", None)
+    if audit is None or foreground is None or generator is None or not callable(register):
+        return
+    store, orchestrator = captured.memory, captured.orchestrator
+    coordinator = coordinator_for(captured)
+    generation = getattr(captured, "_native_agent_turn_generation", 0)
+    identity = {"contract_version": 1, "request_id": audit.request_id, "turn_id": audit.turn_id}
+    # working_get is exact-SID; retain values, never live mutable history or
+    # another turn's runtime writer scope in the new task.
+    history = [
+        {key: value for key in ("role", "text", "content")
+         if isinstance(value := entry.get(key), str)}
+        for entry in (store.working_get(session_id) or [])[-6:]
+        if isinstance(entry, dict)
+    ]
+
+    def current() -> bool:
+        guard_agent_dispatch()
+        return (state is captured and captured.memory is store
+                and captured.orchestrator is orchestrator and captured.skill_gen is generator
+                and captured.sessions.get(session_id) is ws
+                and coordinator_for(captured) is coordinator
+                and getattr(captured, "_native_agent_turn_generation", 0) == generation)
+
+    async def fenced(checkpoint) -> bool:
+        if not current():
+            return False
+        if checkpoint is None:
+            return coordinator is None or not coordinator.known_managed(session_id)
+        expected = CheckpointFence(session_id, checkpoint["generation"],
+                                   checkpoint["revision"], checkpoint["attempt_id"])
+        read = await store.runtime_checkpoint_read(session_id)
+        return (current() and read.status == CheckpointStatus.READY
+                and read.record is not None and read.record.fence == expected)
+
+    async def followup() -> None:
+        manifest = None
+        delivered = False
+        try:
+            # Waiting does not propagate follow-up cancellation to the command.
+            # The manager commits and publishes its terminal before its task ends.
+            await asyncio.wait({foreground})
+            if not current():
+                return
+            terminal = await store.chat_turn_get(session_id=session_id, turn_id=identity["turn_id"])
+            if (not current() or terminal is None or terminal.get("durable") is not True
+                    or terminal.get("session_id") != session_id
+                    or any(terminal.get(key) != value for key, value in identity.items())
+                    or terminal.get("processing_outcome") not in {"completed", "awaiting_approval", "refused"}):
+                return
+            checkpoint = terminal.get("context_checkpoint")
+            async with asyncio.timeout(60):
+                if not await fenced(checkpoint):
+                    return
+                need = await generator.detect_unmet_need(history)
+                if not need or not await fenced(checkpoint):
+                    return
+                manifest = await generator.generate_skill(
+                    capability=need.get("capability", ""), service=need.get("service", ""))
+                if manifest is None or not await fenced(checkpoint):
+                    return
+                payload = {"manifest": manifest, "reason": need.get("capability", ""),
+                           "chat_turn": identity}
+                if checkpoint is not None:
+                    payload["context_checkpoint"] = checkpoint
+                await ws.send_json(FeralMessage(session_id=session_id, hop="brain",
+                                              type="skill_proposal", payload=payload).model_dump())
+                delivered = True
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            logger.debug("Optional skill discovery did not complete; foreground receipt is unchanged")
+        finally:
+            # generate_skill stages a proposal, not an installed skill. Discard
+            # only this task's undelivered object; never another proposal sharing
+            # its skill_id, and never approve or execute generated code here.
+            pending = getattr(generator, "_pending_skills", None)
+            if not delivered and isinstance(manifest, dict) and isinstance(pending, dict):
+                skill_id = manifest.get("skill_id")
+                if isinstance(skill_id, str) and pending.get(skill_id) is manifest:
+                    generator.reject_skill(skill_id)
+
+    # Do not inherit the closed turn audit or an operation-local writer scope.
+    # The existing lease runner captures this exact reviewed agent generation.
+    task = Context().run(spawn_agent_turn, captured, followup())
+    register(task)
+
+
 def _build_chat_turn_runner(
     *,
     ws: WebSocket,
@@ -2347,7 +2446,12 @@ def _build_chat_turn_runner(
             )
             if scope_receipt is not None:
                 scope_receipt.assert_current()
-            if state.skill_gen:
+            if tracked:
+                try:
+                    _schedule_chat_skill_followup(ws=ws, session_id=session_id)
+                except Exception:
+                    logger.debug("Optional skill discovery could not be scheduled")
+            elif state.skill_gen:
                 history = state.memory.working_get(session_id) or []
                 need = await state.skill_gen.detect_unmet_need(history)
                 if scope_receipt is not None:

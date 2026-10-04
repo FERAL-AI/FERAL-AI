@@ -8,7 +8,7 @@ import re
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
-from config.loader import clear_settings_cache as _clear_settings_cache, feral_home
+from config.loader import ChatOutputBudgetError, clear_settings_cache as _clear_settings_cache, feral_home, validate_chat_output_settings_patch
 from config.runtime import ollama_base_url
 
 logger = logging.getLogger("feral.api.config")
@@ -53,6 +53,10 @@ async def complete_setup(body: dict):
     settings = body.get("settings", {})
     credentials = body.get("credentials", {})
     identity = body.get("identity", {})
+    try:
+        validate_chat_output_settings_patch(settings)
+    except ChatOutputBudgetError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from None
     if credentials:
         _require_deferred_credentials_ready()
 
@@ -134,7 +138,10 @@ async def update_config(body: dict):
         if getattr(state, "_native_vault_deferred", False) is True:
             raise HTTPException(status_code=400, detail={"code": "use_credential_endpoint", "message": "Store provider credentials through the encrypted credential endpoint, not generic settings."})
 
-    state.config.update_settings(section, key, value)
+    try:
+        state.config.update_settings(section, key, value)
+    except ChatOutputBudgetError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from None
 
     # ``load_settings`` memoises the merged dict so a per-turn caller does
     # not re-parse three files and unlock the keychain every time. The

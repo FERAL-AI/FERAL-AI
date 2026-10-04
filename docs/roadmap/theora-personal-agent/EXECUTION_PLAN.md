@@ -21,22 +21,22 @@ assembled, signature/runtime audited, and matches51 native inputs and 488 Python
 files. Actual avatar selection and single-stage provider setup pass. The main
 chat answer was generated, but optional skill discovery delayed its committed
 terminal; a later health-related disconnect produced a cancelled receipt. Whole-
-turn chat acceptance therefore failed and the scoped repair is active. Critical
+turn chat acceptance therefore failed. The backend correction passes 623 frozen
+checks and awaits rebuilt-app acceptance; native passive-health suspension is
+active. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md). Critical
 storage pressure was removed with verified history-preserving cleanup. Actual
 voice, cloud accounts, migration, clean installation and signed distribution
 remain open. [Candidate evidence](NATIVE_9_35_ACCEPTANCE.md) and
 [current checkpoint](WORK_STATE.md) own the active status. Older paragraphs are
 historical and do not supersede these results.
 
-Next provider-contract hardening card, after exact-source Mac acceptance:
-`llm.max_tokens` is currently stored but has no production reader. Normal chat
-requests use1024; a synthetic capture confirmed saved512 produced wire1024.
-This does not explain the observed empty generation, which stopped after25
-completion tokens. Add a validated chat-output setting and forward it through
-both orchestrator paths with adapter request-body, retry and failover tests.
-Preserve explicit background budgets and provider-specific thinking adjustments;
-do not represent the setting as a universal hard cap. No source change for this
-card is included in candidate 9.35.
+The output-budget source correction now passes actual mock-HTTP request bodies,
+real orchestrator retry and failover checks. Saved chat limits are resolved when
+ordinary chat omits an explicit limit; explicit background budgets and thinking
+provider transformations remain authoritative. This does not establish a universal
+hard output or cost cap and does not explain the preceding empty generation.
+It is outside immutable 9.35. The next integration combines its 623-check backend
+wave with native passive-health suspension before rebuilt actual-app acceptance.
 
 Mac-first reconciliation: published `f41c204fe` passes general CI, docs, naming,
 version and the corrected automatic Linux desktop build. Further Linux engineering

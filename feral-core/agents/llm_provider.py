@@ -17,7 +17,7 @@ import ipaddress
 import httpx
 from typing import Any, Optional, AsyncGenerator
 
-from config.loader import feral_data_home
+from config.loader import ChatOutputBudgetError, feral_data_home, resolve_chat_output_budget
 from config.runtime import ollama_base_url, ollama_openai_base_url
 from agents.chat_sanitizer import sanitize_assistant_display_text
 
@@ -1068,7 +1068,7 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         *,
         call_site: str = "chat",
         force_tool: Optional[str] = None,
@@ -1089,6 +1089,10 @@ class LLMProvider:
         caller (digital twin, proactive, ideas engine, wherever) gains
         cross-provider failover without knowing about the distinction.
         """
+        try:
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site=call_site)
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "choices": [], "error_code": exc.code}
         live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
         if live_error:
             return {"error": live_error, "choices": [], "error_code": "unsupported_live_protocol"}
@@ -2797,7 +2801,7 @@ class LLMProvider:
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         *,
         call_site: str = "chat",
         force_tool: Optional[str] = None,
@@ -2814,6 +2818,11 @@ class LLMProvider:
         into their own caps by passing ``call_site="screen_loop"``,
         ``"learner"``, etc. (Wave 2 Lane 09).
         """
+        try:
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site=call_site)
+        except ChatOutputBudgetError as exc:
+            yield {"type": "error", "content": str(exc), "error_code": exc.code}
+            return
         live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
         if live_error:
             yield {"type": "error", "content": live_error, "error_code": "unsupported_live_protocol"}
@@ -5390,6 +5399,13 @@ class LLMProvider:
         on providers (Gemini) that can't name a single tool on the
         wire shape we drive.
         """
+        try:
+            kwargs["max_tokens"] = resolve_chat_output_budget(
+                getattr(self, "_config", {}), kwargs.get("max_tokens"),
+                call_site=str(kwargs.get("call_site", "chat") or "chat"),
+            )
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "choices": [], "error_code": exc.code}
         # Adaptive route (kw-only ``route`` = a ``route_call`` ProviderRef).
         # Popped FIRST so it never leaks into ``self.chat(**kwargs)`` on the
         # local-engine short-circuit below. When present and concrete it
@@ -5424,7 +5440,7 @@ class LLMProvider:
         # their own call_site name. Defaults to "chat" so a missing
         # kwarg does the safe thing.
         call_site = str(kwargs.pop("call_site", "chat") or "chat")
-        max_tokens_kw = int(kwargs.get("max_tokens", 1024) or 1024)
+        max_tokens_kw = kwargs["max_tokens"]
         budget_model = route_model or self.model
         budget_block = await self._budget_check(call_site, budget_model, max_tokens_kw)
         if budget_block is not None:

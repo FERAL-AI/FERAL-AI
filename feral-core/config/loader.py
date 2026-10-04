@@ -160,10 +160,46 @@ DEFAULT_STREAMING = True
 # from production.
 DEFAULT_MULTI_AGENT = True
 
+# Requested output allowance for ordinary chat; provider-specific request
+# shaping (for example Anthropic thinking headroom) remains authoritative.
+DEFAULT_CHAT_MAX_TOKENS = 1024
+
+
+class ChatOutputBudgetError(ValueError):
+    code = "llm_configuration_error"
+
+
+def validate_chat_output_budget(value: object) -> int:
+    """Accept a positive JSON integer, without coercing booleans or strings."""
+    if type(value) is not int or value <= 0:
+        raise ChatOutputBudgetError("llm.max_tokens must be a positive integer. Update the setting or remove it to use the default.")
+    return value
+
+
+def validate_chat_output_settings_patch(settings: object) -> None:
+    """Validate an explicitly written allowance; null keeps merge-patch deletion."""
+    if isinstance(settings, dict) and isinstance(settings.get("llm"), dict):
+        llm = settings["llm"]
+        if "max_tokens" in llm and llm["max_tokens"] is not None:
+            validate_chat_output_budget(llm["max_tokens"])
+
+
+def resolve_chat_output_budget(config: object, explicit: object = None, *, call_site: str = "chat") -> int:
+    """Explicit caller limits win; only ordinary chat reads the saved default."""
+    if explicit is not None:
+        return validate_chat_output_budget(explicit)
+    if call_site != "chat":
+        return DEFAULT_CHAT_MAX_TOKENS
+    if isinstance(config, dict) and "max_tokens" in config:
+        return validate_chat_output_budget(config["max_tokens"])
+    return DEFAULT_CHAT_MAX_TOKENS
+
+
 DEFAULT_SETTINGS = {
     "version": "0.4.0",
     "llm": {
         "provider": "openai",
+        "max_tokens": DEFAULT_CHAT_MAX_TOKENS,
         # Empty on purpose: ``LLMProvider.__init__`` falls through to
         # ``_default_model_for`` which reads the live model catalog. A
         # literal here pins every new install to whatever was current
@@ -1604,10 +1640,14 @@ class ConfigLoader:
         :meth:`_publish_env_changes` for why the re-export is here rather
         than in each of the four surfaces that write settings.
         """
+        if section == "llm" and key == "max_tokens" and value is not None:
+            validate_chat_output_budget(value)
         before = self._env_snapshot()
         if section not in self._merged:
             self._merged[section] = {}
-        self._merged[section][key] = value
+        self._merged[section][key] = (
+            DEFAULT_CHAT_MAX_TOKENS if section == "llm" and key == "max_tokens" and value is None else value
+        )
 
         # Load existing user settings and update
         user_path = self.user_home / "settings.json"

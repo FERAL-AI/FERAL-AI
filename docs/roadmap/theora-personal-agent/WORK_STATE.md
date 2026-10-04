@@ -9,7 +9,8 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ### Current Mac integration checkpoint
 
-- Published source is `12cc62c480422a3d844eada816d9cdf29c79fbef` on the
+- Published implementation before this source wave is
+  `12cc62c480422a3d844eada816d9cdf29c79fbef` on the
   existing review branch in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
   Backend contracts and typed empty-response handling are included from
   `9e9ac51fdd1f569f95afe79c17973beab6c93de2`. Main remains unchanged.
@@ -29,11 +30,13 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   text after health timeouts and disconnect. This is failed whole-turn acceptance.
   Optional skill discovery runs after the main answer but is awaited before
   foreground terminal commitment; the observed disconnect cancelled that wait.
-  A scoped backend repair is active. Do not relabel a cancelled receipt completed
+  The backend correction now passes parent integration. Do not relabel a cancelled receipt completed
   from transcript text. The app exited normally with host code 0.
-- Final frozen backend integration before this repair passes 471 tests with 1290
-  unchanged inputs. Full mypy 809 adds zero diagnostics versus retained 812;
-  core Ruff passes. Native production typecheck and 28 linked groups pass, with
+- The new frozen terminal/output-budget integration passes 623 tests with 1,291
+  unchanged Python inputs. Full mypy 809 has zero added/removed diagnostics
+  versus retained 809, and core Ruff passes. Publication and rebuilt actual-app
+  acceptance are next. [Integration evidence](MAC_CHAT_TERMINAL_BUDGET_EVIDENCE.md).
+  The preceding voice wave passed 471 before these corrections. Native production typecheck and 28 linked groups pass, with
   Voice 55, ManagedVoice 50, ChatTurn/ContextCheckpoint, OnboardingSetup 34,
   additional linked onboarding 33, desktop 39 and error 5 assertions. These checks
   prove source/fixture behavior, not microphone, account or physical-device use.
@@ -51,14 +54,16 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 - Obsolete generated 9.32/9.33 app copies were removed after identity and process
   checks; all their manifests, logs and profiles remain. The canonical9.35 app
   and preceding 9.34 copy are retained. Artifact/resource rules are in AGENTS.md.
-- Parent owns integration, shared contracts, documents and publication. One
-  worker owns optional skill-discovery terminal sequencing; another prepares
-  the output-budget correction privately. The ignored `llm.max_tokens` setting
-  is confirmed separately and is not the cause of the earlier 25-token empty
-  generation. Neither new repair is in immutable 9.35.
-- Next: integrate the exact-receipt repair with meaningful cancellation and
-  stale-context tests, then repeat actual tool-enabled chat/recovery with ample
-  headroom. Review the output-budget patch independently. Microphone/speaker,
+- Parent owns integration, shared contracts, documents and publication. Backend
+  terminal sequencing and configured output-budget corrections are integrated
+  and frozen. A worker owns typed native passive-health suspension, preserving
+  live conversation control while blocking new action admission. These source
+  changes are outside immutable 9.35. The output setting defect is independent
+  of the earlier 25-token empty generation. Resource/docs checkpoint b3995e02a
+  is published; prior work is preserved.
+- Next: publish the verified backend correction, finish/integrate the native
+  suspension card and rebuild. Repeat actual tool-enabled chat/recovery with
+  ample headroom, checking durable receipt and transcript together. Microphone/speaker,
   cloud accounts, migration, clean installation and signed distribution remain
   acceptance gates. Mac usability remains first; Linux and Gen-UI are deferred.
 
