@@ -7,9 +7,12 @@ as `6947bbec1` and are packaged in immutable 9.42/build2026100406. Fresh native
 compilation, all 495 packaged Python comparisons, runtime/signature audits,
 packaged methods/backend lifecycle and actual isolated native warning/Quit pass.
 9.41 is the sole generated rollback. One remote backend fixture failed because it
-modeled paid calls as API-free Ollama; its test-only correction needs new-head CI.
+modeled paid calls as API-free Ollama. Its test-only correction in `e35dd9af9`
+now has 18 successful remote checks and four conditional skips. Local desktop
+dependency and task-handoff changes are outside 9.42 until new-source acceptance.
 [Artifact and limits](NATIVE_9_42_ACCEPTANCE.md).
 [Behavior, limitations and acceptance](RUNTIME_MULTITASKING_EVIDENCE.md).
+[Active installation/task acceptance](INSTALL_AND_TASK_HANDOFF_EVIDENCE.md).
 
 **Review priority update (October 4).** Existing AX/GUI/vision computer-control
 paths are confirmed and should be reused. Independent routine-policy/recovery,

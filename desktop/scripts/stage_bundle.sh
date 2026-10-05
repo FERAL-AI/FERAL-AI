@@ -323,10 +323,23 @@ PYEXE="$(staged_python_exe)"
 # meant: install into this interpreter's own site-packages. $STAGED_PY is
 # a private copy inside the build tree, so nothing shared is modified;
 # the interpreter under ~/.local/share/uv is never written to.
-echo "  -> installing feral-core[llm] and the Python plugin SDK into the staged interpreter"
+STAGED_EXTRAS="llm"
+if [ "$(uname -s)" = "Darwin" ]; then
+    # Existing desktop extra supplies the reviewed Mac input adapter closure.
+    # Linux input/display provisioning has a separate acceptance gate.
+    STAGED_EXTRAS="llm,desktop"
+fi
+echo "  -> installing feral-core[$STAGED_EXTRAS] and the Python plugin SDK into the staged interpreter"
 "$UV" pip install --python "$PYEXE" --break-system-packages \
     --constraint "$REPO_ROOT/feral-core/requirements.lock" \
-    "$REPO_ROOT/feral-core[llm]" "$REPO_ROOT/sdk/python" >&2
+    "$REPO_ROOT/feral-core[$STAGED_EXTRAS]" "$REPO_ROOT/sdk/python" >&2
+
+if [ "$(uname -s)" = "Darwin" ]; then
+    # Imports only: never click, type, capture, read/write clipboard or launch UI.
+    # Missing optional imports can otherwise hide behind PyAutoGUI fallbacks.
+    python3 -I -B "$REPO_ROOT/scripts/check_native_bundle.py" \
+        --probe-desktop-inputs "$STAGED_PY"
+fi
 
 # ── 4. Prove it, here, rather than at the user's first launch ────────
 #

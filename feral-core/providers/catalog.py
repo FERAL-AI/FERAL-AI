@@ -581,8 +581,9 @@ class ProviderCatalog:
         """Return models for *provider_id*.
 
         ``live=False`` returns the cached value without touching the
-        network. ``force=True`` ignores the TTL and always refreshes —
-        that's what the "Refresh models" button in v2 Settings hits.
+        network, including a cold cache. With ``live=True``, ``force=True``
+        ignores the TTL and refreshes. The v2 "Refresh models" button
+        explicitly requests both flags.
         When a live attempt fails the cached / fallback list is still
         returned, but ``CachedModelList.warning`` carries the error so
         the client can render a visible "key rejected" chip instead of
@@ -620,11 +621,15 @@ class ProviderCatalog:
             if warning and not cached.warning:
                 cached.warning = warning
             return cached
-        if not live and cached:
+        if not live:
+            # Passive reads are an egress boundary, including the first
+            # read on a fresh installation. ``force`` controls cache age
+            # only when live discovery was explicitly requested.
+            passive = cached if cached is not None else self._fallback_models(provider_id)
             warning = self._warnings.get(provider_id, "")
-            if warning and not cached.warning:
-                cached.warning = warning
-            return cached
+            if warning and not passive.warning:
+                passive.warning = warning
+            return passive
         async with self._lock:
             fresh = await self._refresh_models(provider_id)
             if fresh is not None:

@@ -129,6 +129,7 @@ AUTOLOAD_MODULES: tuple[str, ...] = (
     "feral_reminders",
     "feral_routines",
     "feral_workflows",
+    "background_task",
     "notes_memory",
     "plan",
     # imported for the @register_skill side effect

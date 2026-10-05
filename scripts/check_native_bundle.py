@@ -4,6 +4,8 @@ Reports paths and fixed diagnostic codes, never file contents or process stderr.
 This is not a complete secret scan or signing/notarization acceptance test.
 """
 import argparse
+from email.parser import BytesParser
+from itertools import islice
 import json
 import os
 from pathlib import Path
@@ -20,6 +22,102 @@ MAX_INFO_PLIST = 65_536
 PREVIEW_BUNDLE_ID = "ai.feral.native.preview"
 MACH_MAGIC = {b"\xcf\xfa\xed\xfe", b"\xce\xfa\xed\xfe", b"\xca\xfe\xba\xbe", b"\xfe\xed\xfa\xcf", b"\xbe\xba\xfe\xca"}
 LOAD_COMMANDS = {"LC_LOAD_DYLIB", "LC_LOAD_WEAK_DYLIB", "LC_REEXPORT_DYLIB", "LC_LOAD_UPWARD_DYLIB", "LC_LAZY_LOAD_DYLIB"}
+MAX_DEPENDENCY_METADATA = 65_536
+MAX_DESKTOP_PROBE_FILE_BYTES = 16_384
+# PyGetWindow is a resolver dependency but explicitly has no Mac implementation.
+# Check its installed source/metadata; never require its unsupported Mac import.
+DESKTOP_DISTRIBUTIONS = {
+    "pyautogui": "pyautogui/__init__.py", "mouseinfo": "mouseinfo/__init__.py",
+    "pygetwindow": "pygetwindow/__init__.py", "pymsgbox": "pymsgbox/__init__.py",
+    "pyperclip": "pyperclip/__init__.py", "pyrect": "pyrect/__init__.py",
+    "pyscreeze": "pyscreeze/__init__.py", "pytweening": "pytweening/__init__.py",
+    "rubicon-objc": "rubicon/objc/__init__.py",
+}
+DESKTOP_IMPORTS = ("PIL", "Quartz", "AppKit", "pyperclip", "pyscreeze", "pytweening",
+                   "pymsgbox", "pyrect", "rubicon.objc", "mouseinfo", "pyautogui")
+
+
+def desktop_dependency_issues(python_root):
+    """Inspect the Mac closure without importing native code on the audit host."""
+    root = Path(python_root).resolve()
+    findings = []
+
+    def fail(code, path=""):
+        findings.append({"code": code, "path": path})
+
+    sites = list(islice(root.glob("lib/python*/site-packages"), 2))
+    if len(sites) != 1 or not sites[0].is_dir() or not inside(sites[0].resolve(), root):
+        return [{"code": "desktop_site_packages_missing_or_external", "path": ""}]
+    site = sites[0]
+    for distribution, module in DESKTOP_DISTRIBUTIONS.items():
+        source = site / module
+        if not source.is_file() or source.is_symlink() or not inside(source.resolve(), root):
+            fail("desktop_module_missing_or_external", module)
+        pattern = distribution.replace("-", "_") + "-*.dist-info/METADATA"
+        metadata = list(islice(site.glob(pattern), 2))
+        if len(metadata) != 1:
+            fail("desktop_distribution_missing_or_duplicate", distribution)
+            continue
+        path = metadata[0]
+        try:
+            if path.is_symlink() or not inside(path.resolve(strict=True), root):
+                fail("desktop_distribution_external", distribution)
+                continue
+            with path.open("rb") as stream:
+                data = stream.read(MAX_DEPENDENCY_METADATA + 1)
+            if len(data) > MAX_DEPENDENCY_METADATA:
+                fail("desktop_distribution_metadata_over_budget", distribution)
+                continue
+            header = BytesParser().parsebytes(data, headersonly=True)
+            name = re.sub(r"[-_.]+", "-", header.get("Name", "")).lower()
+            version = header.get("Version", "")
+            if name != distribution or not re.fullmatch(r"[0-9]+(?:\.[0-9]+){1,3}", version):
+                fail("desktop_distribution_metadata_invalid", distribution)
+        except (OSError, ValueError, UnicodeError):
+            fail("desktop_distribution_metadata_unreadable", distribution)
+    adapter = site / "pyautogui/_pyautogui_osx.py"
+    if not adapter.is_file() or adapter.is_symlink() or not inside(adapter.resolve(), root):
+        fail("desktop_macos_adapter_missing_or_external", "pyautogui/_pyautogui_osx.py")
+    return findings
+
+
+def probe_desktop_inputs(python_root):
+    """Bounded opt-in import check; dependency readiness is not action permission."""
+    root = Path(python_root).resolve()
+    findings = desktop_dependency_issues(root)
+    if findings:
+        return {"ok": False, "issues": findings, "code": "desktop_dependencies_unavailable"}
+    code = ("import resource; "
+            f"resource.setrlimit(resource.RLIMIT_FSIZE,({MAX_DESKTOP_PROBE_FILE_BYTES},{MAX_DESKTOP_PROBE_FILE_BYTES})); "
+            "import importlib,json,sys; from pathlib import Path; "
+            "assert sys.platform=='darwin', 'Mac import probe requires Darwin'; "
+            "r=Path(sys.argv[1]).resolve(); "
+            f"names={DESKTOP_IMPORTS!r}; "
+            "modules=[importlib.import_module(name) for name in names]; "
+            "assert all(Path(m.__file__).resolve().is_relative_to(r) for m in modules), 'external desktop import'; "
+            "p=modules[-1]; "
+            "assert all(callable(getattr(p,n,None)) for n in ('click','moveTo','write','hotkey','scroll')); "
+            "print(json.dumps({'ok':True,'modules':list(names)}))")
+    try:
+        with tempfile.TemporaryDirectory(prefix="feral-desktop-import-", dir="/private/tmp") as home:
+            env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": home,
+                   "FERAL_HOME": str(Path(home) / "feral"), "FERAL_DATA_HOME": str(Path(home) / "data"),
+                   "PYTHONDONTWRITEBYTECODE": "1"}
+            # Regular-file output is bounded in the child before third-party
+            # imports. Read one bounded receipt, never captured process stderr.
+            with (Path(home) / "stdout").open("w+b") as output, (Path(home) / "stderr").open("w+b") as errors:
+                result = subprocess.run([str(root / "bin/python3"), "-I", "-B", "-c", code, str(root)],
+                                        cwd=home, env=env, stdout=output, stderr=errors, timeout=20)
+                output.seek(0)
+                receipt = output.read(2049)
+            if result.returncode or len(receipt) > 2048:
+                raise ValueError("desktop_import_failed")
+            data = json.loads(receipt)
+            if data != {"ok": True, "modules": list(DESKTOP_IMPORTS)}:
+                raise ValueError("desktop_import_receipt_invalid")
+            return {**data, "scope": "Imports only; no capture, input, clipboard or permission verification"}
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return {"ok": False, "code": "desktop_import_failed_private_details_withheld"}
 
 
 def dylib_loads(output):
@@ -182,6 +280,8 @@ def audit_bundle(bundle, inspector=inspect_macho):
                 issue("critical_resource_missing_or_external", relative)
             elif executable and not os.access(path, os.X_OK):
                 issue("critical_resource_not_executable", relative)
+        for finding in desktop_dependency_issues(root / "Contents/Resources/python"):
+            issue(finding["code"], finding["path"])
     return {"ok": not issues, "counts": counts, "issues": issues,
             "scope": "Bounded macOS preview metadata/filename/path/dependency audit; not migration, complete secret or distribution acceptance."}
 
@@ -205,16 +305,26 @@ def probe_runtime(bundle):
             version = engine.stdout.strip()
             if not re.fullmatch(r"\d+\.\d+\.\d+", version):
                 raise ValueError("runtime_probe_failed")
-            return {"ok": data.get("fts5") is True and data.get("base_prefix_in_bundle") is True and data.get("stdlib_in_bundle") is True and version == "1.18.10", "python": data.get("python"), "sqlite": data.get("sqlite"), "fts5": data.get("fts5"), "base_prefix_in_bundle": data.get("base_prefix_in_bundle"), "stdlib_in_bundle": data.get("stdlib_in_bundle"), "opencode": version}
+            desktop = probe_desktop_inputs(python_root)
+            return {"ok": data.get("fts5") is True and data.get("base_prefix_in_bundle") is True and data.get("stdlib_in_bundle") is True and version == "1.18.10" and desktop["ok"], "python": data.get("python"), "sqlite": data.get("sqlite"), "fts5": data.get("fts5"), "base_prefix_in_bundle": data.get("base_prefix_in_bundle"), "stdlib_in_bundle": data.get("stdlib_in_bundle"), "opencode": version, "desktop_inputs": desktop}
     except (OSError, ValueError, subprocess.SubprocessError):
         return {"ok": False, "code": "runtime_probe_failed_private_details_withheld"}
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("bundle")
-    parser.add_argument("--probe-runtime", action="store_true", help="Execute isolated bundled Python FTS5 and OpenCode version only; no backend imports")
+    parser.add_argument("bundle", nargs="?")
+    parser.add_argument("--probe-runtime", action="store_true", help="Execute isolated Python FTS5, OpenCode version and Mac input imports; no actions/backend imports")
+    parser.add_argument("--probe-desktop-inputs", type=Path, help="Isolated Mac input imports for a staged Python root; no capture or input actions")
     args = parser.parse_args()
+    if args.probe_desktop_inputs is not None:
+        if args.bundle is not None or args.probe_runtime:
+            parser.error("desktop input probe takes only a Python root")
+        result = probe_desktop_inputs(args.probe_desktop_inputs)
+        print(json.dumps(result, sort_keys=True))
+        return 0 if result["ok"] else 1
+    if args.bundle is None:
+        parser.error("bundle path required")
     result = audit_bundle(args.bundle)
     if args.probe_runtime:
         result["runtime"] = probe_runtime(args.bundle) if result["ok"] else {"ok": False, "code": "probe_skipped_failed_static_audit"}

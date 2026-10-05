@@ -7,6 +7,45 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
+### Active installation and task handoff wave
+
+- Published source `e35dd9af9f362bfea267c3bce173cf9a59af4a98` now has
+  18 successful remote checks and four conditional/opt-in skips. It contains the
+  corrected cloud/local admission fixture and the 9.42 acceptance record.
+  Immutable 9.42 still contains production source `6947bbec1`.
+- INSTALL-01A source adds the existing pinned Mac desktop dependency extra and
+  import-only staging acceptance. Parent and independent review pass 24 script
+  tests. Development imports pass; the immutable 9.42 package lacks this closure.
+  New dependency acquisition and 9.43 packaging have not occurred.
+- INSTALL-01B fixes cold-cache passive model discovery: native/shared API and
+  default CLI `live=False` requests no longer invoke provider refresh. Four
+  prepatch inert failures and 14 focused postpatch passes establish the boundary;
+  explicit live discovery remains available. Web's explicit live mount and local
+  vision selection are separate cards. Parent integration remains required.
+- TASK-01B extends the existing in-process background-task adapter and TaskFlow
+  creation with durable origin attribution, bounded input, atomic duplicate
+  prevention, scoped inspection and retained asynchronous database work. The
+  worker passes 208 focused tests, including active-supervisor writer contention.
+  Known original surfaces persist through tracked and legacy agent creation;
+  unknown surfaces refuse. Approval-resume attribution, current revision and result
+  subscriptions remain separate acceptance gates.
+- RESOURCE-01A inert review reproduces overlapping GUI input threads,
+  cancellation that leaves already-running threads active, and foreign-session
+  AX references. A coordinated target-binding/physical-drain contract is required;
+  dependencies alone do not provide selected-window control or desktop Stop.
+- Parent owns integration, documentation, Git and the proposed 9.43 assembly.
+  TASK and INSTALL files are released after independent review. TASK independent
+  verification passes 86 tests with prohibited network connections. Read-only
+  local capability review identifies preset/text fallback and stale LM Studio
+  inventory cards for a subsequent source wave.
+  Preserve unrelated AUDIT-FIXES.md. Coding expansion remains last.
+- Source is now frozen and parent-owned. Combined integration passes 1,962 tests
+  across 100 suites with two skips/55 warnings in 51.55 seconds, with all 1,325
+  Python inputs unchanged. Full local typing has 800 existing errors and zero
+  normalized additions; Ruff, 24 script tests and docs navigation pass.
+  [Behavior and limits](INSTALL_AND_TASK_HANDOFF_EVIDENCE.md). Exact-source 9.43
+  assembly follows; 9.42 is not relabeled.
+
 ### Current multitasking and admission source
 
 - Three workers completed responsive realtime intake (RT-01), persistent

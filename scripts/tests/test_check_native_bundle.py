@@ -34,6 +34,15 @@ class BundleAuditTests(unittest.TestCase):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_bytes(b"fixture")
             path.chmod(0o755)
+        site = root / "Contents/Resources/python/lib/python3.11/site-packages"
+        for distribution, module in check.DESKTOP_DISTRIBUTIONS.items():
+            source = site / module
+            source.parent.mkdir(parents=True, exist_ok=True)
+            source.write_text("# inert dependency source\n")
+            metadata = site / (distribution.replace("-", "_") + "-0.1.dist-info/METADATA")
+            metadata.parent.mkdir(parents=True)
+            metadata.write_text(f"Name: {distribution}\nVersion: 0.1\n")
+        (site / "pyautogui/_pyautogui_osx.py").write_text("# inert Mac adapter\n")
 
     def write_info(self, root, updates=None):
         info = {"CFBundleIdentifier": "ai.feral.native.preview", "CFBundleExecutable": "feral-native",

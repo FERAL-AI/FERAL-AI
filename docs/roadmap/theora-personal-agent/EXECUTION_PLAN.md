@@ -6,7 +6,9 @@ visibility are published as `6947bbec1` and packaged in immutable 9.42.
 Frozen integration passes 1,765 tests across 88 suites. Exact-source packaging,
 packaged methods/backend lifecycle and actual isolated native warning/Quit pass.
 9.41 is the sole generated rollback. A test-only cloud/local pricing fixture
-correction follows one remote failure; new-head CI is still required.
+correction follows one remote failure. Corrected source `e35dd9af9` now has
+18 successful remote checks and four conditional skips. Local INSTALL/TASK
+changes require their own frozen integration and a new exact-source package.
 [Artifact and acceptance](NATIVE_9_42_ACCEPTANCE.md).
 [Behavior and acceptance](RUNTIME_MULTITASKING_EVIDENCE.md),
 [current ownership](WORK_STATE.md). Coding expansion remains last.
@@ -82,6 +84,9 @@ independent local card.
 ### Current ready cards and ownership
 
 After the 9.42 acceptance checkpoint, the next three bounded Mac cards are:
+
+Source work and independent findings are recorded in
+[installation and task handoff evidence](INSTALL_AND_TASK_HANDOFF_EVIDENCE.md).
 
 | Card | Existing interfaces to extend | Required acceptance |
 | --- | --- | --- |

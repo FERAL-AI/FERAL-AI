@@ -14,7 +14,7 @@ import sqlite3
 import threading
 import time
 from enum import Enum
-from typing import Optional, Any
+from typing import Optional, Any, Callable
 from uuid import uuid4
 
 import httpx
@@ -32,6 +32,10 @@ class TaskFlowStatus(str, Enum):
     COMPLETED = "completed"
     FAILED = "failed"
     CANCELLED = "cancelled"
+
+
+class TaskFlowHandoffConflict(ValueError):
+    """An accepted creation identity cannot be reused with changed terms."""
 
 
 class TaskFlowRuntime:
@@ -68,6 +72,7 @@ class TaskFlowRuntime:
     def _init_db(self):
         with self._lock:
             conn = self._conn
+            conn.execute("BEGIN IMMEDIATE")
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS taskflows (
@@ -106,6 +111,13 @@ class TaskFlowRuntime:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_taskflows_status ON taskflows(status)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_taskflows_updated ON taskflows(updated_at)")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_taskflow_steps_flow ON taskflow_steps(flow_id, step_index)")
+            # Optional creation identity lives with the flow, not a second runner.
+            columns = {r[1] for r in conn.execute("PRAGMA table_info(taskflows)")}
+            for name in ("handoff_key", "terms_digest", "origin_session_id", "origin_surface"):
+                if name not in columns:
+                    conn.execute(f"ALTER TABLE taskflows ADD COLUMN {name} TEXT")
+            conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_taskflows_handoff ON taskflows(handoff_key)")
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_taskflows_origin ON taskflows(origin_session_id, updated_at)")
             conn.commit()
 
     async def start(self):
@@ -179,6 +191,11 @@ class TaskFlowRuntime:
         title: str,
         steps: list[dict],
         context: Optional[dict] = None,
+        handoff_key: Optional[str] = None,
+        terms_digest: Optional[str] = None,
+        origin_session_id: Optional[str] = None,
+        origin_surface: Optional[str] = None,
+        creation_guard: Optional[Callable[[], None]] = None,
     ) -> dict:
         if not steps:
             raise ValueError("TaskFlow requires at least one step")
@@ -187,41 +204,101 @@ class TaskFlowRuntime:
                 raise ValueError(f"Invalid step at index {idx}")
             if not step.get("type"):
                 raise ValueError(f"Missing step.type at index {idx}")
+        if (handoff_key is None) != (terms_digest is None):
+            raise ValueError("TaskFlow handoff requires identity and terms digest")
+        if handoff_key is not None and any(
+            not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+            for value in (handoff_key, terms_digest)
+        ):
+            raise ValueError("Invalid TaskFlow handoff identity")
+        if origin_session_id is not None:
+            from security.session_identity import validate_session_id
+            validate_session_id(origin_session_id)
+        if origin_surface is not None:
+            from security.dangerous_tools import known_surfaces
+            if origin_surface not in known_surfaces():
+                raise ValueError("Invalid TaskFlow origin surface")
 
         now = time.time()
         flow_id = str(uuid4())[:12]
-        with self._lock:
-            conn = self._conn
-            conn.execute(
-                """
-                INSERT INTO taskflows
-                (id, session_id, title, status, current_step, context_json, created_at, updated_at)
-                VALUES (?, ?, ?, ?, 0, ?, ?, ?)
-                """,
-                (
-                    flow_id,
-                    session_id,
-                    title or f"TaskFlow {flow_id}",
-                    TaskFlowStatus.QUEUED.value,
-                    json.dumps(context or {}),
-                    now,
-                    now,
-                ),
-            )
-            for i, step in enumerate(steps):
-                payload = dict(step)
-                payload.pop("type", None)
-                conn.execute(
-                    """
-                    INSERT INTO taskflow_steps
-                    (flow_id, step_index, step_type, payload_json, status)
-                    VALUES (?, ?, ?, ?, 'pending')
-                    """,
-                    (flow_id, i, step["type"], json.dumps(payload)),
-                )
-            conn.commit()
-        self._wake_event.set()
+        replayed = False
+        retry_deadline = time.monotonic() + 5.0
+        while True:
+            busy = False
+            if creation_guard is not None:
+                creation_guard()
+            with self._lock:
+                conn = self._conn
+                timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+                conn.execute("PRAGMA busy_timeout = 0")
+                try:
+                    # A competing SQLite writer must not hold the mutex while
+                    # the active supervisor is trying to inspect ready flows.
+                    try:
+                        conn.execute("BEGIN IMMEDIATE")
+                    except sqlite3.OperationalError as exc:
+                        if (getattr(exc, "sqlite_errorcode", 0) & 255) != sqlite3.SQLITE_BUSY or time.monotonic() >= retry_deadline:
+                            raise
+                        busy = True
+                    if not busy:
+                        if creation_guard is not None:
+                            creation_guard()
+                        existing = conn.execute(
+                            "SELECT id, terms_digest, origin_session_id, origin_surface FROM taskflows WHERE handoff_key = ?", (handoff_key,),
+                        ).fetchone() if handoff_key is not None else None
+                        if existing is not None:
+                            if (existing["terms_digest"] != terms_digest or existing["origin_session_id"] != origin_session_id
+                                    or existing["origin_surface"] != origin_surface):
+                                raise TaskFlowHandoffConflict("TaskFlow handoff terms changed")
+                            flow_id, replayed = existing["id"], True
+                        else:
+                            conn.execute(
+                                """INSERT INTO taskflows
+                                (id, session_id, title, status, current_step, context_json, created_at, updated_at, handoff_key, terms_digest, origin_session_id, origin_surface)
+                                VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)""",
+                                (flow_id, session_id, title or f"TaskFlow {flow_id}", TaskFlowStatus.QUEUED.value,
+                                 json.dumps(context or {}), now, now, handoff_key, terms_digest, origin_session_id, origin_surface),
+                            )
+                            for i, step in enumerate(steps):
+                                payload = dict(step)
+                                payload.pop("type", None)
+                                conn.execute(
+                                    """INSERT INTO taskflow_steps
+                                    (flow_id, step_index, step_type, payload_json, status)
+                                    VALUES (?, ?, ?, ?, 'pending')""",
+                                    (flow_id, i, step["type"], json.dumps(payload)),
+                                )
+                        conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+                finally:
+                    conn.execute(f"PRAGMA busy_timeout = {timeout}")
+            if not busy:
+                break
+            # This adapter runs on a retained worker. Never sleep with the
+            # runtime mutex held; cancellation is rechecked before every retry.
+            if creation_guard is not None:
+                creation_guard()
+            time.sleep(0.025)
+        # The adapter may create on a worker thread. Wake only on a live loop.
+        owner_loop = self._runner_task.get_loop() if self._runner_task is not None else None
+        if owner_loop is not None and not owner_loop.is_closed():
+            owner_loop.call_soon_threadsafe(self._wake_event.set)
+        else:
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                pass  # No running supervisor has a wake waiter yet.
+            else:
+                self._wake_event.set()
         flow = self.get_flow(flow_id)
+        if flow is None:
+            raise RuntimeError("TaskFlow creation readback unavailable")
+        if handoff_key is not None:
+            flow["handoff_replayed"] = replayed
+        if replayed:
+            return flow
         # Consciousness-layer write: record the flow as an in-flight
         # entity so "where did I leave off" queries surface it across
         # a Brain restart. Wrapped in try/except so a missing store
@@ -240,6 +317,27 @@ class TaskFlowRuntime:
         except Exception:
             pass
         return flow
+
+    def origin_session_for_flow(self, flow_id: str) -> Optional[str]:
+        """Read creation-owned attribution, never a caller's context claim."""
+        with self._lock:
+            row = self._conn.execute("SELECT origin_session_id FROM taskflows WHERE id = ?", (flow_id,)).fetchone()
+        return row[0] if row is not None else None
+
+    def origin_surface_for_flow(self, flow_id: str) -> Optional[str]:
+        with self._lock:
+            row = self._conn.execute("SELECT origin_surface FROM taskflows WHERE id = ?", (flow_id,)).fetchone()
+        return row[0] if row is not None else None
+
+    def list_origin_flows(self, origin_session_id: str, *, limit: int = 50) -> list[dict]:
+        from security.session_identity import validate_session_id
+        validate_session_id(origin_session_id)
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM taskflows WHERE origin_session_id = ? ORDER BY updated_at DESC LIMIT ?",
+                (origin_session_id, max(1, min(limit, 100))),
+            ).fetchall()
+        return [self._flow_row_to_dict(row) for row in rows]
 
     def list_flows(
         self,
@@ -964,9 +1062,34 @@ class TaskFlowRuntime:
                 return {"status": "failed", "error": "No orchestrator available"}
             session_id = flow.get("session_id") or f"taskflow-{flow['id']}"
             try:
+                origin = flow.get("context", {}).get("task_origin", {})
+                command_context = None
+                if isinstance(origin, dict) and origin.get("source") in {"tracked_chat_turn", "legacy_agent_context"}:
+                    from security.dangerous_tools import known_surfaces
+                    with self._lock:
+                        stored = self._conn.execute(
+                            "SELECT handoff_key, terms_digest, origin_session_id, origin_surface, context_json FROM taskflows WHERE id = ?",
+                            (flow["id"],),
+                        ).fetchone()
+                    if (stored is None or not stored["origin_surface"]
+                            or origin.get("contract_version") != 1
+                            or origin.get("session_id") != stored["origin_session_id"]
+                            or origin.get("surface") != stored["origin_surface"]
+                            or origin != json.loads(stored["context_json"]).get("task_origin")
+                            or origin.get("surface") not in known_surfaces()):
+                        return {"status": "failed", "error": "Agent handoff origin is not durably bound", "dispatch_started": False}
+                    if origin.get("source") == "tracked_chat_turn" and (
+                            not stored["handoff_key"] or not stored["terms_digest"]
+                            or origin.get("handoff_key") != stored["handoff_key"]
+                            or origin.get("terms_digest") != stored["terms_digest"]):
+                        return {"status": "failed", "error": "Tracked handoff identity is not durably bound", "dispatch_started": False}
+                    command_context = {"surface": origin["surface"]}
                 # L4 — capture the reply text so downstream steps can consume
                 # it via {{ previous_output }} / {{ step_N }}.
-                reply = await self._orchestrator.handle_command(session_id, prompt)
+                if command_context is None:
+                    reply = await self._orchestrator.handle_command(session_id, prompt)
+                else:
+                    reply = await self._orchestrator.handle_command(session_id, prompt, context=command_context)
                 reply_text = "" if reply is None else str(reply)
                 return {"status": "completed", "prompt": prompt, "output": reply_text, "reply": reply_text}
             except Exception as exc:
