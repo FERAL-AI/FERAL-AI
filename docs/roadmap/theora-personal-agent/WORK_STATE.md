@@ -30,8 +30,9 @@ oversight is last. Existing coding functionality remains available.
   `fd7571150505b742900ae8b11e13ed83277c524fa565b1fdab6e08e356314d06`.
   [Behavior, regressions and limits](RUNTIME_RELIABILITY_EVIDENCE.md).
   Workers released their files; parent owns the frozen checkpoint/publication.
-  New source publication is prepared in the existing draft PR310; exact remote
-  identity/CI must be checked separately after push. Packaging remains pending.
+  Source commit `eb2060d6d62e3e4d932bf7fbd760311003af34e6` is published
+  and its exact remote HEAD verified in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
+  Remote checks started; overall CI is pending. Main is unchanged.
 - Existing immutable 9.40 contains none of these later fixes. No model, personal
   account, microphone, message, purchase, service registration or GUI launch is
   part of this source wave. Unrelated AUDIT-FIXES.md remains unstaged.
@@ -39,6 +40,13 @@ oversight is last. Existing coding functionality remains available.
   intake, exact durable scheduled grants, durable concurrent jobs, supported
   computer-control provisioning and real Mac/voice acceptance. Full product scope
   remains in the feature table below; bounded fixes do not close these gates.
+- Packaging 9.41/build2026100405 is prepared from a separate committed checkpoint.
+  Parent owns assembly; computer worker reviews it read-only. Measured 24 GiB
+  available, at most 2 GiB new payloads/copies planned. Require identical 52 Swift
+  inputs and compiler flags before native reuse, exact packaged Python identity,
+  bundled-runtime and strict ad-hoc signature checks. Preserve 9.40 as rollback;
+  inspect ownership/hash/signature/in-use status before retiring generated 9.39.
+  No package outcome or new GUI/hardware acceptance is yet claimed.
 
 ### Current independent runtime review
 

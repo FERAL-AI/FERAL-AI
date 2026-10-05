@@ -26,8 +26,8 @@ if icon.is_file():
 info = {
     'CFBundleName': 'FERAL Native Preview', 'CFBundleDisplayName': 'FERAL Native Preview',
     'CFBundleIdentifier': 'ai.feral.native.preview', 'CFBundleExecutable': 'feral-native',
-    'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '2026.9.40',
-    'CFBundleVersion': '2026100404', 'LSMinimumSystemVersion': '13.0',
+    'CFBundlePackageType': 'APPL', 'CFBundleShortVersionString': '2026.9.41',
+    'CFBundleVersion': '2026100405', 'LSMinimumSystemVersion': '13.0',
     'NSMicrophoneUsageDescription': 'FERAL uses your microphone only when you start a voice conversation.',
     'CFBundleIconFile': 'icon', 'NSHighResolutionCapable': True,
     'NSAppTransportSecurity': {'NSAllowsLocalNetworking': True},
