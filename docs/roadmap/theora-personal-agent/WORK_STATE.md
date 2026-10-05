@@ -1292,3 +1292,24 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
   these named files, rerun all gates, commit with a public implementation message,
   push, then build from that exact commit. The CUA native pipe remains unavailable,
   so GUI acceptance is still unexecuted.
+
+## October 5 9.46 packaging checkpoint
+
+- Source commit `af7ecd804f02123bb8cb9c33c1d5e8e6f8d1f88a` is published on the
+  release-foundation branch. Native candidate **2026.9.46 / 2026100502** was
+  freshly compiled from that exact commit with 53 Swift inputs. Manifest:
+  `/private/tmp/feral-candidate-9-46-manifest.json` (SHA
+  `3eb3d98a7063afaf73fedd4412c41e48eb3eb838299d318d00aa52a1877df5a9`). Native
+  binary SHA is `391ed880972a2e693dc959a9b2209f2f5dc7bda46d01992307a428a17b4cc504`.
+  9.45 remains at `/private/tmp/feral-candidate-9-45-preserved.app`; 9.44 remains
+  the prior rollback.
+- The exact-source builder passed in 172.71 seconds with 25.51 GiB free before
+  and 24.74 GiB after; bundle and packaged-core audits passed. Bundled task/
+  approval/selected-vision methods passed with no network or subprocess attempts
+  (`/private/tmp/feral-946-approval-vision-packaged-evidence.json`). Bundled
+  backend startup passed health in 2.10 seconds, owned-process/lifeline EOF
+  shutdown, listener closure and unchanged artifact identity
+  (`/private/tmp/feral-946-backend-startup-evidence.json`).
+- This is a packaged/runtime acceptance checkpoint, not GUI acceptance: native
+  CUA remains unavailable, and no real provider, account, audio, Messages,
+  commerce or glasses path was exercised.
