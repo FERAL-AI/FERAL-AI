@@ -1313,3 +1313,17 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
 - This is a packaged/runtime acceptance checkpoint, not GUI acceptance: native
   CUA remains unavailable, and no real provider, account, audio, Messages,
   commerce or glasses path was exercised.
+
+## October 5 provider/setup parity repair
+
+- Read-only cross-surface review found that CLI/WebUI requested live,
+  chat-filtered model lists while native onboarding requested cached,
+  unfiltered lists. Catalog-only providers were also visible in WebUI/native
+  despite backend activation rejecting them without an explicit gateway URL.
+- Commit `38bba5d4d` adds backend `runtime_supported`/`setup_selectable` flags
+  and changes native onboarding to the same bounded live/recommended/chat model
+  request used by WebUI. Provider API tests pass **35 passed**; the broader
+  provider/setup suite passes **365 passed**; native production typecheck passes.
+- This aligns discovery and readiness presentation. Credential storage remains
+  deliberately reviewed separately from activation; successful setup still does
+  not claim provider inference until a real or controlled provider probe is run.
