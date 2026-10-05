@@ -5,8 +5,10 @@ in the [single current checkpoint](WORK_STATE.md). The
 [independent runtime review](RUNTIME_REVIEW_20261004.md) confirms existing desktop
 computer use, reproduced routine/budget/voice/memory/completion defects and missing
 bundle dependencies. Bounded authority/recovery/result/accounting/memory fixes
-now pass frozen combined source verification: 1,405 tests across 72 suites.
-[Implementation and remaining limits](RUNTIME_RELIABILITY_EVIDENCE.md). Immutable 9.40
+now pass frozen combined source verification: 1,418 tests across 73 suites.
+[Implementation and remaining limits](RUNTIME_RELIABILITY_EVIDENCE.md).
+[Packaged 9.41](NATIVE_9_41_ACCEPTANCE.md) contains them with separate payload/backend
+startup evidence. Immutable 9.40
 still passes its bounded native browser/setup/lifecycle acceptance. No new physical,
 account, voice or distribution certification is implied.
 

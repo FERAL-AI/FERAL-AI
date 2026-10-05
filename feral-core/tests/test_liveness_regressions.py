@@ -604,17 +604,19 @@ def test_cron_turn_runs_on_the_brains_own_loop_when_there_is_one(cron_server_env
         loop.close()
 
 
-def test_a_contended_run_record_does_not_skip_the_routine(cron_server_env):
-    """``record_run_start`` is a raw sqlite3 INSERT + commit that sat
-    outside every try. One "database is locked" there took the whole
-    dispatch out, and (before D1) the scheduler thread with it. History
-    bookkeeping must never decide whether the routine runs."""
+def test_a_contended_run_record_refuses_dispatch_without_stalling_other_jobs(cron_server_env):
+    """An unattended turn needs persisted run identity before dispatch.
+
+    Contention must fail closed without escaping the callback or preventing
+    a later independent routine from running after bookkeeping recovers.
+    """
     server = cron_server_env["server"]
     cron = cron_server_env["cron"]
 
     def _boom(job_id):
         raise sqlite3.OperationalError("database is locked")
 
+    record_run_start = cron.record_run_start
     cron.record_run_start = _boom
 
     ran: list[str] = []
@@ -632,9 +634,16 @@ def test_a_contended_run_record_does_not_skip_the_routine(cron_server_env):
     )
     server.execute_routine_job(job)
 
-    assert ran == ["water the plants"], (
-        "a contended run-history INSERT stopped the routine from running"
+    assert ran == [], "routine dispatched without persisted run identity"
+    assert cron.get_runs(job.id) == []
+
+    cron.record_run_start = record_run_start
+    independent = cron.create_job(
+        JobType.CUSTOM, "every 30m", "independent", {"prompt": "fixture-ready"}, "s",
     )
+    server.execute_routine_job(independent)
+    assert ran == ["fixture-ready"]
+    assert len(cron.get_runs(independent.id)) == 1
 
 
 # ─────────────────────────────────────────────────────────────

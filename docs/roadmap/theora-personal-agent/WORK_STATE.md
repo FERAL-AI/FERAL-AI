@@ -32,21 +32,37 @@ oversight is last. Existing coding functionality remains available.
   Workers released their files; parent owns the frozen checkpoint/publication.
   Source commit `eb2060d6d62e3e4d932bf7fbd760311003af34e6` is published
   and its exact remote HEAD verified in [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310).
-  Remote checks started; overall CI is pending. Main is unchanged.
-- Existing immutable 9.40 contains none of these later fixes. No model, personal
-  account, microphone, message, purchase, service registration or GUI launch is
-  part of this source wave. Unrelated AUDIT-FIXES.md remains unstaged.
+  Packaging source `a3f99db02718ab620a579e4bd9ebfd2b4f4c637f` is also published.
+  Its remote checks show 17 success, four opt-in/conditional skips and one failed
+  Ubuntu backend fast lane. Independent log review identified one legacy assertion
+  expecting dispatch without persisted run identity; 13,911 other tests passed,
+  86 skipped, with 75.89% coverage. That assertion is corrected without changing
+  the runtime guard or CI configuration. New remote acceptance remains pending.
+  Main is unchanged.
+- Reconciled parent gate, including the complete liveness suite: 1,418 passed,
+  two skips, 61 warnings across 73 suites in 40.11 seconds. All 1,317 Python inputs
+  remain frozen; digest `41db6cbc4ce20409129588df55d26857a552e1086f3dd5989b9efb54e7379943`.
+  The contention regression refuses untracked dispatch and then proves a later
+  independent routine progresses after bookkeeping recovers. Only test/docs
+  inputs changed after 9.41 assembly; packaged production runtime is unchanged.
+- Immutable 9.41 contains these fixes; source/signature/runtime checks and isolated
+  packaged-method/backend startup pass. No model, personal account, microphone,
+  message, purchase, service registration or GUI launch is part of this wave.
+  Unrelated AUDIT-FIXES.md remains unstaged.
 - Next dependencies remain persistent cost reservations, responsive realtime
   intake, exact durable scheduled grants, durable concurrent jobs, supported
   computer-control provisioning and real Mac/voice acceptance. Full product scope
   remains in the feature table below; bounded fixes do not close these gates.
-- Packaging 9.41/build2026100405 is prepared from a separate committed checkpoint.
-  Parent owns assembly; computer worker reviews it read-only. Measured 24 GiB
-  available, at most 2 GiB new payloads/copies planned. Require identical 52 Swift
-  inputs and compiler flags before native reuse, exact packaged Python identity,
-  bundled-runtime and strict ad-hoc signature checks. Preserve 9.40 as rollback;
-  inspect ownership/hash/signature/in-use status before retiring generated 9.39.
-  No package outcome or new GUI/hardware acceptance is yet claimed.
+- Packaging 9.41/build2026100405 passes from the exact committed checkpoint.
+  Parent owns assembly; computer worker independently reviewed identity/retention.
+  All 52 Swift inputs and flags match verified 9.40; all 494 packaged Python files
+  equal source. Native SHA `8d414d82176a682db484f17afb8826209ac2f314459a05d02c30df34f2d9dc17`.
+  Bundled-runtime and strict ad-hoc signature checks pass. Measured 24 GiB before
+  and after, within the 2 GiB planned bound. Verified generated 9.39 was retired;
+  9.40 is retained as the sole rollback. Do not downgrade unresolved 9.41 routine
+  profiles onto the older scheduler. [Artifact and acceptance](NATIVE_9_41_ACCEPTANCE.md).
+  Actual bundled backend startup took 2.36 seconds; host lifeline EOF stopped the
+  owned child and closed its listener. Native GUI/hardware acceptance is pending.
 
 ### Current independent runtime review
 

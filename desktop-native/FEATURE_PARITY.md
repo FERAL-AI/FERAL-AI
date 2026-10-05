@@ -1,6 +1,12 @@
 # FERAL Native Preview: feature parity inventory
 
-**Verified Mac checkpoint (October 4).** Immutable 9.40/build2026100404,
+**Current packaged checkpoint (October 4).** 9.41/build2026100405 contains the
+runtime reliability wave. All 494 packaged Python files equal source `a3f99db02...`;
+runtime/signature audits, isolated packaged-method checks and actual backend
+startup/lifeline acceptance pass. No new native GUI, physical/account or release
+acceptance is implied. [Exact artifact and limits](../docs/roadmap/theora-personal-agent/NATIVE_9_41_ACCEPTANCE.md).
+
+**Preceding GUI-verified Mac checkpoint (October 4).** Immutable 9.40/build2026100404,
 source `250787b2d1512d2cef98ff77f8ceda607875ee24`, passes actual fresh-profile
 local-provider setup/probe, existing-Chrome connection/tab attachment, exact
 request-only native approval, visible synthetic page outcome, Stop/disconnect and

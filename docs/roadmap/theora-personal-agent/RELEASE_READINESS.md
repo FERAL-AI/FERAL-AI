@@ -4,13 +4,22 @@
 paths are confirmed and should be reused. Independent routine-policy/recovery,
 budget/settlement, voice/result, memory-attribution and inner desktop-dispatch
 findings now precede expanded unattended features. Runtime reliability
-fixes pass frozen combined source verification. Publication and new packaging
-remain separate from this source acceptance.
+fixes pass frozen combined source verification and are packaged in 9.41, with
+separate payload/backend startup evidence. Native GUI/hardware acceptance remains.
 [Implementation and limits](RUNTIME_RELIABILITY_EVIDENCE.md),
 [review and fix order](RUNTIME_REVIEW_20261004.md),
-[full current feature checkpoint](WORK_STATE.md). The 9.40 artifact remains immutable.
+[full current feature checkpoint](WORK_STATE.md).
 
-**Verified Mac checkpoint (October 4).** Immutable 9.40/build2026100404,
+**Current packaged Mac checkpoint.** 9.41/build2026100405, source `a3f99db02...`,
+contains the reliability fixes. All 494 packaged Python files match source;
+bundled-runtime and strict ad-hoc signature checks pass. Isolated packaged-method
+tests and actual backend startup/lifeline acceptance pass. This does not replace
+physical, account, clean-install or native GUI acceptance. Remote Ubuntu backend
+CI identified a legacy untracked-dispatch assertion; the corrected test passes
+the 1,418-test reconciled local gate. New remote acceptance is pending.
+[Artifact and rollback limits](NATIVE_9_41_ACCEPTANCE.md).
+
+**Preceding GUI-verified Mac checkpoint (October 4).** Immutable 9.40/build2026100404,
 source `250787b2d1512d2cef98ff77f8ceda607875ee24`, passes actual fresh-profile
 local-provider setup/probe, existing-Chrome connection/tab attachment, exact
 request-only native approval, visible synthetic page outcome, Stop/disconnect and

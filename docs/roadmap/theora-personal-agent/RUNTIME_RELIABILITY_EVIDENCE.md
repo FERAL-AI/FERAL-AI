@@ -75,8 +75,10 @@ into a product-coverage percentage.
   injection was corrected and the complete frozen gate rerun. Initial process
   isolation and first-WAL concurrency fixture failures remain test-harness limits,
   not additional app acceptance evidence.
-- No new bundle or physical/account outcome is claimed. Remote CI belongs to the
-  subsequently published exact commit and remains a separate gate.
+- Source verification alone claims no physical/account outcome. Subsequent
+  [9.41 packaging](NATIVE_9_41_ACCEPTANCE.md) incorporates these fixes with separate
+  payload and backend startup evidence. Remote CI belongs to its exact published
+  commit and remains a separate gate.
 - Repository Ruff check passes. Full local mypy completes with 809 errors in
   233 files across 1,317 inputs; this is an outstanding repository type-check
   limitation, not a type-clean acceptance result. The platform-specific public
@@ -85,6 +87,20 @@ into a product-coverage percentage.
   passes for tracked documents and this new ledger. The unfiltered working-tree
   scan still flags three ignored historical local documents; they are not staged
   or shipped and remain untouched.
+
+## CI reconciliation
+
+Subsequent remote CI identified one unchanged liveness assertion expecting a
+routine to execute after its run-identity insert fails. The failure reproduced
+locally. The corrected regression checks zero untracked dispatch and successful
+progress of a later independent routine after bookkeeping recovers. Production
+runtime and CI configuration remain unchanged. The complete reconciled local
+gate passes 1,418 tests across 73 suites with two skips and 61 warnings in
+40.11 seconds; all 1,317 Python inputs remain frozen with digest
+`41db6cbc4ce20409129588df55d26857a552e1086f3dd5989b9efb54e7379943`.
+Receipt: `/private/tmp/feral-reliability-integration-941-reconciled-20261004/result.json`.
+The preceding remote run passed 13,911 other tests and 75.89% coverage with
+86 skips. New remote acceptance is pending; these counts are not summed.
 
 ## Remaining dependencies
 
@@ -102,7 +118,7 @@ into a product-coverage percentage.
    developer documentation. Coding/OpenCode feature expansion follows the product
    reliability and everyday-use work. Mac leads; Linux expansion/Gen-UI stay deferred.
 
-The immutable 9.40 app predates this source wave. No account, audio, message,
+The retained 9.40 app predates this source wave; 9.41 incorporates it. No account, audio, message,
 purchase, download, service registration or GUI acceptance is implied by these
 regressions. [Full feature state](WORK_STATE.md),
 [release gates](RELEASE_READINESS.md) retain the complete scope.

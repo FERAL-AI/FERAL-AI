@@ -1,10 +1,11 @@
 # Theora personal agent: product and engineering plan
 
-**Current checkpoint: October 4, 2026.** Immutable native9.40/source250787b2d
-passes bounded actual setup, selected Chrome action and normal shutdown.
-Later runtime reliability fixes pass 1,405 tests across 72 frozen source suites;
-they are separate from that package. Actual audio, accounts/devices, local control
-provisioning and distribution remain open. The new
+**Current checkpoint: October 4, 2026.** Immutable native9.41/sourcea3f99db02
+contains the runtime reliability fixes, with exact payload/runtime/signature checks
+and isolated backend startup/lifeline acceptance. Source verification passes
+1,418 tests across 73 suites. Native GUI acceptance belongs to predecessor9.40;
+actual audio, accounts/devices, local control provisioning and distribution remain
+open. The new
 [multitasking and setup plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) covers background
 jobs during voice, subscription/API/local access, three-step installation,
 computer/browser ownership, Messages shopping offers and phone/glasses handoff.
@@ -41,7 +42,7 @@ The candidate advantage is the complete loop from real-world context to grounded
 | [Runtime reliability evidence](RUNTIME_RELIABILITY_EVIDENCE.md) | Central routine/computer authority, occurrence recovery, truthful results/accounting and source-aware memory; frozen combined checks and remaining contracts |
 | [Contributor rules](../../../AGENTS.md) | Authorization, privacy, verification, worker ownership, resource retention and clean Git publication |
 | [Codex continuation rules](../../../codex.md) | Checkpoint cadence, source/candidate distinctions and resuming the existing project |
-| [Latest native candidate](NATIVE_9_40_ACCEPTANCE.md) | Exact source, actual setup/selected Chrome action, normal exit and remaining audio/account/release gates |
+| [Latest native candidate](NATIVE_9_41_ACCEPTANCE.md) | Exact runtime source, packaged-method/backend startup and rollback limits; remaining GUI/audio/account/release gates |
 | [Multitasking and easy setup](MULTITASKING_AND_EASY_SETUP_PLAN.md) | Current subscription/voice research and source-backed installation, durable jobs, browser/resources, shopping and iOS acceptance cards |
 | [Automatic learning switch](SELF_LEARNING_SWITCH_EVIDENCE.md) | Boot/live revocation, learner cost authority and664-check source integration outside9.36 |
 | [Setup and status integration](SETUP_PARITY_EVIDENCE.md) | Model-list/CLI parity, asynchronous terminal fixtures and695-check combined integration outside9.36 |

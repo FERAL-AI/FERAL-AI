@@ -8,7 +8,9 @@ fixes pass frozen combined source verification; coding/OpenCode
 feature expansion follows the Mac product work.
 [Implementation and limits](RUNTIME_RELIABILITY_EVIDENCE.md),
 [review and fix order](RUNTIME_REVIEW_20261004.md),
-[full current feature checkpoint](WORK_STATE.md). The 9.40 artifact remains immutable.
+[full current feature checkpoint](WORK_STATE.md).
+[Packaged 9.41](NATIVE_9_41_ACCEPTANCE.md) contains this wave; 9.40 remains an
+immutable rollback with its own earlier GUI acceptance.
 
 Reconciled October 3, 2026 by parallel source/research audits and the parent integration audit. This supersedes the dependency order in older planning prose where it would require rebuilding existing sessions, memory or workflows before packaging the supported local system. It does not supersede their safety or acceptance contracts.
 
