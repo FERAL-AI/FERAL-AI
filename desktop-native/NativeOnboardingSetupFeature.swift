@@ -44,6 +44,16 @@ enum NativeSetupWire {
         guard ids.allSatisfy({!$0.isEmpty && $0.utf8.count<=256 && !$0.unicodeScalars.contains(where:{CharacterSet.whitespacesAndNewlines.union(.controlCharacters).contains($0)})}) else{throw NativeSetupFailure("Cached model IDs are unsupported.")}
         var seen:Set<String>=[];return(ids.filter{seen.insert($0).inserted},source)
     }
+    static func probe(_ raw:[String:Any],provider:String)throws->Bool{
+        // ProviderStatus is a status receipt, including `error: ""` when reachable.
+        // A negative result may contain bounded private diagnostics; never render them.
+        guard id(provider)==provider,let reachable=bool(raw["reachable"]),raw["id"] != nil || raw["provider_id"] != nil else{throw NativeSetupFailure("Probe receipt did not identify the reviewed provider.")}
+        for key in ["id","provider_id"]{if let value=raw[key]{guard id(value)==provider else{throw NativeSetupFailure("Probe receipt did not identify the reviewed provider.")}}}
+        if let value=raw["error"],!(value is NSNull){
+            guard let detail=value as? String,detail.utf8.count<=4096,!reachable || detail.isEmpty else{throw NativeSetupFailure("Probe reachability status is unsupported. Private provider details are withheld.")}
+        }
+        return reachable
+    }
     static func providers(_ raw:[String:Any])throws->[NativeSetupProvider]{
         guard let rows=raw["providers"] as? [[String:Any]],rows.count<=100 else{throw NativeSetupFailure("Provider catalogue is unavailable or unsupported.")};var seen:Set<String>=[]
         return try rows.map{row in guard let id=id(row["id"]),seen.insert(id).inserted,let name=text(row["display_name"],limit:160),let local=bool(row["supports_local"]),let key=bool(row["requires_api_key"]),let configured=bool(row["configured"]),let chat=bool(row["chat_ready"]),let model=text(row["default_model"],limit:256,empty:true),let endpoint=text(row["default_base_url"],limit:2048,empty:true) else{throw NativeSetupFailure("Provider catalogue metadata is unsupported.")};if let reachable=row["reachable"],!(reachable is NSNull),bool(reachable)==nil{throw NativeSetupFailure("Provider reachability status is unsupported.")};// The actual Qwen descriptor is informational until its workspace is resolved.
@@ -77,10 +87,10 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
     private let session:URLSession
     init(session:URLSession?=nil){self.session=session ?? NativeSetupRedirectGuard.session()}
     func configure(baseURL:URL?){guard self.baseURL != baseURL else{return};generation=UUID();self.baseURL=baseURL;providers=[];models=[];selected="";saved=[:];model="";endpoint="";runtimeAvailable=nil;vaultReady=false;setupComplete=false;error=nil;notice=nil;used=[];busy=operation != nil}
-    private func request(_ base:URL,path:String,body:[String:Any]?=nil,query:[URLQueryItem]=[])async throws->[String:Any]{
+    private func request(_ base:URL,path:String,body:[String:Any]?=nil,query:[URLQueryItem]=[],probeProvider:String?=nil)async throws->[String:Any]{
         guard base.scheme=="http",["127.0.0.1","::1","[::1]"].contains(base.host ?? ""),base.user==nil,base.password==nil,var parts=URLComponents(url:base,resolvingAgainstBaseURL:false) else{throw NativeSetupFailure("Provider setup requires the local service.")};parts.path=path;parts.queryItems=query.isEmpty ? nil : query;parts.fragment=nil;guard let url=parts.url else{throw NativeSetupFailure("Invalid setup URL.")};var req=URLRequest(url:url);req.httpMethod=body==nil ? "GET" : "POST"
         if let body=body{guard JSONSerialization.isValidJSONObject(body) else{throw NativeSetupFailure("Invalid setup request.")};req.httpBody=try JSONSerialization.data(withJSONObject:body);req.setValue("application/json",forHTTPHeaderField:"Content-Type")}
-        let (data,response)=try await session.feralLocalData(for:req);guard data.count<=524288,let http=response as? HTTPURLResponse,http.url==url,(200..<300).contains(http.statusCode),let raw=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any],raw["error"]==nil else{throw NativeSetupFailure("Setup request failed or was not acknowledged. Private provider details are withheld.")};return raw
+        let (data,response)=try await session.feralLocalData(for:req);guard data.count<=524288,let http=response as? HTTPURLResponse,http.url==url,(200..<300).contains(http.statusCode),let raw=(try? JSONSerialization.jsonObject(with:data)) as? [String:Any] else{throw NativeSetupFailure("Setup request failed or was not acknowledged. Private provider details are withheld.")};if let probeProvider{_ = try NativeSetupWire.probe(raw,provider:probeProvider)}else{guard raw["error"]==nil else{throw NativeSetupFailure("Setup request failed or was not acknowledged. Private provider details are withheld.")}};return raw
     }
     func refresh()async {
         guard !busy,let base=baseURL else{return};let started=generation,op=UUID();operation=op;busy=true;error=nil
@@ -126,7 +136,7 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
                 guard NativeSetupWire.bool(raw["success"])==true,raw["provider"] as? String==item.provider,raw["model"] as? String==item.model else{throw NativeSetupFailure("Provider activation receipt did not match the review.")}
                 notice="Provider settings were acknowledged. Runtime activation and working model inference require separate verification."
             case .probe:
-                sent=true;raw=try await request(item.origin,path:"/api/llm/providers/"+item.provider+"/probe",body:[:]);guard raw["id"] as? String==item.provider || raw["provider_id"] as? String==item.provider,let reachable=NativeSetupWire.bool(raw["reachable"]) else{throw NativeSetupFailure("Probe receipt did not identify the reviewed provider.")};notice=reachable ? "Backend reports the saved provider reachable. A successful model response is still unverified." : "Backend reports the saved provider unreachable. Setup remains saved; no successful model response is claimed."
+                sent=true;raw=try await request(item.origin,path:"/api/llm/providers/"+item.provider+"/probe",body:[:],probeProvider:item.provider);let reachable=try NativeSetupWire.probe(raw,provider:item.provider);notice=reachable ? "Backend reports the saved provider reachable. A successful model response is still unverified." : "Backend reports the saved provider unreachable. Setup remains saved; no successful model response is claimed."
             case .complete:
                 let setup=try await request(item.origin,path:"/api/setup/status");guard generation==started,!Task.isCancelled else{return false};guard NativeSetupWire.bool(setup["setup_complete"])==item.setupComplete else{throw NativeSetupFailure("Setup completion state changed. Review again.")};sent=true;raw=try await request(item.origin,path:"/api/setup/complete",body:[:]);guard NativeSetupWire.bool(raw["ok"])==true,NativeSetupWire.bool(raw["setup_complete"])==true else{throw NativeSetupFailure("Setup completion was not acknowledged.")};notice="Setup completion was acknowledged. Voice, access, pairing and sync remain deferred; provider inference is unverified."
             }

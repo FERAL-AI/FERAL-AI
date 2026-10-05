@@ -17,7 +17,9 @@ The existing installed app and personal data stay intact while the native candid
 The direct connection adapter, explicit native reviews and strict selected-chat
 resource approvals are implemented. The frozen 53-suite integration passes
 1,468 tests; Browser 115 and Oversight 12 fixture groups pass. Exact-source
-packaging and actual new native controls are not yet certified. See the
+9.38 packaging and bounded actual new native controls are recorded; lifecycle
+acceptance failed the harness deadline. Corrected provider-status parsing and
+approval-scope copy await 9.39 packaging and actual acceptance. See the
 [connection contract](EXISTING_CHROME_PLAN.md) and [current state](WORK_STATE.md)
 for this wave. Concurrent independent browser resources/foreground takeover,
 whole-desktop sharing and account/commerce outcomes retain separate exit gates.

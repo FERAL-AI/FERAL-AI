@@ -1,9 +1,11 @@
 # Existing Chrome connection contract
 
 Updated October 4, 2026. The connection adapter, local HTTP routes and native
-review controls are implemented in the current integration tree. Immutable
-2026.9.37/source `b9afadb236e6e39d798a311d38955bb9e8051e74` predates this
-connection feature; its packaged-browser acceptance is a separate record.
+review controls are implemented. Immutable 9.38/source
+`d5c063605e4991dcc0efd1396854eecca7968957` passes bounded actual native
+connection, selection, viewing and approval observations; normal Quit failed the
+harness deadline. [Actual artifact record](NATIVE_9_38_ACCEPTANCE.md).
+Provider-status and approval-scope presentation corrections await 9.39 acceptance.
 
 ## Connection and consent
 
@@ -130,7 +132,7 @@ These are distinct checks, not additive product-readiness totals:
   log: `/private/tmp/feral-chrome-disconnect-race-fiw59czv/pytest.log`.
   Four tested inputs were unchanged; test SHA
   `d4976eb1ea5360aac83d7f2e9d1d1810892074bbc03425ae0ee7a5b66f2f9842`.
-- Native Browser review/view fixtures: **103 checks passed** in the parent
+- Native Browser review/view fixtures: **115 checks passed** in the parent
   integration runner (`bash test_features.sh BrowserView Oversight`, from
   `desktop-native`). The same log records 12 Oversight groups, 28 linked wire
   groups, 39 desktop assertions and five error assertions. Log:

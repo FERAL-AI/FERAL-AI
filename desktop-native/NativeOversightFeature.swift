@@ -1,6 +1,24 @@
 import SwiftUI
 import Foundation
 
+struct NativeApprovalBrowserResource: Equatable {
+    let connectionID: String
+    let targetID: String
+    let ownerSessionID: String
+    init(_ raw: Any, sessionID: String, tool: String) throws {
+        guard let value = raw as? [String: Any], Set(value.keys) == ["connection_id", "target_id", "owner_session_id"],
+              let connection = value["connection_id"] as? String, connection.utf8.count == 36,
+              UUID(uuidString: connection)?.uuidString.lowercased() == connection,
+              let target = value["target_id"] as? String, (1...128).contains(target.utf8.count),
+              target.utf8.allSatisfy({ (65...90).contains($0) || (97...122).contains($0) || (48...57).contains($0) || $0 == 45 || $0 == 95 }),
+              let owner = value["owner_session_id"] as? String, owner == sessionID,
+              NativeGlobalApproval.validSession(owner), tool.hasPrefix("browser__") || tool.hasPrefix("web_actions__") else {
+            throw OversightFailure(message: "The browser approval scope is invalid. Refresh before deciding; no session permission can be inferred.")
+        }
+        connectionID = connection; targetID = target; ownerSessionID = owner
+    }
+}
+
 struct NativeGlobalApproval: Identifiable {
     let connectionID: UUID
     let id: String
@@ -11,11 +29,28 @@ struct NativeGlobalApproval: Identifiable {
     let arguments: String
     let policy: String
     let status: String
+    let browserResource: NativeApprovalBrowserResource?
+
+    static func validSession(_ value: String) -> Bool {
+        !value.isEmpty && value.unicodeScalars.count <= 1024 && value.trimmingCharacters(in: .whitespacesAndNewlines) == value && !value.unicodeScalars.contains(where: { $0.properties.generalCategory == .control })
+    }
+    var approvalActionTitle: String { browserResource == nil ? "Approve for this session" : "Approve this request" }
+    var approvalDialogTitle: String { browserResource == nil ? "Approve this tool for its session?" : "Approve this exact browser request?" }
+    var approvalExplanation: String {
+        if let resource = browserResource {
+            return "Runs only this request using the reviewed arguments on Chrome tab \(resource.targetID), connection \(resource.connectionID), in session \(sessionID). It grants no ongoing tool permission. A changed connection or tab requires a fresh request and review. Approval is not proof of successful execution. It does not change your global autonomy policy."
+        }
+        return "The core tool will run using the reviewed arguments. This also grants the same tool for this session. It does not change your global autonomy policy."
+    }
+    var approvedReceipt: String {
+        if let resource = browserResource {
+            return "Approved this request for \(tool) on Chrome tab \(resource.targetID) (connection \(resource.connectionID)) in session \(sessionID). No ongoing tool permission was granted."
+        }
+        return "Approved \(tool) for session \(sessionID)."
+    }
 
     var sessionIssue: String? {
-        guard !sessionID.isEmpty, sessionID.unicodeScalars.count <= 1024,
-              sessionID.trimmingCharacters(in: .whitespacesAndNewlines) == sessionID,
-              !sessionID.unicodeScalars.contains(where: { $0.properties.generalCategory == .control }) else {
+        guard Self.validSession(sessionID) else {
             return "This request has no valid caller session. It cannot be approved or denied here. The original caller must submit a fresh request with its exact session; this action will not be replayed."
         }
         return nil
@@ -137,7 +172,8 @@ private func oversightBool(_ value: Any?) -> Bool? {
                       let args = row["args"] as? [String: Any] else {
                     throw OversightFailure(message: "The approval queue contains an invalid request. Refresh before deciding.")
                 }
-                return NativeGlobalApproval(connectionID: started, id: id, sessionID: sessionID, tool: tool, safety: row["safety_level"] as? String ?? "Unspecified", created: Date(timeIntervalSince1970: (row["created_at"] as? NSNumber)?.doubleValue ?? 0), arguments: oversightJSON(args), policy: oversightJSON(row["policy_sources"] as? [String: Any] ?? [:]), status: status)
+                let resource = try row["browser_resource"].map { try NativeApprovalBrowserResource($0, sessionID: sessionID, tool: tool) }
+                return NativeGlobalApproval(connectionID: started, id: id, sessionID: sessionID, tool: tool, safety: row["safety_level"] as? String ?? "Unspecified", created: Date(timeIntervalSince1970: (row["created_at"] as? NSNumber)?.doubleValue ?? 0), arguments: oversightJSON(args), policy: oversightJSON(row["policy_sources"] as? [String: Any] ?? [:]), status: status, browserResource: resource)
             }
             approvals = parsed; queueFresh = true; queueError = nil
         } catch { if generation == started { queueFresh = false; queueError = error.localizedDescription } }
@@ -190,6 +226,7 @@ private func oversightBool(_ value: Any?) -> Bool? {
               let current = approvals.first(where: { $0.id == reviewed.id }), current.status == "pending",
               current.sessionID == reviewed.sessionID, current.arguments == reviewed.arguments,
               current.tool == reviewed.tool, current.policy == reviewed.policy, current.safety == reviewed.safety,
+              current.browserResource == reviewed.browserResource,
               !approve || paused == false else {
             decisionError = "This request or supervisor state changed. Refresh and review it again."
             return
@@ -208,7 +245,7 @@ private func oversightBool(_ value: Any?) -> Bool? {
             }
             approvals.removeAll { $0.id == current.id }
             if approve {
-                receipt = "Approved \(current.tool) for session \(current.sessionID)."
+                receipt = current.approvedReceipt
                 if let result = value["result"] as? [String: Any] {
                     let rawError = result["error"]
                     let hasError = (rawError as? String).map { !$0.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty } ?? (rawError != nil && !(rawError is NSNull))
@@ -268,7 +305,7 @@ struct NativeOversightFeatureView: View {
                 if let error = model.decisionError { oversightNotice(error) }
                 if let receipt = model.receipt { NativeSelectableText(receipt).font(.callout) }
                 Text("Pending approvals").font(.title2.weight(.semibold))
-                Text("Up to 500 pending core tool approvals across sessions. Coding engine approvals remain in Coding. Approving a core tool grants it for that session and runs this request.").font(.callout).foregroundStyle(.secondary)
+                Text("Up to 500 pending core tool approvals across sessions. Coding engine approvals remain in Coding. Review the scope shown on each request before approving.").font(.callout).foregroundStyle(.secondary)
                 if let error = model.queueError { oversightNotice("Queue could not be refreshed. " + error) }
                 if model.approvals.isEmpty && model.queueFresh { Text("No core tool requests are waiting.").foregroundStyle(.secondary) }
                 ForEach(model.approvals) { request in
@@ -278,9 +315,10 @@ struct NativeOversightFeatureView: View {
                             Text(request.created.formatted(date: .abbreviated, time: .standard)).font(.caption).foregroundStyle(.secondary)
                             oversightCode("Proposed arguments", text: request.arguments)
                             DisclosureGroup("Policy that held this request") { oversightCode("Policy sources", text: request.policy) }
+                            Text(request.approvalExplanation).font(.callout).foregroundStyle(.secondary)
                             if let issue = request.sessionIssue { oversightNotice(issue) }
                             HStack {
-                                Button("Approve for this session…") { confirmation = request; approve = true }
+                                Button(request.approvalActionTitle + "…") { confirmation = request; approve = true }
                                     .disabled(request.sessionIssue != nil || !model.queueFresh || model.paused != false || model.loading || model.acting)
                                 Button("Deny request…") { confirmation = request; approve = false }
                                     .disabled(request.sessionIssue != nil || !model.queueFresh || model.loading || model.acting)
@@ -324,16 +362,16 @@ struct NativeOversightFeatureView: View {
                 if !Task.isCancelled { await model.refresh() }
             }
         }
-        .confirmationDialog(approve ? "Approve this tool for its session?" : "Deny this pending request?", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
+        .confirmationDialog(approve ? (confirmation?.approvalDialogTitle ?? "Review this pending request") : "Deny this pending request?", isPresented: Binding(get: { confirmation != nil }, set: { if !$0 { confirmation = nil } }), titleVisibility: .visible) {
             if let request = confirmation {
-                Button(approve ? "Approve for this session" : "Deny request", role: approve ? nil : .destructive) {
+                Button(approve ? request.approvalActionTitle : "Deny request", role: approve ? nil : .destructive) {
                     let choice = approve; confirmation = nil
                     Task { await model.decide(request, approve: choice) }
                 }
                 Button("Cancel", role: .cancel) { confirmation = nil }
             }
         } message: {
-            Text(approve ? "The core tool will run using the reviewed arguments. This also grants the same tool for this session. It does not change your global autonomy policy." : "This denies only the pending request. It does not change your global autonomy policy.")
+            Text(approve ? (confirmation?.approvalExplanation ?? "Refresh and review this request before deciding.") : "This denies only the pending request. It does not change your global autonomy policy.")
         }
         .confirmationDialog(model.paused == true ? "Resume supervised calls?" : "Pause new supervised calls?", isPresented: $pauseConfirmation, titleVisibility: .visible) {
             Button(model.paused == true ? "Resume" : "Pause") { let desired = model.paused != true; Task { await model.setPaused(desired) } }

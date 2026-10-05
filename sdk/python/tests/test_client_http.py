@@ -130,19 +130,37 @@ def test_confirmation_denial_and_unknown_are_application_results(server_contract
     async def scenario():
         async with FeralClient("http://brain", bearer_token="sdk-test-credential",
                                transport=server_contract.transport) as client:
-            needs_review = await client.invoke_skill("sdk_confirm", "act", {"fixture": 1})
+            needs_review = await client.invoke_skill("sdk_confirm", "act", {"fixture": 1},
+                                                   session_id="sdk-reviewed-session")
             assert needs_review["success"] is False
             assert needs_review["status_code"] == 412
             assert needs_review["policy"]["level"] == "confirm"
             assert server_contract.calls == []  # No automatic confirmation or retry.
-            approved = await client.invoke_skill("sdk_confirm", "act", {"fixture": 1}, confirm=True)
+            approved = await client.invoke_skill("sdk_confirm", "act", {"fixture": 1}, confirm=True,
+                                               session_id="sdk-reviewed-session")
             assert approved["success"] is True
             assert len(server_contract.calls) == 1
+            assert server_contract.calls[0][2].session_id == "sdk-reviewed-session"
             denied = await client.invoke_skill("sdk_deny", "act", confirm=True)
             assert denied["success"] is False and denied["status_code"] == 403
             missing = await client.invoke_skill("unknown_sdk_skill", "act")
             assert missing["success"] is False and missing["status_code"] == 404
             assert len(server_contract.calls) == 1
+    run(scenario())
+
+
+@pytest.mark.parametrize("session_id", [None, "", " leading", "trailing ", "private\nidentity",
+                                       "private\u0085identity", "x" * 1025, True, 1])
+def test_missing_or_invalid_caller_session_cannot_dispatch_reviewed_action(server_contract, session_id):
+    async def scenario():
+        async with FeralClient("http://brain", bearer_token="sdk-test-credential",
+                               session_id="different-chat-session",
+                               transport=server_contract.transport) as client:
+            result = await client.invoke_skill("sdk_confirm", "act", {"fixture": 1},
+                                               confirm=True, session_id=session_id)
+            assert result["success"] is False and result["status_code"] == 422
+            assert result["error_code"] == "context_invalid_session"
+            assert server_contract.calls == []
     run(scenario())
 
 

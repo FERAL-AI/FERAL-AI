@@ -23,8 +23,8 @@ import unicodedata
 from typing import Any
 from uuid import uuid4
 
-from memory.runtime_session_checkpoint import (
-    CheckpointValidationError,
+from security.session_identity import (
+    SessionIdentityValidationError,
     validate_session_id,
 )
 from skills.call_context import context_enabled, current_context
@@ -515,7 +515,7 @@ class ExistingChromeConnector:
     def __init__(self, owner_session_id: str, profile_dir: Path | None = None):
         try:
             validate_session_id(owner_session_id)
-        except CheckpointValidationError:
+        except SessionIdentityValidationError:
             raise ExistingChromeError("existing_chrome_owner_required", 403) from None
         self.owner_session_id = owner_session_id
         self._profile = (

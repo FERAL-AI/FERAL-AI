@@ -13,6 +13,11 @@ from dataclasses import dataclass
 from enum import Enum
 from uuid import UUID
 
+from security.session_identity import (
+    SessionIdentityValidationError,
+    validate_session_id as _validate_session_id,
+)
+
 FORMAT_VERSION = 1
 IMAGE_OMITTED = "[Image unavailable in restored context]"
 
@@ -42,10 +47,10 @@ class CheckpointLimits:
 
 
 def validate_session_id(value: str) -> None:
-    if not isinstance(value, str) or not value or len(value) > 1024 or value.strip() != value or any(
-        unicodedata.category(char) == "Cc" for char in value
-    ):
-        raise CheckpointValidationError("Invalid checkpoint session identity")
+    try:
+        _validate_session_id(value)
+    except SessionIdentityValidationError:
+        raise CheckpointValidationError("Invalid checkpoint session identity") from None
 
 
 def validate_uuid(value: str) -> None:

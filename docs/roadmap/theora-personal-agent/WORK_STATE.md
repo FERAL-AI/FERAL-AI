@@ -7,48 +7,59 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### Active existing-Chrome integration wave
+### Active Mac acceptance corrections
 
-- Baseline published source is `290b034a096157b0b87a51a0c16510e032334dba`;
-  all executed required workflows pass; opt-in real-brain E2E is skipped.
-  The installed immutable package remains 9.37/runtime b9af until assembly.
-- Parent plus three workers completed separate source cards: strict REST session
-  identity and native Oversight; real selector input/document fences; direct
-  existing-Chrome discovery and session transport; registered route and genuine
-  central approval integration. Parent owns native connection controls, rollback,
-  runtime fencing, combined verification, packaging and publication.
-- Explicit existing-Chrome controls and direct CDP integration are implemented in
-  the working tree. They do not install an MCP server, launch Chrome, copy a user
-  profile or grant unrestricted actions. Tab titles are consented bounded local
-  inventory; exact session/connection/target approvals govern dispatch.
-  [Connection contract](EXISTING_CHROME_PLAN.md).
-- Frozen 53-suite backend run: **1,468 passed, three opt-in skips**, 230 warnings,
-  43 seconds; all 1,305 Python inputs unchanged. The preceding sandbox run
-  failed only at localhost bind with PermissionError and is retained; an
-  escalated same-source run passed. A prior private harness named two absent
-  suites and stopped before collection; corrected inventory was verified.
-- Native Browser **115 checks**, Oversight **12 groups**, linked model **28 groups**,
-  desktop **39 assertions**, error presentation **five assertions** pass. These
-  transport/GUI-model fixtures do not certify the actual app or personal Chrome.
-- The five new typing diagnostics were corrected; final full mypy retains 809
-  errors in 233 files with zero normalized additions/removals and all 1,305
-  Python inputs unchanged. Ruff passes. This is no-regression typing, not clean.
-- Real installed owned-Chrome adapter acceptance passes nine checks, including
-  the production default-path constructor in an isolated subprocess home,
-  exact-field Unicode, preserved wrong-focus field, actual selector click,
-  accessibility snapshot, password/control pixels and socket-only disconnect.
-  Final adapter SHA fa18a52a545c86e4cfc2552a0c775ee74f828acc24d2c600a4b334b801bab821.
-  Owned Chrome exited normally and both listeners closed. Personal permission
-  or account behavior is not verified. Exact committed 9.38 assembly is pending.
-- Disk headroom remains 27 GiB. Package wave budget: 2 GiB new artifacts; canonical
-  plus one preceding verified app. Retire only the exactly verified generated
-  9.36 rollback when preserving 9.37. Personal profiles/accounts/settings/models,
-  Git history and unrelated AUDIT-FIXES.md remain untouched by this wave.
-- Next: freeze final inputs, commit and
-  push the existing draft branch, package 9.38/build2026100402 from that exact
-  source, then test actual native connection/selection/approval/revocation/Quit.
-  Default-profile Chrome permission and representative account/2FA/purchase
-  outcomes remain separate unperformed acceptance. Main and release stay unchanged.
+- Published implementation is `d5c063605e4991dcc0efd1396854eecca7968957`
+  on `feat/native-product-release-foundation-20261001` in
+  [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Main is unchanged.
+- Immutable 9.38/build2026100402 contains that exact source: 52 native inputs,
+  492 packaged Python files, optimized assembly, runtime probes and strict ad-hoc
+  signature pass. Native SHA
+  `887cabcdbb31b3e983f6439eb3255fc5a6226b7e05ad98b6d405a0d65d8ab0ac`.
+  [Actual acceptance and limitations](NATIVE_9_38_ACCEPTANCE.md).
+- Actual isolated native Chrome controls passed connect/cancel/select, separate
+  viewing consent, masked frames, native Oversight approval, changed synthetic
+  button and real input marker, Stop/navigation and disconnect. These used an
+  owned synthetic browser and the production default-path discovery constructor.
+  Personal Chrome permission, accounts and model-selected tasks were not tested.
+- Normal Quit was not captured before the GUI harness deadline. Its exact owned
+  host was retired and browser listeners closed; the receipt explicitly fails
+  lifecycle acceptance. This is not an application-crash diagnosis.
+- Actual provider probe returned HTTP 200 but the native parser rejected normal
+  `error: ""`. A reproduced regression and probe-only typed correction pass
+  73 native onboarding assertions, linked model 28 groups, desktop 39 and errors 5.
+  The correction is outside 9.38 pending assembly and actual positive-probe GUI.
+- Actual Oversight copy incorrectly promised a standing grant for resource-bound
+  Chrome approval. Typed optional scope projection and native request-only presentation pass backend
+  and native fixtures. Both CI regressions are corrected locally: a shared pure
+  security validator preserves checkpoint behavior, and SDK fixtures use exact
+  caller identity while invalid identities still produce zero execution.
+  All workers released their bounded files; parent owns integration/publication.
+- d5c native, desktop, docs, naming and version CI pass; general CI fails the
+  import boundary and Python SDK tool-session contract. Real-brain E2E is skipped.
+  New-head CI is required; no all-green claim is made. Integrated correction source
+  passes 1,567 backend checks across 54 suites (three opt-in skips), native setup 73,
+  Oversight 16 groups, Browser 115, linked model 28, desktop 39 and errors five.
+  SDK 121 and architecture gates pass. Full mypy has zero normalized changes from
+  its 809-error baseline; Ruff passes. [Correction ledger](NATIVE_9_39_ACCEPTANCE.md).
+- Frozen d5c backend integration: 1,468 passed across 53 suites, three opt-in
+  skips. Native Browser 115 and Oversight 12 groups pass. Real installed owned
+  Chrome adapter acceptance passes nine checks. Full typing retains its 809-error
+  baseline, with no normalized additions; Ruff passes. Counts are distinct gates.
+- Next: commit the frozen verified corrections and professional evidence, package 9.39/build2026100403 from exact
+  committed inputs, then repeat setup, bound approval and normal Quit promptly.
+  Build budget is at most 2 GiB, with at least 10 GiB free at start; latest disk
+  check shows 25 GiB. Keep canonical plus one preceding verified generated app.
+  Preserve personal profiles/models/history and unrelated AUDIT-FIXES.md.
+- Full audio, cloud accounts, glasses, Messages, commerce, independent concurrent
+  browser resources, clean installation, migration and signed distribution remain
+  separate product gates. Mac leads; Linux expansion and Gen-UI remain deferred.
+
+### Historical existing-Chrome source wave
+
+The d5c implementation and tests are described in
+[the connection contract](EXISTING_CHROME_PLAN.md). The actual artifact record
+supersedes the preceding pending-assembly status.
 
 ### October 4 native browser integration and packaged acceptance
 

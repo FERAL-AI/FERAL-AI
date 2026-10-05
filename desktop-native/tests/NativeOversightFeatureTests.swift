@@ -121,6 +121,60 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
             try require(!stale.queueFresh && stale.queueError != nil && stale.approvals.count == 1 && OversightWire.count("/api/approvals/req-real/reject") == 0, "queue read failure retains last known data but disables decisions")
             print("PASS stale queue disables decisions without fake empty state")
 
+            let resource: [String: Any] = ["connection_id": "a2345678-1234-4234-9234-123456789abc", "target_id": "tab-A", "owner_session_id": "phone-device"]
+            var browserApproval = approval; browserApproval["tool_name"] = "browser__click"; browserApproval["browser_resource"] = resource
+            var browserFixtures = fixtures; browserFixtures["/api/approvals"] = (200, ["approvals": [browserApproval]])
+            OversightWire.reset(browserFixtures)
+            let browser = model(); await browser.refresh(); let browserReview = browser.approvals[0]
+            try require(browserReview.browserResource?.targetID == "tab-A" && browserReview.approvalActionTitle == "Approve this request" && browserReview.approvalDialogTitle.contains("exact browser"), "bound request has request-only action and dialog titles")
+            try require(browserReview.approvalExplanation.contains("grants no ongoing tool permission") && browserReview.approvalExplanation.contains(resource["connection_id"] as! String) && browserReview.approvalExplanation.contains("tab-A"), "bound approval visibly reviews exact connection/tab without promising session grant")
+            OversightWire.set("/api/approvals", ["approvals": []])
+            OversightWire.set("/api/approvals/req-real/approve", ["success": true, "status": "approved", "request_id": "req-real", "session_id": "phone-device", "result": ["success": false, "error": "synthetic failure"]])
+            await browser.decide(browserReview, approve: true)
+            try require(browser.receipt?.contains("Approved this request") == true && browser.receipt?.contains("No ongoing tool permission was granted") == true && browser.receipt?.contains("reported a failure") == true, "bound result receipt distinguishes exact approval, no grant, and execution failure")
+            try require(Set(OversightWire.body("/api/approvals/req-real/approve").keys) == ["session_id"], "native scope display creates no new client-selected authority")
+            print("PASS exact browser request scope, reviewed identity, and failure receipt")
+
+            OversightWire.reset(fixtures)
+            let ordinary = model(); await ordinary.refresh(); let ordinaryReview = ordinary.approvals[0]
+            try require(ordinaryReview.browserResource == nil && ordinaryReview.approvalActionTitle == "Approve for this session" && ordinaryReview.approvalExplanation.contains("grants the same tool for this session"), "ordinary queue preserves session-grant explanation")
+            print("PASS absent browser metadata retains ordinary session scope copy")
+
+            for replacementResource in [["connection_id": "b2345678-1234-4234-9234-123456789abc", "target_id": "tab-A", "owner_session_id": "phone-device"], ["connection_id": "a2345678-1234-4234-9234-123456789abc", "target_id": "tab-B", "owner_session_id": "phone-device"]] {
+                OversightWire.reset(browserFixtures)
+                let changed = model(); await changed.refresh(); let oldScope = changed.approvals[0]
+                var replacement = browserApproval; replacement["browser_resource"] = replacementResource
+                OversightWire.set("/api/approvals", ["approvals": [replacement]]); await changed.refresh()
+                await changed.decide(oldScope, approve: true)
+                try require(changed.queueFresh && changed.decisionError != nil && OversightWire.count("/api/approvals/req-real/approve") == 0, "same request/args cannot reuse review after browser resource changes")
+            }
+            print("PASS changed connection or target invalidates reviewed approval")
+
+            var malformedResources: [Any] = [NSNull(), [:], ["connection_id": "bad", "target_id": "tab-A", "owner_session_id": "phone-device"]]
+            for (key, value): (String, Any) in [("connection_id", "A2345678-1234-4234-9234-123456789ABC"), ("target_id", "tab/A"), ("target_id", "tab-A\n"), ("target_id", String(repeating: "x", count: 129)), ("target_id", 1), ("owner_session_id", "foreign"), ("extra", "not-a-scope-field")] {
+                var invalid = resource; invalid[key] = value; malformedResources.append(invalid)
+            }
+            for metadata in malformedResources {
+                OversightWire.reset(fixtures)
+                let invalid = model(); await invalid.refresh(); let retained = invalid.approvals[0]
+                var malformed = browserApproval; malformed["browser_resource"] = metadata
+                OversightWire.set("/api/approvals", ["approvals": [malformed]]); await invalid.refresh()
+                await invalid.decide(retained, approve: true)
+                try require(!invalid.queueFresh && invalid.queueError != nil && OversightWire.count("/api/approvals/req-real/approve") == 0, "malformed present resource must never become ordinary grant scope")
+            }
+            print("PASS malformed bound scope disables decisions without granting fallback")
+
+            if CommandLine.arguments.count == 2 {
+                let fixtureURL = URL(fileURLWithPath: CommandLine.arguments[1])
+                let data = try Data(contentsOf: fixtureURL)
+                let actual = try JSONSerialization.jsonObject(with: data) as! [String: Any]
+                var actualFixtures = fixtures; actualFixtures["/api/approvals"] = (200, actual)
+                OversightWire.reset(actualFixtures)
+                let actualModel = model(); await actualModel.refresh()
+                try require(actualModel.queueFresh && actualModel.approvals.count == 1 && actualModel.approvals[0].browserResource?.targetID == "tab-A" && actualModel.approvals[0].sessionID == "s-resource" && actualModel.approvals[0].approvalActionTitle == "Approve this request", "real registered REST/ToolRunner pending fixture parses as exact request scope in native")
+                print("PASS actual Python registered pending response to native scope parser")
+            }
+
             OversightWire.reset(fixtures)
             let execute = model(); await execute.refresh(); let reviewed = execute.approvals[0]
             OversightWire.set("/api/approvals", ["approvals": []])
@@ -171,7 +225,7 @@ private func require(_ condition: @autoclosure () -> Bool, _ message: String) th
             try require(lateAction.receipt == nil && lateAction.decisionError == nil && lateAction.approvals.isEmpty && !lateAction.acting, "late action receipt must not mutate new backend state")
             try require(OversightWire.count() == count, "old action must not refresh new backend")
             print("PASS delayed old-backend action receipt is discarded")
-            print("NATIVE_OVERSIGHT_TESTS_PASSED: 12 fixture groups; mocked HTTP only, no real approvals executed")
+            print("NATIVE_OVERSIGHT_TESTS_PASSED: 16 fixture groups; mocked HTTP only, no real approvals executed")
         } catch { fputs("NATIVE_OVERSIGHT_TESTS_FAILED: \(error)\n", stderr); exit(1) }
     }
 }

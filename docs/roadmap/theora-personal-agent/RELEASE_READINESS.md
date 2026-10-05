@@ -4,8 +4,10 @@
 already running Chrome, selected-chat/tab controls and exact resource-bound
 approvals are implemented. Frozen backend integration passes 1,468 tests with
 three opt-in skips; native Browser 115 and Oversight 12 fixture groups pass.
-Typing retains the unchanged baseline; exact-source 9.38 packaging and actual native
-connection controls remain pending. Personal-profile permission/account behavior
+Immutable 9.38/source d5c is packaged and actual native connection, selection,
+viewing and approval were observed. Normal Quit did not finish within the harness
+deadline; provider-status parsing and approval copy corrections require 9.39
+packaging and actual acceptance. Personal-profile permission/account behavior
 is untested. [Connection contract](EXISTING_CHROME_PLAN.md), [current checkpoint](WORK_STATE.md).
 
 

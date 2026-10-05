@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import json
+import os
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -14,6 +17,56 @@ from api.routes.approvals import router as approvals_router
 from security.exec_approvals import ApprovalManager
 
 pytestmark = pytest.mark.no_auto_feral_home
+
+
+def test_registered_pending_resource_is_projected_without_grant_or_mutation(approvals_client):
+    client, orch = approvals_client
+    binding = {"connection_id": "a2345678-1234-4234-9234-123456789abc",
+               "target_id": "tab-A", "owner_session_id": "s-resource"}
+    orch._browser_resource_supplier = lambda: binding
+    pending = _new_pending(orch, "s-resource")
+    assert pending["browser_resource"] == binding
+    response = client.get("/api/approvals")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["approvals"][0]["browser_resource"] == binding
+    payload["approvals"][0]["browser_resource"]["target_id"] = "changed-copy"
+    assert orch.tool_runner.get_pending(pending["request_id"])["browser_resource"] == binding
+    assert not orch.tool_runner._approval_mgr.check_approval("browser__navigate", "s-resource")[0]
+    # Optional disposable cross-language fixture; never reads a deployment.
+    if destination := os.environ.get("FERAL_OVERSIGHT_SYNTHETIC_FIXTURE"):
+        output = Path(destination)
+        assert output.is_absolute() and str(output).startswith("/private/tmp/")
+        with output.open("w", encoding="utf-8") as fixture:
+            os.chmod(output, 0o600)
+            json.dump(response.json(), fixture)
+
+
+@pytest.mark.parametrize("binding", [None, {},
+    {"connection_id": "bad", "target_id": "tab-A", "owner_session_id": "s-resource"},
+    {"connection_id": "a2345678-1234-4234-9234-123456789abc", "target_id": "tab-A", "owner_session_id": "foreign"},
+    {"connection_id": "a2345678-1234-4234-9234-123456789abc", "target_id": "tab/A", "owner_session_id": "s-resource"},
+    {"connection_id": "a2345678-1234-4234-9234-123456789abc", "target_id": 1, "owner_session_id": "s-resource"},
+    {"connection_id": "A2345678-1234-4234-9234-123456789ABC", "target_id": "tab-A", "owner_session_id": "s-resource"},
+    {"connection_id": "a2345678-1234-4234-9234-123456789abc", "target_id": "x" * 129, "owner_session_id": "s-resource"},
+    {"connection_id": "a2345678-1234-4234-9234-123456789abc", "target_id": "tab-A", "owner_session_id": "s-resource", "extra": "private-canary"}])
+def test_invalid_resource_metadata_never_projects_ordinary_grant(approvals_client, binding):
+    client, orch = approvals_client
+    pending = _new_pending(orch, "s-resource")
+    orch.tool_runner._pending_approvals[pending["request_id"]]["browser_resource"] = binding
+    response = client.get("/api/approvals")
+    assert response.status_code == 503
+    assert response.json() == {"detail": {"code": "approval_resource_invalid"}}
+    assert "private-canary" not in response.text
+    assert orch.tool_runner.get_pending(pending["request_id"]) is not None
+    orch._execute_tool_call_for_llm.assert_not_awaited()
+
+
+def test_regular_pending_keeps_legacy_projection_shape(approvals_client):
+    client, orch = approvals_client
+    _new_pending(orch, "s-regular")
+    row = client.get("/api/approvals").json()["approvals"][0]
+    assert set(row) == {"request_id", "session_id", "tool_name", "args", "safety_level", "created_at", "status", "policy_sources"}
 
 
 @pytest.fixture

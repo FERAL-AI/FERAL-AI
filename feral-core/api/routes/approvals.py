@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+import re
+from uuid import UUID
+
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
@@ -25,6 +28,28 @@ def _normalize_limit(limit: int) -> int:
     if limit <= 0:
         return 100
     return min(limit, 500)
+
+
+def _browser_resource_projection(row: dict) -> dict:
+    """Preserve exact review scope; invalid metadata must not imply a grant."""
+    if "browser_resource" not in row:
+        return {}
+    resource = row["browser_resource"]
+    try:
+        tool = row.get("tool_name")
+        if (not isinstance(resource, dict)
+                or set(resource) != {"connection_id", "target_id", "owner_session_id"}
+                or not all(type(value) is str for value in resource.values())
+                or len(resource["connection_id"]) != 36
+                or str(UUID(resource["connection_id"])) != resource["connection_id"]
+                or re.fullmatch(r"[A-Za-z0-9_-]{1,128}", resource["target_id"]) is None
+                or type(tool) is not str or not tool.startswith(("browser__", "web_actions__"))
+                or resource["owner_session_id"] != row.get("session_id")):
+            raise ValueError("Invalid approval resource")
+        validate_session_id(resource["owner_session_id"])
+    except (KeyError, TypeError, ValueError, CheckpointValidationError):
+        raise HTTPException(status_code=503, detail={"code": "approval_resource_invalid"}) from None
+    return {"browser_resource": dict(resource)}
 
 
 @router.get("/api/approvals")
@@ -52,6 +77,7 @@ async def list_pending_approvals(session_id: str = "", limit: int = 100):
                 # it, which made the field unreachable over HTTP for the
                 # one client that would use it.
                 "policy_sources": row.get("policy_sources") or {},
+                **_browser_resource_projection(row),
             }
             for row in rows
         ],

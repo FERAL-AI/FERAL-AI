@@ -262,7 +262,8 @@ async def test_connect_does_not_select_or_initialize_and_labels_are_consent_scop
 
 
 @pytest.mark.parametrize(
-    "owner_id", ["", " leading", "trailing ", "control\nvalue", "x" * 1025, 1, None]
+    "owner_id", ["", " leading", "trailing ", "control\nvalue", "control\u0085value",
+                 "x" * 1025, 1, True, False, None]
 )
 def test_owner_is_exact_canonical_session_identity(owner_id):
     with pytest.raises(ExistingChromeError, match="owner_required"):
