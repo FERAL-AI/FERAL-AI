@@ -5,6 +5,55 @@ Git, CI and processes after resuming; it is a checkpoint, not a live process loc
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
+## Paused checkpoint, October 5
+
+Runtime source `99f94dda13bbcb090c756f8ec57f8810064d7b72` is committed and published on
+`feat/native-product-release-foundation-20261001`. It contains the completed
+TASK-01C approval transfer, strict native approval scope/availability, selected
+vision routing and compatibility corrections. All three workers have finished
+and released their files; no test or build remains running. Frozen parent
+verification: 2,724 passed/two skipped across 124 suites; typing adds no diagnostics;
+native fixture/linked checks and production typecheck pass. The exact evidence
+and source digest are below. Unrelated AUDIT-FIXES.md remains unstaged.
+
+**Artifact boundary:** canonical 9.44/source `4c8498bf0` and rollback 9.43 remain
+unchanged. 9.45 metadata is committed, but no 9.45 staging, optimized compilation,
+assembly, retention cleanup or packaged acceptance has started. No generated
+candidate is claimed from source tests. Computer Use remains blocked by native
+pipe startup, so actual approval-screen GUI acceptance is not run.
+
+**Resume next:** reconcile root/branch/HEAD, remote/PR identity, dirty files,
+worker states and disk headroom. Do not rerun the passed source gate unless its
+inputs changed. Review and run the prepared private build helper with exact
+runtime source `99f94dda13bbcb090c756f8ec57f8810064d7b72`, initially without
+`--execute`. It requires 10 GiB free, a 2 GiB artifact budget, frozen committed
+inputs and exact predecessor identities. Then execute fresh 52-input optimized
+compilation/assembly; retain only inspected 9.44 rollback after success. Run
+actual packaged approvals/selected-vision and backend lifecycle probes, plus
+independent source/signature review. Run isolated GUI acceptance if Computer Use
+is restored; otherwise retain that explicit open gate. Update artifact evidence,
+this checkpoint and draft PR310 before further runtime changes. Next product
+cards remain task-result delivery and trusted desktop target/watch/Stop;
+coding expansion, Linux and Gen-UI remain deferred.
+
+Small private preparation/evidence files (not published or shipped):
+
+- `/private/tmp/feral-task-vision-945-integration-20261005/{result.json,pytest.log}`
+  and `/private/tmp/feral-task-vision-945-typing-20261005/{result.json,mypy.log}`.
+- `/private/tmp/feral-task01c-core-implementation-v2-20261005.json`,
+  `/private/tmp/feral-task01c-api-native-implementation-20261005.json`,
+  `/private/tmp/feral-task01c-native-final-inputs-20261005.json` and
+  `/private/tmp/feral-local-vision01c-implementation-evidence.json`.
+- Build helper `/private/tmp/feral-native-9-45-build-20261005.py` accepts
+  `--expected-source` and optional `--execute`; it has not run.
+- Packaged-method script `/private/tmp/feral-945-approval-vision-packaged-probe.py`,
+  SHA `d80d564e433be64c251950b47721625e4886328eaab380418c2461308f0c447f`,
+  has not run. Use future bundle Python with `-I -B`, `--app`, `--manifest`,
+  `--expected-manifest-sha`, `--expected-source`, `--expected-native-sha`
+  and an unused private `--receipt` path. Review source pins against the new
+  manifest before executing. Adapt the preceding 9.44 backend lifecycle probe
+  to exact new identity after assembly; do not run old identity against 9.45.
+
 ## Current status at a glance
 
 ### Current Mac 9.44 checkpoint
@@ -86,9 +135,9 @@ compatibility failures remain separate from the corrected final receipts.
 The local leakage checker flags three ignored private root documents, outside
 tracked publication; no personal or ignored document is modified for that check.
 
-The parent is committing this verified source and preparing fresh optimized
-9.45/build2026100501 with 52 Swift inputs. It is not yet a built or accepted
-candidate. Canonical 9.44 and rollback 9.43 retain their own identities above.
+Verified runtime source is committed as `99f94dda1`; execution is paused
+before fresh optimized 9.45/build2026100501 with 52 Swift inputs. It is not
+yet a built or accepted candidate. Canonical 9.44 and rollback 9.43 retain their own identities above.
 Build headroom is 29,160,000 KiB at the preparation observation; estimated new
 artifacts are at most 2 GiB. After successful compilation only inspected unused
 9.43 will retire, retaining 9.44 as the sole generated rollback. Actual native
