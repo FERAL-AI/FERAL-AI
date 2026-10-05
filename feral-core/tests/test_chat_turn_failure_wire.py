@@ -546,7 +546,7 @@ async def test_legacy_automatic_learning_revocation_discards_its_undelivered_dra
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["automatic", "blocked_automatic", "explicit"])
+@pytest.mark.parametrize("mode", ["automatic", "blocked_automatic", "explicit", "local_zero_cap"])
 async def test_skill_generation_uses_real_provider_and_correct_call_site_cost_cap(tmp_path, monkeypatch, mode):
     import json
     import httpx
@@ -556,6 +556,7 @@ async def test_skill_generation_uses_real_provider_and_correct_call_site_cost_ca
     from agents.skill_generator import SkillGenerator
     from api.routes import skills as skill_routes
     from cost.budget import CostBudget
+    from cost.pricing import ModelPricing
     from fastapi import Response
     from memory.store import MemoryStore
     from tests.test_chat_output_budget import make_provider
@@ -575,12 +576,19 @@ async def test_skill_generation_uses_real_provider_and_correct_call_site_cost_ca
                                              "usage": {"prompt_tokens": 1, "completion_tokens": 1}})
     transport = Transport()
     provider = make_provider(transport, {"max_tokens": 512, "fallback_providers": []})
-    # Actual provider preflight and SQLite cost recording, not mocked budget
-    # methods: the automatic path must bypass the deliberately tiny chat cap.
+    # Paid-provider caps exercise real atomic admission. Ollama's explicit
+    # local compute basis has zero vendor API cost, so a monetary zero cap
+    # must not pretend local inference incurs this fixture's cloud rate.
+    provider.provider = "ollama" if mode == "local_zero_cap" else "openai"
+    catalog = tmp_path / "pricing.json"
+    catalog.write_text(json.dumps({"providers": {"fixture": {"pricing": {
+        "fixture-model": {"input": .001, "output": .001},
+    }}}}))
+    # The automatic path must bypass the deliberately tiny chat cap.
     budget = CostBudget(db_path=tmp_path / "cost.db", settings={
         "chat": {"per_hour_usd": 1.0 if mode == "explicit" else 0.0000001},
-        "learner": {"per_hour_usd": 0.0 if mode == "blocked_automatic" else 1.0},
-    }, pricing=SimpleNamespace(lookup=lambda model: {"input": 0.001, "output": 0.001}))
+        "learner": {"per_hour_usd": 0.0 if mode in {"blocked_automatic", "local_zero_cap"} else 1.0},
+    }, pricing=ModelPricing(catalog))
     provider._cost_budget = budget
     provider._budget_check = MethodType(LLMProvider._budget_check, provider)
     provider._budget_record = MethodType(LLMProvider._budget_record, provider)
@@ -607,14 +615,21 @@ async def test_skill_generation_uses_real_provider_and_correct_call_site_cost_ca
             await asyncio.gather(*tasks)
             await drain_followups(state)
             assert (await manager.status(session_id="exact-A", request_id=accepted["request_id"]))["processing_outcome"] == "completed"
-        expected_count = {"automatic": 2, "blocked_automatic": 0, "explicit": 1}[mode]
+        expected_count = {"automatic": 2, "blocked_automatic": 0, "explicit": 1, "local_zero_cap": 2}[mode]
         assert len(transport.bodies) == expected_count
-        assert [body["max_tokens"] for body in transport.bodies] == ({"automatic": [200, 1500], "blocked_automatic": [], "explicit": [1500]}[mode])
+        assert [body["max_tokens"] for body in transport.bodies] == ({"automatic": [200, 1500], "blocked_automatic": [], "explicit": [1500], "local_zero_cap": [200, 1500]}[mode])
         await budget.ensure_ready()
         async with budget._conn.execute("SELECT call_site FROM cost_events ORDER BY id") as cursor:
             recorded = [row[0] for row in await cursor.fetchall()]
         assert recorded == (["chat"] if mode == "explicit" else ["learner"] * expected_count)
-        if mode == "automatic":
+        reservations = await budget.get_reservations()
+        assert len(reservations) == expected_count
+        assert all(row["status"] == "settled" for row in reservations)
+        assert all(row["pricing_basis"] == ("local_compute_only" if mode == "local_zero_cap"
+                                            else "catalog_estimate") for row in reservations)
+        if mode == "local_zero_cap":
+            assert budget.current_spend() == 0
+        if mode in {"automatic", "local_zero_cap"}:
             ws.send_json.assert_awaited_once()
         else:
             ws.send_json.assert_not_awaited()

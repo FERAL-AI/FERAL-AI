@@ -13,11 +13,13 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   model-call reservations (COST-01), and bounded independent TaskFlow execution
   (WF-01). The parent owns routine occurrence visibility in API/jobs/native UI,
   integration, documentation, packaging and Git publication. Coding expansion
-  remains last. Sources are frozen and are not yet in the immutable 9.41 app.
-- Voice owns both provider receive loops, the new retained dispatch helper and
-  its regressions. Budget owns the cost ledger/pricing, provider budget wrappers
-  and reservation tests. TaskFlow owns its runner and concurrency regressions.
-  These allocations are exclusive; preserve unrelated AUDIT-FIXES.md.
+  remains last. Source `6947bbec10a4eec61ecfb835598d33448d706c29` is published
+  in draft PR310 and packaged in immutable Mac 9.42.
+- Completed exclusive allocations: Voice implemented the provider receive loops,
+  retained dispatch helper and regressions; Budget implemented the ledger/pricing,
+  provider wrappers and reservation tests; TaskFlow implemented its runner and
+  concurrency regressions. Those paths are released to the parent integrator.
+  Preserve unrelated AUDIT-FIXES.md.
 - Parent routine visibility gate passes 55 tests. Native Automation passes
   51 assertions, followed by 28 linked model groups, 39 desktop assertions and
   five error-presentation assertions. These use isolated or mocked collaborators;
@@ -33,13 +35,34 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   routine receipts. Regressions cover these corrections, bounded queue fairness,
   cancellation-resistant work and restart uncertainty. Worker files are released.
   Parent owns the frozen source. No personal deployment/account/audio is used.
-- Next: publish coherent source and build 9.42 with fresh native compilation.
-  Measured headroom is 21 GiB; planned new artifacts are bounded to 2 GiB.
-  Inspect identity/signature/ownership/in-use status before retiring generated
-  9.40, retaining 9.41 as the sole rollback. Packaging and actual GUI acceptance
-  have not yet run. Unrelated AUDIT-FIXES.md remains unstaged.
+- Mac 9.42/build2026100406 passes fresh 52-source native compilation, exact
+  495-file packaged Python comparison, bundled runtime and strict ad-hoc signature
+  audits. Independent brand checks confirm the avatar/logo/icon. Packaged method
+  checks and actual backend startup/lifeline pass. Actual isolated native Automation
+  displays the unresolved-action warning; normal Quit exits 0 and closes its
+  backend listener. [Exact artifact and limits](NATIVE_9_42_ACCEPTANCE.md).
+- Storage is 20.5 GiB free. Only canonical 9.42 and rollback 9.41 are retained;
+  inspected unused generated 9.40 was retired. Unrelated AUDIT-FIXES.md remains
+  unstaged. Personal deployments, accounts, audio and home Git remain untouched.
+- Exact-source remote checks: 17 passed, four conditional/opt-in skipped, one
+  backend fixture failed. It labeled paid calls as local Ollama inference.
+  Independent reproduction and a test-only correction preserve the zero-cost
+  local basis and paid admission guard; the focused worker gate passes 214 tests.
+  Production artifact identity is unchanged. The test-only correction is included
+  with this checkpoint and requires its own remote result; no all-green claim.
+- Reconciled parent integration, including the full corrected wire-failure suite,
+  passes 1,792 tests across 89 suites with two skips and 55 warnings in 137.50
+  seconds. All 1,322 Python inputs stay frozen; digest
+  `e1bb2b8693c48dab03b1819b75879d17fea0abd6fd24b2c38e514ce91771e16f`.
+  Only test/docs inputs changed after 9.42 packaging.
+- Next ready cards: shipped capability/provisioning closure, foreground Mac target
+  ownership and verified model-selected task, and existing TaskFlow conversational
+  handoff/result ownership. Installation and task source work are independent;
+  actual desktop acceptance follows dependency/provider/permission readiness.
+  Preserve ordinary interactive disconnect cancellation. Physical voice acceptance
+  is distinct from realtime intake fixtures; coding expansion stays last.
 
-### Preserved reliability source checkpoint
+### Historical reliability source checkpoint
 
 Implementation follows the completed independent review. Mac reliability and
 product functionality take priority; expansion of coding/OpenCode and CLI
@@ -99,7 +122,7 @@ oversight is last. Existing coding functionality remains available.
   Actual bundled backend startup took 2.36 seconds; host lifeline EOF stopped the
   owned child and closed its listener. Native GUI/hardware acceptance is pending.
 
-### Current independent runtime review
+### Historical independent runtime review
 
 - Three read-only workers completed current-source review and inert reproductions.
   [Findings, counterevidence, reuse decisions and fix order](RUNTIME_REVIEW_20261004.md).

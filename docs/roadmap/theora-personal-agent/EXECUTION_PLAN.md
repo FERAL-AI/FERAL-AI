@@ -1,10 +1,13 @@
 # FERAL app completion: executable plan
 
-**Active source wave (October 4).** Three exclusive workers own responsive
-realtime intake, atomic model-call reservations and bounded TaskFlow concurrency.
-Frozen integration passes 1,765 tests across 88 suites. The parent owns routine
-uncertainty visibility, integration and publication. 9.41 remains the preceding
-immutable artifact until exact-source 9.42 packaging passes.
+**Current Mac checkpoint (October 4).** Responsive realtime intake, atomic
+model-call reservations, bounded TaskFlow concurrency and routine uncertainty
+visibility are published as `6947bbec1` and packaged in immutable 9.42.
+Frozen integration passes 1,765 tests across 88 suites. Exact-source packaging,
+packaged methods/backend lifecycle and actual isolated native warning/Quit pass.
+9.41 is the sole generated rollback. A test-only cloud/local pricing fixture
+correction follows one remote failure; new-head CI is still required.
+[Artifact and acceptance](NATIVE_9_42_ACCEPTANCE.md).
 [Behavior and acceptance](RUNTIME_MULTITASKING_EVIDENCE.md),
 [current ownership](WORK_STATE.md). Coding expansion remains last.
 
@@ -17,8 +20,9 @@ feature expansion follows the Mac product work.
 [Implementation and limits](RUNTIME_RELIABILITY_EVIDENCE.md),
 [review and fix order](RUNTIME_REVIEW_20261004.md),
 [full current feature checkpoint](WORK_STATE.md).
-[Packaged 9.41](NATIVE_9_41_ACCEPTANCE.md) contains this wave; 9.40 remains an
-immutable rollback with its own earlier GUI acceptance.
+[Packaged 9.41](NATIVE_9_41_ACCEPTANCE.md) contains the earlier reliability wave
+and is the current rollback. The older 9.40 generated copy is retired; its earlier
+GUI acceptance remains recorded.
 
 Reconciled October 3, 2026 by parallel source/research audits and the parent integration audit. This supersedes the dependency order in older planning prose where it would require rebuilding existing sessions, memory or workflows before packaging the supported local system. It does not supersede their safety or acceptance contracts.
 
@@ -77,6 +81,22 @@ independent local card.
 
 ### Current ready cards and ownership
 
+After the 9.42 acceptance checkpoint, the next three bounded Mac cards are:
+
+| Card | Existing interfaces to extend | Required acceptance |
+| --- | --- | --- |
+| INSTALL-01A | Cached bundle staging, provider catalog, onboarding, voice diagnostics and local model storage | Supported bundled desktop primitives import with empty development PATH/cache; installed/configured/reachable/inference/tool/audio states remain distinct; missing assets are actionable; selected inference has a real receipt |
+| RESOURCE-01A | AX/GUI/VLM skills, central executor and existing browser/native viewing | Model-selected harmless fixture task changes the intended field with observed readback; target lease, capture consent, Stop/takeover and competing/wrong-target refusal work |
+| TASK-01B | Existing `/internal/task/start`, TaskFlow, tracked turns, checkpoint, jobs and native Workflows | Durable origin/owner/request/revision binding; two jobs progress while chat remains usable; selective cancellation and reconnect retrieve results without resubmission; owner receives each result once |
+
+INSTALL and TASK source work can proceed independently. RESOURCE's actual Mac
+acceptance depends on packaged input dependencies and reviewed provider/permission
+readiness. Natural-language TaskFlow creation already exists; extend its handoff
+and result ownership rather than adding another runner. Ordinary interactive
+turn disconnect must retain cancellation. Physical bounded mic/task/speech
+acceptance can run separately once provisioned and authorized; continuous native
+voice/delegation follows durable task ownership. Coding expansion stays last.
+
 The [October4 integration plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) adds explicit
 cards for setup parity/local installation, ChatGPT plan access, durable concurrent
 jobs, browser/desktop resources, full-duplex voice, Messages offers, Link checkout,
@@ -85,9 +105,9 @@ preserves all earlier product/developer/social/health/memory requirements. These
 new features are not claimed implemented by documentation or model availability.
 
 Parent owns shared contracts, integration, docs, publication and packaging.
-The setup and voice workers released their bounded source/test corrections after
-focused checks; all research audits are complete. Parent owns the frozen sources
-and passed combined verification. Reconcile this allocation with
+Runtime workers released their source/test paths after focused and combined
+checks. Their names are historical ownership records, not live claims. Assign
+exclusive files and acceptance commands before new implementation. Reconcile with
 actual workers before reuse. Freeze production/test sources for integration.
 Keep caches/models,10 GiB minimum start headroom and at most2 GiB new packaging
 budget; canonical app plus one preceding copy by default.

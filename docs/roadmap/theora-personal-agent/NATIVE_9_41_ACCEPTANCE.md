@@ -1,5 +1,11 @@
 # Mac 9.41 runtime reliability candidate
 
+Historical artifact record. After [9.42 acceptance](NATIVE_9_42_ACCEPTANCE.md),
+9.41 is retained as the sole generated rollback at
+`/private/tmp/feral-candidate-9-41-preserved.app`; canonical build path now holds
+9.42. The inspected unused 9.40 generated copy was retired. The original checks
+and retention decisions below describe the 9.41 build checkpoint.
+
 October 4, 2026. This candidate contains the bounded
 [runtime reliability fixes](RUNTIME_RELIABILITY_EVIDENCE.md). It is not full
 product or signed-distribution acceptance.

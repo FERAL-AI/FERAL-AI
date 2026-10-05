@@ -70,12 +70,27 @@ review reproduced deletion hiding an unresolved action; the scheduler deletion
 fence and HTTP/skill conflict regression address it. Worker and independent
 test counts overlap this combined gate and are not summed.
 
-The current immutable 9.41 app contains the preceding reliability changes,
-not this wave. A fresh optimized 9.42 native compile is planned with exact
-committed inputs, offline cached staging, at least 10 GiB free and at most
-2 GiB new artifacts. Keep 9.41 as the sole generated rollback and retire only
-the inspected, unused 9.40 copy. Packaging and actual GUI acceptance remain
-pending until recorded separately.
+Published source `6947bbec10a4eec61ecfb835598d33448d706c29` is packaged in
+immutable 9.42 after fresh optimized compilation and offline cached staging.
+All 495 packaged Python files match source. Runtime/signature and independent
+brand checks, packaged methods/backend lifecycle, and actual isolated native
+unresolved-warning/Quit acceptance pass. Approximately 20.5 GiB remains free;
+9.41 is the sole generated rollback and the inspected unused 9.40 copy is retired.
+[Exact artifact and limits](NATIVE_9_42_ACCEPTANCE.md).
+
+Exact-source remote checks show 17 passed, four conditional/opt-in skips and one
+failed paid-cost fixture using Ollama's zero-API-cost basis. The independent
+test-only correction explicitly separates cloud and local cases; its worker
+gate passes 214 tests. The correction is included with this checkpoint and
+requires its own remote result. Production runtime guards and the immutable
+artifact are unchanged.
+
+The reconciled parent gate includes the complete corrected wire-failure suite:
+1,792 tests pass across 89 suites, with two skips and 55 warnings in 137.50
+seconds. All 1,322 Python inputs remain frozen, digest
+`e1bb2b8693c48dab03b1819b75879d17fea0abd6fd24b2c38e514ce91771e16f`.
+Receipt: `/private/tmp/feral-multitasking-ci-reconciled-20261004/result.json`.
+Only tests/documentation changed after assembly; no new runtime bundle is needed.
 
 No physical voice, personal account, message, payment, model download or device
 outcome is implied. Continuous native duplex, durable detached jobs and background

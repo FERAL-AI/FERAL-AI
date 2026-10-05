@@ -4,11 +4,15 @@
 identity and distinguishes active, unresolved and bookkeeping-pending actions.
 Automation passes 51 fixture assertions, followed by the linked model/desktop
 checks. New runtime intake/reservation/concurrency changes pass 1,765 combined
-checks across 88 suites; exact-source 9.42 packaging and actual GUI acceptance
-remain pending. They are outside 9.41.
+checks across 88 suites and are published in exact-source 9.42. Fresh compilation,
+495 packaged Python comparisons, runtime/signature audits, isolated packaged
+methods/backend lifecycle and actual native unresolved-warning/Quit pass. Physical
+voice, inference, accounts and distribution remain separate gates. One remote
+cost fixture requires its test-only correction and a new-head result.
+[9.42 artifact](../docs/roadmap/theora-personal-agent/NATIVE_9_42_ACCEPTANCE.md).
 [Behavior and limits](../docs/roadmap/theora-personal-agent/RUNTIME_MULTITASKING_EVIDENCE.md).
 
-**Current packaged checkpoint (October 4).** 9.41/build2026100405 contains the
+**Preceding packaged checkpoint (October 4).** 9.41/build2026100405 contains the
 runtime reliability wave. All 494 packaged Python files equal source `a3f99db02...`;
 runtime/signature audits, isolated packaged-method checks and actual backend
 startup/lifeline acceptance pass. No new native GUI, physical/account or release

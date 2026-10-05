@@ -1,9 +1,14 @@
 # Theora / FERAL full-product release readiness
 
-**Active source wave (October 4).** Responsive realtime tool intake, persistent
+**Current Mac source and artifact (October 4).** Responsive realtime tool intake, persistent
 text-model reservations, bounded independent TaskFlow work and routine uncertainty
-visibility pass frozen integration (1,765 tests across 88 suites). They are not
-in 9.41; exact-source 9.42 packaging and actual GUI acceptance remain pending.
+visibility pass frozen integration (1,765 tests across 88 suites), are published
+as `6947bbec1` and are packaged in immutable 9.42/build2026100406. Fresh native
+compilation, all 495 packaged Python comparisons, runtime/signature audits,
+packaged methods/backend lifecycle and actual isolated native warning/Quit pass.
+9.41 is the sole generated rollback. One remote backend fixture failed because it
+modeled paid calls as API-free Ollama; its test-only correction needs new-head CI.
+[Artifact and limits](NATIVE_9_42_ACCEPTANCE.md).
 [Behavior, limitations and acceptance](RUNTIME_MULTITASKING_EVIDENCE.md).
 
 **Review priority update (October 4).** Existing AX/GUI/vision computer-control
@@ -16,7 +21,7 @@ separate payload/backend startup evidence. Native GUI/hardware acceptance remain
 [review and fix order](RUNTIME_REVIEW_20261004.md),
 [full current feature checkpoint](WORK_STATE.md).
 
-**Current packaged Mac checkpoint.** 9.41/build2026100405, source `a3f99db02...`,
+**Preceding packaged Mac checkpoint.** 9.41/build2026100405, source `a3f99db02...`,
 contains the reliability fixes. All 494 packaged Python files match source;
 bundled-runtime and strict ad-hoc signature checks pass. Isolated packaged-method
 tests and actual backend startup/lifeline acceptance pass. This does not replace
