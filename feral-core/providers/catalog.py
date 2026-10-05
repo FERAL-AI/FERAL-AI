@@ -417,6 +417,13 @@ class CachedModelList:
     warning: str = ""
 
 
+class ProviderProbeConfigurationChanged(RuntimeError):
+    """An in-flight probe cannot certify a replacement provider adapter."""
+
+    def __init__(self):
+        super().__init__("Provider configuration changed during the probe; review it again.")
+
+
 class ProviderCatalog:
     """Holds one adapter instance per provider id + a disk-backed model cache."""
 
@@ -531,6 +538,36 @@ class ProviderCatalog:
         """Force the next ``list_models(provider_id)`` call to go live."""
         self._models.pop(provider_id, None)
         self._warnings.pop(provider_id, None)
+
+    def bind_active_local(self, provider_id: str, base_url: Optional[str] = None) -> bool:
+        """Bind only the selected local runtime; inactive scoped overrides survive.
+
+        Explicit active configuration takes precedence. An empty endpoint uses
+        the same defaults as LLMProvider. No credential or network work occurs.
+        Return False without cache invalidation when the binding is unchanged.
+        """
+        resolved = self.resolve_alias(provider_id) or provider_id
+        if resolved not in ("ollama", "lmstudio"):
+            return False
+        if base_url is not None and not isinstance(base_url, str):
+            raise ValueError("Selected local provider endpoint must be a string")
+        from .ollama_provider import OllamaProvider
+        from .lmstudio_provider import LMStudioProvider
+        from config.runtime import ollama_openai_base_url
+
+        chosen = base_url or (ollama_openai_base_url() if resolved == "ollama"
+                              else self._descriptors[resolved].default_base_url)
+        expected = (OllamaProvider.native_base_url(chosen) if resolved == "ollama"
+                    else chosen.rstrip("/"))
+        provider_type = OllamaProvider if resolved == "ollama" else LMStudioProvider
+        current = self._adapters.get(resolved)
+        if isinstance(current, provider_type) and getattr(current, "_base_url", None) == expected:
+            return False
+        self.configure(resolved, base_url=chosen)
+        current = self._adapters.get(resolved)
+        if not isinstance(current, provider_type) or getattr(current, "_base_url", None) != expected:
+            raise RuntimeError("Selected local provider adapter could not bind its endpoint")
+        return True
 
     async def list_models(
         self,
@@ -670,6 +707,8 @@ class ProviderCatalog:
             return status
         try:
             models = await adapter.refresh_models()
+            if self._adapters.get(provider_id) is not adapter:
+                raise ProviderProbeConfigurationChanged()
             cleaned = [m for m in (models or []) if m]
             status.reachable = bool(cleaned)
             status.last_refresh = time.time()
@@ -682,7 +721,11 @@ class ProviderCatalog:
                 self._save_cache()
             else:
                 status.error = "provider returned no models"
+        except ProviderProbeConfigurationChanged:
+            raise
         except Exception as exc:
+            if self._adapters.get(provider_id) is not adapter:
+                raise ProviderProbeConfigurationChanged() from None
             status.reachable = False
             status.error = str(exc)
         return status

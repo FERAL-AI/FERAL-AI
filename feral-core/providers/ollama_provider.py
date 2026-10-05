@@ -30,7 +30,13 @@ class OllamaProvider(BaseProvider):
     _capabilities = {"streaming", "tool_calling"}
 
     def __init__(self, base_url: Optional[str] = None) -> None:
-        self._base_url = (base_url or "http://localhost:11434").rstrip("/")
+        self._base_url = self.native_base_url(base_url)
+
+    @staticmethod
+    def native_base_url(base_url: Optional[str] = None) -> str:
+        """Translate only the terminal OpenAI API suffix, retaining proxy paths."""
+        root = (base_url or "http://localhost:11434").rstrip("/")
+        return root[:-3] if root.endswith("/v1") else root
 
     async def chat(
         self,

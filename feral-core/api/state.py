@@ -1192,6 +1192,13 @@ class BrainState:
                 # classify_error-triggered failover actually uses them.
                 _shared_llm.set_config(_llm_cfg)
 
+            if self.provider_catalog is not None:
+                # Bind from the actual resolved runtime, including environment
+                # defaults, without changing inactive provider-scoped adapters.
+                self.provider_catalog.bind_active_local(
+                    _shared_llm.provider, _shared_llm.base_url,
+                )
+
             # Cross-cut #1 (v2026.5.42): hydrate the active labeled
             # vault key onto the running provider so ``feral key add
             # --set-active`` (and the equivalent WebUI POST) lands on

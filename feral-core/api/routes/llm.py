@@ -263,7 +263,14 @@ async def probe_llm_provider(provider_id: str):
     catalog = _require_catalog()
     if catalog.get_descriptor(provider_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
-    status = await catalog.probe(provider_id)
+    from providers.catalog import ProviderProbeConfigurationChanged
+    try:
+        status = await catalog.probe(provider_id)
+    except ProviderProbeConfigurationChanged:
+        raise HTTPException(status_code=409, detail={
+            "code": "provider_configuration_changed",
+            "message": "Provider configuration changed; review it before probing again.",
+        }) from None
     return status.to_dict()
 
 
@@ -866,6 +873,17 @@ async def set_llm_config(req: LLMConfigRequest):
     if req.api_key:
         persisted = _persist_key(env_var, req.api_key)
         catalog.configure(resolved, api_key=req.api_key, base_url=effective_base_url or None)
+
+    # Local activation does not require a credential. Keep its catalogue probe
+    # bound to this exact saved endpoint rather than an unrelated default port.
+    if resolved in ("ollama", "lmstudio"):
+        try:
+            catalog.bind_active_local(resolved, effective_base_url)
+        except (ValueError, RuntimeError):
+            raise HTTPException(status_code=503, detail={
+                "code": "local_provider_binding_unavailable",
+                "message": "Local provider settings were saved but its adapter could not be bound. Refresh before continuing.",
+            }) from None
 
     state.config.update_settings("meta", "setup_complete", True)
 

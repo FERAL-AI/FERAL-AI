@@ -7,53 +7,45 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### Active Mac acceptance corrections
+### Active saved-local-provider correction
 
-- Published implementation is `d5c063605e4991dcc0efd1396854eecca7968957`
-  on `feat/native-product-release-foundation-20261001` in
-  [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310). Main is unchanged.
-- Immutable 9.38/build2026100402 contains that exact source: 52 native inputs,
-  492 packaged Python files, optimized assembly, runtime probes and strict ad-hoc
-  signature pass. Native SHA
-  `887cabcdbb31b3e983f6439eb3255fc5a6226b7e05ad98b6d405a0d65d8ab0ac`.
-  [Actual acceptance and limitations](NATIVE_9_38_ACCEPTANCE.md).
-- Actual isolated native Chrome controls passed connect/cancel/select, separate
-  viewing consent, masked frames, native Oversight approval, changed synthetic
-  button and real input marker, Stop/navigation and disconnect. These used an
-  owned synthetic browser and the production default-path discovery constructor.
-  Personal Chrome permission, accounts and model-selected tasks were not tested.
-- Normal Quit was not captured before the GUI harness deadline. Its exact owned
-  host was retired and browser listeners closed; the receipt explicitly fails
-  lifecycle acceptance. This is not an application-crash diagnosis.
-- Actual provider probe returned HTTP 200 but the native parser rejected normal
-  `error: ""`. A reproduced regression and probe-only typed correction pass
-  73 native onboarding assertions, linked model 28 groups, desktop 39 and errors 5.
-  The correction is outside 9.38 pending assembly and actual positive-probe GUI.
-- Actual Oversight copy incorrectly promised a standing grant for resource-bound
-  Chrome approval. Typed optional scope projection and native request-only presentation pass backend
-  and native fixtures. Both CI regressions are corrected locally: a shared pure
-  security validator preserves checkpoint behavior, and SDK fixtures use exact
-  caller identity while invalid identities still produce zero execution.
-  All workers released their bounded files; parent owns integration/publication.
-- d5c native, desktop, docs, naming and version CI pass; general CI fails the
-  import boundary and Python SDK tool-session contract. Real-brain E2E is skipped.
-  New-head CI is required; no all-green claim is made. Integrated correction source
-  passes 1,567 backend checks across 54 suites (three opt-in skips), native setup 73,
-  Oversight 16 groups, Browser 115, linked model 28, desktop 39 and errors five.
-  SDK 121 and architecture gates pass. Full mypy has zero normalized changes from
-  its 809-error baseline; Ruff passes. [Correction ledger](NATIVE_9_39_ACCEPTANCE.md).
-- Frozen d5c backend integration: 1,468 passed across 53 suites, three opt-in
-  skips. Native Browser 115 and Oversight 12 groups pass. Real installed owned
-  Chrome adapter acceptance passes nine checks. Full typing retains its 809-error
-  baseline, with no normalized additions; Ruff passes. Counts are distinct gates.
-- Next: commit the frozen verified corrections and professional evidence, package 9.39/build2026100403 from exact
-  committed inputs, then repeat setup, bound approval and normal Quit promptly.
-  Build budget is at most 2 GiB, with at least 10 GiB free at start; latest disk
-  check shows 25 GiB. Keep canonical plus one preceding verified generated app.
-  Preserve personal profiles/models/history and unrelated AUDIT-FIXES.md.
-- Full audio, cloud accounts, glasses, Messages, commerce, independent concurrent
-  browser resources, clean installation, migration and signed distribution remain
-  separate product gates. Mac leads; Linux expansion and Gen-UI remain deferred.
+- Published source `fc4e86faf048b556b0b4400b80ec7a7fa8e7ebd8` is on the
+  existing draft branch/PR310; main is unchanged. All executed CI workflows pass:
+  general 37246502749, native 37246502794, desktop 37246502741, docs 37246502791,
+  version 37246502786 and naming 37246502860. Real-brain E2E37246502849 is skipped.
+- Immutable 9.39/build2026100403 contains that exact source, 52 native inputs and
+  493 packaged Python files; optimized assembly, bundled-runtime, source equality
+  and strict ad-hoc signature audits pass. [Artifact ledger](NATIVE_9_39_ACCEPTANCE.md).
+- Source corrections pass 1,567 backend checks across 54 suites, three opt-in skips,
+  native Onboarding73/Oversight16 groups/Browser115/linked model28/desktop39/errors5,
+  SDK121, architecture and Ruff. Full mypy retains809 baseline errors with zero
+  normalized additions/removals. These are distinct and overlapping gates.
+- Actual 9.39 native setup activation/readback/completion and Chrome connection/tab
+  selection passed. The repaired parser rendered a real negative probe result.
+  Source inspection identified a second defect: active chat uses the saved custom
+  local endpoint while the catalogue ignores it and forms an invalid native URL.
+  The selected local service catalogue was independently reachable with the pinned
+  model; no positive native probe or model inference is claimed.
+- The 9.39 GUI harness deadline elapsed before the queue helper submitted a click.
+  The helper refused the expired host without dispatch. Forced exact owned cleanup
+  and normal Chrome exit/closed listeners are recorded; normal app Quit remains
+  unverified. Computer Use window rebinding was required while the host was alive.
+  The prior9.38 actual native approved click/outcome/marker remains historical.
+- Workers completed and released the saved local catalogue binding, native-root
+  normalization, stale-probe refusal, focused tests and independent review.
+  Frozen68-suite integration passes1,801 tests/three opt-in skips; all1,308 Python
+  inputs unchanged. Ruff passes and full mypy has zero normalized changes from
+  its809-error baseline. Private40 build/GUI/queue plans pass read-only checks. Parent owns
+  shared integration, documentation, source freeze, Git and actual acceptance.
+- Next: commit/push the frozen verified corrections, package40/build2026100404
+  from exact inputs with verified unchanged native reuse, then verify
+  actual positive probe, native resource-only approval, page outcome and normal
+  Quit/listener cleanup. GUI lease is bounded and allows for approval latency.
+- Keep canonical plus one preceding generated app, >=10GiB free before build and
+  <=2GiB new-artifact budget. Preserve personal data/models/accounts/history and
+  unrelated AUDIT-FIXES.md. Real audio/cloud accounts/glasses/Messages/commerce,
+  whole-desktop sharing/concurrent resources/clean install/migration/signing remain
+  separate gates; Mac leads and Linux expansion/Gen-UI remain deferred.
 
 ### Historical existing-Chrome source wave
 

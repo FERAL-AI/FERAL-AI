@@ -1,7 +1,8 @@
 # Native 9.39 acceptance ledger
 
 Updated October 4, 2026. The candidate is scheduled as
-`2026.9.39/build2026100403`. Assembly and actual GUI acceptance are pending.
+`2026.9.39/build2026100403`. Assembly passed; actual GUI setup and Chrome attachment were observed.
+Normal Quit and the new approval copy remain unverified in this package.
 The immutable predecessor and its failed lifecycle gate are recorded in
 [9.38 acceptance](NATIVE_9_38_ACCEPTANCE.md).
 
@@ -62,3 +63,33 @@ and closed backend/browser listeners. Preserve all failed harness evidence.
 Personal Chrome permission/account use, real audio, glasses, Messages, payment,
 clean-machine install, migration, updates and signed distribution remain open.
 This build does not certify Linux or iOS. See [release gates](RELEASE_READINESS.md).
+
+## Actual immutable 9.39 result
+
+Runtime source `fc4e86faf048b556b0b4400b80ec7a7fa8e7ebd8`; native SHA
+`94c4b8c420ef304f9a5b3829c80f8c1fe9caffeb502cc547611114e37e2998d4`;
+manifest SHA `d411295dd81e52c1c070709c74aad45f404cd9699a70259ccc7b485ffe994a3f`.
+All 52 native inputs and 493 packaged Python files match. Cached optimized
+assembly took 237.55 seconds; runtime, source and ad-hoc signature audits pass.
+
+Actual native setup retained the companion and 22 destinations. Reviewed local
+activation/readback and completion passed. The native probe parser correctly
+rendered a negative catalogue result instead of a generic request failure.
+A second defect was traced: active chat uses the saved custom local endpoint,
+while the catalogue probe ignores it and appends `/api/tags` to its descriptor
+OpenAI endpoint ending in `/v1`. The existing selected local service catalogue
+was separately reachable and contained the pinned model. A positive native probe
+is not claimed until saved-endpoint binding and native-root normalization are fixed.
+
+Explicit native Chrome connection and selected synthetic target attachment passed.
+Computer Use lost its window identity; exact host verification showed it still
+running, and rebinding restored the same UI. The harness deadline then elapsed
+before the synthetic request was queued. The queue helper refused the expired
+host before submitting any action. No approved or executed 9.39 click is claimed.
+
+The wrapper reports failed normal-Quit acceptance and exact owned cleanup;
+Chrome exited 0 and both browser listeners closed. This is retained as a harness
+failure, not an app-crash diagnosis. Receipt:
+`/private/tmp/feral-native-populated-9-39-fresh-20261004-attempt-existing-browser1/existing-chrome-gui-wave-result.json`.
+Next: corrected catalogue source, exact-source packaging and timely actual
+positive probe, bound native approval and normal Quit acceptance.
