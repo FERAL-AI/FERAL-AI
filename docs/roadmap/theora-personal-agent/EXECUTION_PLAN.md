@@ -1,14 +1,18 @@
 # FERAL app completion: executable plan
 
-**Verified next source (October 5).** Exact tracked-task approval transfer,
-output-only scope/availability and selected vision routing pass frozen parent
-integration: 2,724 tests across 124 suites, unchanged inputs and no added typing
-diagnostics. Native Oversight/API fixture and linked checks pass. Fresh
-9.45 compilation and packaged-method acceptance are next; canonical 9.44 remains
-below until a new artifact passes. Actual approval-screen acceptance is blocked
-by Computer Use. [Behavior and remaining gates](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md).
+**Current Mac artifact (October 5).** Immutable 9.45/build2026100501 contains
+published exact source `3cfe733b4`, with exact tracked-task approval and selected
+vision routing. Fresh 52-input optimized native compilation, all 496 packaged
+Python comparisons, independent source/signature/import review, bundled actual
+approval/vision methods and backend startup/lifeline shutdown pass. Source
+integration remains 2,724 passed; exact build head has 18 successful remote
+checks/four skips. Sole generated rollback is 9.44. Actual new approval-screen
+GUI acceptance is blocked by Computer Use; physical, account and distribution
+gates remain. [Artifact and limits](NATIVE_9_45_ACCEPTANCE.md). Next source work
+is durable originating-conversation task results, followed by trusted desktop
+resource ownership. Coding expansion remains last.
 
-**Current Mac artifact (October 4).** Immutable 9.44/build2026100408 contains
+**Preceding Mac artifact (October 4).** Immutable 9.44/build2026100408 contains
 published source `4c8498bf0`: truthful local inventory, guarded vision preset
 selection and task-status/endpoint corrections. Frozen integration passes 2,337
 tests across 106 suites; typing adds no diagnostics. All 496 packaged Python

@@ -5,61 +5,55 @@ Git, CI and processes after resuming; it is a checkpoint, not a live process loc
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
-## Paused checkpoint, October 5
+## Current execution checkpoint, October 5
 
-Runtime source `99f94dda13bbcb090c756f8ec57f8810064d7b72` is committed and published on
-`feat/native-product-release-foundation-20261001`. It contains the completed
-TASK-01C approval transfer, strict native approval scope/availability, selected
-vision routing and compatibility corrections. All three workers have finished
-and released their files; no test or build remains running. Frozen parent
-verification: 2,724 passed/two skipped across 124 suites; typing adds no diagnostics;
-native fixture/linked checks and production typecheck pass. The exact evidence
-and source digest are below. Unrelated AUDIT-FIXES.md remains unstaged.
+Immutable Mac 9.45/build2026100501 is built from published exact source
+`3cfe733b4f94ae18dd1755d13b7b5fbd7a34be5a`; runtime implementation is `99f94dda1`.
+Fresh optimized 52-input Swift compilation, all 496 packaged Python comparisons,
+68 assembly inputs, contained runtime/imports and strict ad-hoc signatures pass.
+Independent artifact review, actual bundled approval/selected-vision methods and
+isolated backend startup/lifeline shutdown pass. Native binary SHA
+`fb9141bdaacd9b1e5cd9a728add4243f75a68e9aeb83ea7769d839e0697cbe93`; manifest SHA
+`79746a5e62a0e068aba58d4fa3c83a8feb308afff6e0e336585eca464dc52802`.
+[Artifact, executed checks and limits](NATIVE_9_45_ACCEPTANCE.md).
 
-**Artifact boundary:** canonical 9.44/source `4c8498bf0` and rollback 9.43 remain
-unchanged. 9.45 metadata is committed, but no 9.45 staging, optimized compilation,
-assembly, retention cleanup or packaged acceptance has started. No generated
-candidate is claimed from source tests. Computer Use remains blocked by native
-pipe startup, so actual approval-screen GUI acceptance is not run.
+Canonical 9.45 plus sole rollback 9.44 remain; only inspected unused generated
+9.43 is retired. Historical evidence is retained. Assembly starts with
+26,331,430,912 bytes free and ends with 26,259,369,984 bytes, net growth
+72,060,928 bytes in 181.49 seconds; peak disk usage is not measured. Personal
+Git/models/profiles are untouched. All 1,329 Python and 55 native/harness hashes
+still match passed source evidence; no unchanged suite is rerun. Exact build
+head's remote checks pass 18 with four conditional skips and zero failures.
 
-**Resume next:** reconcile root/branch/HEAD, remote/PR identity, dirty files,
-worker states and disk headroom. Do not rerun the passed source gate unless its
-inputs changed. Review the prepared private build helper. The pause documentation commit
-follows runtime source `99f94dda13bbcb090c756f8ec57f8810064d7b72`; verify that
-subsequent commits change documentation only and all frozen runtime/native input
-hashes still match. Pass the reconciled full current HEAD as `--expected-source`,
-initially without `--execute`; the helper requires HEAD equality and the new
-manifest records that exact build commit. It requires 10 GiB free, a 2 GiB artifact budget, frozen committed
-inputs and exact predecessor identities. Then execute fresh 52-input optimized
-compilation/assembly; retain only inspected 9.44 rollback after success. Run
-actual packaged approvals/selected-vision and backend lifecycle probes, plus
-independent source/signature review. Run isolated GUI acceptance if Computer Use
-is restored; otherwise retain that explicit open gate. Update artifact evidence,
-this checkpoint and draft PR310 before further runtime changes. Next product
-cards remain task-result delivery and trusted desktop target/watch/Stop;
-coding expansion, Linux and Gen-UI remain deferred.
+Actual native approval-screen acceptance remains blocked by Computer Use native
+pipe startup; no GUI claim follows fixtures. Backend startup observes health
+in 1.91 seconds, setup200/incomplete and lifeline SIGTERM/listener closure, with
+no fallback cleanup. The initial sandbox binding failure remains separate.
+No inference/account/audio/message/payment/device or distribution acceptance
+is established. Unrelated AUDIT-FIXES.md remains unstaged.
 
-Small private preparation/evidence files (not published or shipped):
+Next source wave is outside immutable 9.45. Runtime worker owns bounded durable
+origin-scoped TaskFlow result snapshots and gateway read methods; native worker
+owns separate originating-chat result cards and reconnect/poll lifecycle.
+Parent owns their common payload contract, build lists, integration, docs and
+publication. Computer worker owns the narrower GUI-STOP01 physical input cancellation/drain
+repair in GUI/AX adapters and a small shared input helper, with inert OS-sink
+regressions. Trusted target selection/window lease/watch is a separate follow-on;
+this repair does not claim it implemented.
+Do not modify the signed 9.45 artifact to install new source. Coding expansion,
+Linux product expansion and Gen-UI remain deferred.
 
-- `/private/tmp/feral-task-vision-945-integration-20261005/{result.json,pytest.log}`
-  and `/private/tmp/feral-task-vision-945-typing-20261005/{result.json,mypy.log}`.
-- `/private/tmp/feral-task01c-core-implementation-v2-20261005.json`,
-  `/private/tmp/feral-task01c-api-native-implementation-20261005.json`,
-  `/private/tmp/feral-task01c-native-final-inputs-20261005.json` and
-  `/private/tmp/feral-local-vision01c-implementation-evidence.json`.
-- Build helper `/private/tmp/feral-native-9-45-build-20261005.py` accepts
-  `--expected-source` and optional `--execute`; it has not run.
-- Packaged-method script `/private/tmp/feral-945-approval-vision-packaged-probe.py`,
-  SHA `d80d564e433be64c251950b47721625e4886328eaab380418c2461308f0c447f`,
-  has not run. Use future bundle Python with `-I -B`, `--app`, `--manifest`,
-  `--expected-manifest-sha`, `--expected-source`, `--expected-native-sha`
-  and an unused private `--receipt` path. Review source pins against the new
-  manifest before executing. Adapt the preceding 9.44 backend lifecycle probe
-  to exact new identity after assembly; do not run old identity against 9.45.
+Small private receipts: `feral-native-9-45-build-20261005/{result.json,bundle.json,core.json}`,
+`feral-945-independent-artifact-evidence.json`,
+`feral-945-approval-vision-packaged-evidence.json`,
+`feral-945-backend-startup-evidence-unsandboxed.json` and
+`feral-resume-head-verification-20261005.json`. The earlier source/worker/failure
+receipts remain. If resuming, verify root/HEAD/dirty paths, worker ownership,
+current artifact hashes and source changes before running another gate or build.
 
 ## Current status at a glance
 
-### Current Mac 9.44 checkpoint
+### Historical Mac 9.44 checkpoint
 
 - Source `4c8498bf0a8457c905598a2bf3f423fed44abf73` is committed, published
   and packaged as immutable 9.44/build2026100408. Exact remote branch identity
@@ -125,7 +119,7 @@ Small private preparation/evidence files (not published or shipped):
   glasses/iOS and distribution retain explicit acceptance gates below. Coding
   expansion remains last; Linux and Gen-UI remain deferred.
 
-### Verified next-source integration, October 5
+### Historical 9.45 source integration, October 5
 
 TASK-01C, output-only approval scope/availability and LOCAL-VISION01C are
 implemented and frozen. Parent integration passes 2,724 tests across 124 suites
@@ -138,9 +132,9 @@ compatibility failures remain separate from the corrected final receipts.
 The local leakage checker flags three ignored private root documents, outside
 tracked publication; no personal or ignored document is modified for that check.
 
-Verified runtime source is committed as `99f94dda1`; execution is paused
-before fresh optimized 9.45/build2026100501 with 52 Swift inputs. It is not
-yet a built or accepted candidate. Canonical 9.44 and rollback 9.43 retain their own identities above.
+Verified runtime source is committed as `99f94dda1` and packaged from exact
+build checkpoint `3cfe733b4` in 9.45. Its accepted artifact and open GUI gate are
+recorded above. The following preparation observations are historical.
 Build headroom is 29,160,000 KiB at the preparation observation; estimated new
 artifacts are at most 2 GiB. After successful compilation only inspected unused
 9.43 will retire, retaining 9.44 as the sole generated rollback. Actual native
@@ -148,7 +142,7 @@ GUI approval acceptance remains blocked by Computer Use native pipe startup.
 No model, account, audio, payment, message or physical action is exercised.
 [Behavior, checks and limits](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md).
 
-### Active next-source cards, October 5
+### Completed 9.45 source cards, October 5
 
 These allocations have completed source implementation and released their files.
 The immutable 9.44 candidate does not contain them. The verified integration
@@ -320,10 +314,10 @@ oversight is last. Existing coding functionality remains available.
 | Product area | Existing/verified boundary | Next incomplete gate |
 | --- | --- | --- |
 | Mac app, logo/avatar, clean UI, retained features | Native 22 destinations; first-use/avatar and bounded retained journeys verified | Full populated parity, accessibility/permission/error/recovery journeys and remaining UX defects |
-| Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.44 source/signature/backend lifecycle and desktop imports audited | Local model/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
+| Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.45 source/signature/backend lifecycle and desktop imports audited | Local model/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
 | Cloud/API/subscription/local text, vision and voice | Shared config/catalog and provider adapters; bounded earlier local inference | Genuine account entitlement/tool/audio capability, supported sign-in, local vision wiring and M1/8GiB measurements |
 | Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 Chrome outcome verified; central inner gates tested; 9.44 desktop dependencies import | Trusted desktop/AX target ownership, physical drain, desktop watch/stop/takeover and actual model-selected Mac task |
-| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; routine fences, text reservations/concurrency and 9.44 exact-call creation/scoped origin tested | Approval-origin transfer/result subscriptions, exact durable grants/external receipts, global resource lanes, all-subsystem accounting and single-writer service |
+| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; routine fences, text reservations/concurrency and 9.45 exact-call creation and approval-origin transfer tested | Result subscriptions, exact durable grants/external receipts, global resource lanes, all-subsystem accounting and single-writer service |
 | Natural voice/calls/interruption | Bounded managed utterance; truthful realtime results and responsive tool intake tested | Continuous native same-session duplex/delegation, other inline sinks, headset/speaker/noise/latency acceptance |
 | Texting experience, sent/read/seen and task progress | Tracked chat receipts, rich history and events | Distinct transport/read/task receipts, truthful incomplete states and reconnect/reordering acceptance |
 | Memory across sessions/devices/life | Existing layered memory/KG/sync; later committed-row role/source/alias guards and query retrieval tested | Authenticated evidence stamping, full provenance through codec/merge/sync, correction/deletion/export and same-owner sync acceptance |

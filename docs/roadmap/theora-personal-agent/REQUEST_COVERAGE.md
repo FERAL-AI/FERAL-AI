@@ -1,12 +1,14 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 5).** Immutable 9.44 contains the verified local
-readiness/task-status and preceding reliability waves. The next exact approval
-and selected vision source passes 2,724 frozen integration checks and native
-fixture/typecheck gates; fresh 9.45 packaging is next. Actual new native GUI,
-physical voice, model/account and distribution acceptance remain separate.
-[Current state](WORK_STATE.md), [new behavior](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md),
-[immutable artifact](NATIVE_9_44_ACCEPTANCE.md).
+**Current checkpoint (October 5).** Immutable 9.45 contains exact approval
+transfer and selected vision routing, with separate fresh native compilation,
+source/signature/import audits, actual bundled-method and backend lifecycle
+acceptance. Source integration passes 2,724 checks; exact build head has 18
+successful remote checks/four skips. Actual new GUI, physical voice, real model/
+account and distribution gates remain. Task results in the originating chat and
+trusted desktop resources are next.
+[Current state](WORK_STATE.md), [behavior](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md),
+[artifact and limits](NATIVE_9_45_ACCEPTANCE.md).
 
 Reconciled October 4, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
 
@@ -20,7 +22,7 @@ outcome, Stop/disconnect and normal Quit. Earlier 9.36 local chat/recall and 9.3
 markers remain separate historical evidence. Whole-desktop control source already
 exists; its complete packaged/model-driven acceptance is not established.
 [Historical GUI acceptance](NATIVE_9_40_ACCEPTANCE.md),
-[current artifact](NATIVE_9_44_ACCEPTANCE.md), [runtime review](RUNTIME_REVIEW_20261004.md)
+[current artifact](NATIVE_9_45_ACCEPTANCE.md), [runtime review](RUNTIME_REVIEW_20261004.md)
 and [WORK_STATE](WORK_STATE.md) distinguish the evidence and remaining gates.
 
 ## October4 additions and integration coverage

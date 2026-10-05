@@ -3,7 +3,8 @@
 Updated October 5, 2026. This wave extends the existing tracked turns, central
 executor, TaskFlow, provider adapters and native Oversight screen. Current source,
 publication and artifact acceptance are recorded in [WORK_STATE](WORK_STATE.md).
-The preceding immutable 9.44 does not contain these changes.
+They are packaged in [immutable 9.45](NATIVE_9_45_ACCEPTANCE.md); the preceding
+9.44 does not contain them.
 
 ## Task approval retains its original request
 
