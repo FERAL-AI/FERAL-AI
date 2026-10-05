@@ -1,18 +1,20 @@
 # FERAL completion checkpoint
 
-Updated October 4, 2026. Parent/integrator owns this file. Reconcile it with actual
+Updated October 5, 2026. Parent/integrator owns this file. Reconcile it with actual
 Git, CI and processes after resuming; it is a checkpoint, not a live process lock.
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
 ## Current status at a glance
 
-### Current local readiness and task status source checkpoint
+### Current Mac 9.44 checkpoint
 
-- Parent integrates three completed workers. Local inventory, vision preset and
-  task inspection files are frozen and released. Unrelated AUDIT-FIXES.md stays
-  unstaged. Coding expansion remains last; Linux and Gen-UI are deferred.
-- LOCAL-READY-01A clears removed Ollama/LM Studio models only after a valid empty
+- Source `4c8498bf0a8457c905598a2bf3f423fed44abf73` is committed, published
+  and packaged as immutable 9.44/build2026100408. Exact remote branch identity
+  matches. Parent integrated three completed workers; source files are released.
+  Documentation acceptance follows as a separate checkpoint. Draft PR310 remains
+  the publication target; main and existing public history are unchanged.
+- LOCAL-READY-01A clears removed Ollama/LM Studio models only after valid empty
   inventory, preserving prior IDs and warning on failed/malformed refresh. Passive
   reads and reopen do not revive stale defaults or make live calls. Worker gate:
   257 tests. No model download or user configuration is involved.
@@ -24,34 +26,46 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   a failed job's error stays in data. Supported adapter endpoints are explicit.
   The cancellation fixture controls worker drain before checking retained refs.
   Final task/manifest worker gate: 477 tests. Existing executor/policy remains.
-- Parent final frozen integration passes 2,337 tests across 106 suites, including
-  all manifest endpoint contracts, with two skips/55 warnings in 51.51 seconds.
+- Parent frozen integration passes 2,337 tests across 106 suites, including all
+  manifest endpoint contracts, with two skips/55 warnings in 51.51 seconds.
   All 1,327 Python inputs stay unchanged; digest
   `b7ae5e4288ab3502b11e8ba030abc0b5968b5f95ba8a5c35abcc8354433c80a8`.
   Full local typing has 798 existing errors, zero normalized additions including
   multiplicities and two previous object-type diagnostics removed. Ruff, 24 script
   tests, shell syntax, whitespace and docs navigation pass. Initial typing failure
   remains separate evidence. [Behavior and limits](LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md).
-- Current immutable package remains 9.43/build2026100407/source `0604ddf97`.
-  It passes 496 packaged Python comparisons, 65 build-input hashes, 11 desktop
-  imports, strict ad-hoc signatures and isolated backend startup/lifeline shutdown.
-  Packaged handoff found a genuine status-envelope defect; full acceptance is not
-  passed. It is corrected only in this next source wave. No new GUI is claimed.
-  [Exact artifact](NATIVE_9_43_ACCEPTANCE.md). 9.42 remains the sole rollback.
-- Published source `0604ddf97` has 17 successful remote checks, four conditional
-  skips and one failed backend job. Three failures are delegated endpoint contract
-  inspection and one is cancellation fixture timing. The source wave corrects
-  both; new-head remote acceptance is still required. Preceding `e35dd9af9` has
-  18 successful checks/four skips. No previous CI result is reassigned.
-- Parent next: commit/publish this source, offline assemble immutable 9.44 with
-  68 exact build inputs and reused identical 52 Swift inputs/flags, preserve 9.43
-  and retire only inspected unused 9.42. Budget: at least 10 GiB initially,
-  estimated 2 GiB new artifacts and at least 5 GiB finally. Actual packaged task,
-  public readiness-method and isolated startup checks must follow assembly.
-- Following cards: exact pending-approval origin/result ownership, then coordinated
-  trusted desktop target/watch/Stop and physical drain. Shared memory, continuous
-  voice, local assets, fresh installation, Messages, commerce, glasses/iOS and
-  distribution retain explicit acceptance gates. Full requirements stay below.
+- Exact 9.44 assembly and independent artifact review pass all 496 packaged
+  Python comparisons, 68 assembly hashes, three brand assets, 11 desktop imports,
+  contained Python/SDK/OpenCode and strict deep ad-hoc signatures. Identical 52
+  Swift inputs/flags reuse verified 9.43 output; no fresh compile or GUI claim.
+  Native SHA `33f35e12ba2c5ffe7ae40d5eea387bd49a27013b6edf9a16f46113b85635d3c2`.
+  Manifest SHA `b8416f024ba3b84d8bb1dcaf7e47d7a0f17cfee598f4f67f76cc3d069d33ec31`.
+  [Exact artifact and acceptance](NATIVE_9_44_ACCEPTANCE.md).
+- Actual bundled interpreter checks pass tracked exact-call creation/replay,
+  changed terms/scoped inspection, queued/failed-job status, active-supervisor
+  writer contention and cancellation before insertion with zero rows/drained
+  workers. Inert public local inventory/preset routes pass without inference or
+  configuration mutation on refusal. Zero network/subprocess attempts occur.
+  Inert admission does not establish full approval handling or external outcomes.
+- Actual isolated bundled backend health/setup passes in one 1.85-second startup
+  observation. Lifeline EOF stops only the owned backend with SIGTERM and closes
+  its listener without fallback. No new native GUI, account, audio, message,
+  payment, model download or service operation is part of this wave.
+- Canonical 9.44 plus sole rollback 9.43 remain. Inspected unused 9.42 is retired;
+  its evidence and the genuine 9.43 failed-status probe remain. Assembly free space:
+  23,995,965,440 bytes before, 23,951,286,272 after; net growth 44,679,168 bytes.
+  Peak disk usage is not measured. Personal models/profiles/home Git are untouched.
+- Source `4c8498bf0` remote CI is in progress. The latest observed general CI
+  completed 12 jobs successfully, with one conditional matrix skip and Ubuntu
+  backend fast-lane still running; separate native/desktop checks also remain
+  pending. Preceding `0604ddf97` finished with 17 successes/four skips/one failed
+  backend job (endpoint inspection and timing fixture, corrected here). No result
+  is reassigned from a different head. Unrelated AUDIT-FIXES.md remains unstaged.
+- Next shared contract: exact pending-approval origin/result ownership. Then
+  coordinate trusted desktop target/watch/Stop and physical drain. Continuous
+  voice, local assets, fresh installation, memory/sync, Messages, commerce,
+  glasses/iOS and distribution retain explicit acceptance gates below. Coding
+  expansion remains last; Linux and Gen-UI remain deferred.
 
 ### Historical multitasking and admission source
 
@@ -201,10 +215,10 @@ oversight is last. Existing coding functionality remains available.
 | Product area | Existing/verified boundary | Next incomplete gate |
 | --- | --- | --- |
 | Mac app, logo/avatar, clean UI, retained features | Native 22 destinations; first-use/avatar and bounded retained journeys verified | Full populated parity, accessibility/permission/error/recovery journeys and remaining UX defects |
-| Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.43 source/signature/backend lifecycle and desktop imports audited | Local model/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
+| Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.44 source/signature/backend lifecycle and desktop imports audited | Local model/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
 | Cloud/API/subscription/local text, vision and voice | Shared config/catalog and provider adapters; bounded earlier local inference | Genuine account entitlement/tool/audio capability, supported sign-in, local vision wiring and M1/8GiB measurements |
-| Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 Chrome outcome verified; central inner gates tested; 9.43 desktop dependencies import | Trusted desktop/AX target ownership, physical drain, desktop watch/stop/takeover and actual model-selected Mac task |
-| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; routine fences, text reservations/concurrency and 9.43 exact-call creation/scoped origin tested | Approval-origin transfer/result subscriptions, exact durable grants/external receipts, global resource lanes, all-subsystem accounting and single-writer service |
+| Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 Chrome outcome verified; central inner gates tested; 9.44 desktop dependencies import | Trusted desktop/AX target ownership, physical drain, desktop watch/stop/takeover and actual model-selected Mac task |
+| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; routine fences, text reservations/concurrency and 9.44 exact-call creation/scoped origin tested | Approval-origin transfer/result subscriptions, exact durable grants/external receipts, global resource lanes, all-subsystem accounting and single-writer service |
 | Natural voice/calls/interruption | Bounded managed utterance; truthful realtime results and responsive tool intake tested | Continuous native same-session duplex/delegation, other inline sinks, headset/speaker/noise/latency acceptance |
 | Texting experience, sent/read/seen and task progress | Tracked chat receipts, rich history and events | Distinct transport/read/task receipts, truthful incomplete states and reconnect/reordering acceptance |
 | Memory across sessions/devices/life | Existing layered memory/KG/sync; later committed-row role/source/alias guards and query retrieval tested | Authenticated evidence stamping, full provenance through codec/merge/sync, correction/deletion/export and same-owner sync acceptance |

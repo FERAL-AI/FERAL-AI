@@ -73,8 +73,11 @@ Full typing completes with 798 existing diagnostics, zero normalized additions
 including multiplicity checks, and two previous object-type errors removed.
 Ruff, 24 script tests, shell syntax, whitespace and documentation navigation pass.
 The final task/manifest worker gate passes 477 tests. Worker counts overlap;
-they are not additive evidence of product coverage. Packaged acceptance remains
-required; the current package is not modified in place.
+they are not additive evidence of product coverage. Exact-source
+[Mac 9.44](NATIVE_9_44_ACCEPTANCE.md) now passes independent payload/signature
+verification, actual bundled task/status and public local-readiness method
+checks, and isolated backend startup/lifeline shutdown. No inference, physical
+voice or full approval handling is claimed by those inert collaborators.
 
 Small private receipts retain the initial 2,065-test source gate and its typing
 failure separately from the corrected final gate. Final evidence is

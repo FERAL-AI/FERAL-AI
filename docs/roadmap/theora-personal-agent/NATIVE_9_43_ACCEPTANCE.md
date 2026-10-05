@@ -1,10 +1,11 @@
 # Mac 9.43 exact-source acceptance
 
-Updated October 4, 2026. This is the current generated Mac candidate. Historical
-[9.42 acceptance](NATIVE_9_42_ACCEPTANCE.md) remains evidence for the preceding
-runtime and its actual native warning/Quit check. It is the sole generated
-rollback; the inspected unused 9.41 copy was retired. No personal deployment or
-model/profile data was removed.
+Updated October 4, 2026. Historical artifact record. [9.44](NATIVE_9_44_ACCEPTANCE.md)
+is canonical; immutable 9.43 is the sole generated rollback and its failed status
+probe remains below. Inspected unused 9.42 was retired after the new assembly.
+[9.42 acceptance](NATIVE_9_42_ACCEPTANCE.md) preserves its actual native warning/Quit
+evidence. Retention figures below describe the 9.43 assembly checkpoint. No
+personal deployment or model/profile data was removed.
 
 ## Identity and assembly
 

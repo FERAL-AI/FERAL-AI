@@ -3,9 +3,9 @@
 October 4, 2026. This is a bounded artifact and runtime acceptance record, not
 full-product or distribution certification.
 
-This is the preceding artifact record. [9.43](NATIVE_9_43_ACCEPTANCE.md) is now
-canonical; immutable 9.42 is the sole generated rollback. The retention figures
-below describe the historical 9.42 assembly, not current generated copies.
+This is a historical artifact record. [9.44](NATIVE_9_44_ACCEPTANCE.md) is now
+canonical; immutable 9.43 is the sole generated rollback. The inspected unused
+9.42 generated copy is retired. Figures below describe its historical assembly.
 
 ## Artifact identity
 

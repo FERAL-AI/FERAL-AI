@@ -35,7 +35,8 @@ timeout and actual post-startup output flooding. Independent review reproduces
 the interpreter-startup qualification above. The development interpreter passes
 all 11 imports. Immutable 9.42 fails the new static capability gate because it
 lacks the additional closure; its historical acceptance has not been erased or
-changed. A new exact-source package must establish bundled imports separately.
+changed. [9.43](NATIVE_9_43_ACCEPTANCE.md) and [9.44](NATIVE_9_44_ACCEPTANCE.md)
+subsequently establish all 11 imports under bundled Python separately.
 
 ## Passive provider discovery
 
@@ -99,8 +100,10 @@ skips and 55 warnings in 51.55 seconds. All 1,325 Python inputs remain unchanged
 digest `241e37798db9e41638ae1debf19e9bc26c6b47d6890ca93fdd610f3420be1891`.
 Full local typing completes with 800 existing errors, no normalized additions,
 and one optional-return diagnostic removed. Ruff, 24 bundle script tests, shell
-syntax and documentation navigation pass. Packaging must establish these changes
-inside a new candidate separately.
+syntax and documentation navigation pass. Later [9.44](NATIVE_9_44_ACCEPTANCE.md)
+establishes bounded bundled task/status checks after correcting the status defect
+found in 9.43; [local readiness/status evidence](LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md)
+records the later source gate and its separate limitations.
 
 ## Remaining acceptance gates
 

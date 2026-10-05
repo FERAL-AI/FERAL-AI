@@ -1,9 +1,9 @@
 # Mac 9.41 runtime reliability candidate
 
-Historical artifact record. After [9.43 acceptance](NATIVE_9_43_ACCEPTANCE.md),
-the inspected unused 9.41 generated copy is retired. The canonical build path
-holds 9.43 and immutable 9.42 is the sole generated rollback. The original checks
-and retention decisions below describe the 9.41 build checkpoint.
+Historical artifact record. The inspected unused 9.41 generated copy is retired.
+The canonical build path holds [9.44](NATIVE_9_44_ACCEPTANCE.md), with immutable
+9.43 as the sole generated rollback. Original checks and retention decisions
+below describe the 9.41 build checkpoint.
 
 October 4, 2026. This candidate contains the bounded
 [runtime reliability fixes](RUNTIME_RELIABILITY_EVIDENCE.md). It is not full

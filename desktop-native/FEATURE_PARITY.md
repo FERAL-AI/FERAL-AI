@@ -1,12 +1,17 @@
 # FERAL Native Preview: feature parity inventory
 
-**Current frozen source (October 4).** Local inventory removal, vision preset
-refusal and truthful task inspection pass 2,337 tests across 106 suites. Full
-typing adds no errors. New exact-source 9.44 assembly and packaged acceptance
-remain required. Current 9.43 retains a failed task-status probe; its correction
-is outside that immutable artifact. Native Swift inputs are unchanged.
-[Source behavior and gates](../docs/roadmap/theora-personal-agent/LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md),
-[current checkpoint](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+**Current Mac artifact (October 4).** Immutable 9.44/build2026100408 contains
+published source `4c8498bf0`: truthful local inventory, guarded vision preset
+selection and task-status/endpoint corrections. Frozen integration passes 2,337
+tests across 106 suites; typing adds no diagnostics. All 496 packaged Python
+files and 68 assembly inputs match. Independent artifact review, 11 desktop
+imports, strict ad-hoc signatures, bundled task/public readiness methods and
+isolated backend startup/lifeline shutdown pass. Identical 52 Swift inputs/flags
+reuse verified output; no new GUI/physical/account acceptance is claimed. Sole
+rollback: 9.43, retaining its failed status-probe evidence. Current-source CI is
+pending. [Artifact and limits](../docs/roadmap/theora-personal-agent/NATIVE_9_44_ACCEPTANCE.md),
+[behavior and remaining gates](../docs/roadmap/theora-personal-agent/LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md).
+Coding expansion remains last.
 
 **Preceding packaged checkpoint (October 4).** Mac 9.43/source `0604ddf97` includes
 the pinned desktop input closure, passive cold-cache provider discovery and the
