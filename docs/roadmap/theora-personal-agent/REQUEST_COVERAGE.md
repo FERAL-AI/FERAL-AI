@@ -1,12 +1,12 @@
 # User request coverage and next implementation work
 
-**Existing-Chrome integration (October 4).** Direct consented connection to an
-already running Chrome, selected-chat/tab controls and exact resource-bound
-approvals are implemented. Frozen backend integration passes 1,468 tests with
-three opt-in skips; native Browser 115 and Oversight 12 fixture groups pass.
-Typing retains the unchanged baseline; exact-source 9.38 packaging and actual native
-connection controls remain pending. Personal-profile permission/account behavior
-is untested. [Connection contract](EXISTING_CHROME_PLAN.md), [current checkpoint](WORK_STATE.md).
+**Current review (October 4).** All feature groups and next incomplete gates are
+in the [single current checkpoint](WORK_STATE.md). The
+[independent runtime review](RUNTIME_REVIEW_20261004.md) confirms existing desktop
+computer use, reproduced routine/budget/voice/memory/completion defects and missing
+bundle dependencies. These findings are reviewed, not yet patched. Immutable 9.40
+still passes its bounded native browser/setup/lifecycle acceptance. No new physical,
+account, voice or distribution certification is implied.
 
 
 Reconciled October 4, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
@@ -15,13 +15,13 @@ The detailed contracts and acceptance work packages remain in [release readiness
 
 ## Current verified boundary
 
-Actual9.37/sourceb9af passes bounded native browser consent, real masked frames,
-correct-field text, coordinate marker, Stop/navigation/expiry clearing and normal
-exit. Earlier9.36 passes local chat and saved-context restart; 9.37 does not
-certify new chat latency, audio/account/device/migration/distribution acceptance.
-Source corrections and research are separate from actual task outcomes.
-See [current candidate evidence](NATIVE_9_37_ACCEPTANCE.md) and
-[WORK_STATE](WORK_STATE.md) for exact verification and publication.
+Actual 9.40/source 250787b2d passes bounded fresh-profile local-provider probing,
+existing-Chrome connection/selection, request-only native approval, synthetic page
+outcome, Stop/disconnect and normal Quit. Earlier 9.36 local chat/recall and 9.38
+markers remain separate historical evidence. Whole-desktop control source already
+exists; its complete packaged/model-driven acceptance is not established.
+[Current candidate](NATIVE_9_40_ACCEPTANCE.md), [runtime review](RUNTIME_REVIEW_20261004.md)
+and [WORK_STATE](WORK_STATE.md) distinguish the evidence and remaining gates.
 
 ## October4 additions and integration coverage
 

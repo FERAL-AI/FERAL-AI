@@ -1,5 +1,12 @@
 # Theora / FERAL full-product release readiness
 
+**Review priority update (October 4).** Existing AX/GUI/vision computer-control
+paths are confirmed and should be reused. Independent routine-policy/recovery,
+budget/settlement, voice/result, memory-attribution and inner desktop-dispatch
+findings now precede expanded unattended features. Runtime fixes are not yet
+implemented. [Review and fix order](RUNTIME_REVIEW_20261004.md),
+[full current feature checkpoint](WORK_STATE.md). The 9.40 artifact remains immutable.
+
 **Verified Mac checkpoint (October 4).** Immutable 9.40/build2026100404,
 source `250787b2d1512d2cef98ff77f8ceda607875ee24`, passes actual fresh-profile
 local-provider setup/probe, existing-Chrome connection/tab attachment, exact

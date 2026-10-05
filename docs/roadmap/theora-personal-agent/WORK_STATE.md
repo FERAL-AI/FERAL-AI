@@ -7,7 +7,60 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### Current verified Mac and existing-Chrome checkpoint
+### Current independent runtime review
+
+- Three read-only workers completed current-source review and inert reproductions.
+  [Findings, counterevidence, reuse decisions and fix order](RUNTIME_REVIEW_20261004.md).
+  All 13 supplied source hashes match; runtime/candidate unchanged. No new account,
+  audio, OS input, message, purchase, model download or service launch occurred.
+- Existing computer use is confirmed: registered AX, GUI input/screenshot and
+  vision/action paths. Reuse these executors. New findings concern inner policy
+  fallback/drag/shell paths, missing bundled input dependencies, local vision and
+  provider capability wiring. The selected-tab Browser panel is a separate view.
+- Confirmed routine policy and restart/replay defects precede new unattended
+  features. Atomic budget admission/settlement, truthful voice/agent envelopes,
+  source-aware memory extraction and independent workflow scheduling are next.
+  Normal policy denials, registered GUI dispatch, managed realtime refusal,
+  ordinary scheduler reopen, scoped ownership and existing ACP remain counterevidence.
+- Executed review evidence: four routine/commerce defect reproductions plus nine
+  follow-up controls; 34 voice/memory/agent probes plus 100 existing tests;
+  three inert computer-method checks. Counts overlap; they are not a product
+  coverage sum. Method evidence is distinct from physical/account acceptance.
+- Published documentation HEAD before this review is 43c1dcb5b; all six executed
+  CI workflows pass, opt-in real-brain skipped. Runtime/app identity remains 250787b2d.
+  Runtime fixes from this independent review are not implemented or packaged.
+- Workers released their review paths. Parent owns integration, the feature table
+  below, docs and publication. No browser-only or GUI build wave is active.
+  Start implementation only after review is accepted; assign exclusive files,
+  preserve shared contracts and freeze before combined checks/new packaging.
+
+### Full feature checkpoint
+
+| Product area | Existing/verified boundary | Next incomplete gate |
+| --- | --- | --- |
+| Mac app, logo/avatar, clean UI, retained features | Native 22 destinations; first-use/avatar and bounded retained journeys verified | Full populated parity, accessibility/permission/error/recovery journeys and remaining UX defects |
+| Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.40 source/signature/lifecycle audited | Missing input/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
+| Cloud/API/subscription/local text, vision and voice | Shared config/catalog and provider adapters; bounded earlier local inference | Genuine account entitlement/tool/audio capability, supported sign-in, local vision wiring and M1/8GiB measurements |
+| Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 native Chrome approval/page outcome verified | Inner dispatch fixes, bundled dependencies, target ownership, desktop watch/stop/takeover and actual model-selected Mac task |
+| Multiple agents/jobs while talking; always-on work | Multi-agent/ToolRunner/ACP and persisted TaskFlow/cron exist | Routine authorization/recovery, budgets, durable detached ownership, resource concurrency and opt-in single-writer service |
+| Natural voice/calls/interruption | Bounded managed utterance with ownership/playback gates; legacy realtime paths | Intake/envelope fixes, continuous same-session duplex/delegation, headset/speaker/noise/latency acceptance |
+| Texting experience, sent/read/seen and task progress | Tracked chat receipts, rich history and events | Distinct transport/read/task receipts, truthful incomplete states and reconnect/reordering acceptance |
+| Memory across sessions/devices/life | Existing layered memory/KG/retrieval/compaction/sync; selected recall verified | Role/evidence attribution fixes, query retrieval, temporal correction/deletion/export and same-owner sync acceptance |
+| Coding and CLI oversight | Bundled OpenCode, ACP adapters, scoped activity and bounded actual command | End-to-end project/cancel/restart parity, provider tool capability and opted-in independent CLI event ingestion |
+| Messages, shopping cards, browsing/accounts/booking | Messages send primitive, channel abstractions, preview commerce, account adapters | Enrolled receive/dedup/delivery, evidence-backed offers, real permitted account/task outcomes |
+| Payments/Stripe Link and order confirmation | Money policy/preview; Link research | Atomic quote reservation, exact approval, one merchant adapter, sandbox uncertainty/reconciliation and authorized real receipt |
+| iOS/glasses camera/voice handoff and health | Existing HUP/relay/outbox and health integrations; separate iOS owner | Exact device/capture freshness, durable task/voice handoff, units/provenance and physical acceptance |
+| Proactive help and autonomous learning | Existing proactive hooks/policy and learner | All-entry-point grants, budgets, quiet-hours/expiry and trustworthy attribution; no ambient consent inference |
+| Multiplayer/social collaboration/street matching | Peer/sync and scoped federation primitives | Cross-owner invitations/task permissions/revocation/privacy and opted-in matching; complete consumer experience absent |
+| Developer/open-source platform, Linux and PMF | SDK/extensions/rules/public branch and research exist | Clean third-party setup/documentation, signed releases and measured user outcomes; Linux expansion/Gen-UI deferred |
+
+[Complete requirement detail](REQUEST_COVERAGE.md),
+[acceptance gates](RELEASE_READINESS.md), [iOS handoff](IOS_AGENT_HANDOFF.md).
+No numeric completion percentage or calendar forecast is inferred from code size
+or passing fixtures. Implemented, tested, packaged and published are separate states.
+
+### Preserved verified Mac and existing-Chrome checkpoint
+
 
 - Published runtime source `250787b2d1512d2cef98ff77f8ceda607875ee24` is on
   `feat/native-product-release-foundation-20261001` in
@@ -46,11 +99,10 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   checks confirm owned host, backend, Chrome and helper absent, with no listeners
   on their recorded ports. Parent owns integration/docs/publication. No GUI host
   remains; no unknown process was signalled.
-- Next ready cards: reconcile provider status projection, then actual Mac voice
-  interruption/background-task acceptance and task-linked browser takeover.
-  Independent browser resource ownership, personal Chrome permission acceptance
-  and full model-selected outcomes remain explicit gates. Use exclusive worker
-  files and freeze before combined checks; do not rebuild unchanged native source.
+- This packaged checkpoint predates the independent runtime review above. Keep
+  provider status projection as a small follow-up; shared action/recovery and
+  result/memory correctness take priority before additional unattended features.
+  Real browser permissions/model-selected outcomes remain explicit gates.
 - Keep canonical plus one preceding generated app, >=10 GiB free before build and
   <=2 GiB new-artifact budget. Preserve personal data/models/accounts/history and
   unrelated AUDIT-FIXES.md. Real audio/cloud accounts/glasses/Messages/commerce,

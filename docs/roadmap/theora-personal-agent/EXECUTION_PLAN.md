@@ -1,5 +1,12 @@
 # FERAL app completion: executable plan
 
+**Review priority update (October 4).** Existing AX/GUI/vision computer-control
+paths are confirmed and should be reused. Independent routine-policy/recovery,
+budget/settlement, voice/result, memory-attribution and inner desktop-dispatch
+findings now precede expanded unattended features. Runtime fixes are not yet
+implemented. [Review and fix order](RUNTIME_REVIEW_20261004.md),
+[full current feature checkpoint](WORK_STATE.md). The 9.40 artifact remains immutable.
+
 Reconciled October 3, 2026 by parallel source/research audits and the parent integration audit. This supersedes the dependency order in older planning prose where it would require rebuilding existing sessions, memory or workflows before packaging the supported local system. It does not supersede their safety or acceptance contracts.
 
 ## Starting point and scope
