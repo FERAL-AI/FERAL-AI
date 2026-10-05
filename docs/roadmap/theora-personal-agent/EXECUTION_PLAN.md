@@ -1,6 +1,25 @@
 # FERAL app completion: executable plan
 
-**Current Mac checkpoint (October 4).** Responsive realtime intake, atomic
+**Current frozen source wave (October 4).** Truthful local model inventory,
+vision preset admission and task-status envelopes pass 2,337 tests across
+106 suites. Full typing adds no diagnostics. Endpoint inspection and cancellation
+fixture corrections address the preceding remote failure. This source requires
+its own publication, CI and exact-source Mac 9.44 acceptance. 9.43 remains the
+current immutable package; its handoff status defect is retained as failed
+evidence. [Behavior and gates](LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md),
+[current ownership](WORK_STATE.md). Coding expansion remains last.
+
+**Preceding Mac checkpoint (October 4).** INSTALL-01A/01B and bounded TASK-01B
+are published as `0604ddf97` and packaged in immutable 9.43. The pinned desktop
+closure imports in bundled Python; all 496 packaged Python files and 65 assembly
+inputs match source. Source integration passes 1,962 tests across 100 suites.
+Backend startup/lifeline passes; packaged handoff exposes a status-envelope
+defect and is not fully accepted. Its next-build correction is active.
+9.42 is the sole rollback. Approval-origin transfer/result delivery, truthful
+local vision presets and trusted desktop ownership are next. Coding expansion
+remains last. [Artifact and limits](NATIVE_9_43_ACCEPTANCE.md).
+
+**Preceding Mac checkpoint (October 4).** Responsive realtime intake, atomic
 model-call reservations, bounded TaskFlow concurrency and routine uncertainty
 visibility are published as `6947bbec1` and packaged in immutable 9.42.
 Frozen integration passes 1,765 tests across 88 suites. Exact-source packaging,

@@ -87,7 +87,14 @@ class OllamaProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"{self._base_url}/api/tags")
             r.raise_for_status()
-        ids = [m["name"] for m in r.json().get("models", []) if m.get("name")]
+        payload = r.json()
+        if not isinstance(payload, dict) or payload.get("error") is not None or not isinstance(payload.get("models"), list):
+            raise ValueError("Ollama returned an invalid model inventory")
+        ids: list[str] = []
+        for item in payload["models"]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
+                raise ValueError("Ollama returned an invalid model inventory entry")
+            ids.append(item["name"])
         # Trust /api/tags as the source of truth — including the empty
         # case. The previous behaviour preserved a stale ``self._models``
         # list when the server returned no models, so the picker kept

@@ -375,6 +375,7 @@ def _task_status(flow, flow_id):
     steps = flow.get("steps", [])
     done = sum(1 for s in steps if s.get("status") == "completed")
     return {
+        "ok": True,
         "flow_id": flow["id"],
         "title": flow["title"],
         "status": flow["status"],

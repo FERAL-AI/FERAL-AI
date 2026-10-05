@@ -4344,21 +4344,48 @@ class LLMProvider:
         preset = LLM_PRESETS.get(preset_id)
         if not preset:
             return {"ok": False, "error": f"Unknown preset: {preset_id}"}
-        requested_model = preset.get("model", "") or ""
-        # Ollama presets that hardcode a model name (``ollama_vision`` ->
-        # ``llava``) are a guaranteed 404 on the first chat turn when
-        # that model isn't pulled locally. Probe ``/api/tags`` and fall
-        # through to switch_provider's auto-detect path when the request
-        # doesn't match an installed model — the caller still gets an
-        # ``ok=True`` response but with a ``warning`` describing the
-        # substitution so the UI can prompt the operator to pull the
-        # preferred model. When Ollama itself is unreachable we leave
-        # the request unchanged: the running brain's own probe ladder
-        # will surface that failure.
+        requested_model = preset.get("model", "")
+        if not isinstance(requested_model, str):
+            return {"ok": False, "preset": preset_id, "error_code": "preset_model_invalid",
+                    "error": "The preset model must be a string. Settings were not changed."}
+        vision_preset = preset_id == "ollama_vision"
         fallback_warning = ""
         if preset.get("provider") == "ollama" and requested_model:
-            pulled = await self._ollama_pulled_models()
-            if pulled is not None:
+            try:
+                pulled = await self._ollama_pulled_models()
+            except Exception:
+                if not vision_preset:
+                    raise
+                return {"ok": False, "preset": preset_id, "error_code": "vision_model_unverified",
+                        "error": "Installed Ollama vision models could not be verified. Settings were not changed."}
+            if vision_preset:
+                if pulled is None:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_model_unverified",
+                            "error": "Installed Ollama vision models could not be verified. Settings were not changed."}
+                if ":" in requested_model:
+                    selected = requested_model if requested_model.partition(":")[2] and requested_model in pulled else None
+                else:
+                    # The inventory includes manufactured bare aliases. Use
+                    # an actual full tag rather than treating a base alias as
+                    # proof that Ollama's implicit latest tag is installed.
+                    candidates = sorted(name for name in pulled if isinstance(name, str)
+                                        and name.split(":", 1)[0] == requested_model
+                                        and name.partition(":")[2])
+                    latest = f"{requested_model}:latest"
+                    selected = latest if latest in candidates else (candidates[0] if candidates else None)
+                if selected is None:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_model_not_installed",
+                            "error": "The requested Ollama vision model is not verified as installed. Settings were not changed."}
+                try:
+                    vision_ok, _ = self._vision_support_for("ollama", selected)
+                except Exception:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_capability_unverified",
+                            "error": "Vision capability could not be classified. Settings were not changed."}
+                if not vision_ok:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_model_unsupported",
+                            "error": "The installed model is not classified as vision-capable. Settings were not changed."}
+                requested_model = selected
+            elif pulled is not None:
                 base = requested_model.split(":", 1)[0]
                 if requested_model not in pulled and base not in pulled:
                     fallback_warning = (
@@ -4368,6 +4395,9 @@ class LLMProvider:
                         "preset directly."
                     )
                     requested_model = ""
+        elif vision_preset:
+            return {"ok": False, "preset": preset_id, "error_code": "vision_model_unverified",
+                    "error": "The vision preset has no verifiable Ollama model. Settings were not changed."}
         await self.switch_provider(
             provider=preset["provider"],
             model=requested_model,
@@ -4382,6 +4412,9 @@ class LLMProvider:
         }
         if fallback_warning:
             payload["warning"] = fallback_warning
+        if vision_preset:
+            payload["readiness"] = {"model_presence": "confirmed", "capability_basis": "model_classification",
+                                    "inference_verified": False}
         return payload
 
     @staticmethod

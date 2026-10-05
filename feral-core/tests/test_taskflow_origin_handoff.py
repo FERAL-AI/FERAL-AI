@@ -214,10 +214,13 @@ async def test_blocked_sql_creation_keeps_loop_responsive_and_cancel_guarded(rig
     competing = sqlite3.connect(runtime._db_path)
     competing.execute("BEGIN IMMEDIATE")
     entered = threading.Event()
+    release_worker = threading.Event()
     original = runtime.create_flow
 
     def blocking_create(**kwargs):
         entered.set()
+        if cancel and not release_worker.wait(3):
+            raise RuntimeError("fixture creation worker release timed out")
         return original(**kwargs)
     monkeypatch.setattr(runtime, "create_flow", blocking_create)
     caller = asyncio.create_task(invoke(rig))
@@ -231,14 +234,18 @@ async def test_blocked_sql_creation_keeps_loop_responsive_and_cancel_guarded(rig
             caller.cancel()
             await asyncio.gather(caller, return_exceptions=True)
             assert taskflows._CREATION_WORKERS  # Worker ownership outlives its cancelled subscriber.
+            workers = list(taskflows._CREATION_WORKERS)
+            assert all(not worker.done() for worker in workers)
         competing.commit()
+        release_worker.set()
         if cancel:
-            await asyncio.wait_for(asyncio.gather(*taskflows._CREATION_WORKERS, return_exceptions=True), 2)
+            await asyncio.wait_for(asyncio.gather(*workers, return_exceptions=True), 2)
             assert runtime.list_flows() == []
         else:
             result, _ = await asyncio.wait_for(caller, 2)
             assert result["success"] is True
     finally:
+        release_worker.set()
         competing.rollback()
         competing.close()
         if not caller.done():
@@ -509,3 +516,66 @@ async def test_public_executor_uses_registered_adapter_and_retains_policy_gate(r
         assert len(rig[0].taskflows.list_flows()) == 2
     finally:
         await executor.client.aclose()
+
+
+@pytest.mark.parametrize("job_failed", [False, True])
+async def test_public_status_read_success_is_distinct_from_job_outcome(rig, job_failed):
+    from pathlib import Path
+    from models.skill_manifest import SkillManifest
+    from skills.executor import SkillExecutor
+
+    started, _ = await invoke(rig)
+    flow_id = started["data"]["flow_id"]
+    runtime = rig[0].taskflows
+    if job_failed:
+        # The real runner cannot execute an llm.chat step without an
+        # orchestrator. Its persisted job failure is data, not a failed read.
+        await runtime.start()
+        deadline = time.monotonic() + 2
+        while runtime.get_flow(flow_id)["status"] != "failed":
+            assert time.monotonic() < deadline
+            await asyncio.sleep(0.01)
+        await runtime.stop()
+    expected = runtime.get_flow(flow_id)
+    manifest = SkillManifest.model_validate(json.loads(
+        (Path(__file__).parents[1] / "skills/manifests/task.json").read_text()))
+    endpoint = next(e for e in manifest.endpoints if e.id == "status")
+    executor = SkillExecutor()
+    try:
+        executor.client.request = AsyncMock(side_effect=AssertionError("HTTP must not be used"))
+        async def read(_skill):
+            return await executor.execute("background_task__status", {"flow_id": flow_id}, manifest, endpoint)
+        result, _ = await invoke(rig, endpoint="status", callback=read)
+        assert result["success"] is True and result["status_code"] == 200
+        assert result["error"] is None
+        assert result["data"]["ok"] is True
+        assert result["data"]["status"] == expected["status"]
+        assert result["data"]["error"] == expected["error"]
+        assert bool(result["data"]["error"]) is job_failed
+        assert result["data"]["origin"] == started["data"]["handoff"]["origin"]
+        assert result["data"]["action_outcome"] == "not_asserted"
+        executor.client.request.assert_not_awaited()
+    finally:
+        await executor.client.aclose()
+
+
+def test_registered_task_adapter_declares_and_validates_manifest_endpoints():
+    from agents.tool_dispatch_validator import ToolDispatchValidator
+    validator = ToolDispatchValidator()
+    calls = {"start": {"goal": "inert research"}, "status": {"flow_id": "inert-flow"}, "list": {"limit": 10}}
+    for endpoint, args in calls.items():
+        schema = validator.get_endpoint_schema("background_task", endpoint)
+        assert schema is not None and schema.dispatch_keys == set(calls)
+        assert validator.contract_violations("background_task", endpoint) == []
+        assert validator.validate("background_task", endpoint, args).ok is True
+    assert validator.validate("background_task", "unsupported", {}).ok is False
+
+
+async def test_task_adapter_unknown_endpoint_refuses_without_delegation(rig, monkeypatch):
+    delegate = AsyncMock(side_effect=AssertionError("Unsupported endpoint must not reach the task control plane"))
+    monkeypatch.setattr(taskflows, "execute_background_task_skill", delegate)
+    result = await rig[2].execute("unsupported", {}, {})
+    assert result["success"] is False and result["status_code"] == 409
+    assert result["error_code"] == result["data"]["error_code"] == "task_invalid_endpoint"
+    assert result["data"]["ok"] is False
+    delegate.assert_not_awaited()

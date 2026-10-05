@@ -382,7 +382,7 @@ class TestVisionAndPresets:
             result = await llm.apply_preset("ollama_vision")
         assert result["ok"] is True
         assert llm.provider == "ollama"
-        assert llm.model == "llava"
+        assert llm.model == "llava:7b"
         await llm.close()
 
 

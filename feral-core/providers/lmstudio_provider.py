@@ -81,7 +81,15 @@ class LMStudioProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=5.0) as c:
             r = await c.get(f"{self._base_url}/models")
             r.raise_for_status()
-        ids = [m.get("id") for m in (r.json().get("data") or []) if m.get("id")]
-        if ids:
-            self._models = sorted(ids)
+        payload = r.json()
+        if not isinstance(payload, dict) or payload.get("error") is not None or not isinstance(payload.get("data"), list):
+            raise ValueError("LM Studio returned an invalid model inventory")
+        ids: list[str] = []
+        for item in payload["data"]:
+            if not isinstance(item, dict) or not isinstance(item.get("id"), str) or not item["id"].strip():
+                raise ValueError("LM Studio returned an invalid model inventory entry")
+            ids.append(item["id"])
+        # A valid empty response is authoritative. Failed parsing above
+        # must leave the previous inventory intact instead of clearing it.
+        self._models = sorted(ids)
         return list(self._models)

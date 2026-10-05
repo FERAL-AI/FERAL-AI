@@ -714,17 +714,20 @@ class ProviderCatalog:
             models = await adapter.refresh_models()
             if self._adapters.get(provider_id) is not adapter:
                 raise ProviderProbeConfigurationChanged()
-            cleaned = [m for m in (models or []) if m]
+            cleaned = self._clean_discovered_models(provider_id, models)
             status.reachable = bool(cleaned)
             status.last_refresh = time.time()
-            if cleaned:
+            if cleaned or desc.supports_local:
                 # Persist the hit so list_models can return it without
-                # re-reaching out a second time.
+                # re-reaching out a second time. A valid empty local hit
+                # also supersedes any previously installed model IDs.
                 self._models[provider_id] = CachedModelList(
                     models=cleaned, last_refresh=status.last_refresh, source="live"
                 )
+                if desc.supports_local:
+                    self._warnings.pop(provider_id, None)
                 self._save_cache()
-            else:
+            if not cleaned:
                 status.error = "provider returned no models"
         except ProviderProbeConfigurationChanged:
             raise
@@ -733,6 +736,8 @@ class ProviderCatalog:
                 raise ProviderProbeConfigurationChanged() from None
             status.reachable = False
             status.error = str(exc)
+            if desc.supports_local:
+                self._warnings[provider_id] = self._format_refresh_error(exc)
         return status
 
     def status_for(self, provider_id: str) -> ProviderStatus:
@@ -830,7 +835,7 @@ class ProviderCatalog:
 
         cached = self._models.get(provider_id)
         base_models: list[str] = []
-        if cached and cached.models:
+        if cached is not None and (cached.models or self._descriptors[provider_id].supports_local):
             base_models = list(cached.models)
         else:
             adapter = self._adapters.get(provider_id)
@@ -1025,6 +1030,7 @@ class ProviderCatalog:
             return None
         try:
             models = await adapter.refresh_models()
+            cleaned = self._clean_discovered_models(provider_id, models)
         except Exception as exc:
             # Capture the failure so list_models() can surface it as a
             # warning on the cached / fallback list. Without this the
@@ -1033,7 +1039,11 @@ class ProviderCatalog:
             logger.debug("refresh_models(%s) raised: %s", provider_id, exc)
             self._warnings[provider_id] = self._format_refresh_error(exc)
             return None
-        cleaned = [m for m in (models or []) if m]
+        descriptor = self._descriptors.get(provider_id)
+        if descriptor is not None and descriptor.supports_local:
+            # Successful emptiness is a discovery result, not a failed
+            # request and not permission to revive stale adapter defaults.
+            return CachedModelList(models=cleaned, last_refresh=time.time(), source="live")
         if not cleaned:
             # Distinguish "provider returned nothing" from "network error"
             # by falling back to the adapter's synchronous cache — still
@@ -1047,6 +1057,16 @@ class ProviderCatalog:
         return CachedModelList(
             models=cleaned, last_refresh=time.time(), source="live"
         )
+
+    def _clean_discovered_models(self, provider_id: str, models: Any) -> list[str]:
+        descriptor = self._descriptors.get(provider_id)
+        if descriptor is not None and descriptor.supports_local:
+            if not isinstance(models, list) or any(not isinstance(m, str) or not m.strip() for m in models):
+                raise ValueError("Local provider returned an invalid model inventory")
+            return list(models)
+        # Preserve the existing discovery contract for cloud/community
+        # adapters that use bundled models as their synchronous fallback.
+        return [m for m in (models or []) if m]
 
     @staticmethod
     def _format_refresh_error(exc: Exception) -> str:

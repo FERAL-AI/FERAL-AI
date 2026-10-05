@@ -169,7 +169,12 @@ async def test_saved_probe_reports_real_negative_outcome(observed, tmp_path, neg
     behavior.update(models=[], error="unreachable" if negative == "unreachable" else None)
     status = await catalog.probe("ollama")
     assert status.reachable is False and status.error
-    assert "ollama" not in catalog._models
+    if negative == "empty":
+        assert catalog._models["ollama"].models == []
+        assert catalog._models["ollama"].source == "live"
+        assert catalog._models["ollama"].warning == ""
+    else:
+        assert "ollama" not in catalog._models
     assert [str(request.url) for request in calls] == ["http://127.0.0.1:11436/api/tags"]
 
 

@@ -1,6 +1,27 @@
 # Theora / FERAL full-product release readiness
 
-**Current Mac source and artifact (October 4).** Responsive realtime tool intake, persistent
+**Current frozen source wave (October 4).** Truthful local model inventory,
+vision preset admission and task-status envelopes pass 2,337 tests across
+106 suites. Full typing adds no diagnostics. Endpoint inspection and cancellation
+fixture corrections address the preceding remote failure. This source requires
+its own publication, CI and exact-source Mac 9.44 acceptance. 9.43 remains the
+current immutable package; its handoff status defect is retained as failed
+evidence. [Behavior and gates](LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md),
+[current ownership](WORK_STATE.md). Coding expansion remains last.
+
+**Preceding Mac source and artifact (October 4).** Immutable 9.43/build2026100407
+contains published `0604ddf97`: pinned Mac desktop inputs, passive cold-cache
+provider discovery and durable exact-call conversational task creation. Frozen
+source integration passes 1,962 tests across 100 suites. All 496 packaged Python
+files and 65 assembly inputs match source; bundled imports and strict ad-hoc
+signature audits pass. Isolated backend startup/lifeline passes; packaged task
+handoff finds successful status reads mislabeled as failure. Full handoff
+acceptance is not passed; a next-build correction is active. Identical Swift/flags reuse the
+verified 9.42 optimized binary. 9.42 is the sole generated rollback.
+No new native GUI, physical, account, clean-install or signed distribution
+acceptance is inferred. [Exact artifact and open gates](NATIVE_9_43_ACCEPTANCE.md).
+
+**Preceding Mac source and artifact (October 4).** Responsive realtime tool intake, persistent
 text-model reservations, bounded independent TaskFlow work and routine uncertainty
 visibility pass frozen integration (1,765 tests across 88 suites), are published
 as `6947bbec1` and are packaged in immutable 9.42/build2026100406. Fresh native

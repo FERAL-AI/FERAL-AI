@@ -1,6 +1,28 @@
 # FERAL Native Preview: feature parity inventory
 
-**Active source wave (October 4).** Routine inspection now validates occurrence
+**Current frozen source (October 4).** Local inventory removal, vision preset
+refusal and truthful task inspection pass 2,337 tests across 106 suites. Full
+typing adds no errors. New exact-source 9.44 assembly and packaged acceptance
+remain required. Current 9.43 retains a failed task-status probe; its correction
+is outside that immutable artifact. Native Swift inputs are unchanged.
+[Source behavior and gates](../docs/roadmap/theora-personal-agent/LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md),
+[current checkpoint](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+
+**Preceding packaged checkpoint (October 4).** Mac 9.43/source `0604ddf97` includes
+the pinned desktop input closure, passive cold-cache provider discovery and the
+existing TaskFlow's durable exact-call handoff with scoped origin/surface.
+All 496 packaged production Python files, 65 assembly inputs and strict ad-hoc
+signatures pass. All 11 supported desktop imports pass in bundled Python.
+Isolated backend startup/lifeline passes. Frozen source integration passes
+1,962 tests across 100 suites; full typing introduces no normalized errors.
+All 52 Swift sources and flags remain identical to 9.42; its optimized binary
+is reused, without claiming new GUI acceptance. 9.42 is the sole rollback.
+Task approval-origin transfer/result subscriptions, selected-window desktop
+ownership and physical voice/model/account/distribution gates remain open.
+[9.43 artifact and limits](../docs/roadmap/theora-personal-agent/NATIVE_9_43_ACCEPTANCE.md).
+[Handoff behavior](../docs/roadmap/theora-personal-agent/INSTALL_AND_TASK_HANDOFF_EVIDENCE.md).
+
+**Preceding source wave (October 4).** Routine inspection now validates occurrence
 identity and distinguishes active, unresolved and bookkeeping-pending actions.
 Automation passes 51 fixture assertions, followed by the linked model/desktop
 checks. New runtime intake/reservation/concurrency changes pass 1,765 combined

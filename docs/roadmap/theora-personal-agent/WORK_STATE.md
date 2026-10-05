@@ -7,46 +7,53 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### Active installation and task handoff wave
+### Current local readiness and task status source checkpoint
 
-- Published source `e35dd9af9f362bfea267c3bce173cf9a59af4a98` now has
-  18 successful remote checks and four conditional/opt-in skips. It contains the
-  corrected cloud/local admission fixture and the 9.42 acceptance record.
-  Immutable 9.42 still contains production source `6947bbec1`.
-- INSTALL-01A source adds the existing pinned Mac desktop dependency extra and
-  import-only staging acceptance. Parent and independent review pass 24 script
-  tests. Development imports pass; the immutable 9.42 package lacks this closure.
-  New dependency acquisition and 9.43 packaging have not occurred.
-- INSTALL-01B fixes cold-cache passive model discovery: native/shared API and
-  default CLI `live=False` requests no longer invoke provider refresh. Four
-  prepatch inert failures and 14 focused postpatch passes establish the boundary;
-  explicit live discovery remains available. Web's explicit live mount and local
-  vision selection are separate cards. Parent integration remains required.
-- TASK-01B extends the existing in-process background-task adapter and TaskFlow
-  creation with durable origin attribution, bounded input, atomic duplicate
-  prevention, scoped inspection and retained asynchronous database work. The
-  worker passes 208 focused tests, including active-supervisor writer contention.
-  Known original surfaces persist through tracked and legacy agent creation;
-  unknown surfaces refuse. Approval-resume attribution, current revision and result
-  subscriptions remain separate acceptance gates.
-- RESOURCE-01A inert review reproduces overlapping GUI input threads,
-  cancellation that leaves already-running threads active, and foreign-session
-  AX references. A coordinated target-binding/physical-drain contract is required;
-  dependencies alone do not provide selected-window control or desktop Stop.
-- Parent owns integration, documentation, Git and the proposed 9.43 assembly.
-  TASK and INSTALL files are released after independent review. TASK independent
-  verification passes 86 tests with prohibited network connections. Read-only
-  local capability review identifies preset/text fallback and stale LM Studio
-  inventory cards for a subsequent source wave.
-  Preserve unrelated AUDIT-FIXES.md. Coding expansion remains last.
-- Source is now frozen and parent-owned. Combined integration passes 1,962 tests
-  across 100 suites with two skips/55 warnings in 51.55 seconds, with all 1,325
-  Python inputs unchanged. Full local typing has 800 existing errors and zero
-  normalized additions; Ruff, 24 script tests and docs navigation pass.
-  [Behavior and limits](INSTALL_AND_TASK_HANDOFF_EVIDENCE.md). Exact-source 9.43
-  assembly follows; 9.42 is not relabeled.
+- Parent integrates three completed workers. Local inventory, vision preset and
+  task inspection files are frozen and released. Unrelated AUDIT-FIXES.md stays
+  unstaged. Coding expansion remains last; Linux and Gen-UI are deferred.
+- LOCAL-READY-01A clears removed Ollama/LM Studio models only after a valid empty
+  inventory, preserving prior IDs and warning on failed/malformed refresh. Passive
+  reads and reopen do not revive stale defaults or make live calls. Worker gate:
+  257 tests. No model download or user configuration is involved.
+- LOCAL-READY-01B refuses missing, unverified or unsupported vision models before
+  switching or saving settings. Full installed tags are exact; a base alias is
+  not proof of latest. Non-string preset values refuse. Worker gate: 56 tests.
+  Presence/classification is distinct from inference, explicitly unverified.
+- TASK status correction makes successful inspection distinct from job success;
+  a failed job's error stays in data. Supported adapter endpoints are explicit.
+  The cancellation fixture controls worker drain before checking retained refs.
+  Final task/manifest worker gate: 477 tests. Existing executor/policy remains.
+- Parent final frozen integration passes 2,337 tests across 106 suites, including
+  all manifest endpoint contracts, with two skips/55 warnings in 51.51 seconds.
+  All 1,327 Python inputs stay unchanged; digest
+  `b7ae5e4288ab3502b11e8ba030abc0b5968b5f95ba8a5c35abcc8354433c80a8`.
+  Full local typing has 798 existing errors, zero normalized additions including
+  multiplicities and two previous object-type diagnostics removed. Ruff, 24 script
+  tests, shell syntax, whitespace and docs navigation pass. Initial typing failure
+  remains separate evidence. [Behavior and limits](LOCAL_READINESS_AND_TASK_STATUS_EVIDENCE.md).
+- Current immutable package remains 9.43/build2026100407/source `0604ddf97`.
+  It passes 496 packaged Python comparisons, 65 build-input hashes, 11 desktop
+  imports, strict ad-hoc signatures and isolated backend startup/lifeline shutdown.
+  Packaged handoff found a genuine status-envelope defect; full acceptance is not
+  passed. It is corrected only in this next source wave. No new GUI is claimed.
+  [Exact artifact](NATIVE_9_43_ACCEPTANCE.md). 9.42 remains the sole rollback.
+- Published source `0604ddf97` has 17 successful remote checks, four conditional
+  skips and one failed backend job. Three failures are delegated endpoint contract
+  inspection and one is cancellation fixture timing. The source wave corrects
+  both; new-head remote acceptance is still required. Preceding `e35dd9af9` has
+  18 successful checks/four skips. No previous CI result is reassigned.
+- Parent next: commit/publish this source, offline assemble immutable 9.44 with
+  68 exact build inputs and reused identical 52 Swift inputs/flags, preserve 9.43
+  and retire only inspected unused 9.42. Budget: at least 10 GiB initially,
+  estimated 2 GiB new artifacts and at least 5 GiB finally. Actual packaged task,
+  public readiness-method and isolated startup checks must follow assembly.
+- Following cards: exact pending-approval origin/result ownership, then coordinated
+  trusted desktop target/watch/Stop and physical drain. Shared memory, continuous
+  voice, local assets, fresh installation, Messages, commerce, glasses/iOS and
+  distribution retain explicit acceptance gates. Full requirements stay below.
 
-### Current multitasking and admission source
+### Historical multitasking and admission source
 
 - Three workers completed responsive realtime intake (RT-01), persistent
   model-call reservations (COST-01), and bounded independent TaskFlow execution
@@ -194,10 +201,10 @@ oversight is last. Existing coding functionality remains available.
 | Product area | Existing/verified boundary | Next incomplete gate |
 | --- | --- | --- |
 | Mac app, logo/avatar, clean UI, retained features | Native 22 destinations; first-use/avatar and bounded retained journeys verified | Full populated parity, accessibility/permission/error/recovery journeys and remaining UX defects |
-| Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.40 source/signature/lifecycle audited | Missing input/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
+| Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.43 source/signature/backend lifecycle and desktop imports audited | Local model/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
 | Cloud/API/subscription/local text, vision and voice | Shared config/catalog and provider adapters; bounded earlier local inference | Genuine account entitlement/tool/audio capability, supported sign-in, local vision wiring and M1/8GiB measurements |
-| Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 Chrome outcome verified; later central inner capture/action gates tested | Bundle dependencies, target ownership, desktop watch/stop/takeover and actual model-selected Mac task |
-| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; routine fences, text-call reservations and bounded local workflow concurrency tested | Exact durable grants/external receipts, detached ownership, global resource lanes, all-subsystem accounting and single-writer service |
+| Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 Chrome outcome verified; central inner gates tested; 9.43 desktop dependencies import | Trusted desktop/AX target ownership, physical drain, desktop watch/stop/takeover and actual model-selected Mac task |
+| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; routine fences, text reservations/concurrency and 9.43 exact-call creation/scoped origin tested | Approval-origin transfer/result subscriptions, exact durable grants/external receipts, global resource lanes, all-subsystem accounting and single-writer service |
 | Natural voice/calls/interruption | Bounded managed utterance; truthful realtime results and responsive tool intake tested | Continuous native same-session duplex/delegation, other inline sinks, headset/speaker/noise/latency acceptance |
 | Texting experience, sent/read/seen and task progress | Tracked chat receipts, rich history and events | Distinct transport/read/task receipts, truthful incomplete states and reconnect/reordering acceptance |
 | Memory across sessions/devices/life | Existing layered memory/KG/sync; later committed-row role/source/alias guards and query retrieval tested | Authenticated evidence stamping, full provenance through codec/merge/sync, correction/deletion/export and same-owner sync acceptance |
