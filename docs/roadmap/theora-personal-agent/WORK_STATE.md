@@ -7,42 +7,52 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### Active saved-local-provider correction
+### Current verified Mac and existing-Chrome checkpoint
 
-- Published source `fc4e86faf048b556b0b4400b80ec7a7fa8e7ebd8` is on the
-  existing draft branch/PR310; main is unchanged. All executed CI workflows pass:
-  general 37246502749, native 37246502794, desktop 37246502741, docs 37246502791,
-  version 37246502786 and naming 37246502860. Real-brain E2E37246502849 is skipped.
-- Immutable 9.39/build2026100403 contains that exact source, 52 native inputs and
-  493 packaged Python files; optimized assembly, bundled-runtime, source equality
-  and strict ad-hoc signature audits pass. [Artifact ledger](NATIVE_9_39_ACCEPTANCE.md).
-- Source corrections pass 1,567 backend checks across 54 suites, three opt-in skips,
-  native Onboarding73/Oversight16 groups/Browser115/linked model28/desktop39/errors5,
-  SDK121, architecture and Ruff. Full mypy retains809 baseline errors with zero
-  normalized additions/removals. These are distinct and overlapping gates.
-- Actual 9.39 native setup activation/readback/completion and Chrome connection/tab
-  selection passed. The repaired parser rendered a real negative probe result.
-  Source inspection identified a second defect: active chat uses the saved custom
-  local endpoint while the catalogue ignores it and forms an invalid native URL.
-  The selected local service catalogue was independently reachable with the pinned
-  model; no positive native probe or model inference is claimed.
-- The 9.39 GUI harness deadline elapsed before the queue helper submitted a click.
-  The helper refused the expired host without dispatch. Forced exact owned cleanup
-  and normal Chrome exit/closed listeners are recorded; normal app Quit remains
-  unverified. Computer Use window rebinding was required while the host was alive.
-  The prior9.38 actual native approved click/outcome/marker remains historical.
-- Workers completed and released the saved local catalogue binding, native-root
-  normalization, stale-probe refusal, focused tests and independent review.
-  Frozen68-suite integration passes1,801 tests/three opt-in skips; all1,308 Python
-  inputs unchanged. Ruff passes and full mypy has zero normalized changes from
-  its809-error baseline. Private40 build/GUI/queue plans pass read-only checks. Parent owns
-  shared integration, documentation, source freeze, Git and actual acceptance.
-- Next: commit/push the frozen verified corrections, package40/build2026100404
-  from exact inputs with verified unchanged native reuse, then verify
-  actual positive probe, native resource-only approval, page outcome and normal
-  Quit/listener cleanup. GUI lease is bounded and allows for approval latency.
-- Keep canonical plus one preceding generated app, >=10GiB free before build and
-  <=2GiB new-artifact budget. Preserve personal data/models/accounts/history and
+- Published runtime source `250787b2d1512d2cef98ff77f8ceda607875ee24` is on
+  `feat/native-product-release-foundation-20261001` in
+  [draft PR310](https://github.com/FERAL-AI/FERAL-AI/pull/310); exact remote identity
+  was verified. Main is unchanged. Later documentation commits do not change the
+  immutable runtime identity. Exact-source executed CI passes: general37249478666,
+  native37249478635, desktop37249478661, docs37249478672, version37249478668 and
+  naming37249478630; opt-in real-brain37249478634 is skipped. Later documentation
+  heads have their own CI snapshot and do not supersede this runtime result.
+- Immutable 9.40/build2026100404 contains that exact source: 52 native inputs and
+  493 packaged Python files match Git. Assembly, bundled-runtime and strict ad-hoc
+  signature audits pass. The verified optimized 9.39 native executable was reused
+  with all Swift inputs/build flags identical; no fresh 9.40 compile is claimed.
+  [Exact artifact, observations and limits](NATIVE_9_40_ACCEPTANCE.md).
+- Fixed reproduced defects: native parsing of positive provider status; catalogue
+  binding to the actual saved local runtime endpoint at boot and keyless activation;
+  terminal `/v1` normalization; stale in-flight probe refusal; browser-resource
+  projection and request-only native approval wording. The pure session validator
+  restores the architecture boundary; SDK confirmation fixtures use explicit SID.
+- Frozen integration: 1,801 backend tests across 68 suites, three opt-in skips,
+  229 warnings, unchanged 1,308 Python inputs. Native Onboarding 73/Oversight 16
+  groups/Browser 115/linked model 28/desktop 39/errors 5 and SDK 121 pass. Ruff passes;
+  full mypy retains 809 baseline errors with zero normalized additions/removals.
+  These are distinct overlapping checks, not a summed coverage claim.
+- Actual 9.40 fresh-profile GUI passed avatar/local setup, successful reviewed
+  saved-provider reachability probe, Chrome connection and exact tab attachment,
+  request-only native approval, visible synthetic page outcome, Stop viewing and
+  disconnect. Normal Cmd-Q exited host 0, backend listener closed; owned Chrome
+  exited 0 and both listeners closed. No personal Chrome profile, account, model
+  inference or purchase was used. The expired input marker was not re-observed.
+- Prior 38/39 harness deadline failures remain historical evidence, not unexplained
+  app crashes. Their owned resources were closed. The passive provider badge still
+  needs reconciliation with successful explicit probe status; the probe result
+  itself was truthful. Do not claim that status polish is already fixed.
+- All source workers released their paths. Independent read-only process/listener
+  checks confirm owned host, backend, Chrome and helper absent, with no listeners
+  on their recorded ports. Parent owns integration/docs/publication. No GUI host
+  remains; no unknown process was signalled.
+- Next ready cards: reconcile provider status projection, then actual Mac voice
+  interruption/background-task acceptance and task-linked browser takeover.
+  Independent browser resource ownership, personal Chrome permission acceptance
+  and full model-selected outcomes remain explicit gates. Use exclusive worker
+  files and freeze before combined checks; do not rebuild unchanged native source.
+- Keep canonical plus one preceding generated app, >=10 GiB free before build and
+  <=2 GiB new-artifact budget. Preserve personal data/models/accounts/history and
   unrelated AUDIT-FIXES.md. Real audio/cloud accounts/glasses/Messages/commerce,
   whole-desktop sharing/concurrent resources/clean install/migration/signing remain
   separate gates; Mac leads and Linux expansion/Gen-UI remain deferred.

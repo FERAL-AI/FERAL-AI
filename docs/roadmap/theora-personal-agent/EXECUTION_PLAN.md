@@ -14,17 +14,19 @@ The existing installed app and personal data stay intact while the native candid
 
 ## Active existing-Chrome integration
 
-The direct connection adapter, explicit native reviews and strict selected-chat
-resource approvals are implemented. The frozen 53-suite integration passes
-1,468 tests; Browser 115 and Oversight 12 fixture groups pass. Exact-source
-9.38 packaging and bounded actual new native controls are recorded; lifecycle
-acceptance failed the harness deadline. Corrected provider-status parsing and
-approval-scope copy await 9.39 packaging and actual acceptance. See the
-[connection contract](EXISTING_CHROME_PLAN.md) and [current state](WORK_STATE.md)
-for this wave. Concurrent independent browser resources/foreground takeover,
-whole-desktop sharing and account/commerce outcomes retain separate exit gates.
+The direct adapter, native reviews and selected-chat/resource approvals pass
+bounded actual 9.40 Mac acceptance, including visible click outcome and normal
+Quit/listener cleanup. Reproduced provider-status and saved local-endpoint defects
+are corrected and actual positive probing passes. Frozen integration passes
+1,801 tests across 68 suites; native Onboarding 73/Oversight 16 groups/Browser 115
+and linked checks pass. [Current artifact and limits](NATIVE_9_40_ACCEPTANCE.md),
+[connection contract](EXISTING_CHROME_PLAN.md) and [checkpoint](WORK_STATE.md).
+The passive provider status badge remains a follow-up. Independent browser
+resources/foreground takeover, whole-desktop sharing, personal Chrome permission
+and account/commerce outcomes retain separate exit gates.
 
-## Current verification checkpoint
+
+## Historical native browser verification checkpoint
 
 The native browser viewing integration adds a 22nd destination and explicit
 operator viewing leases. Frozen source passes 1,230 combined backend checks,

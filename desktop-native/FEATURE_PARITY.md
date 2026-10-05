@@ -1,14 +1,16 @@
 # FERAL Native Preview: feature parity inventory
 
-**Existing-Chrome integration (October 4).** Direct consented connection to an
-already running Chrome, selected-chat/tab controls and exact resource-bound
-approvals are implemented. Frozen backend integration passes 1,468 tests with
-three opt-in skips; native Browser 115 and Oversight 12 fixture groups pass.
-Immutable 9.38/source d5c is packaged and actual native connection, selection,
-viewing and approval were observed. Normal Quit did not finish within the harness
-deadline; provider-status parsing and approval copy corrections require 9.39
-packaging and actual acceptance. Personal-profile permission/account behavior
-is untested. [Connection contract](../docs/roadmap/theora-personal-agent/EXISTING_CHROME_PLAN.md), [current checkpoint](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+**Verified Mac checkpoint (October 4).** Immutable 9.40/build2026100404,
+source `250787b2d1512d2cef98ff77f8ceda607875ee24`, passes actual fresh-profile
+local-provider setup/probe, existing-Chrome connection/tab attachment, exact
+request-only native approval, visible synthetic page outcome, Stop/disconnect and
+normal Quit. Host and owned Chrome exited 0 with closed listeners. Frozen backend
+integration passes 1,801 tests across 68 suites with three opt-in skips; native
+Onboarding 73/Oversight 16 groups/Browser 115 and linked checks pass. Full mypy keeps
+809 baseline errors with no normalized changes. Personal Chrome permissions,
+real accounts/audio/glasses/Messages/commerce and signed clean installation remain
+unverified. The passive provider badge needs reconciliation with explicit probe
+status. [Current artifact and limits](../docs/roadmap/theora-personal-agent/NATIVE_9_40_ACCEPTANCE.md), [checkpoint](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
 
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.

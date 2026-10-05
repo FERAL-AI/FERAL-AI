@@ -1,11 +1,14 @@
 # Existing Chrome connection contract
 
 Updated October 4, 2026. The connection adapter, local HTTP routes and native
-review controls are implemented. Immutable 9.38/source
-`d5c063605e4991dcc0efd1396854eecca7968957` passes bounded actual native
-connection, selection, viewing and approval observations; normal Quit failed the
-harness deadline. [Actual artifact record](NATIVE_9_38_ACCEPTANCE.md).
-Provider-status and approval-scope presentation corrections await 9.39 acceptance.
+reviews are implemented. Immutable 9.40/source
+`250787b2d1512d2cef98ff77f8ceda607875ee24` passes actual isolated native
+connection, exact tab selection, request-only approval, live page outcome,
+Stop/disconnect and normal Quit with owned listener cleanup. Provider-status
+parsing and saved endpoint binding also pass actual positive probe acceptance.
+[Current artifact record](NATIVE_9_40_ACCEPTANCE.md). Personal-profile Chrome
+permission/account behavior remains untested. Prior 38/39 deadline failures and
+older marker observations remain historical evidence, not current lifecycle results.
 
 ## Connection and consent
 
