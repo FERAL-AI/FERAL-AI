@@ -16,6 +16,7 @@ import os
 import re
 import shlex
 import sys
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
 
@@ -45,6 +46,26 @@ class _ActionStopped(Exception):
     def __init__(self, result: dict):
         self.result = result
         super().__init__("Computer-use action did not complete")
+
+
+@dataclass(frozen=True)
+class _SelectedVision:
+    """Immutable request binding; the shared provider owns wire/budget logic."""
+    owner: Any = field(repr=False)
+    provider: str
+    model: str
+    base_url: str = field(repr=False)
+    api_key: str = field(repr=False)
+
+    async def chat(self, *, messages, temperature=0.1, max_tokens=300):
+        return await self.owner.chat_selected_vision(
+            messages, provider=self.provider, model=self.model,
+            base_url=self.base_url, api_key=self.api_key,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+
+    def extract_response(self, response):
+        return self.owner.extract_response(response)
 
 ACTION_SYSTEM_PROMPT = """You are an AI agent that controls a computer to accomplish tasks.
 You are given a screenshot of the current screen and a task to perform.
@@ -215,8 +236,10 @@ class AgenticComputerUseSkill(BaseSkill):
         steps_log: list[dict] = []
 
         llm = await self._get_vlm(vault)
+        if isinstance(llm, dict):
+            return llm
         if not llm:
-            return {"success": False, "status_code": 503, "data": None, "error": "No VLM available. Set OPENAI_API_KEY or FERAL_VLM_PROVIDER."}
+            return self._vision_refusal("vision_binding_unavailable", "Select a configured vision provider and model.")
 
         for i in range(max_steps):
             try:
@@ -231,7 +254,10 @@ class AgenticComputerUseSkill(BaseSkill):
                 steps_log.append({"step": i + 1, "error": "Screenshot capture failed"})
                 break
 
-            action = await self._decide_action(llm, task, screenshot_b64, steps_log, vault)
+            try:
+                action = await self._decide_action(llm, task, screenshot_b64, steps_log, vault)
+            except _ActionStopped as stopped:
+                return {**stopped.result, "data": {"completed": False, "steps": len(steps_log), "log": steps_log}}
             if not action:
                 steps_log.append({"step": i + 1, "error": "VLM returned no valid action"})
                 break
@@ -284,50 +310,79 @@ class AgenticComputerUseSkill(BaseSkill):
         }
 
     async def _get_vlm(self, vault: dict) -> Optional[Any]:
-        """Get an LLM provider that supports vision.
-
-        This used to call ``LLMProvider(provider=, model=, api_key=)``.
-        ``LLMProvider.__init__`` takes ``(self)`` and accepts none of those,
-        so the call raised TypeError every single time, the except below
-        turned it into ``None``, and the caller rendered that as "No VLM
-        available. Set OPENAI_API_KEY". A user who had set the key was told
-        to set the key, which is why a dead capability was never reported as
-        a bug. See AUDIT-FIXES F-16.
-
-        Configuration goes through ``switch_provider``, which is the real
-        API for this and is async, hence this method is now async too. The
-        only caller was already inside ``async def _execute_task``.
-        """
-        from agents.llm_provider import LLMProvider
-
-        api_key = (
-            vault.get("OPENAI_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or vault.get("ANTHROPIC_API_KEY")
-            or os.getenv("ANTHROPIC_API_KEY")
+        """Resolve a passive selected binding; never construct or switch chat."""
+        import httpx
+        from agents.llm_provider import (
+            _PROVIDER_REGISTRY, _resolve_api_key,
+            _chat_completions_model_guard, _unsupported_live_error,
+            is_supported_runtime_provider,
         )
-        # Genuinely not configured. Not an error, and deliberately silent:
-        # the caller already returns an actionable 503 for this case.
-        if not api_key:
-            return None
+        from config.runtime import ollama_openai_base_url
+        from providers.catalog import ProviderCatalog
+        from providers.ollama_provider import OllamaProvider
 
-        provider = os.getenv("FERAL_VLM_PROVIDER", "openai")
-        model = os.getenv("FERAL_VLM_MODEL", "gpt-4o")
         try:
-            llm = LLMProvider()
-            await llm.switch_provider(provider, model=model, api_key=api_key)
-            return llm
+            state = getattr(sys.modules.get("api.state"), "state", None)
+            owner = getattr(getattr(state, "orchestrator", None), "llm", None)
+            if owner is None or not callable(getattr(owner, "chat_selected_vision", None)):
+                return self._vision_refusal("vision_binding_unavailable", "The shared vision runtime is unavailable.")
+            config = getattr(state, "config", None)
+
+            def selection(key):
+                env_key = f"FERAL_VLM_{key.upper()}"
+                if env_key in os.environ:
+                    return os.environ[env_key]
+                return config.get("vision", key, "") if callable(getattr(config, "get", None)) else ""
+
+            provider, model, base_url = (selection(key) for key in ("provider", "model", "base_url"))
+            if any(not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 32 for c in value)
+                   for value in (provider, model, base_url)):
+                return self._vision_refusal("vision_binding_invalid", "Vision selection must use valid bounded strings.")
+            explicit_provider = bool(provider.strip())
+            provider = provider.strip() or getattr(owner, "provider", "")
+            model = model.strip() or (getattr(owner, "model", "") if provider == getattr(owner, "provider", None)
+                                      else "")
+            if (not provider or not model or not is_supported_runtime_provider(provider)
+                    or provider in {"codex", "local", "hybrid"}):
+                return self._vision_refusal("vision_binding_unavailable", "Select a supported vision provider and model.")
+            capable, _reason = owner._vision_support_for(provider, model)
+            if not capable or _unsupported_live_error(provider, model) or _chat_completions_model_guard(provider, model):
+                return self._vision_refusal("vision_model_unsupported", "The selected model cannot process screen images.")
+            if not explicit_provider and not getattr(owner, "available", False):
+                return self._vision_refusal("vision_binding_unavailable", "The configured primary vision provider is unavailable.")
+            base_url = base_url.strip() or (getattr(owner, "base_url", "") if provider == getattr(owner, "provider", None) else "")
+            base_url = base_url or (ollama_openai_base_url() if provider == "ollama" else _PROVIDER_REGISTRY.get(provider, ("", ""))[0])
+            url = httpx.URL(base_url)
+            if url.scheme not in {"http", "https"} or not url.host or url.username or url.password or url.query or url.fragment:
+                return self._vision_refusal("vision_binding_invalid", "The selected vision endpoint is invalid.")
+            if provider == "ollama":
+                path = url.path.rstrip("/")
+                base_url = str(url.copy_with(path=path if path.endswith("/v1") else path + "/v1")).rstrip("/")
+                catalog = getattr(state, "provider_catalog", None)
+                adapter = catalog.get_adapter(provider) if isinstance(catalog, ProviderCatalog) else None
+                # Inventory is evidence for one configured endpoint, never
+                # for an unrelated selected vision server. No discovery here.
+                if (isinstance(catalog, ProviderCatalog) and isinstance(adapter, OllamaProvider)
+                        and httpx.URL(adapter._base_url) == httpx.URL(OllamaProvider.native_base_url(base_url))):
+                    inventory = await catalog.list_models(provider, live=False)
+                    if inventory.source == "live" and model not in inventory.models:
+                        return self._vision_refusal("vision_model_not_installed", "The selected vision model is absent from the recorded local inventory.")
+            key_name = _PROVIDER_REGISTRY.get(provider, ("", ""))[1]
+            api_key = ("ollama" if provider == "ollama" else
+                       os.getenv("FERAL_VLM_API_KEY", "") or vault.get("FERAL_VLM_API_KEY", "")
+                       or (vault.get(key_name, "") if key_name else "") or _resolve_api_key(provider)
+                       or (os.getenv(key_name, "") if key_name else "")
+                       or (getattr(owner, "api_key", "") if provider == getattr(owner, "provider", None) else ""))
+            if not isinstance(api_key, str) or not api_key.strip() or any(ord(c) < 32 for c in api_key):
+                return self._vision_refusal("vision_credentials_unavailable", "Configure credentials for the selected vision provider.")
+            return _SelectedVision(owner=owner, provider=provider, model=model, base_url=base_url, api_key=api_key)
         except Exception as exc:
-            # Reached only with a key present, so this is never a
-            # configuration problem and must not be reported as one. Kept
-            # narrow-in-meaning by the early return above: everything that
-            # lands here is a real failure to build a provider.
-            logger.warning(
-                "VLM construction failed for provider=%s model=%s: %s. "
-                "This is not a missing API key; a key was supplied.",
-                provider, model, exc, exc_info=True,
-            )
-            return None
+            logger.warning("Vision selection could not be resolved (%s)", type(exc).__name__)
+            return self._vision_refusal("vision_binding_unavailable", "The selected vision configuration could not be resolved.")
+
+    @staticmethod
+    def _vision_refusal(code: str, reason: str) -> dict:
+        return {"success": False, "status_code": 503, "data": None, "error": reason, "error_code": code}
 
     async def _capture_screen(self, *, stop_on_refusal: bool = False) -> Optional[str]:
         """Use the registered capture primitive and its caller policy."""
@@ -384,13 +439,24 @@ class AgenticComputerUseSkill(BaseSkill):
                 temperature=0.1,
                 max_tokens=300,
             )
+            if isinstance(response, dict) and response.get("error"):
+                code = response.get("error_code", "vision_request_unavailable")
+                allowed = {"pricing_unavailable", "budget_unavailable", "vision_model_unsupported",
+                           "vision_binding_unavailable", "vision_request_unavailable"}
+                if response.get("budget_exceeded"):
+                    code = "vision_budget_exceeded"
+                elif code not in allowed:
+                    code = "vision_request_unavailable"
+                raise _ActionStopped(self._vision_refusal(code, "Screen reasoning did not complete; no further computer action was dispatched."))
             text, _ = llm.extract_response(response)
             if not text:
                 return None
 
             return parse_vlm_action(text)
+        except _ActionStopped:
+            raise
         except Exception as e:
-            logger.warning(f"VLM action decision failed: {e}")
+            logger.warning("VLM action decision failed (%s)", type(e).__name__)
             return None
 
     async def _execute_action(self, action: dict, *, stop_on_refusal: bool = False) -> str:

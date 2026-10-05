@@ -1314,6 +1314,9 @@ class Orchestrator:
             "args": args or {},
             "id": request_id,
         }
+        task_origin = exact_approval.task_origin if exact_approval is not None else None
+        if task_origin is not None:
+            tool_call["id"] = task_origin.call_id
         taskflows = self.taskflows if taskflow_pending else None
         try:
             await self._emit_tool_start(session_id, tool_call)
@@ -1332,6 +1335,7 @@ class Orchestrator:
                 if exact_approval is not None:
                     result_data = await self.tool_runner.execute_tool_call_for_llm(
                         session_id, tool_call, [], approval=exact_approval,
+                        surface=task_origin.surface if task_origin is not None else None,
                     )
                 else:
                     result_data = await self._execute_tool_call_for_llm(session_id, tool_call, [])
@@ -1392,6 +1396,9 @@ class Orchestrator:
         session_id: str | None = None,
         actor: str = "api",
     ) -> dict:
+        if not approved:
+            # Revocation requires the pending SID, not fresh context authority.
+            return await self._resolve_tool_approval_request_impl(request_id, approved=False, session_id=session_id, actor=actor)
         coordinator = self._context_checkpoints
         if coordinator is None:
             return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
@@ -1439,6 +1446,17 @@ class Orchestrator:
 
         tool_name = str(pending.get("tool_name", "") or "")
         args = pending.get("args") or {}
+        approval_scope = (self.tool_runner.approval_scope_for(pending) if approved
+                          else self.tool_runner.rejection_scope_for(pending))
+        if approval_scope is None:
+            if pending.get("taskflow") or pending.get("browser_resource") is not None:
+                # Preserve invalid workflow/browser review invalidation without
+                # claiming a scope whose step or captured target no longer matches.
+                self.tool_runner.deny_pending(request_id, session_id=effective_session)
+                if pending.get("taskflow") and self.taskflows is not None:
+                    await self.taskflows.finish_approved_dispatch(pending, rejected=True)
+                return {"status": "not_found", "request_id": request_id}
+            return {"status": "origin_superseded", "request_id": request_id, "session_id": effective_session}
         if not tool_name:
             self.tool_runner.deny_pending(request_id, session_id=effective_session)
             return {
@@ -1463,8 +1481,20 @@ class Orchestrator:
                 "session_id": effective_session,
                 "tool_name": tool_name,
                 "resolved_by": actor,
+                "approval_scope": approval_scope,
             }
 
+        task_origin = self.tool_runner._pending_task_origins.get(request_id)
+        validated_task_origin = None
+        if task_origin is not None:
+            from agents.chat_turns import ChatTurnError
+            try:
+                validated_task_origin = await task_origin.manager.validate_task_approval_origin(task_origin)
+            except ChatTurnError as exc:
+                return {"status": exc.code, "request_id": request_id, "session_id": effective_session}
+            current = self.tool_runner.get_pending(request_id)
+            if current is None or current != pending or not task_origin.matches(current):
+                return {"status": "origin_superseded", "request_id": request_id, "session_id": effective_session}
         taskflow_pending = pending if pending.get("taskflow") else None
         if taskflow_pending is not None and (
             self.taskflows is None or not self.taskflows.prepare_approved_dispatch(pending)
@@ -1479,6 +1509,7 @@ class Orchestrator:
             request_id,
             session_id=effective_session,
             exact_once=taskflow_pending is not None,
+            validated_task_origin=validated_task_origin,
         )
         if accepted is None:
             if taskflow_pending is not None:
@@ -1488,7 +1519,7 @@ class Orchestrator:
             await self._push_approval_resolved(
                 effective_session, request_id, "approved", tool_name, actor,
             )
-            return await self._execute_approved_pending_tool(
+            outcome = await self._execute_approved_pending_tool(
                 effective_session,
                 request_id=request_id,
                 tool_name=tool_name,
@@ -1496,6 +1527,7 @@ class Orchestrator:
                 taskflow_pending=taskflow_pending,
                 exact_approval=accepted.get("approval"),
             )
+            return {**outcome, "approval_scope": approval_scope}
         except (Exception, asyncio.CancelledError):
             if taskflow_pending is not None:
                 await self.taskflows.finish_approved_dispatch(taskflow_pending, uncertain=True)
@@ -1529,6 +1561,9 @@ class Orchestrator:
                 session_id=session_id,
                 actor="chat_text",
             )
+            if outcome.get("status") in {"origin_unavailable", "origin_unsettled", "origin_superseded", "stale_context"}:
+                await self._send_text(session_id, "This approval could not be verified. Inspect the pending request before continuing.")
+                return True
             return outcome.get("status") == "approved"
 
         if self._is_reject_execution_ack(text):

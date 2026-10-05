@@ -48,6 +48,7 @@ MAX_LLM_TOOLS = 64
 
 if TYPE_CHECKING:
     from agents.orchestrator import Orchestrator
+    from agents.chat_turns import PendingTaskOrigin, TaskOriginTransfer
 
 logger = logging.getLogger("feral.orchestrator.tool_runner")
 
@@ -65,6 +66,8 @@ class _ExactApproval:
         self.pending = copy.deepcopy(pending) if pending.get("taskflow") else None
         self.used = False
         self.safety_used = False
+        self.task_origin: Optional[PendingTaskOrigin] = None
+        self.transfer: Optional[TaskOriginTransfer] = None
 
 
 _exact_approval: ContextVar[Optional[_ExactApproval]] = ContextVar("feral_exact_tool_approval", default=None)
@@ -349,6 +352,8 @@ class ToolRunner:
         # success. Resolved from ``ui_handlers.handle_daemon_result``.
         self._pending_daemon_acks: dict[str, asyncio.Future] = {}
         self._pending_approvals: dict[str, dict] = {}
+        self._pending_task_origins: dict[str, PendingTaskOrigin] = {}
+        self._pending_scope_kinds: dict[str, str] = {}
         # -A9: approval state must be shared across BrainState/API +
         # ToolRunner. If no manager is injected (legacy/tests), fall back
         # to local construction.
@@ -736,6 +741,13 @@ class ToolRunner:
             )
 
         if not needs_approval:
+            exact = _exact_approval.get()
+            if (exact is not None and exact.task_origin is not None and exact.issuer is self
+                    and exact.used and exact.session_id == session_id
+                    and exact.tool_name == tool_name and exact.args == args):
+                # An already reviewed creation still needs its origin transfer
+                # when the current policy no longer requires confirmation.
+                exact.safety_used = True
             if self._autonomy_mode == "loose" and level == SafetyLevel.CONFIRM:
                 logger.info(f"Safety CONFIRM (loose mode auto-exec): {tool_name}")
             return None
@@ -753,6 +765,20 @@ class ToolRunner:
             logger.info(f"Standing approval for {tool_name}: {reason}")
             return None
 
+        request_id = str(uuid4())
+        task_origin = None
+        if tool_name == "background_task__start":
+            from agents import chat_turns
+            if chat_turns._audit.get() is not None:
+                try:
+                    from api.state import state
+                    manager = getattr(state, "chat_turns", None)
+                    if not isinstance(manager, chat_turns.ChatTurnManager):
+                        raise chat_turns.ChatTurnError("origin_unavailable")
+                    task_origin = manager.capture_task_approval_origin(self, request_id, args, current_context())
+                except (Exception, asyncio.CancelledError):
+                    return make_tool_error_envelope(error_code="task_origin_unavailable",
+                        reason="The original task identity could not be verified", tool_call_id=current_context().call_id)
         # Reuse any identical pending approval so repeated retries by the
         # model keep the same request_id instead of spawning fresh entries.
         for pending in self._pending_approvals.values():
@@ -761,14 +787,22 @@ class ToolRunner:
                 and pending.get("tool_name") == tool_name
                 and pending.get("args") == args
                 and self.pending_context_valid(pending)
+                and not self._expired(pending)
             ):
+                captured = self._pending_task_origins.get(pending.get("request_id", ""))
+                if task_origin is not None:
+                    if (captured is None or not captured.matches(pending)
+                            or (captured.request_id, captured.turn_id, captured.call_id, captured.surface, captured.owner)
+                            != (task_origin.request_id, task_origin.turn_id, task_origin.call_id, task_origin.surface, task_origin.owner)):
+                        continue
+                elif captured is not None or pending.get("task_origin_required"):
+                    continue
                 return pending
 
-        request_id = str(uuid4())
         pending = {
             "status": "pending_approval",
             "tool_name": tool_name,
-            "args": args,
+            "args": copy.deepcopy(args),
             "request_id": request_id,
             "session_id": session_id,
             "safety_level": level,
@@ -789,6 +823,10 @@ class ToolRunner:
         if coordinator is not None and coordinator.known_managed(session_id):
             pending["context_generation"] = coordinator.review_generation(session_id)
         self._pending_approvals[request_id] = pending
+        self._pending_scope_kinds[request_id] = "exact_request" if task_origin is not None or browser_resource is not None else "session"
+        if task_origin is not None:
+            pending["task_origin_required"] = True
+            self._pending_task_origins[request_id] = task_origin
         logger.info(f"Approval required ({self._autonomy_mode}): {tool_name} → request_id={request_id}")
         return pending
 
@@ -833,8 +871,105 @@ class ToolRunner:
 
     # ─── Approval lifecycle ───
 
+    def approval_scope_for(self, pending: dict) -> Optional[dict]:
+        """Project server-owned scope; invalid exact metadata never becomes session permission."""
+        try:
+            if self._expired(pending) or not self.pending_context_valid(pending):
+                return None
+            origin = self._pending_task_origins.get(pending.get("request_id", ""))
+            if "task_origin_required" in pending or origin is not None:
+                if origin is None or not origin.matches(pending):
+                    return None
+                kind = "exact_request"
+            elif "taskflow" in pending:
+                runtime = getattr(self._orch, "taskflows", None)
+                from agents.taskflow import TaskFlowRuntime
+                if not isinstance(runtime, TaskFlowRuntime) or runtime._orchestrator is not self._orch:
+                    return None
+                flow, step = runtime._approval_step(pending)
+                if not flow or not step:
+                    return None
+                kind = "exact_request"
+            elif "browser_resource" in pending:
+                if (not isinstance(pending.get("browser_resource"), dict)
+                        or not self._browser_tool(pending.get("tool_name", ""))):
+                    return None
+                kind = "exact_request"
+            else:
+                kind = "session"
+            if self._pending_approvals.get(pending.get("request_id", "")) == pending:
+                self._pending_scope_kinds[pending["request_id"]] = kind
+            return {"contract_version": 1, "kind": kind}
+        except (Exception, asyncio.CancelledError):
+            return None
+
+    def rejection_scope_for(self, pending: dict) -> Optional[dict]:
+        """Historical issued scope for revocation, never authority to execute."""
+        scope = self.approval_scope_for(pending)
+        if scope is not None:
+            return scope
+        request_id = pending.get("request_id", "")
+        origin = self._pending_task_origins.get(request_id)
+        if ("task_origin_required" in pending or origin is not None) and (
+                origin is None or not origin.static_matches(pending)):
+            return None
+        kind = self._pending_scope_kinds.get(request_id)
+        if self._pending_approvals.get(request_id) != pending or kind not in {"session", "exact_request"}:
+            return None
+        return {"contract_version": 1, "kind": kind}
+
+    def approval_review_for(self, pending: dict) -> Optional[dict]:
+        """An authentic stale task remains deniable without implying current authority."""
+        scope = self.approval_scope_for(pending)
+        if scope is not None:
+            return {"approval_scope": scope, "approval_available": True}
+        request_id = pending.get("request_id", "")
+        origin = self._pending_task_origins.get(request_id)
+        if (not self._expired(pending) and origin is not None and origin.runner is self
+                and self._pending_scope_kinds.get(request_id) == "exact_request"
+                and self._pending_approvals.get(request_id) == pending and origin.static_matches(pending)):
+            return {"approval_scope": {"contract_version": 1, "kind": "exact_request"},
+                    "approval_available": False}
+        return None
+
+    def _prune_expired_pending(self):
+        """Drop expired requests and issued browser reviews whose target was replaced."""
+        for request_id, pending in list(self._pending_approvals.items()):
+            stale_browser = False
+            if (self._pending_scope_kinds.get(request_id) == "exact_request"
+                    and isinstance(pending.get("browser_resource"), dict)
+                    and self._browser_tool(pending.get("tool_name", ""))):
+                try:
+                    stale_browser = self._capture_browser_resource(pending["tool_name"], pending.get("session_id", "")) != pending["browser_resource"]
+                except _BrowserResourceError:
+                    stale_browser = True
+            if self._expired(pending) or stale_browser:
+                self._pending_approvals.pop(request_id, None)
+                self._pending_task_origins.pop(request_id, None)
+                self._pending_scope_kinds.pop(request_id, None)
+
+    def approved_backing_transfer(self, tool_name: str, args: dict):
+        """Capture only the actual reviewed executor entry before its child is scheduled."""
+        from agents.chat_turns import TaskOriginTransfer
+        exact = _exact_approval.get()
+        if exact is None or exact.task_origin is None:
+            return None
+        admission = _executor_admission.get()
+        if (not isinstance(admission, _ExecutorAdmission) or not admission.used
+                or not admission.matches(self, exact, current_context().session_id, tool_name, args)):
+            raise RuntimeError("Task approval executor admission is unavailable")
+        if exact.transfer is not None:
+            raise RuntimeError("Task approval backing task was already issued")
+        exact.task_origin.guard()
+        task = asyncio.current_task()
+        if task is None:
+            raise RuntimeError("Task approval dispatch task is unavailable")
+        exact.transfer = TaskOriginTransfer(exact.task_origin, task)
+        return exact.transfer
+
     def pending_for_session(self, session_id: str) -> list[dict]:
         """Return pending approvals for a session, oldest first."""
+        self._prune_expired_pending()
         rows = [
             p for p in self._pending_approvals.values()
             if p.get("session_id") == session_id
@@ -844,6 +979,7 @@ class ToolRunner:
 
     def list_pending(self, *, session_id: Optional[str] = None, limit: int = 100) -> list[dict]:
         """Return pending approvals, optionally filtered by session."""
+        self._prune_expired_pending()
         rows = list(self._pending_approvals.values())
         if session_id:
             rows = [p for p in rows if p.get("session_id") == session_id]
@@ -880,6 +1016,8 @@ class ToolRunner:
             return None
         if self._expired(pending):
             self._pending_approvals.pop(request_id, None)
+            self._pending_task_origins.pop(request_id, None)
+            self._pending_scope_kinds.pop(request_id, None)
             logger.info("Approval %s expired before it was answered", request_id)
             return None
         return dict(pending)
@@ -895,6 +1033,8 @@ class ToolRunner:
         req_id = latest.get("request_id")
         if not req_id:
             return None
+        self._pending_task_origins.pop(req_id, None)
+        self._pending_scope_kinds.pop(req_id, None)
         return self._pending_approvals.pop(req_id, None)
 
     def grant_session_approval(self, tool_name: str, session_id: str) -> None:
@@ -902,18 +1042,32 @@ class ToolRunner:
         self._approval_mgr.grant_approval(tool_name, session_id, scope="session")
 
     def approve_pending(self, request_id: str, *, session_id: Optional[str] = None,
-                        exact_once: bool = False) -> Optional[dict]:
+                        exact_once: bool = False, validated_task_origin=None) -> Optional[dict]:
         """Approve a pending request; returns tool_name + args for re-execution."""
         pending = self._pending_approvals.get(request_id)
-        if pending is None or not self.pending_context_valid(pending):
+        if pending is None or self._expired(pending) or not self.pending_context_valid(pending):
             return None
         if session_id and pending.get("session_id") != session_id:
             return None
+        origin = self._pending_task_origins.get(request_id)
+        if "task_origin_required" in pending or origin is not None:
+            from agents.chat_turns import ValidatedTaskApprovalOrigin
+            if (origin is None or not isinstance(validated_task_origin, ValidatedTaskApprovalOrigin)
+                    or not origin.matches(pending)):
+                return None
+            try:
+                validated_task_origin.consume(origin)
+            except (Exception, asyncio.CancelledError):
+                return None
+            exact_once = True
         self._pending_approvals.pop(request_id, None)
+        self._pending_task_origins.pop(request_id, None)
+        self._pending_scope_kinds.pop(request_id, None)
         logger.info(f"Approved pending request {request_id} for {pending['tool_name']}")
         result = {"tool_name": pending["tool_name"], "args": pending["args"]}
         if exact_once or pending.get("browser_resource") is not None:
             result["approval"] = _ExactApproval(self, pending)
+            result["approval"].task_origin = origin
         return result
 
     def deny_pending(self, request_id: str, *, session_id: Optional[str] = None) -> Optional[dict]:
@@ -924,6 +1078,8 @@ class ToolRunner:
         if session_id and pending.get("session_id") != session_id:
             return None
         self._pending_approvals.pop(request_id, None)
+        self._pending_task_origins.pop(request_id, None)
+        self._pending_scope_kinds.pop(request_id, None)
         logger.info(f"Denied pending request {request_id} for {pending['tool_name']}")
         return {
             "status": "PermissionOutcome::Deny",
@@ -1554,6 +1710,15 @@ class ToolRunner:
                 return make_tool_error_envelope(error_code="invalid_approval", reason="Exact approval does not match this action", tool_call_id=tool_call.get("id", ""))
         self._guard_agent_lease()
         effective_surface = surface or self._resolve_surface_for_session(session_id)
+        task_origin = approval.task_origin if approval is not None else None
+        if task_origin is not None:
+            try:
+                task_origin.guard()
+                if effective_surface != task_origin.surface or tool_call.get("id") != task_origin.call_id:
+                    raise RuntimeError("Original task call changed")
+            except (Exception, asyncio.CancelledError):
+                return make_tool_error_envelope(error_code="task_origin_superseded",
+                    reason="The original task identity is no longer current", tool_call_id=tool_call.get("id", ""))
         # Wave 1's per-tool instrumentation. It lived at the top of the
         # body this method was split out of, so it stays here: once per
         # call, after surface resolution, before any dispatch.
@@ -1566,7 +1731,7 @@ class ToolRunner:
                 surface=effective_surface,
                 tool_name=str(tool_call.get("name") or ""),
                 call_id=str(tool_call.get("id") or ""),
-                turn_id=self._turn_id_for(session_id),
+                turn_id=task_origin.turn_id if task_origin is not None else self._turn_id_for(session_id),
             ):
                 result = await self._execute_tool_call_for_llm_inner(
                     session_id, tool_call, available_skills,
@@ -1577,6 +1742,9 @@ class ToolRunner:
         except _BrowserResourceError:
             return make_tool_error_envelope(tool_call_id=tool_call.get("id", ""),
                 error_code="browser_resource_changed", reason="Browser admission is no longer current. Inspect the exact connection and action before retrying.")
+        finally:
+            if approval is not None and approval.transfer is not None:
+                approval.transfer.active = False
 
     #: Attribution links kept per session, capped so one answer cannot
     #: push an unbounded list onto the reply frame.

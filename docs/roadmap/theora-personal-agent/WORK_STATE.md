@@ -11,8 +11,8 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 - Source `4c8498bf0a8457c905598a2bf3f423fed44abf73` is committed, published
   and packaged as immutable 9.44/build2026100408. Exact remote branch identity
-  matches. Parent integrated three completed workers; source files are released.
-  Documentation acceptance follows as a separate checkpoint. Draft PR310 remains
+  matches that runtime publication. Documentation checkpoint `3a150160a` is also
+  published and matches the remote branch and draft PR310 head. Draft PR310 remains
   the publication target; main and existing public history are unchanged.
 - LOCAL-READY-01A clears removed Ollama/LM Studio models only after valid empty
   inventory, preserving prior IDs and warning on failed/malformed refresh. Passive
@@ -55,10 +55,16 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   its evidence and the genuine 9.43 failed-status probe remain. Assembly free space:
   23,995,965,440 bytes before, 23,951,286,272 after; net growth 44,679,168 bytes.
   Peak disk usage is not measured. Personal models/profiles/home Git are untouched.
-- Source `4c8498bf0` remote CI is in progress. The latest observed general CI
-  completed 12 jobs successfully, with one conditional matrix skip and Ubuntu
-  backend fast-lane still running; separate native/desktop checks also remain
-  pending. Preceding `0604ddf97` finished with 17 successes/four skips/one failed
+- Documentation head `3a150160a` passes remote native, desktop, docs, naming and
+  version workflows. General CI finishes with 12 successful jobs, one conditional
+  matrix skip and one backend failure: an older fixture expected malformed
+  Ollama inventory entries to be skipped. The backend result is 14,161 passed,
+  86 skipped and one failed; real-brain e2e is conditionally skipped. The parent
+  corrects that fixture to require rejection and preserved prior IDs; its six
+  isolated checks pass. This test-only correction is local pending integration.
+  The preceding `4c8498bf0` general run was cancelled by
+  the later head; its native/desktop/docs/naming/version workflows passed.
+  Preceding `0604ddf97` finished with 17 successes/four skips/one failed
   backend job (endpoint inspection and timing fixture, corrected here). No result
   is reassigned from a different head. Unrelated AUDIT-FIXES.md remains unstaged.
 - Next shared contract: exact pending-approval origin/result ownership. Then
@@ -66,6 +72,53 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   voice, local assets, fresh installation, memory/sync, Messages, commerce,
   glasses/iOS and distribution retain explicit acceptance gates below. Coding
   expansion remains last; Linux and Gen-UI remain deferred.
+
+### Verified next-source integration, October 5
+
+TASK-01C, output-only approval scope/availability and LOCAL-VISION01C are
+implemented and frozen. Parent integration passes 2,724 tests across 124 suites
+with two skips/67 warnings in 69.24 seconds; all 1,329 Python inputs remain
+unchanged, digest `51a73308c52207842d4acc8085a2b2350037b920f7e905f4abdb678e0de0a14f`.
+Full typing retains 798 existing errors with zero normalized additions/removals.
+CI-rule Ruff, whitespace and docs navigation pass. Native Oversight 27 groups,
+linked model 28, desktop 39, error five and production typecheck pass. Initial
+compatibility failures remain separate from the corrected final receipts.
+The local leakage checker flags three ignored private root documents, outside
+tracked publication; no personal or ignored document is modified for that check.
+
+The parent is committing this verified source and preparing fresh optimized
+9.45/build2026100501 with 52 Swift inputs. It is not yet a built or accepted
+candidate. Canonical 9.44 and rollback 9.43 retain their own identities above.
+Build headroom is 29,160,000 KiB at the preparation observation; estimated new
+artifacts are at most 2 GiB. After successful compilation only inspected unused
+9.43 will retire, retaining 9.44 as the sole generated rollback. Actual native
+GUI approval acceptance remains blocked by Computer Use native pipe startup.
+No model, account, audio, payment, message or physical action is exercised.
+[Behavior, checks and limits](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md).
+
+### Active next-source cards, October 5
+
+These allocations have completed source implementation and released their files.
+The immutable 9.44 candidate does not contain them. The verified integration
+above does not establish native GUI or physical/account acceptance.
+
+| Card | Exclusive implementation owner and files | Required acceptance |
+|---|---|---|
+| TASK-01C | Routine/runtime worker: chat_turns, ToolRunner, orchestrator, SkillExecutor, taskflows route and new origin-transfer tests | Actual central approval after terminal awaiting-approval receipt; original request/turn/call/surface preserved; later same-owner YES separate; exact single use, no standing grant; stale/forged/cancelled transfer refuses; SQLite contention cancellation drains without insertion |
+| Approval scope | Voice/native worker: approvals route/API tests, NativeOversightFeature and its tests | Output-only versioned exact-request/session descriptor and boolean availability; truthful workflow/task labels; stale authentic tracked tasks are deny-only; strict parser, refreshed-review equality and decision echo; existing browser/legacy behavior preserved |
+| LOCAL-VISION01C | Computer/provider worker: agentic_computer_use, narrow selected-vision entry in LLMProvider and selection regressions | Passive exact provider/model/endpoint/key selection before capture; keyless local path; shared budget/wire ownership; no cloud fallback, image stripping, primary mutation or setup probe; text-only/unavailable refuses |
+
+The parent owns interfaces, this checkpoint, frozen combined verification, Git
+publication and the next exact-source bundle. The shared approval descriptor is
+`{"contract_version":1,"kind":"exact_request"}` or `session`; it is output
+metadata, never caller-supplied authority. Private origin and backing-task binding
+remain internal. Boolean availability describes whether the original request can
+currently be approved; authentic stale tracked requests remain deny-only. Task
+creation approval does not authorize later task actions.
+[Current behavior and limits](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md).
+Worker fixtures use isolated profiles and inert external boundaries. Native
+changes require a fresh compile and actual isolated approval UI acceptance;
+provider fixtures do not establish physical desktop accuracy or real inference.
 
 ### Historical multitasking and admission source
 

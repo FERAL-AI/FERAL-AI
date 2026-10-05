@@ -1068,14 +1068,16 @@ class LLMProvider:
             return declared_ollama_context_tokens() or 4096
         return configured_context_window_tokens()
 
-    async def _verify_ollama_context(self, client: httpx.AsyncClient, body: dict, provider: str) -> None:
+    async def _verify_ollama_context(self, client: httpx.AsyncClient, body: dict, provider: str, *, record_context: bool = True) -> None:
         if provider != "ollama":
             return
-        self._ollama_context_observation = None
+        if record_context:
+            self._ollama_context_observation = None
         window = await verify_ollama_request_context(client, body, fit_history=True)
-        self._ollama_context_observation = (str(client.base_url).rstrip("/"), body["model"], window, time.monotonic())
+        if record_context:
+            self._ollama_context_observation = (str(client.base_url).rstrip("/"), body["model"], window, time.monotonic())
 
-    async def _prepare_local_request(self, client: httpx.AsyncClient, body: dict, provider: str, force_tool: Optional[str]) -> None:
+    async def _prepare_local_request(self, client: httpx.AsyncClient, body: dict, provider: str, force_tool: Optional[str], *, record_context: bool = True) -> None:
         if provider not in ("ollama", "lmstudio"):
             return
         source_messages, catalogue = body["messages"], body.get("tools")
@@ -1104,7 +1106,7 @@ class LLMProvider:
                 raise exc from None
             fit_local_request(body, provider)
         try:
-            await self._verify_ollama_context(client, body, provider)
+            await self._verify_ollama_context(client, body, provider, record_context=record_context)
         except OllamaContextRefusal as exc:
             capacity = exc.context_capacity
             if exc.code != "local_context_overflow" or capacity is None or not catalogue:
@@ -1120,7 +1122,7 @@ class LLMProvider:
             fit_local_request(body, provider)
             # Recheck allocation after retrieval. Runtime changes never enlarge
             # the request or enable inference against a stale observation.
-            await self._verify_ollama_context(client, body, provider)
+            await self._verify_ollama_context(client, body, provider, record_context=record_context)
 
     def _init_hybrid_cloud(self):
         """In hybrid mode, cloud is used for complex reasoning."""
@@ -5447,6 +5449,53 @@ class LLMProvider:
             LLMProvider._apply_anthropic_cache_breakpoints(body)
         return body
 
+    @_scoped_budget()
+    async def chat_selected_vision(
+        self, messages: list[dict], *, provider: str, model: str,
+        base_url: str, api_key: str, temperature: float = 0.1,
+        max_tokens: int = 300,
+    ) -> dict:
+        """Call one exact vision binding without switching or failing over.
+
+        Selection performs no inference probe. The initialized shared provider
+        owns budget admission and the existing provider-specific wire adapters;
+        an owned temporary client prevents a primary swap from changing this
+        request's endpoint or credentials. Never strip its image inputs.
+        """
+        if (not all(isinstance(value, str) and value.strip() for value in (provider, model, base_url, api_key))
+                or not is_supported_runtime_provider(provider) or provider in {"codex", "local", "hybrid"}):
+            return {"error": "The selected vision binding is unavailable.",
+                    "error_code": "vision_binding_unavailable", "choices": []}
+        try:
+            url = httpx.URL(base_url)
+            if url.scheme not in {"http", "https"} or not url.host or url.username or url.password or url.query or url.fragment:
+                raise ValueError("invalid_endpoint")
+            capable, _reason = self._vision_support_for(provider, model)
+            if not capable or _unsupported_live_error(provider, model) or _chat_completions_model_guard(provider, model):
+                return {"error": "The selected model does not support this vision request.",
+                        "error_code": "vision_model_unsupported", "choices": []}
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site="vision")
+            blocked = await self._budget_check("vision", model, max_tokens)
+            if blocked is not None:
+                return blocked
+            return await self._call_provider(
+                provider, {"base_url": base_url, "api_key": api_key, "model": model, "supported": True},
+                messages, None, temperature=temperature, max_tokens=max_tokens,
+                # One decision attempt: shared transient-retry logging carries
+                # supplier diagnostics, and this screen decision must stop
+                # truthfully on failure rather than leak or change its binding.
+                _reuse_primary_client=False, _record_context=False, _retry_max=1,
+            )
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "error_code": exc.code, "choices": []}
+        except Exception as exc:
+            scope = _budget_scope.get()
+            if scope is not None and scope.get("provider") is self and scope.get("block"):
+                return scope["block"]
+            logger.warning("Selected vision request failed (%s)", type(exc).__name__)
+            return {"error": "The selected vision request did not complete; no fallback was attempted.",
+                    "error_code": "vision_request_unavailable", "choices": []}
+
     async def _call_provider(
         self,
         provider_name: str,
@@ -5466,6 +5515,8 @@ class LLMProvider:
         retry_max = kwargs.pop("_retry_max", None)
         retry_delays = kwargs.pop("_retry_delays", None)
         force_tool = kwargs.pop("force_tool", None)
+        reuse_primary_client = kwargs.pop("_reuse_primary_client", True)
+        record_context = kwargs.pop("_record_context", True)
         # Refuse up front for provider ids that have no runtime
         # adapter. Previously the fallback path built an httpx client
         # against whatever default ``_get_provider_config`` handed
@@ -5510,7 +5561,7 @@ class LLMProvider:
             raise RuntimeError(model_guard_error)
 
         # Primary provider — reuse existing client
-        if provider_name == self.provider:
+        if provider_name == self.provider and reuse_primary_client:
             if provider_name == "anthropic":
                 body = self._build_anthropic_body(
                     selected_model, messages, tools, temperature, max_tokens,
@@ -5640,7 +5691,7 @@ class LLMProvider:
                 )
 
             apply_reasoning_fork(provider_name, model, body)
-            await self._prepare_local_request(tmp, body, provider_name, force_tool)
+            await self._prepare_local_request(tmp, body, provider_name, force_tool, record_context=record_context)
 
             async def _do_fb():
                 await self._budget_dispatch(body, local_free=provider_name in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})

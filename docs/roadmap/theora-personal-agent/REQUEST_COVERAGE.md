@@ -1,17 +1,12 @@
 # User request coverage and next implementation work
 
-**Current review (October 4).** All feature groups and next incomplete gates are
-in the [single current checkpoint](WORK_STATE.md). The
-[independent runtime review](RUNTIME_REVIEW_20261004.md) confirms existing desktop
-computer use, reproduced routine/budget/voice/memory/completion defects and missing
-bundle dependencies. Bounded authority/recovery/result/accounting/memory fixes
-now pass frozen combined source verification: 1,418 tests across 73 suites.
-[Implementation and remaining limits](RUNTIME_RELIABILITY_EVIDENCE.md).
-[Packaged 9.41](NATIVE_9_41_ACCEPTANCE.md) contains them with separate payload/backend
-startup evidence. Immutable 9.40
-still passes its bounded native browser/setup/lifecycle acceptance. No new physical,
-account, voice or distribution certification is implied.
-
+**Current checkpoint (October 5).** Immutable 9.44 contains the verified local
+readiness/task-status and preceding reliability waves. The next exact approval
+and selected vision source passes 2,724 frozen integration checks and native
+fixture/typecheck gates; fresh 9.45 packaging is next. Actual new native GUI,
+physical voice, model/account and distribution acceptance remain separate.
+[Current state](WORK_STATE.md), [new behavior](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md),
+[immutable artifact](NATIVE_9_44_ACCEPTANCE.md).
 
 Reconciled October 4, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
 
@@ -24,7 +19,8 @@ existing-Chrome connection/selection, request-only native approval, synthetic pa
 outcome, Stop/disconnect and normal Quit. Earlier 9.36 local chat/recall and 9.38
 markers remain separate historical evidence. Whole-desktop control source already
 exists; its complete packaged/model-driven acceptance is not established.
-[Current candidate](NATIVE_9_40_ACCEPTANCE.md), [runtime review](RUNTIME_REVIEW_20261004.md)
+[Historical GUI acceptance](NATIVE_9_40_ACCEPTANCE.md),
+[current artifact](NATIVE_9_44_ACCEPTANCE.md), [runtime review](RUNTIME_REVIEW_20261004.md)
 and [WORK_STATE](WORK_STATE.md) distinguish the evidence and remaining gates.
 
 ## October4 additions and integration coverage

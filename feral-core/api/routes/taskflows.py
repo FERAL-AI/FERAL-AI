@@ -147,7 +147,7 @@ def _task_terms(body):
             "steps": [{"type": "llm.chat", "prompt": p} for p in prompts]}
 
 
-async def _skill_origin(endpoint_id):
+async def _skill_origin(endpoint_id, args=None):
     """Correlate actual tracked receipts, without inventing authentication.
 
     The executor's child task inherits the audit. Revalidate its live record and
@@ -161,6 +161,14 @@ async def _skill_origin(endpoint_id):
     if not context_enabled():
         raise _TaskRequestError("task_origin_unavailable", "Task identity context is disabled.")
     ctx = current_context()
+    if endpoint_id == "start":
+        from agents.chat_turns import ChatTurnError, claim_task_origin_transfer
+        try:
+            transferred = claim_task_origin_transfer(args)
+        except ChatTurnError as exc:
+            raise _TaskRequestError("task_origin_superseded", "Original task approval is no longer current.") from exc
+        if transferred is not None:
+            return transferred
     caller_task = asyncio.current_task()
 
     def caller_guard():
@@ -279,7 +287,7 @@ async def execute_background_task_skill(endpoint_id, args):
     try:
         if not isinstance(args, dict):
             raise _TaskRequestError("task_invalid_request", "Task arguments must be an object.")
-        origin, guard = await _skill_origin(endpoint_id)
+        origin, guard = await _skill_origin(endpoint_id, args)
         brain = state
         runtime = state.taskflows
         source_guard = guard

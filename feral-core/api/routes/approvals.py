@@ -52,6 +52,27 @@ def _browser_resource_projection(row: dict) -> dict:
     return {"browser_resource": dict(resource)}
 
 
+def _validated_scope(value: object) -> dict:
+    """Output description only; private admission remains owned by ToolRunner."""
+    if (not isinstance(value, dict) or set(value) != {"contract_version", "kind"}
+            or type(value["contract_version"]) is not int or value["contract_version"] != 1
+            or type(value["kind"]) is not str or value["kind"] not in {"exact_request", "session"}):
+        raise HTTPException(status_code=503, detail={"code": "approval_scope_unavailable"})
+    return dict(value)
+
+
+def _scope_projection(runner, row: dict) -> dict:
+    try:
+        review = runner.approval_review_for(row)
+    except Exception:
+        raise HTTPException(status_code=503, detail={"code": "approval_scope_unavailable"}) from None
+    if (not isinstance(review, dict) or set(review) != {"approval_scope", "approval_available"}
+            or type(review["approval_available"]) is not bool):
+        raise HTTPException(status_code=503, detail={"code": "approval_scope_unavailable"})
+    return {"approval_scope": _validated_scope(review["approval_scope"]),
+            "approval_available": review["approval_available"]}
+
+
 @router.get("/api/approvals")
 async def list_pending_approvals(session_id: str = "", limit: int = 100):
     orch = _require_orchestrator()
@@ -78,6 +99,7 @@ async def list_pending_approvals(session_id: str = "", limit: int = 100):
                 # one client that would use it.
                 "policy_sources": row.get("policy_sources") or {},
                 **_browser_resource_projection(row),
+                **_scope_projection(orch.tool_runner, row),
             }
             for row in rows
         ],
@@ -118,6 +140,24 @@ async def _resolve_request(request_id: str, *, approved: bool, body: dict | None
                 "pending_session_id": outcome.get("pending_session_id", ""),
             },
         )
+    if status in {"origin_unavailable", "origin_unsettled", "origin_superseded", "stale_context"}:
+        raise HTTPException(status_code=409, detail={
+            "code": status, "request_id": request_id,
+            "processing_outcome": "unavailable", "action_outcome": "not_asserted",
+            "retry_safe": False,
+            "message": "This approval is not currently available. Refresh and review before continuing.",
+        })
+    if status in {"approved", "rejected"}:
+        try:
+            scope = _validated_scope(outcome.get("approval_scope"))
+        except HTTPException:
+            raise HTTPException(status_code=503, detail={
+                "code": "approval_scope_unavailable", "request_id": request_id,
+                "processing_outcome": "outcome_unknown", "action_outcome": "unknown" if approved else "not_asserted",
+                "effects_may_have_occurred": approved, "retry_safe": False,
+                "message": "The decision scope was not confirmed. Inspect the request and results before continuing.",
+            }) from None
+        outcome = {**outcome, "approval_scope": scope}
     return outcome
 
 
@@ -158,6 +198,7 @@ async def approve_request(request_id: str, body: dict | None = None):
         "tool_name": outcome.get("tool_name", ""),
         "summary": outcome.get("summary", ""),
         "result": outcome.get("result", {}),
+        **({"approval_scope": outcome["approval_scope"]} if "approval_scope" in outcome else {}),
     }
 
 
@@ -170,4 +211,5 @@ async def reject_request(request_id: str, body: dict | None = None):
         "request_id": outcome.get("request_id", request_id),
         "session_id": outcome.get("session_id", ""),
         "tool_name": outcome.get("tool_name", ""),
+        **({"approval_scope": outcome["approval_scope"]} if "approval_scope" in outcome else {}),
     }

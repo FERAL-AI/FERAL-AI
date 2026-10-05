@@ -26,6 +26,8 @@ SESSION = "s-approval"
 def _runner() -> ToolRunner:
     runner = ToolRunner.__new__(ToolRunner)
     runner._pending_approvals = {}
+    runner._pending_task_origins = {}
+    runner._pending_scope_kinds = {}
     return runner
 
 

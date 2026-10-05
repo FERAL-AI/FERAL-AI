@@ -6,12 +6,14 @@ completed means processing finished, never that an external action succeeded.
 from __future__ import annotations
 
 import asyncio
+import copy
+from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 import hashlib
 import json
 import os
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING, Any, Callable
 from uuid import UUID, uuid4
 
 from security.agent_turn_lease import spawn_agent_turn
@@ -120,6 +122,152 @@ class LiveTurn:
     terminal_notified: set[int] = field(default_factory=set)
 
 
+def _review_digest(args: dict) -> str:
+    return hashlib.sha256(json.dumps(args, sort_keys=True, separators=(",", ":"),
+                                    ensure_ascii=False, allow_nan=False).encode()).hexdigest()
+
+
+@dataclass(frozen=True)
+class PendingTaskOrigin:
+    """Private original-input evidence, never a JSON approval credential."""
+    manager: Any
+    state: Any
+    store: Any
+    runner: Any
+    runtime: Any
+    owner: object
+    audit: TurnAudit
+    original_task: asyncio.Task
+    approval_id: str
+    session_id: str
+    request_id: str
+    turn_id: str
+    call_id: str
+    surface: str
+    args: dict
+    args_digest: str
+    coordinator: Any
+    generation: str | None
+    agent_generation: int
+
+    def guard(self) -> None:
+        state = self.state
+        coordinator = getattr(self.runner._orch, "_context_checkpoints", None)
+        if (state.chat_turns is not self.manager or self.manager._store is not self.store
+                or self.manager.state is not state
+                or state.memory is not self.store or state.taskflows is not self.runtime
+                or getattr(state.orchestrator, "tool_runner", None) is not self.runner
+                or state.sessions.get(self.session_id) is not self.owner
+                or self.audit.cancel_requested or self.original_task.cancelled()
+                or (self.audit.session_id, self.audit.request_id, self.audit.turn_id)
+                    != (self.session_id, self.request_id, self.turn_id)
+                or self.original_task.cancelling()
+                or coordinator is not self.coordinator
+                or getattr(state, "_native_agent_turn_generation", 0) != self.agent_generation
+                or self.args_digest != _review_digest(self.args)):
+            raise ChatTurnError("origin_superseded")
+        if coordinator is not None and not coordinator.review_generation_valid(self.session_id, self.generation):
+            raise ChatTurnError("origin_superseded")
+        if self.runner is None:
+            raise ChatTurnError("origin_superseded")
+        self.runner._guard_agent_lease()
+
+    def matches(self, pending: dict) -> bool:
+        try:
+            self.guard()
+            return self.static_matches(pending)
+        except (Exception, asyncio.CancelledError):
+            return False
+
+    def static_matches(self, pending: dict) -> bool:
+        """Historical display/revocation evidence, never current execution permission."""
+        try:
+            return (self.args_digest == _review_digest(self.args)
+                    and (self.audit.session_id, self.audit.request_id, self.audit.turn_id)
+                        == (self.session_id, self.request_id, self.turn_id)
+                    and pending.get("request_id") == self.approval_id
+                    and pending.get("session_id") == self.session_id
+                    and pending.get("tool_name") == "background_task__start"
+                    and isinstance(pending.get("args"), dict)
+                    and _review_digest(pending["args"]) == self.args_digest)
+        except (Exception, asyncio.CancelledError):
+            return False
+
+
+class TaskOriginTransfer:
+    """One registered executor backing task may claim the original input."""
+    def __init__(self, origin: PendingTaskOrigin, dispatch_task: asyncio.Task):
+        self.origin = origin
+        self.dispatch_task = dispatch_task
+        self.backing_task: asyncio.Task | None = None
+        self.active = True
+        self.claimed = False
+
+    def guard(self):
+        self.origin.guard()
+        if (not self.active or self.dispatch_task.done() or self.dispatch_task.cancelling()
+                or self.backing_task is None or self.backing_task.done() or self.backing_task.cancelling()):
+            raise ChatTurnError("origin_superseded")
+
+
+class ValidatedTaskApprovalOrigin:
+    """Resolver-task-bound proof issued only after the durable receipt read."""
+    def __init__(self, manager, origin, seal):
+        if seal is not manager._task_approval_seal:
+            raise ChatTurnError("origin_unavailable")
+        self.manager = manager
+        self.origin = origin
+        self._seal = seal
+        self.owner_task = asyncio.current_task()
+        self.used = False
+
+    def consume(self, origin):
+        task = asyncio.current_task()
+        if (self.used or self.origin is not origin or self.manager is not origin.manager
+                or self._seal is not self.manager._task_approval_seal
+                or task is None or task is not self.owner_task or task.cancelling()):
+            raise ChatTurnError("origin_superseded")
+        origin.guard()
+        self.used = True
+
+
+_task_origin_transfer: ContextVar[TaskOriginTransfer | None] = ContextVar("feral_task_origin_transfer", default=None)
+
+
+@contextmanager
+def bind_task_origin_transfer(transfer: TaskOriginTransfer):
+    if transfer.backing_task is not None or not transfer.active:
+        raise ChatTurnError("origin_superseded")
+    transfer.backing_task = asyncio.current_task()
+    token = _task_origin_transfer.set(transfer)
+    try:
+        transfer.guard()
+        yield
+    finally:
+        transfer.active = False
+        _task_origin_transfer.reset(token)
+
+
+def claim_task_origin_transfer(args: dict):
+    transfer = _task_origin_transfer.get()
+    if transfer is None:
+        return None
+    transfer.guard()
+    from skills.call_context import current_context
+    ctx = current_context()
+    origin = transfer.origin
+    if (transfer.claimed or transfer.backing_task is not asyncio.current_task()
+            or ctx.session_id != origin.session_id or ctx.call_id != origin.call_id
+            or ctx.turn_id != origin.turn_id or ctx.surface != origin.surface
+            or ctx.tool_name != "background_task__start" or _review_digest(args) != origin.args_digest):
+        raise ChatTurnError("origin_superseded")
+    transfer.claimed = True
+    return ({"contract_version": 1, "source": "tracked_chat_turn", "owner_verified": True,
+             "session_id": origin.session_id, "request_id": origin.request_id, "turn_id": origin.turn_id,
+             "tool_call_id": origin.call_id, "surface": origin.surface,
+             "input_revision": None, "context_commit": "pending"}, transfer.guard)
+
+
 class ChatTurnManager:
     """Track exact connection/session/turn tasks, using existing SQLite receipts."""
     def __init__(self, state):
@@ -129,6 +277,52 @@ class ChatTurnManager:
         self._submit_lock = asyncio.Lock()
         self._live: dict[tuple[str, str], LiveTurn] = {}
         self._settlements: set[asyncio.Task] = set()
+        self._task_approval_seal = object()
+
+    def capture_task_approval_origin(self, runner, approval_id: str, args: dict, ctx) -> PendingTaskOrigin:
+        audit = turn_audit(ctx.session_id)
+        live = self._live.get((ctx.session_id, audit.turn_id)) if audit is not None else None
+        from security.dangerous_tools import known_surfaces
+        if (audit is None or live is None or live.audit is not audit or live.request_id != audit.request_id
+                or live.task is None or live.task.done() or live.task.cancelling()
+                or audit.cancel_requested or self.state.sessions.get(ctx.session_id) is not live.owner
+                or self._store is not self.state.memory or ctx.surface not in known_surfaces()
+                or ctx.tool_name != "background_task__start" or not ctx.call_id or len(ctx.call_id) > 256
+                or any(ord(c) < 32 for c in ctx.call_id)):
+            raise ChatTurnError("origin_unavailable")
+        exact_uuid(audit.request_id)
+        exact_uuid(audit.turn_id)
+        coordinator = getattr(runner._orch, "_context_checkpoints", None)
+        origin = PendingTaskOrigin(self, self.state, self._store, runner, self.state.taskflows,
+            live.owner, audit, live.task, approval_id, ctx.session_id, audit.request_id, audit.turn_id,
+            ctx.call_id, ctx.surface, copy.deepcopy(args), _review_digest(args), coordinator,
+            coordinator.review_generation(ctx.session_id) if coordinator is not None else None,
+            getattr(self.state, "_native_agent_turn_generation", 0))
+        origin.guard()
+        return origin
+
+    async def validate_task_approval_origin(self, origin: PendingTaskOrigin):
+        origin.guard()
+        try:
+            receipt = await self._store.chat_turn_get(session_id=origin.session_id,
+                request_id=origin.request_id, turn_id=origin.turn_id)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            raise ChatTurnError("origin_unavailable") from None
+        origin.guard()
+        if (not isinstance(receipt, dict) or receipt.get("contract_version") != 1
+                or receipt.get("durable") is not True or receipt.get("session_id") != origin.session_id
+                or receipt.get("request_id") != origin.request_id or receipt.get("turn_id") != origin.turn_id):
+            raise ChatTurnError("origin_unavailable")
+        if receipt.get("status") in {"accepted", "running"}:
+            raise ChatTurnError("origin_unsettled")
+        if (not origin.audit.closed or not origin.original_task.done()
+                or receipt.get("processing_outcome") != "awaiting_approval"
+                or origin.approval_id not in receipt.get("approval_request_ids", [])
+                or origin.approval_id not in origin.audit.approval_request_ids):
+            raise ChatTurnError("origin_superseded")
+        return ValidatedTaskApprovalOrigin(self, origin, self._task_approval_seal)
 
     async def start(self):
         async with self._start_lock:

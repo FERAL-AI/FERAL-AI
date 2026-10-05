@@ -1,5 +1,13 @@
 # Theora / FERAL full-product release readiness
 
+**Verified next source (October 5).** Exact tracked-task approval transfer,
+output-only scope/availability and selected vision routing pass frozen parent
+integration: 2,724 tests across 124 suites, unchanged inputs and no added typing
+diagnostics. Native Oversight/API fixture and linked checks pass. Fresh
+9.45 compilation and packaged-method acceptance are next; canonical 9.44 remains
+below until a new artifact passes. Actual approval-screen acceptance is blocked
+by Computer Use. [Behavior and remaining gates](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md).
+
 **Current Mac artifact (October 4).** Immutable 9.44/build2026100408 contains
 published source `4c8498bf0`: truthful local inventory, guarded vision preset
 selection and task-status/endpoint corrections. Frozen integration passes 2,337

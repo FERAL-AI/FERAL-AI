@@ -898,6 +898,20 @@ class SkillExecutor:
                 # Let backing implementations know host fallback is forbidden.
                 exec_args["_feral_require_sandbox"] = True
             time_budget = tool_budget_seconds(skill, endpoint, exec_args)
+            # Admission is captured in the executor entry task, then bound only
+            # inside the exact wait_for backing task, not arbitrary context copies.
+            import sys
+            _brain_state = getattr(sys.modules.get("api.state"), "state", None)
+            runner = getattr(getattr(_brain_state, "orchestrator", None), "tool_runner", None)
+            transfer = runner.approved_backing_transfer(tool_name, args) if runner is not None and callable(
+                getattr(type(runner), "approved_backing_transfer", None)) else None
+
+            async def invoke_backing():
+                if transfer is None:
+                    return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
+                from agents.chat_turns import bind_task_origin_transfer
+                with bind_task_origin_transfer(transfer):
+                    return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
             try:
                 # Bounded. ``wait_for`` cancels the coroutine when the
                 # budget expires and the caller gets a 504 envelope
@@ -908,7 +922,7 @@ class SkillExecutor:
                 # which is why integrations/email.py moved its IMAP work
                 # to ``asyncio.to_thread`` in the same change.
                 result = await asyncio.wait_for(
-                    impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id)),
+                    invoke_backing(),
                     timeout=time_budget,
                 )
                 # The budget is declared by the manifest for THIS endpoint
