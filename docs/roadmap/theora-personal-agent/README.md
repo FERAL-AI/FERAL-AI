@@ -1,10 +1,10 @@
 # Theora personal agent: product and engineering plan
 
-**Current checkpoint: October 4, 2026.** Native9.36/source9a40b9ac8
-passes bounded actual local chat, saved-context restart and normal shutdown.
-Strict response formatting and71–77-second latency remain issues; actual audio,
-accounts/devices and distribution are still open. Current source corrections are
-separate from that immutable package. The new
+**Current checkpoint: October 4, 2026.** Immutable native9.40/source250787b2d
+passes bounded actual setup, selected Chrome action and normal shutdown.
+Later runtime reliability fixes pass 1,405 tests across 72 frozen source suites;
+they are separate from that package. Actual audio, accounts/devices, local control
+provisioning and distribution remain open. The new
 [multitasking and setup plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) covers background
 jobs during voice, subscription/API/local access, three-step installation,
 computer/browser ownership, Messages shopping offers and phone/glasses handoff.
@@ -38,9 +38,10 @@ The candidate advantage is the complete loop from real-world context to grounded
 |---|---|
 | [Native browser viewing](BROWSER_VIEW_EVIDENCE.md) | Real viewport frames, input locations, explicit viewing leases, correct-field typing and remaining computer-use integration |
 | [Current work checkpoint](WORK_STATE.md) | Tested source/candidate, current evidence, worker ownership, next ready cards and external dependencies |
+| [Runtime reliability evidence](RUNTIME_RELIABILITY_EVIDENCE.md) | Central routine/computer authority, occurrence recovery, truthful results/accounting and source-aware memory; frozen combined checks and remaining contracts |
 | [Contributor rules](../../../AGENTS.md) | Authorization, privacy, verification, worker ownership, resource retention and clean Git publication |
 | [Codex continuation rules](../../../codex.md) | Checkpoint cadence, source/candidate distinctions and resuming the existing project |
-| [Latest native candidate](NATIVE_9_36_ACCEPTANCE.md) | Exact source, actual local chat/context/restart, normal exit and remaining latency/audio/release gates |
+| [Latest native candidate](NATIVE_9_40_ACCEPTANCE.md) | Exact source, actual setup/selected Chrome action, normal exit and remaining audio/account/release gates |
 | [Multitasking and easy setup](MULTITASKING_AND_EASY_SETUP_PLAN.md) | Current subscription/voice research and source-backed installation, durable jobs, browser/resources, shopping and iOS acceptance cards |
 | [Automatic learning switch](SELF_LEARNING_SWITCH_EVIDENCE.md) | Boot/live revocation, learner cost authority and664-check source integration outside9.36 |
 | [Setup and status integration](SETUP_PARITY_EVIDENCE.md) | Model-list/CLI parity, asynchronous terminal fixtures and695-check combined integration outside9.36 |

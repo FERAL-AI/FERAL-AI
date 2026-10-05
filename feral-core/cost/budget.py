@@ -214,6 +214,8 @@ class CostBudget:
         self._conn: aiosqlite.Connection | None = None
         self._ready = False
         self._spend: dict[tuple[str, str], float] = {}
+        self._spend_windows: dict[str, float] = {}
+        self._settlement_uncertain = False
         self._override_caps: dict[tuple[str, str], float] = {}
 
     async def ensure_ready(self) -> None:
@@ -252,6 +254,7 @@ class CostBudget:
             )
             await self._conn.commit()
             await self._load_rollups()
+            self._settlement_uncertain = False
             self._ready = True
 
     async def close(self) -> None:
@@ -264,15 +267,19 @@ class CostBudget:
     async def _load_rollups(self) -> None:
         assert self._conn is not None
         now = time.time()
-        self._spend.clear()
+        loaded: dict[tuple[str, str], float] = {}
+        loaded_windows: dict[str, float] = {}
         for window in ("hour", "day", "month"):
             start = window_start(window, now)
+            loaded_windows[window] = start
             async with self._conn.execute(
                 "SELECT call_site, dollars FROM cost_rollup WHERE window = ? AND window_start = ?",
                 (window, start),
             ) as cursor:
                 async for call_site, dollars in cursor:
-                    self._spend[(call_site, window)] = float(dollars)
+                    loaded[(call_site, window)] = float(dollars)
+        self._spend = loaded
+        self._spend_windows = loaded_windows
 
     def set_cap(self, call_site: str, window: str, cap_dollars: float) -> None:
         if window not in _VALID_WINDOWS:
@@ -367,6 +374,8 @@ class CostBudget:
         return caps
 
     def _get_spend(self, call_site: str, window: str) -> float:
+        if self._spend_windows.get(window) != window_start(window):
+            return 0.0
         return float(self._spend.get((call_site, window), 0.0))
 
     def current_spend(
@@ -396,6 +405,8 @@ class CostBudget:
     ) -> bool:
         if not self.enabled:
             return True
+        if self._settlement_uncertain and self._active_caps(call_site):
+            raise RuntimeError("Cost settlement requires ledger reconciliation")
         est = self._estimate_cost(model, estimated_max_tokens)
         for site, window, cap in self._active_caps(call_site):
             projected = self._get_spend(site, window) + est
@@ -445,40 +456,64 @@ class CostBudget:
         input_dollars = (prompt / 1000.0) * rates["input"]
         output_dollars = ((completion + reasoning) / 1000.0) * rates["output"]
 
+        exceeded: tuple[str, str, float, float] | None = None
         async with self._lock:
-            for site, window, cap in self._active_caps(call_site):
-                projected = self._get_spend(site, window) + dollars
-                if projected > cap + 1e-12:
-                    self._raise_budget_exceeded(site, window, cap, projected)
-
-            for window in ("hour", "day", "month"):
-                for site in (call_site, _GLOBAL_SITE):
-                    key = (site, window)
-                    self._spend[key] = self._get_spend(site, window) + dollars
-
             assert self._conn is not None
             ts = time.time()
-            await self._conn.execute(
-                """
-                INSERT INTO cost_events
-                    (ts, call_site, model, prompt_tokens, completion_tokens, reasoning_tokens, dollars)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (ts, call_site, model, prompt, completion, reasoning, dollars),
-            )
-            for window in ("hour", "day", "month"):
-                start = window_start(window, ts)
-                for site in (call_site, _GLOBAL_SITE):
-                    await self._conn.execute(
-                        """
-                        INSERT INTO cost_rollup (call_site, window, window_start, dollars)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(call_site, window, window_start) DO UPDATE SET
-                            dollars = cost_rollup.dollars + excluded.dollars
-                        """,
-                        (site, window, start, dollars),
-                    )
-            await self._conn.commit()
+            # Usage is an already-incurred charge, not an admission request.
+            # Persist it even when it crosses a cap. The SQLite writer lock
+            # also serializes distinct CostBudget instances using this ledger.
+            try:
+                await self._conn.execute("BEGIN IMMEDIATE")
+                await self._conn.execute(
+                    """
+                    INSERT INTO cost_events
+                        (ts, call_site, model, prompt_tokens, completion_tokens, reasoning_tokens, dollars)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (ts, call_site, model, prompt, completion, reasoning, dollars),
+                )
+                for window in ("hour", "day", "month"):
+                    start = window_start(window, ts)
+                    for site in dict.fromkeys((call_site, _GLOBAL_SITE)):
+                        await self._conn.execute(
+                            """
+                            INSERT INTO cost_rollup (call_site, window, window_start, dollars)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(call_site, window, window_start) DO UPDATE SET
+                                dollars = cost_rollup.dollars + excluded.dollars
+                            """,
+                            (site, window, start, dollars),
+                        )
+                settled_spend: dict[tuple[str, str], float] = {}
+                for window in ("hour", "day", "month"):
+                    async with self._conn.execute(
+                        "SELECT call_site, dollars FROM cost_rollup "
+                        "WHERE window = ? AND window_start = ?",
+                        (window, window_start(window, ts)),
+                    ) as cursor:
+                        async for site, spent in cursor:
+                            settled_spend[(site, window)] = float(spent)
+                await self._conn.commit()
+            except BaseException:
+                self._settlement_uncertain = True
+                await self._conn.rollback()
+                # Cancellation can arrive after SQLite commits but before the
+                # await returns. Reload truth instead of assuming no charge.
+                await self._load_rollups()
+                self._settlement_uncertain = False
+                raise
+            # Publish the cache only after the entire settlement commits.
+            self._spend = settled_spend
+            self._spend_windows = {
+                window: window_start(window, ts) for window in ("hour", "day", "month")
+            }
+            self._settlement_uncertain = False
+            for site, window, cap in self._active_caps(call_site):
+                current = settled_spend.get((site, window), 0.0)
+                if current > cap + 1e-12:
+                    exceeded = (site, window, cap, current)
+                    break
 
         cost_telemetry.record_call(call_site, model)
         cost_telemetry.record_dollars(
@@ -487,6 +522,8 @@ class CostBudget:
             input_dollars=input_dollars,
             output_dollars=output_dollars,
         )
+        if exceeded is not None:
+            self._raise_budget_exceeded(*exceeded)
         return dollars
 
     async def reset(self, call_site: str | None = None) -> None:
@@ -510,3 +547,4 @@ class CostBudget:
                     self._spend.pop((call_site, window), None)
             await self._conn.commit()
             await self._load_rollups()
+            self._settlement_uncertain = False

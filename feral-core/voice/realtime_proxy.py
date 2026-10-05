@@ -43,6 +43,7 @@ from skills.call_context import bind_context
 from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
 from voice.transcript_order import TRANSCRIPT_ORDER
+from voice.tool_result_envelope import serialize_realtime_tool_result
 
 logger = logging.getLogger("feral.voice.openai")
 
@@ -1979,7 +1980,7 @@ class RealtimeProxy:
         if not endpoint:
             return json.dumps({"error": f"Endpoint not found: {endpoint_id}"})
 
-        logger.info(f"Realtime tool execution: {name} -> {args}")
+        logger.info("Realtime tool execution: %s", name)
         await self._send_tool_feedback(session_id, self._tool_feedback_text(name))
         self._assert_callback_owner(session_id)
 
@@ -2067,7 +2068,7 @@ class RealtimeProxy:
                 exc_info=True,
             )
 
-        return json.dumps(result.get("data") or {"status": result.get("error", "done")})
+        return serialize_realtime_tool_result(name, result, registry=self._skill_registry)
 
     async def _record_voice_tool_episode(
         self,

@@ -1367,28 +1367,26 @@ def execute_routine_job(job):
 
       1. ``workflow_id`` — instantiate a workflow pack as a live TaskFlow.
       2. ``flow_id`` + inline ``steps`` — create an ad-hoc TaskFlow.
-      3. ``skill`` + ``endpoint`` — direct skill invoke, behind a safety
-         pre-flight on surface="cron" (DENY → skip + record).
+      3. ``skill`` + ``endpoint`` — central tool dispatch on surface="cron";
+         DENY is final and CONFIRM needs an exact durable routine grant.
       4. ``prompt`` / ``action_text`` — run through the orchestrator.
       5. otherwise — log a no-op.
     """
     logger.info(
         "Routine fired: id=%s type=%s desc=%s", job.id, job.job_type, job.description
     )
-    # Bookkeeping must not decide whether the routine runs. This is a raw
-    # sqlite3 INSERT + commit and it sat outside the try below, so one
-    # "database is locked" here propagated all the way out of the callback.
-    # A run we could not write a history row for is still a run worth doing;
-    # ``record_run_finish`` with a None id updates no rows and is harmless.
+    # Unattended work must not dispatch without a persisted run identity.
+    # Scheduler liveness/rearming remains the scheduler's responsibility.
     try:
         run_id = state.cron_service.record_run_start(job.id)
+        if type(run_id) is not int or run_id <= 0:
+            raise ValueError("Run record identity is unavailable")
     except Exception:
-        logger.warning(
-            "Could not open a run record for routine %s; running it anyway",
+        logger.error(
+            "Routine %s was not dispatched: run identity could not be persisted",
             job.id,
-            exc_info=True,
         )
-        run_id = None
+        return
     try:
         payload = job.payload or {}
         skill_id = payload.get("skill")
@@ -1521,89 +1519,113 @@ def execute_routine_job(job):
             )
             return
 
-        if skill_id and endpoint and state.skill_registry:
-            # audit / smart-loops S2 — the cron skill path bypasses the
-            # orchestrator's safety resolver entirely. Run an explicit
-            # pre-flight on surface="cron" so a DENY verdict skips (and
-            # records) the run instead of firing blind.
-            skill_args = payload.get("args", {}) or {}
-            # A routine the user DELIBERATELY created with auto-confirm is an
-            # explicit, pre-authorised action — the cron pre-flight must not
-            # silently DENY it (there is no human at fire time to approve).
-            # We still skip a DENY for routines that were NOT user-confirmed,
-            # so an auto-generated/unsafe routine can't fire blind.
-            auto_confirm = bool(payload.get("auto_confirm"))
-            try:
-                from security.safety_resolver import resolve_policy, LEVEL_DENY
+        if (skill_id and endpoint and state.skill_registry
+                and skill_id in state.skill_registry.skills):
+            from agents.tool_runner import ToolRunner
+            from security.safety_resolver import (
+                resolve_policy, LEVEL_AUTO, LEVEL_CONFIRM, LEVEL_DENY,
+            )
+            from security.session_identity import validate_session_id
+            from skills.call_context import bind_context, current_context
 
+            skill_args = payload.get("args", {})
+            if skill_args is None:
+                skill_args = {}
+            if not isinstance(skill_args, dict):
+                state.cron_service.record_run_finish(
+                    run_id, "error", {"reason": "invalid_args"},
+                    "Routine arguments must be an object; nothing was dispatched",
+                )
+                return
+            tool_name = f"{skill_id}__{endpoint}"
+            try:
                 decision = resolve_policy(
-                    f"{skill_id}__{endpoint}",
-                    skill_args,
-                    surface="cron",
-                    registry=state.skill_registry,
+                    tool_name, skill_args, surface="cron", registry=state.skill_registry,
                 )
             except Exception:
-                decision = None
-            # Physical-safety denials (e.g. robot wheel speed > limit) are
-            # NEVER overridable by auto_confirm — they protect hardware.
-            hard_physical_deny = bool(
-                decision is not None
-                and (decision.sources or {}).get("cutebot_speed_limit")
-            )
-            # A surface deny is not overridable either. `surface="cron"` now
-            # has a deny list (shell, docker exec, browser eval, FS delete,
-            # arbitrary code eval); if auto_confirm could wave those through,
-            # the list would be decorative, because auto_confirm is set by the
-            # same routine payload that names the tool. auto_confirm means
-            # "the user pre-approved a CONFIRM-tier action", not "the user may
-            # opt into running a shell at 3am unattended".
-            hard_surface_deny = bool(
-                decision is not None and (decision.sources or {}).get("surface_deny")
-            )
-            deny_overridden = (
-                auto_confirm and not hard_physical_deny and not hard_surface_deny
-            )
-            if (
-                decision is not None
-                and decision.level == LEVEL_DENY
-                and not deny_overridden
-            ):
+                logger.error("Routine %s policy evaluation failed; no dispatch", job.id)
                 state.cron_service.record_run_finish(
-                    run_id,
-                    "skipped",
-                    {"policy": decision.to_dict()},
+                    run_id, "error", {"reason": "policy_unavailable"},
+                    "Routine policy could not be evaluated; nothing was dispatched",
+                )
+                return
+            if decision.level == LEVEL_DENY:
+                state.cron_service.record_run_finish(
+                    run_id, "skipped", {"policy": decision.to_dict()},
                     f"denied by safety policy: {decision.deny_reason}",
                 )
                 return
+            if decision.level == LEVEL_CONFIRM:
+                # A payload boolean, standing tool permission or loose mode is
+                # not an exact durable routine/occurrence/argument grant. That
+                # contract is not implemented yet; do not manufacture consent.
+                state.cron_service.record_run_finish(
+                    run_id, "skipped",
+                    {"reason": "routine_exact_approval_unavailable", "policy": decision.to_dict()},
+                    "Routine requires an exact durable approval; nothing was dispatched",
+                )
+                return
+            if decision.level != LEVEL_AUTO:
+                state.cron_service.record_run_finish(
+                    run_id, "error", {"reason": "invalid_policy"},
+                    "Routine policy is unavailable; nothing was dispatched",
+                )
+                return
 
-            skill = state.skill_registry.get_skill(skill_id)
-            if skill:
-                session_id = job.session_id or f"routine-{job.id}"
+            owner = state.orchestrator
+            runner = getattr(owner, "tool_runner", None)
+            if not isinstance(runner, ToolRunner):
+                state.cron_service.record_run_finish(
+                    run_id, "error", {"reason": "dispatcher_unavailable"},
+                    "Full policy dispatcher unavailable; nothing was dispatched",
+                )
+                return
+            session_id = job.session_id or f"routine-{job.id}"
+            try:
+                validate_session_id(session_id)
+            except ValueError:
+                state.cron_service.record_run_finish(
+                    run_id, "error", {"reason": "invalid_session"},
+                    "Routine owner identity is invalid; nothing was dispatched",
+                )
+                return
+            # This is a persisted run attempt identity, not a durable scheduled
+            # occurrence/idempotency grant. Recovery fencing is a separate gate.
+            call_id = f"routine:{job.id}:run:{run_id}"
 
-                async def _dispatch_skill():
-                    result = await skill.execute(endpoint, skill_args, {})
-                    if isinstance(result, dict) and result.get("success"):
+            async def _dispatch_skill():
+                # Bind inside the coroutine so transfer to the brain loop keeps
+                # identity. Central dispatch validates schema and repeats gates.
+                with bind_context(session_id=session_id, surface="cron",
+                                  tool_name=tool_name, call_id=call_id):
+                    ctx = current_context()
+                    if ctx.session_id != session_id or ctx.surface != "cron" or ctx.call_id != call_id:
+                        return {"success": False, "error": "Routine call identity is unavailable",
+                                "dispatch_started": False}
+                    result = await runner.execute_tool_call_for_llm(
+                        session_id, {"id": call_id, "name": tool_name, "args": skill_args},
+                        [], surface="cron",
+                    )
+                    if isinstance(result, dict) and result.get("success") is True:
                         await _log_routine_device_action(
-                            session_id,
-                            skill_id,
-                            endpoint,
-                            skill_args,
-                            result,
-                            run_id,
+                            session_id, skill_id, endpoint, skill_args, result, run_id,
                         )
                     return result
 
-                result = _run_cron_coroutine(
-                    _dispatch_skill(),
-                    owner=state.orchestrator,
-                )
+            result = _run_cron_coroutine(_dispatch_skill(), owner=owner)
+            if not isinstance(result, dict):
                 state.cron_service.record_run_finish(
-                    run_id,
-                    "success" if result.get("success") else "error",
-                    result,
-                    result.get("error"),
+                    run_id, "error", {"reason": "invalid_dispatch_result"},
+                    "Routine dispatch did not return a verified result envelope",
                 )
                 return
+            if result.get("status") == "pending_approval":
+                status, error = "skipped", "Central policy requires approval; no routine action executed"
+            else:
+                status = "success" if result.get("success") is True else "error"
+                error = result.get("error")
+            state.cron_service.record_run_finish(run_id, status, result, error)
+            return
 
         if prompt and state.orchestrator:
             # audit-r14 / S6 — pre-flight against the cron cost cap before

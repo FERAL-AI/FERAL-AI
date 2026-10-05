@@ -21,6 +21,7 @@ from bridges.client_voice_attempt import current_voice_attempt, voice_attempt_pa
 from skills.call_context import bind_context
 from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
+from voice.tool_result_envelope import serialize_realtime_tool_result
 
 logger = logging.getLogger("feral.voice.gemini")
 
@@ -987,7 +988,7 @@ class GeminiRealtimeProxy:
                 exc_info=True,
             )
 
-        return json.dumps(result.get("data") or {"status": result.get("error", "done")})
+        return serialize_realtime_tool_result(name, result, registry=self._skill_registry)
 
     async def _record_voice_tool_episode(
         self,

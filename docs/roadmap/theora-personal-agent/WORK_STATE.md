@@ -7,6 +7,39 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
+### Current reliability source checkpoint
+
+Implementation follows the completed independent review. Mac reliability and
+product functionality take priority; expansion of coding/OpenCode and CLI
+oversight is last. Existing coding functionality remains available.
+
+- Parent owns integration, cost settlement/admission failure handling, truthful
+  child completion, shared cron executor gate, documentation and Git publication.
+- Routine worker owns fail-closed central routine dispatch and the subordinate
+  durable occurrence journal. Computer worker owns registered inner action/capture
+  authority. Voice/memory worker owns truthful realtime results, source-aware
+  extraction and query-aware worker retrieval. Files have exclusive owners.
+- Completed bounded cards: CRON-01 central admission/final recheck, CRON-02
+  occurrence fencing/bookkeeping recovery, CU-01 registered inner capture/action
+  dispatch, RT-02 truthful bounded results, COST-02 incurred settlement plus
+  fail-closed admission errors, AG-01 incomplete child results, MEM-01 query
+  retrieval and MEM-02/03 user/source/alias attribution guards.
+- Frozen parent integration passes 1,405 tests across 72 suites with two opt-in
+  skips and 54 warnings (schema/FastAPI, existing numerical/fixture/environment
+  diagnostics). All 1,317 Python inputs remained unchanged. Source digest
+  `fd7571150505b742900ae8b11e13ed83277c524fa565b1fdab6e08e356314d06`.
+  [Behavior, regressions and limits](RUNTIME_RELIABILITY_EVIDENCE.md).
+  Workers released their files; parent owns the frozen checkpoint/publication.
+  New source publication is prepared in the existing draft PR310; exact remote
+  identity/CI must be checked separately after push. Packaging remains pending.
+- Existing immutable 9.40 contains none of these later fixes. No model, personal
+  account, microphone, message, purchase, service registration or GUI launch is
+  part of this source wave. Unrelated AUDIT-FIXES.md remains unstaged.
+- Next dependencies remain persistent cost reservations, responsive realtime
+  intake, exact durable scheduled grants, durable concurrent jobs, supported
+  computer-control provisioning and real Mac/voice acceptance. Full product scope
+  remains in the feature table below; bounded fixes do not close these gates.
+
 ### Current independent runtime review
 
 - Three read-only workers completed current-source review and inert reproductions.
@@ -28,11 +61,12 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
   coverage sum. Method evidence is distinct from physical/account acceptance.
 - Published documentation HEAD before this review is 43c1dcb5b; all six executed
   CI workflows pass, opt-in real-brain skipped. Runtime/app identity remains 250787b2d.
-  Runtime fixes from this independent review are not implemented or packaged.
+  This review checkpoint predates the active implementation above. Its executed
+  evidence belongs to the reviewed source, not later patches or a new bundle.
 - Workers released their review paths. Parent owns integration, the feature table
   below, docs and publication. No browser-only or GUI build wave is active.
-  Start implementation only after review is accepted; assign exclusive files,
-  preserve shared contracts and freeze before combined checks/new packaging.
+  Implementation is now active with exclusive ownership; preserve shared
+  contracts and freeze before combined checks/new packaging.
 
 ### Full feature checkpoint
 
@@ -41,11 +75,11 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 | Mac app, logo/avatar, clean UI, retained features | Native 22 destinations; first-use/avatar and bounded retained journeys verified | Full populated parity, accessibility/permission/error/recovery journeys and remaining UX defects |
 | Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.40 source/signature/lifecycle audited | Missing input/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
 | Cloud/API/subscription/local text, vision and voice | Shared config/catalog and provider adapters; bounded earlier local inference | Genuine account entitlement/tool/audio capability, supported sign-in, local vision wiring and M1/8GiB measurements |
-| Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 native Chrome approval/page outcome verified | Inner dispatch fixes, bundled dependencies, target ownership, desktop watch/stop/takeover and actual model-selected Mac task |
-| Multiple agents/jobs while talking; always-on work | Multi-agent/ToolRunner/ACP and persisted TaskFlow/cron exist | Routine authorization/recovery, budgets, durable detached ownership, resource concurrency and opt-in single-writer service |
-| Natural voice/calls/interruption | Bounded managed utterance with ownership/playback gates; legacy realtime paths | Intake/envelope fixes, continuous same-session duplex/delegation, headset/speaker/noise/latency acceptance |
+| Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 Chrome outcome verified; later central inner capture/action gates tested | Bundle dependencies, target ownership, desktop watch/stop/takeover and actual model-selected Mac task |
+| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; later routine authority/occurrence fence tested | Exact durable grants/external receipts, atomic reservations, detached ownership, resource concurrency and single-writer service |
+| Natural voice/calls/interruption | Bounded managed utterance; later truthful realtime result envelopes tested | Responsive intake, continuous same-session duplex/delegation, headset/speaker/noise/latency acceptance |
 | Texting experience, sent/read/seen and task progress | Tracked chat receipts, rich history and events | Distinct transport/read/task receipts, truthful incomplete states and reconnect/reordering acceptance |
-| Memory across sessions/devices/life | Existing layered memory/KG/retrieval/compaction/sync; selected recall verified | Role/evidence attribution fixes, query retrieval, temporal correction/deletion/export and same-owner sync acceptance |
+| Memory across sessions/devices/life | Existing layered memory/KG/sync; later committed-row role/source/alias guards and query retrieval tested | Authenticated evidence stamping, full provenance through codec/merge/sync, correction/deletion/export and same-owner sync acceptance |
 | Coding and CLI oversight | Bundled OpenCode, ACP adapters, scoped activity and bounded actual command | End-to-end project/cancel/restart parity, provider tool capability and opted-in independent CLI event ingestion |
 | Messages, shopping cards, browsing/accounts/booking | Messages send primitive, channel abstractions, preview commerce, account adapters | Enrolled receive/dedup/delivery, evidence-backed offers, real permitted account/task outcomes |
 | Payments/Stripe Link and order confirmation | Money policy/preview; Link research | Atomic quote reservation, exact approval, one merchant adapter, sandbox uncertainty/reconciliation and authorized real receipt |

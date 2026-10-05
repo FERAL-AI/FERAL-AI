@@ -4512,16 +4512,30 @@ class LLMProvider:
         budget = getattr(self, "_cost_budget", None)
         if budget is None:
             return None
+        def unavailable() -> Optional[dict]:
+            # A configured cap cannot be enforced when admission accounting
+            # is unavailable. Preserve the operator's disabled/unlimited mode.
+            try:
+                bounded = budget.enabled and bool(budget._active_caps(call_site))
+            except Exception:
+                bounded = True
+            if not bounded:
+                return None
+            return {
+                "error": "Cost budget unavailable; no model request was dispatched.",
+                "error_code": "budget_unavailable",
+                "choices": [],
+            }
         try:
             await budget.ensure_ready()
         except Exception as exc:
-            logger.debug("CostBudget.ensure_ready failed (non-fatal): %s", exc)
-            return None
+            logger.warning("CostBudget admission ledger unavailable (%s)", type(exc).__name__)
+            return unavailable()
         try:
             ok = budget.check_and_reserve(call_site, model, int(max_tokens or 0))
         except Exception as exc:
-            logger.debug("CostBudget.check_and_reserve raised (non-fatal): %s", exc)
-            return None
+            logger.warning("CostBudget admission check unavailable (%s)", type(exc).__name__)
+            return unavailable()
         if ok:
             return None
         # Build a synthetic BudgetExceeded so the response shape is

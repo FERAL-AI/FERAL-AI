@@ -70,9 +70,32 @@ logger = logging.getLogger("feral.memory.kg")
 # draws exactly this boundary for About-Me extraction; the graph needs it
 # too, and did not have it because the ``source`` argument that would carry
 # the distinction was never accepted.
-_NO_FIRST_PERSON_HEURISTIC_SOURCES = frozenset({
-    "ambient_conversation",
+_OPERATOR_ASSERTION_SOURCES = frozenset({
+    "user", "operator", "user_command", "user_assertion",
 })
+
+
+def _operator_heuristic_text(text: str, source: str | None) -> str:
+    """Legacy unlabelled explicit operator input remains supported.
+
+    Known transcripts must retain their user boundary even on model failure.
+    Unknown explicit sources cannot become first-person operator assertions.
+    This is source filtering, not authentication of arbitrary imported text.
+    """
+    if source is not None and source not in _OPERATOR_ASSERTION_SOURCES:
+        return ""
+    import re
+    labels = list(re.finditer(
+        r"(?im)^(?:\[(user|assistant|tool|system|ambient)\]|(user|assistant|tool|system|ambient):)\s*",
+        text,
+    ))
+    if not labels:
+        return text
+    return "\n".join(
+        text[label.end():labels[index + 1].start() if index + 1 < len(labels) else len(text)].strip()
+        for index, label in enumerate(labels)
+        if (label.group(1) or label.group(2)).lower() == "user"
+    )
 
 
 # ─────────────────────────────────────────────────────────────────────
@@ -718,15 +741,21 @@ class KnowledgeGraph:
         name: str,
         entity_type: str = "thing",
         metadata: dict | None = None,
+        *,
+        excluded_entity_id: str | None = None,
     ) -> dict:
         """Add or merge an entity. Uses embedding similarity for dedup."""
         existing = await self._find_entity_by_name(name)
         if existing:
+            if existing["id"] == excluded_entity_id:
+                return {}
             await self._bump_mention(existing["id"])
             return existing
 
         linked = await self._link_entity(name)
         if linked:
+            if linked["id"] == excluded_entity_id:
+                return {}
             await self._bump_mention(linked["id"])
             await self._add_alias(linked["id"], name)
             return linked
@@ -737,6 +766,8 @@ class KnowledgeGraph:
         # would replicate twice (once per node id) and ``add_relation``
         # would link to whichever copy the local brain wrote first.
         eid = _stable_kg_id(name, entity_type)
+        if eid == excluded_entity_id:
+            return {}
         now = time.time()
         embedding = await self._embedder.embed(name)
         meta_json = json.dumps(metadata or {})
@@ -790,6 +821,7 @@ class KnowledgeGraph:
         source_type: str = "thing",
         target_type: str = "thing",
         source_origin: str = "conversation",
+        excluded_source_entity_id: str | None = None,
     ) -> dict:
         """Add a relation between two entities (creating them if needed).
 
@@ -804,7 +836,13 @@ class KnowledgeGraph:
             )
             return {}
 
-        source = await self.add_entity(source_name, source_type)
+        # Source extraction restrictions apply to the resolved entity, including
+        # aliases and embedding links, before mention/alias/sync mutation.
+        source = await self.add_entity(
+            source_name, source_type, excluded_entity_id=excluded_source_entity_id,
+        )
+        if not source:
+            return {}
         target = await self.add_entity(target_name, target_type)
 
         conn = await self._conn()
@@ -1436,19 +1474,17 @@ class KnowledgeGraph:
         under the ``user`` entity. That is correct for something the
         operator typed and wrong for speech the room merely overheard,
         which is the same trust boundary ``store._NO_SELF_MODEL_EVENT_TYPES``
-        draws for About-Me extraction. So for ambient text the heuristic
-        is refused rather than allowed to attribute a stranger's home
-        town to the operator; an LLM pass, which sees whose words these
-        are, still runs.
+        draws for About-Me extraction. Unknown explicit sources refuse
+        this fallback both when the model is unavailable and when it fails.
+        An LLM can still extract named third-party relations from ambient
+        text, but cannot identify that speaker as the operator ``user``.
+        Legacy direct unlabelled operator text remains supported; this
+        compatibility path does not authenticate arbitrary imported text.
         """
+        heuristic_text = _operator_heuristic_text(text, source)
+        heuristic_origin = "heuristic" if source is None else f"heuristic:{source}"
         if not llm or not llm.available:
-            if source in _NO_FIRST_PERSON_HEURISTIC_SOURCES:
-                logger.debug(
-                    "heuristic extraction skipped for source=%r: first-person "
-                    "patterns would be attributed to the operator", source,
-                )
-                return []
-            return await self._heuristic_extract(text)
+            return await self._heuristic_extract(heuristic_text, source_origin=heuristic_origin) if heuristic_text else []
 
         # Sized against the serving model's context window rather than
         # clipped at a fixed character count. See "Extraction prompt
@@ -1471,8 +1507,10 @@ class KnowledgeGraph:
             triples = json.loads(cleaned)
         except Exception as e:
             logger.warning("LLM extraction failed, using heuristic: %s", e)
-            return await self._heuristic_extract(text)
+            return await self._heuristic_extract(heuristic_text, source_origin=heuristic_origin) if heuristic_text else []
 
+        untrusted_source = source is not None and source not in _OPERATOR_ASSERTION_SOURCES
+        operator = await self._find_entity_by_name("user") if untrusted_source else None
         stored = []
         for t in triples:
             if not isinstance(t, dict):
@@ -1482,6 +1520,10 @@ class KnowledgeGraph:
             obj = t.get("object", "").strip()
             if not all([subj, pred, obj]):
                 continue
+            if untrusted_source and subj.casefold() in {"user", "me", "myself", "i", "operator"}:
+                # An available model is not authority to identify a bystander
+                # or generated first-person speaker as the operator.
+                continue
             rel = await self.add_relation(
                 source_name=subj,
                 relation_type=pred,
@@ -1489,11 +1531,14 @@ class KnowledgeGraph:
                 evidence=text[:500],
                 source_type=t.get("subject_type", "thing"),
                 target_type=t.get("object_type", "thing"),
+                source_origin=source or "conversation",
+                excluded_source_entity_id=operator["id"] if operator else None,
             )
-            stored.append(rel)
+            if rel:
+                stored.append(rel)
         return stored
 
-    async def _heuristic_extract(self, text: str) -> list[dict]:
+    async def _heuristic_extract(self, text: str, *, source_origin: str = "heuristic") -> list[dict]:
         """Pattern-based extraction when LLM is unavailable. Async-native.
 
         Writes through :meth:`add_relation` rather than INSERTing directly.
@@ -1533,7 +1578,7 @@ class KnowledgeGraph:
                     evidence=text[:200],
                     source_type="person",
                     target_type=obj_type,
-                    source_origin="heuristic",
+                    source_origin=source_origin,
                 )
             except Exception as exc:
                 # One unstorable triple must not lose the others. Logged,

@@ -696,6 +696,15 @@ class ToolRunner:
             }
 
         level = decision.level
+        if surface == "cron" and level == SafetyLevel.CONFIRM:
+            # Interactive/standing permissions and autonomy modes do not bind
+            # a scheduled occurrence to exact arguments. Recheck here as well
+            # as at routine admission, including policy changes during awaits.
+            return make_tool_error_envelope(
+                tool_call_id=current_context().call_id,
+                error_code="routine_exact_approval_unavailable",
+                reason="Scheduled action requires an exact durable approval; nothing was dispatched.",
+            )
         read_only_flag = is_read_only(tool_name, registry=self._skill_registry())
 
         needs_approval = False
@@ -2139,6 +2148,7 @@ class ToolRunner:
         history: list[dict] = [{"role": "user", "content": task_text}]
         sub_session_id = f"{parent_session_id}:sub:{ordinal}:{str(uuid4())[:6]}"
         final_text = ""
+        completion_reason = "iteration_limit"
         tool_calls_executed = 0
         iterations_used = 0
 
@@ -2170,6 +2180,8 @@ class ToolRunner:
                     "task_index": ordinal,
                     "task": task_text,
                     "success": False,
+                    "status": "failed",
+                    "completion_reason": "provider_error",
                     "result": "",
                     "error": provider_error,
                     "iterations": iterations_used,
@@ -2221,18 +2233,22 @@ class ToolRunner:
                 continue
 
             if text_content:
-                final_text = text_content
+                final_text = text_content.strip()
+            completion_reason = "final_answer" if final_text else "empty_output"
             break
 
-        if not final_text:
-            final_text = "No final answer produced by subagent."
-
+        # An executed tool is not evidence that its enclosing task completed.
+        # Preserve the attempt count and stop; never repeat effects to obtain
+        # a better closing sentence after exhausting this bounded loop.
+        completed = bool(final_text)
         return {
             "task_index": ordinal,
             "task": task_text,
-            "success": True,
+            "success": completed,
+            "status": "completed" if completed else "incomplete",
+            "completion_reason": completion_reason,
             "result": final_text,
-            "error": None,
+            "error": None if completed else "Subagent did not produce a final answer.",
             "iterations": iterations_used,
             "tool_calls_executed": tool_calls_executed,
         }

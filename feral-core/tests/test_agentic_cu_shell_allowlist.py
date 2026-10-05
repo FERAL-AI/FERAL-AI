@@ -1,10 +1,8 @@
-"""PR2: agentic_computer_use shell action must be allowlisted.
+"""Agentic app opening accepts only a literal registered-tool operation.
 
 The VLM-driven autonomous loop emits ``shell`` actions to launch apps
-(``open -a ...``) and run AppleScript. Free-form shell from the VLM
-loop bypasses the canonical sandbox boundary, so non-allowlisted
-commands must be refused at the impl boundary — even before they
-reach ``coding_tools__bash``'s own gating.
+(``open -a ...``). Supplied AppleScript, shell operators and other
+commands require separately reviewed tools instead of raw shell execution.
 """
 
 from __future__ import annotations
@@ -18,10 +16,7 @@ from skills.impl.agentic_computer_use import AgenticComputerUseSkill
     "command",
     [
         "open -a 'Google Chrome'",
-        "osascript -e 'tell application \"Finder\" to activate'",
-        "screencapture /tmp/feral.png",
-        # Path-prefixed program names are recognised too.
-        "/usr/bin/open ~/Desktop",
+        "/usr/bin/open -a Finder",
     ],
 )
 def test_allowed_commands_pass(command: str) -> None:
@@ -36,6 +31,11 @@ def test_allowed_commands_pass(command: str) -> None:
         "python3 -c \"print(1)\"",
         "bash -lc 'echo hi'",
         "git status",
+        "osascript -e 'tell application \"Finder\" to activate'",
+        "screencapture /tmp/feral.png",
+        "/usr/bin/open ~/Desktop",
+        "open -a Finder; echo inert",
+        "open -a Finder && echo inert",
         "  ",
     ],
 )
