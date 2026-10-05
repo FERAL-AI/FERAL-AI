@@ -186,11 +186,15 @@ async def list_llm_providers():
     """
     catalog = _require_catalog()
     descriptors = catalog.list_providers()
+    from agents.llm_provider import is_supported_runtime_provider
     payload = []
     for desc in descriptors:
         status = catalog.status_for(desc.provider_id)
+        runtime_supported = is_supported_runtime_provider(desc.provider_id) or desc.provider_id in ("local", "hybrid")
         payload.append({
             **status.to_dict(),
+            "runtime_supported": runtime_supported,
+            "setup_selectable": runtime_supported,
             "credential_env_var": desc.credential_env_var,
             "aliases": list(desc.aliases),
             "notes": desc.notes,

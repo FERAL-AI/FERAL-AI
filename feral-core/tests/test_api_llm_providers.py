@@ -67,6 +67,10 @@ def test_provider_descriptor_includes_alias_list(client):
     assert "open ai" in entries["openai"]["aliases"]
     assert entries["openai"]["requires_api_key"] is True
     assert entries["ollama"]["supports_local"] is True
+    assert entries["openai"]["runtime_supported"] is True
+    assert entries["openai"]["setup_selectable"] is True
+    assert entries["bedrock"]["runtime_supported"] is False
+    assert entries["bedrock"]["setup_selectable"] is False
 
 
 def test_get_provider_unknown_404(client):
