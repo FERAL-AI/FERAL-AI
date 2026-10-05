@@ -529,6 +529,7 @@ private struct NativeChatView: View {
                             }
                             if model.isSending { HStack(spacing: 9) { ProgressView().controlSize(.small); Text(model.chatTurnStatus).foregroundStyle(.secondary) }.id("thinking") }
                             NativeChatEventsHost(model: model)
+                            NativeTaskResultCards(model: model.taskResults)
                         }.padding(.horizontal, 24).padding(.vertical, 20).frame(maxWidth: 850).frame(maxWidth: .infinity, alignment: .center)
                     }.frame(maxWidth: .infinity, maxHeight: .infinity).layoutPriority(1)
                         .onChange(of: model.messages.last?.text) { _ in
@@ -538,6 +539,7 @@ private struct NativeChatView: View {
             }
             if model.messages.isEmpty {
                 NativeEmptyChatEventsHost(model: model, rich: model.richChat)
+                ScrollView { NativeTaskResultCards(model: model.taskResults).padding(.horizontal, 28) }.frame(maxHeight: 220)
             }
             HStack {
                 Text(model.chatTurnStatus).font(.caption).foregroundStyle(model.chatRecoveryBlocked ? .orange : .secondary)
@@ -651,6 +653,30 @@ private struct NativeChatView: View {
             if sent && draft == original { draft = "" }
             dispatching = false
         }
+    }
+}
+
+private struct NativeTaskResultCards: View {
+    @ObservedObject var model: NativeTaskResultModel
+    var body: some View {
+        DisclosureGroup("Background tasks") {
+            VStack(alignment: .leading, spacing: 12) {
+                Text(model.status).font(.caption).foregroundStyle(.secondary)
+                if model.historyLimited { Text("Showing up to 100 recent task snapshots. Additional history is checked in bounded pages.").font(.caption).foregroundStyle(.orange) }
+                ForEach(model.receipts.reversed()) { receipt in
+                    VStack(alignment: .leading, spacing: 7) {
+                        HStack { Text(receipt.title.isEmpty ? "Background task" : receipt.title).font(.headline); Spacer(); Text(receipt.label).font(.caption) }
+                        Text("\(receipt.completed) of \(receipt.total) processing steps recorded").font(.caption).foregroundStyle(.secondary)
+                        if !model.freshIDs.contains(receipt.id) { Text("Snapshot unconfirmed on this connection").font(.caption).foregroundStyle(.orange) }
+                        if receipt.resultPresent { NativeSelectableText(text: receipt.result?.isEmpty == true ? "Empty recorded result" : receipt.result ?? "") }
+                        else { Text("No result recorded").font(.caption).foregroundStyle(.secondary) }
+                        if receipt.truncated { Text("Recorded result shortened to 4 KiB.").font(.caption).foregroundStyle(.secondary) }
+                        if receipt.processing == "outcome_unknown" { Text("Check the external outcome before retrying an action.").font(.caption).foregroundStyle(.orange) }
+                        Text("Processing status does not verify an external action outcome.").font(.caption2).foregroundStyle(.secondary)
+                    }.padding(12).background(Color.secondary.opacity(0.07)).clipShape(RoundedRectangle(cornerRadius: 10))
+                }
+            }.frame(maxWidth: .infinity, alignment: .leading).padding(.top, 8)
+        }.accessibilityIdentifier("native-background-task-results")
     }
 }
 

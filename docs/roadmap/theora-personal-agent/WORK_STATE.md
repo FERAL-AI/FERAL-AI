@@ -1269,3 +1269,26 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
   compare staged backend to that full SHA before actual GUI acceptance.
 - All original22 requirement areas remain tracked. No personal data reset,
   real account/message/purchase, merge or release occurred.
+
+## October 5 next source wave (not yet packaged)
+
+- TASK-RESULT-01A adds a read-only, origin/session-scoped task-receipt contract.
+  It projects persisted processing state and bounded recorded results through
+  `task.receipts`/`task.receipt`; it never asserts an external action succeeded,
+  dispatches work, or writes task state. The dirty-source integration gate passed
+  **2780 passed, 2 skipped, 67 warnings in 68.06s** across 126 suites. Evidence:
+  `/private/tmp/feral-taskresult-946-integration-20261005/result.json`.
+- GUI-STOP01 adds a retained physical-input worker lane. Cancellation revokes
+  future input but retains the actual worker until key/mouse cleanup settles;
+  cleanup uncertainty permanently blocks new physical input. Existing GUI/AX and
+  approval/capture/browser regressions passed **186 passed, 15 skipped, 7
+  warnings in 10.59s**. Focused task-result/settlement tests passed **56 passed,
+  6 warnings in 1.66s**. No real input or account was used.
+- NativeTaskResultFeature is integrated into the native model and Background task
+  cards, with strict session/connection/generation/expiry fences and bounded
+  polling. `test_features.sh TaskResult` and native production typecheck pass.
+- These edits are still a working-tree source wave. They are not in 9.45 and do
+  not change the immutable 9.45 artifact. Before a 9.46 build: review/stage only
+  these named files, rerun all gates, commit with a public implementation message,
+  push, then build from that exact commit. The CUA native pipe remains unavailable,
+  so GUI acceptance is still unexecuted.

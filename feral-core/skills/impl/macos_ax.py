@@ -92,6 +92,10 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from skills.base import BaseSkill
 from skills.impl import register_skill
+from security.desktop_input import (
+    DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked,
+    check_input, cleanup_failed, input_failure, physical_input_scope, run_worker,
+)
 
 logger = logging.getLogger("feral.skill.macos_ax")
 
@@ -980,6 +984,8 @@ class MacOSAccessibilitySkill(BaseSkill):
                 if gate is not None:
                     return gate
             return await self._run(handler, call_args)
+        except (DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked) as exc:
+            return input_failure(exc)
         except _Unsupported as exc:
             return _fail(str(exc), status=501)
         except Exception as exc:  # noqa: BLE001 - never crash the orchestrator
@@ -995,9 +1001,7 @@ class MacOSAccessibilitySkill(BaseSkill):
         loop thread stalls every other orchestrator task for the duration
         (0.25s for Finder, worse for a busy app).
         """
-        import asyncio
-
-        return await asyncio.to_thread(handler, call_args)
+        return await run_worker(handler, call_args)
 
     @staticmethod
     def _require_accessibility() -> Optional[dict]:
@@ -1609,16 +1613,31 @@ class MacOSAccessibilitySkill(BaseSkill):
                 status=501,
             )
         try:
-            point = (x, y)
-            for event_type in (
-                Quartz.kCGEventMouseMoved,
-                Quartz.kCGEventLeftMouseDown,
-                Quartz.kCGEventLeftMouseUp,
-            ):
-                event = Quartz.CGEventCreateMouseEvent(
-                    None, event_type, point, Quartz.kCGMouseButtonLeft,
-                )
-                Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            with physical_input_scope():
+                point = (x, y)
+                down_attempted = False
+                try:
+                    for event_type in (Quartz.kCGEventMouseMoved, Quartz.kCGEventLeftMouseDown):
+                        check_input()
+                        event = Quartz.CGEventCreateMouseEvent(
+                            None, event_type, point, Quartz.kCGMouseButtonLeft,
+                        )
+                        check_input()
+                        if event_type == Quartz.kCGEventLeftMouseDown:
+                            down_attempted = True
+                        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+                        check_input()
+                finally:
+                    if down_attempted:
+                        try:
+                            event = Quartz.CGEventCreateMouseEvent(
+                                None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft,
+                            )
+                            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+                        except Exception:
+                            cleanup_failed()
+        except (DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked):
+            raise
         except Exception as exc:  # noqa: BLE001
             return _fail(
                 f"Coordinate click at ({int(x)},{int(y)}) failed: {exc}",

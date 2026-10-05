@@ -14,6 +14,9 @@ Streaming uses events with incrementing seq numbers.
 from __future__ import annotations
 import asyncio
 import logging
+import math
+import threading
+import sys
 import time
 from typing import Callable, Awaitable, Optional, Any
 from uuid import uuid4
@@ -27,6 +30,7 @@ from memory.runtime_session_checkpoint import CheckpointFence, CheckpointValidat
 from config.loader import feral_home
 
 logger = logging.getLogger("feral.gateway")
+_TASK_RECEIPT_WORKERS: set[asyncio.Task] = set()
 
 
 class GatewayError(Exception):
@@ -243,6 +247,8 @@ def register_core_methods(registry: MethodRegistry, state):
         )
         result: dict[str, object] = {"turn_contract_versions": [1] if supported else [], "durable_receipts": supported,
                   "whole_turn_terminal": supported, "session_id": session_id}
+        from agents.taskflow import TaskFlowRuntime
+        result["task_result_contract_versions"] = [1] if isinstance(getattr(state, "taskflows", None), TaskFlowRuntime) else []
         from bridges.client_managed_chained_voice import ClientManagedChainedVoice
         managed_voice = session.metadata.get("managed_chained_voice")
         result["managed_chained_voice_versions"] = await managed_voice.capabilities() if isinstance(managed_voice, ClientManagedChainedVoice) else []
@@ -413,6 +419,84 @@ def register_core_methods(registry: MethodRegistry, state):
             return {"receipt": receipt, "found": receipt is not None}
         except ChatTurnError as exc:
             raise GatewayError(exc.code, "Exact tracked turn identity is required") from None
+
+    async def read_task_receipts(session_id: str, params: dict, session: GatewaySession, *, discovery: bool):
+        from agents.taskflow import TaskFlowRuntime
+        from security.session_identity import validate_session_id
+        allowed = {"contract_version", "limit", "cursor"} if discovery else {"contract_version", "flow_id"}
+        if (not isinstance(params, dict) or set(params) - allowed
+                or type(params.get("contract_version")) is not int or params["contract_version"] != 1):
+            raise GatewayError("INVALID_PARAMS", "A bounded versioned task receipt request is required")
+        try:
+            validate_session_id(session_id)
+        except (ValueError, TypeError):
+            raise GatewayError("INVALID_PARAMS", "Exact originating session is required") from None
+        limit, cursor, flow_id = params.get("limit", 20), params.get("cursor"), params.get("flow_id")
+        if discovery:
+            if type(limit) is not int or not 1 <= limit <= 20:
+                raise GatewayError("INVALID_PARAMS", "Task receipt limit must be 1 through 20")
+            if cursor is not None and (not isinstance(cursor, dict) or set(cursor) != {"created_at", "flow_id"}
+                    or type(cursor.get("created_at")) not in (int, float)
+                    or not 0 <= cursor["created_at"] <= 253402300799 or not math.isfinite(cursor["created_at"])
+                    or not isinstance(cursor.get("flow_id"), str) or not 1 <= len(cursor["flow_id"]) <= 128
+                    or any(ord(c) < 32 or ord(c) == 127 for c in cursor["flow_id"])):
+                raise GatewayError("INVALID_PARAMS", "Task discovery cursor is invalid")
+        elif (not isinstance(flow_id, str) or not 1 <= len(flow_id) <= 128
+              or any(ord(c) < 32 or ord(c) == 127 for c in flow_id)):
+            raise GatewayError("INVALID_PARAMS", "A bounded exact flow ID is required")
+        runtime = getattr(state, "taskflows", None)
+        caller = asyncio.current_task()
+        sessions = getattr(state, "sessions", None)
+        stopped = threading.Event()
+        def guard():
+            if stopped.is_set() or caller is None or caller.done() or caller.cancelling():
+                raise asyncio.CancelledError()
+            state_module = sys.modules.get("api.state")
+            if (session.session_id != session_id or not isinstance(sessions, dict)
+                    or getattr(state, "sessions", None) is not sessions or sessions.get(session_id) is not session._ws
+                    or state_module is not None and getattr(state_module, "state", state) is not state
+                    or getattr(state, "taskflows", None) is not runtime or not isinstance(runtime, TaskFlowRuntime)):
+                raise GatewayError("task_result_owner_unavailable", "The current task reader is unavailable")
+        guard()
+        await attachment_guard(session_id, session)
+        guard()
+        if len(_TASK_RECEIPT_WORKERS) >= 16:
+            raise GatewayError("task_result_busy", "Task receipt readers are at capacity")
+        def read():
+            guard()
+            return (runtime.read_origin_receipts(session_id, limit=limit, cursor=cursor, guard=guard) if discovery
+                    else runtime.read_origin_receipt(session_id, flow_id, guard=guard))
+        worker = asyncio.create_task(asyncio.to_thread(read))
+        _TASK_RECEIPT_WORKERS.add(worker)
+        def completed(task):
+            _TASK_RECEIPT_WORKERS.discard(task)
+            if not task.cancelled():
+                task.exception()
+        worker.add_done_callback(completed)
+        try:
+            result = await asyncio.wait_for(asyncio.shield(worker), timeout=3.0)
+            guard()
+            await attachment_guard(session_id, session)
+            guard()
+        except asyncio.CancelledError:
+            raise
+        except GatewayError:
+            raise
+        except Exception:
+            raise GatewayError("task_result_unavailable", "Persisted task receipts could not be confirmed") from None
+        finally:
+            stopped.set()
+        if discovery:
+            return {"contract_version": 1, "session_id": session_id, **result}
+        return {"contract_version": 1, "session_id": session_id, "found": result is not None, "receipt": result}
+
+    @registry.method("task.receipts")
+    async def task_receipts(session_id: str, params: dict, session: GatewaySession):
+        return await read_task_receipts(session_id, params, session, discovery=True)
+
+    @registry.method("task.receipt")
+    async def task_receipt(session_id: str, params: dict, session: GatewaySession):
+        return await read_task_receipts(session_id, params, session, discovery=False)
 
     @registry.method("session.reset")
     async def session_reset(session_id: str, params: dict, session: GatewaySession):

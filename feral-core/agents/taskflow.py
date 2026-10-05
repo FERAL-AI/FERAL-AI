@@ -7,15 +7,18 @@ Persistent multi-step background flows with restart-safe state.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import math
+from pathlib import Path
 import re
 import sqlite3
 import threading
 import time
 from enum import Enum
 from typing import Optional, Any, Callable
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import httpx
 
@@ -36,6 +39,10 @@ class TaskFlowStatus(str, Enum):
 
 class TaskFlowHandoffConflict(ValueError):
     """An accepted creation identity cannot be reused with changed terms."""
+
+
+class TaskFlowReceiptError(ValueError):
+    """A persisted origin or bounded read could not be verified."""
 
 
 class TaskFlowRuntime:
@@ -338,6 +345,168 @@ class TaskFlowRuntime:
                 (origin_session_id, max(1, min(limit, 100))),
             ).fetchall()
         return [self._flow_row_to_dict(row) for row in rows]
+
+    def _origin_receipt_snapshot(self, origin_session_id: str, *, flow_id=None,
+                                 limit=20, cursor=None, guard=lambda: None):
+        """Use a separate read-only snapshot; never wait with the runner mutex.
+
+        The gateway retains the worker and supplies its current-reader guard.
+        Busy retries are bounded and cannot dispatch or mutate task state.
+        """
+        from security.session_identity import validate_session_id
+        validate_session_id(origin_session_id)
+        if type(limit) is not int or not 1 <= limit <= 20:
+            raise TaskFlowReceiptError("Task receipt limit unavailable")
+        if flow_id is not None and (not isinstance(flow_id, str) or not 1 <= len(flow_id) <= 128
+                                    or any(ord(c) < 32 or ord(c) == 127 for c in flow_id)):
+            raise TaskFlowReceiptError("Task identity unavailable")
+        if cursor is not None and (not isinstance(cursor, dict) or set(cursor) != {"created_at", "flow_id"}
+                or type(cursor.get("created_at")) not in (int, float)
+                or not 0 <= cursor["created_at"] <= 253402300799 or not math.isfinite(cursor["created_at"])
+                or not isinstance(cursor.get("flow_id"), str) or not 1 <= len(cursor["flow_id"]) <= 128
+                or any(ord(c) < 32 or ord(c) == 127 for c in cursor["flow_id"])):
+            raise TaskFlowReceiptError("Task discovery cursor unavailable")
+        deadline = time.monotonic() + 2.0
+        while True:
+            guard()
+            conn = sqlite3.connect(Path(self._db_path).resolve().as_uri() + "?mode=ro",
+                                   uri=True, timeout=0)
+            conn.row_factory = sqlite3.Row
+            try:
+                conn.execute("BEGIN")
+                params: list[Any] = [origin_session_id]
+                query = "SELECT * FROM taskflows WHERE origin_session_id = ? AND handoff_key IS NOT NULL"
+                if flow_id is not None:
+                    query += " AND id = ?"
+                    params.append(flow_id)
+                elif cursor is not None:
+                    query += " AND (created_at > ? OR (created_at = ? AND id > ?))"
+                    params.extend([cursor["created_at"], cursor["created_at"], cursor["flow_id"]])
+                query += " ORDER BY created_at ASC, id ASC LIMIT ?"
+                params.append(1 if flow_id is not None else limit + 1)
+                rows = conn.execute(query, params).fetchall()
+                receipts = []
+                for row in rows[:limit]:
+                    guard()
+                    # A malformed ordering key cannot produce a cursor the
+                    # reader would reject or safely advance on reconnect.
+                    if (type(row["created_at"]) not in (int, float) or not 0 <= row["created_at"] <= 253402300799
+                            or not math.isfinite(row["created_at"]) or not isinstance(row["id"], str)
+                            or not 1 <= len(row["id"]) <= 128 or any(ord(c) < 32 or ord(c) == 127 for c in row["id"])):
+                        raise TaskFlowReceiptError("Task discovery ordering unavailable")
+                    steps = conn.execute("SELECT * FROM taskflow_steps WHERE flow_id = ? ORDER BY step_index",
+                                         (row["id"],)).fetchall()
+                    try:
+                        receipts.append(self._origin_receipt_projection(row, steps))
+                    except TaskFlowReceiptError:
+                        # Invalid rows supply no authority or private output.
+                        # Discovery still advances over the scanned SQL page.
+                        continue
+                guard()
+                scanned = rows[:limit]
+                next_cursor = ({"created_at": scanned[-1]["created_at"], "flow_id": scanned[-1]["id"]}
+                               if scanned else cursor)
+                return receipts, len(rows) > limit, next_cursor
+            except sqlite3.OperationalError as exc:
+                if ((getattr(exc, "sqlite_errorcode", 0) & 255) not in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                        or time.monotonic() >= deadline):
+                    raise TaskFlowReceiptError("Task receipts unavailable") from None
+            finally:
+                conn.close()
+            guard()
+            time.sleep(0.025)
+
+    def read_origin_receipt(self, origin_session_id: str, flow_id: str, *, guard=lambda: None):
+        rows, _, _ = self._origin_receipt_snapshot(origin_session_id, flow_id=flow_id, guard=guard)
+        return rows[0] if rows else None
+
+    def read_origin_receipts(self, origin_session_id: str, *, limit=20, cursor=None, guard=lambda: None):
+        rows, more, next_cursor = self._origin_receipt_snapshot(origin_session_id, limit=limit, cursor=cursor, guard=guard)
+        return {"receipts": rows, "next_cursor": next_cursor, "has_more": more}
+
+    @staticmethod
+    def _origin_receipt_projection(row, steps):
+        """Project recorded processing, never an inferred external outcome."""
+        from security.dangerous_tools import known_surfaces
+        try:
+            context = json.loads(row["context_json"])
+            origin = context["task_origin"]
+            ids = [origin[k] for k in ("session_id", "request_id", "turn_id", "tool_call_id")]
+            if (type(origin.get("contract_version")) is not int or origin["contract_version"] != 1
+                    or origin.get("source") != "tracked_chat_turn" or origin.get("owner_verified") is not True
+                    or ids[0] != row["origin_session_id"] or origin.get("surface") != row["origin_surface"]
+                    or origin["surface"] not in known_surfaces() or row["session_id"] != ""
+                    or any(not isinstance(v, str) or not v or len(v) > 256 for v in ids)
+                    or str(UUID(ids[1])) != ids[1] or str(UUID(ids[2])) != ids[2]
+                    or origin.get("handoff_key") != row["handoff_key"]
+                    or origin.get("terms_digest") != row["terms_digest"]):
+                raise ValueError()
+            identity = hashlib.sha256(json.dumps(ids, separators=(",", ":")).encode()).hexdigest()
+            if identity != row["handoff_key"]:
+                raise ValueError()
+            # The accepted adapter can substitute title for an empty goal in
+            # context. Check both original possibilities, not a guessed goal.
+            creation_steps = []
+            if (not 1 <= len(steps) <= 32 or type(row["current_step"]) is not int
+                    or not 0 <= row["current_step"] <= len(steps)):
+                raise ValueError()
+            for index, step in enumerate(steps):
+                payload = json.loads(step["payload_json"])
+                if (step["step_type"] != "llm.chat" or set(payload) != {"prompt"}
+                        or step["step_index"] != index or not isinstance(payload["prompt"], str)
+                        or not 1 <= len(payload["prompt"]) <= 16384
+                        or step["status"] not in {"pending", "running", "waiting", "completed", "failed", "outcome_unknown"}):
+                    raise ValueError()
+                creation_steps.append({"type": "llm.chat", **payload})
+            terms = {"goal": context["goal"], "title": row["title"], "session_id": "",
+                     "steps": creation_steps, "origin_surface": row["origin_surface"]}
+            possible = []
+            for goal in (terms["goal"], ""):
+                possible.append(hashlib.sha256(json.dumps({**terms, "goal": goal}, sort_keys=True,
+                    separators=(",", ":"), ensure_ascii=False).encode()).hexdigest())
+            if row["terms_digest"] not in possible or not steps:
+                raise ValueError()
+            if row["status"] not in {s.value for s in TaskFlowStatus}:
+                raise ValueError()
+            for field in ("created_at", "updated_at"):
+                if (type(row[field]) not in (int, float) or not math.isfinite(row[field])
+                        or not 0 <= row[field] <= 253402300799):
+                    raise ValueError()
+            result_present, text, result_index = False, None, None
+            recorded = [s for s in steps if s["result_json"] is not None and s["status"] == "completed"]
+            if recorded:
+                latest = max(recorded, key=lambda s: (s["finished_at"] or 0, s["id"]))
+                outcome = json.loads(latest["result_json"])
+                if not isinstance(outcome, dict):
+                    raise ValueError()
+                for key in ("output", "reply", "text"):
+                    if key in outcome:
+                        value = outcome[key]
+                        text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+                        result_present, result_index = True, latest["step_index"]
+                        break
+            truncated = False
+            if text is not None:
+                encoded = text.encode("utf-8")
+                truncated = len(encoded) > 4096
+                text = encoded[:4096].decode("utf-8", errors="ignore")
+            outcomes = [json.loads(s["result_json"]) if s["result_json"] else {} for s in steps]
+            unknown = any(s["status"] == "outcome_unknown" for s in steps)
+            awaiting = any(isinstance(o, dict) and o.get("reason") == "approval_required" for o in outcomes)
+            processing = ("outcome_unknown" if unknown else "awaiting_approval" if awaiting else
+                          "in_progress" if row["status"] in ("queued", "running") else row["status"])
+            projection = {"contract_version": 1, "flow_id": row["id"], "origin_session_id": row["origin_session_id"],
+                "title": row["title"][:120], "status": row["status"], "current_step": row["current_step"],
+                "steps_total": len(steps), "steps_completed": sum(s["status"] == "completed" for s in steps),
+                "processing_outcome": processing, "action_outcome": "not_asserted", "result_present": result_present,
+                "result_text": text, "result_truncated": truncated, "result_step_index": result_index,
+                "error_code": "task_outcome_unknown" if unknown else "task_processing_failed" if row["status"] == "failed" else None,
+                "created_at": row["created_at"], "updated_at": row["updated_at"]}
+            projection["result_digest"] = hashlib.sha256(json.dumps(projection, sort_keys=True,
+                separators=(",", ":"), ensure_ascii=False).encode()).hexdigest()
+            return projection
+        except (KeyError, TypeError, ValueError, UnicodeError):
+            raise TaskFlowReceiptError("Task receipt origin or result unavailable") from None
 
     def list_flows(
         self,

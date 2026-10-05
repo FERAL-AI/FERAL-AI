@@ -30,6 +30,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from skills.base import BaseSkill
 from skills.impl import register_skill
+from security.desktop_input import (
+    DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked,
+    check_input, cleanup_failed, input_failure, input_pause,
+    physical_input_scope, run_worker,
+)
 
 logger = logging.getLogger("feral.skill.gui")
 
@@ -642,7 +647,13 @@ class GUIComputerUseSkill(BaseSkill):
             }
         try:
             return await handler(args)
+        except (DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked) as exc:
+            return input_failure(exc)
         except Exception as exc:
+            if endpoint_id in {"mouse_click", "mouse_double_click", "mouse_right_click", "mouse_move",
+                               "type_text", "key_press", "scroll", "window_focus"}:
+                logger.error("gui_computer_use.%s failed (%s)", endpoint_id, type(exc).__name__)
+                return self._err(500, "Desktop input failed; earlier effects may need checking")
             logger.exception("gui_computer_use.%s failed", endpoint_id)
             return {
                 "success": False, "status_code": 500,
@@ -683,24 +694,24 @@ class GUIComputerUseSkill(BaseSkill):
 
     async def _mouse_click(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_click, x, y, 1, "left")
+        await run_worker(self._pyautogui_click, x, y, 1, "left", physical=True)
         return self._ok(f"Clicked ({x}, {y})")
 
     async def _mouse_double_click(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_click, x, y, 2, "left")
+        await run_worker(self._pyautogui_click, x, y, 2, "left", physical=True)
         return self._ok(f"Double-clicked ({x}, {y})")
 
     async def _mouse_right_click(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_click, x, y, 1, "right")
+        await run_worker(self._pyautogui_click, x, y, 1, "right", physical=True)
         return self._ok(f"Right-clicked ({x}, {y})")
 
     # ── mouse_move ────────────────────────────────────────────────
 
     async def _mouse_move(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_move, x, y)
+        await run_worker(self._pyautogui_move, x, y, physical=True)
         return self._ok(f"Moved to ({x}, {y})")
 
     # ── type_text ─────────────────────────────────────────────────
@@ -709,7 +720,7 @@ class GUIComputerUseSkill(BaseSkill):
         text = args.get("text", "")
         if not text:
             return self._err(400, "text is required")
-        await asyncio.to_thread(self._do_type, text)
+        await run_worker(self._do_type, text, physical=True)
         preview = text[:80] + ("..." if len(text) > 80 else "")
         return self._ok(f"Typed: {preview}")
 
@@ -719,7 +730,7 @@ class GUIComputerUseSkill(BaseSkill):
         combo = args.get("keys", "") or args.get("key", "")
         if not combo:
             return self._err(400, "keys is required (e.g. 'cmd+c')")
-        await asyncio.to_thread(self._do_hotkey, combo)
+        await run_worker(self._do_hotkey, combo, physical=True)
         return self._ok(f"Key combo: {combo}")
 
     # ── scroll ────────────────────────────────────────────────────
@@ -730,7 +741,7 @@ class GUIComputerUseSkill(BaseSkill):
         direction = args.get("direction", "down")
         amount = int(args.get("amount", 3))
         sx, sy = scale_coordinates(x, y, self.scale) if (x or y) else (None, None)
-        await asyncio.to_thread(self._do_scroll, sx, sy, direction, amount)
+        await run_worker(self._do_scroll, sx, sy, direction, amount, physical=True)
         return self._ok(f"Scrolled {direction} by {amount}")
 
     # ── cursor_position ───────────────────────────────────────────
@@ -785,7 +796,7 @@ class GUIComputerUseSkill(BaseSkill):
         title = args.get("title", "")
         if not title:
             return self._err(400, "title is required")
-        outcome = await asyncio.to_thread(self._focus_window, title)
+        outcome = await run_worker(self._focus_window, title, physical=True)
         if outcome.get("ok"):
             return {
                 "success": True, "status_code": 200,
@@ -834,27 +845,58 @@ class GUIComputerUseSkill(BaseSkill):
     @staticmethod
     def _pyautogui_click(x: int, y: int, clicks: int, button: str) -> None:
         import pyautogui
-        pyautogui.click(x, y, clicks=clicks, button=button)
+        with physical_input_scope():
+            for _ in range(clicks):
+                check_input()
+                # Mark attempted before the OS call: a failing call may have
+                # posted the down event before raising.
+                try:
+                    pyautogui.mouseDown(x, y, button=button)
+                    check_input()
+                finally:
+                    try:
+                        pyautogui.mouseUp(button=button)
+                    except Exception:
+                        cleanup_failed()
 
     @staticmethod
     def _pyautogui_move(x: int, y: int) -> None:
         import pyautogui
-        pyautogui.moveTo(x, y)
+        with physical_input_scope():
+            check_input()
+            pyautogui.moveTo(x, y)
 
     @staticmethod
     def _do_type(text: str) -> None:
         """Type text. Uses pyperclip + Cmd/Ctrl+V for non-ASCII."""
         import pyautogui
-        if text.isascii():
-            pyautogui.write(text, interval=0.02)
-        else:
-            try:
-                import pyperclip
-                pyperclip.copy(text)
-                modifier = "command" if platform.system() == "Darwin" else "ctrl"
-                pyautogui.hotkey(modifier, "v")
-            except ImportError:
-                pyautogui.write(text, interval=0.02)
+        with physical_input_scope():
+            check_input()
+            if not text.isascii():
+                try:
+                    import pyperclip
+                except ImportError:
+                    pass
+                else:
+                    check_input()
+                    pyperclip.copy(text)
+                    check_input()
+                    modifier = "command" if platform.system() == "Darwin" else "ctrl"
+                    GUIComputerUseSkill._do_hotkey(modifier + "+v")
+                    return
+            # One character per bounded call. Revocation never retries the
+            # remaining text, and cleanup releases only our attempted key.
+            for character in text:
+                check_input()
+                try:
+                    pyautogui.keyDown(character)
+                    check_input()
+                finally:
+                    try:
+                        pyautogui.keyUp(character)
+                    except Exception:
+                        cleanup_failed()
+                input_pause(0.02)
 
     @staticmethod
     def _do_hotkey(combo: str) -> None:
@@ -873,18 +915,36 @@ class GUIComputerUseSkill(BaseSkill):
                 mapped.append("shift")
             else:
                 mapped.append(low)
-        pyautogui.hotkey(*mapped)
+        with physical_input_scope():
+            held = []
+            try:
+                for key in mapped:
+                    check_input()
+                    held.append(key)
+                    pyautogui.keyDown(key)
+                    check_input()
+            finally:
+                failed = False
+                for key in reversed(held):
+                    try:
+                        pyautogui.keyUp(key)
+                    except Exception:
+                        failed = True
+                if failed:
+                    cleanup_failed()
 
     @staticmethod
     def _do_scroll(
         x: Optional[int], y: Optional[int], direction: str, amount: int,
     ) -> None:
         import pyautogui
-        clicks = amount if direction == "up" else -amount
-        if x is not None and y is not None:
-            pyautogui.scroll(clicks, x=x, y=y)
-        else:
-            pyautogui.scroll(clicks)
+        with physical_input_scope():
+            check_input()
+            clicks = amount if direction == "up" else -amount
+            if x is not None and y is not None:
+                pyautogui.scroll(clicks, x=x, y=y)
+            else:
+                pyautogui.scroll(clicks)
 
     @staticmethod
     def _get_cursor_pos() -> Tuple[int, int]:

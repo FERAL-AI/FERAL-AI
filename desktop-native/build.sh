@@ -8,7 +8,7 @@ sources=(
   NativeConfigurationFeature.swift NativeAttachmentFeature.swift NativeOperationsFeature.swift
   NativeSecurityFeature.swift NativeVaultFeature.swift NativeVaultSetupFeature.swift NativeConnectionsFeature.swift
   NativeHardwareFeature.swift NativeOnboardingSetupFeature.swift NativeVoiceFeature.swift
-  NativeIdentityFeature.swift NativeCapabilitiesFeature.swift NativeWorkflowFeature.swift
+  NativeIdentityFeature.swift NativeCapabilitiesFeature.swift NativeWorkflowFeature.swift NativeTaskResultFeature.swift
   NativeChatToolsFeature.swift NativeChatTurnFeature.swift NativeVoiceConfigurationFeature.swift NativeIntegrationFeature.swift
   NativeRichChatFeature.swift NativeAmbientFeature.swift NativeAgentFeature.swift
   NativeKnowledgeFeature.swift NativeMemoryContextFeature.swift NativeAutomationFeature.swift

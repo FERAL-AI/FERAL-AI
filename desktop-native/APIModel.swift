@@ -30,6 +30,7 @@ import CoreFoundation
     @Published var messages: [NativeMessage] = []
     @Published var observedTodos: [[String: Any]]?
     let richChat = NativeRichChatModel()
+    let taskResults = NativeTaskResultModel()
     @Published var coding = NativeCodingState()
     @Published var memories: [NativeMemory] = []
     @Published var devices: [NativeDevice] = []
@@ -201,6 +202,7 @@ import CoreFoundation
         recovery.configure(baseURL: nil, connectionID: nil)
         let saved = await flushConversationForShutdown()
         richChat.configure(sessionID: nil, connectionID: nil)
+        taskResults.configure(sessionID: taskResults.sessionID, connectionID: nil)
         responseDeadline?.cancel(); codingPoll?.cancel(); contextDeadline?.cancel()
         capabilityDeadline?.cancel(); statusDeadline?.cancel()
         do {
@@ -265,6 +267,7 @@ import CoreFoundation
         }
         conversationID = id; messages = rows.map(NativeMessage.restored); observedTodos = nil
         richChat.configure(sessionID: id, connectionID: socketGeneration)
+        taskResults.configure(sessionID: id, connectionID: nil)
         chatTurns.configure(sessionID:nil,connectionID:nil);recoverSavedChatRequest()
         contextSetupPending = false; pendingContextCreationSID = nil
         configureContext(sessionID: id, connectionID: nil, required: contextRequired(id), requestID: nil)
@@ -399,6 +402,7 @@ import CoreFoundation
             if !coding.status.isEmpty { coding.status = "connection_lost" }
             voice.configureConnection(sessionID: conversationID, connected: false)
             richChat.configure(sessionID: nil, connectionID: nil)
+            taskResults.configure(sessionID: taskResults.sessionID, connectionID: nil)
             runtimeRevision = UUID(); conversationRevision = UUID(); switchingConversation = false
             recovery.configure(baseURL: nil, connectionID: nil)
             ready = false; appSessionScope = UUID()
@@ -606,6 +610,12 @@ import CoreFoundation
         socketGeneration = UUID()
         let generation = socketGeneration
         richChat.configure(sessionID: conversationID, connectionID: generation)
+        taskResults.configure(sessionID: conversationID, connectionID: generation) { [weak self] frame in
+            guard let self, self.ready, !self.shuttingDown, !self.profileArchivePaused,
+                  self.socketGeneration == generation, self.conversationID == self.taskResults.sessionID else { throw NativeFailure("Task receipt connection is unavailable.") }
+            try await self.sendChatFrame(frame)
+            guard self.socketGeneration == generation, !self.shuttingDown else { throw NativeFailure("Task receipt connection changed.") }
+        }
         chatTurns.configure(sessionID:conversationID,connectionID:generation);checkingChatStatus = false;chatTurnStatus = "Verifying chat receipt support…"
         configureContext(sessionID: conversationID, connectionID: generation, required: contextRequired(conversationID) || contextSetupPending, requestID: chatTurns.capabilityID)
         contextStatus = contextState.message
@@ -645,6 +655,7 @@ import CoreFoundation
                     if !Task.isCancelled, self?.socketGeneration == generation {
                         self?.voice.configureConnection(sessionID: self?.conversationID, connected: false)
                         self?.richChat.configure(sessionID: nil, connectionID: nil)
+                        self?.taskResults.configure(sessionID: self?.taskResults.sessionID, connectionID: nil)
                         if let self, let id = self.streamMessageID, let index = self.messages.firstIndex(where: { $0.id == id }) {
                             self.messages[index].metadata["responseIncomplete"] = true
                             self.messages[index].metadata["deliveryError"] = "Chat disconnected before this reply completed."
@@ -733,7 +744,7 @@ import CoreFoundation
         }
     }
     private func sendChatFrame(_ frame:[String:Any]) async throws {
-        let passiveControl = frame["type"] as? String == "req" && ["chat.abort", "chat.status", "chat.capabilities", "session.context.capabilities"].contains(frame["method"] as? String ?? "")
+        let passiveControl = frame["type"] as? String == "req" && ["chat.abort", "chat.status", "chat.capabilities", "session.context.capabilities", "task.receipts", "task.receipt"].contains(frame["method"] as? String ?? "")
         let managedStop = voice.matchesStopDispatch(frame)
         guard !runtimeAdmissionSuspended || passiveControl || managedStop else { throw NativeFailure("New local actions are paused until the owned runtime is reverified.") }
         if let injectedChatSender { try await injectedChatSender(frame);return }
@@ -830,6 +841,7 @@ import CoreFoundation
         let globalBudget = type == "state_push" && frame["event"] as? String == "cost_cap_hit"
         if let sid = frame["session_id"] as? String, sid != conversationID, !globalBudget { return }
         if let sid = payload["session_id"] as? String, sid != conversationID, !globalBudget { return }
+        if taskResults.consume(frame, connectionID: connection) { return }
         if contextState.consumeRecovery(frame, connectionID: connection) {
             contextDeadline?.cancel(); contextStatus = contextState.recoveryMessage ?? contextState.message
             updateVoiceReadiness()
@@ -857,6 +869,7 @@ import CoreFoundation
         switch turnEvent {
         case .ready:
             capabilityDeadline?.cancel()
+            if frame["id"] as? String == chatTurns.capabilityID { taskResults.negotiate(payload, connectionID: connection) }
             chatTurnStatus = chatRecoveryBlocked ? "Earlier request outcome needs checking" : "Verified chat ready"
             updateVoiceReadiness()
             if contextSetupPending { await finishContextCreation(connectionID: connection) }
@@ -872,6 +885,7 @@ import CoreFoundation
         case .stopAcknowledged:chatTurnStatus = "Stop requested; waiting for the terminal receipt";return
         case .terminal(let terminal):voice.terminal(terminal);await applyChatTerminal(terminal);return
         case .unavailable(let reason):
+            if frame["id"] as? String == chatTurns.capabilityID { taskResults.configure(sessionID: conversationID, connectionID: nil) }
             voice.taskUncertain()
             if !chatTurns.statusPending { statusDeadline?.cancel() }
             checkingChatStatus = false
@@ -1178,6 +1192,7 @@ import CoreFoundation
         deletedConversationIDs.insert(id)
         guard conversationID == id else { return }
         conversationRevision = UUID(); socketGeneration = UUID()
+        taskResults.configure(sessionID: nil, connectionID: nil)
         receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
         discardPartialResponse(); finishResponse(); messages = []; conversationID = ""; switchingConversation = false
         newConversation()
@@ -1417,6 +1432,7 @@ import CoreFoundation
     // Snapshot visible partial output honestly before terminating the owned backend.
     @discardableResult func flushConversationForShutdown() async -> Bool {
         shuttingDown = true
+        taskResults.configure(sessionID: taskResults.sessionID, connectionID: nil)
         receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
         archiveRichTurn()
         if let id = streamMessageID, let index = messages.firstIndex(where: { $0.id == id }) {
