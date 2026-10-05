@@ -24,9 +24,12 @@ pipe startup, so actual approval-screen GUI acceptance is not run.
 
 **Resume next:** reconcile root/branch/HEAD, remote/PR identity, dirty files,
 worker states and disk headroom. Do not rerun the passed source gate unless its
-inputs changed. Review and run the prepared private build helper with exact
-runtime source `99f94dda13bbcb090c756f8ec57f8810064d7b72`, initially without
-`--execute`. It requires 10 GiB free, a 2 GiB artifact budget, frozen committed
+inputs changed. Review the prepared private build helper. The pause documentation commit
+follows runtime source `99f94dda13bbcb090c756f8ec57f8810064d7b72`; verify that
+subsequent commits change documentation only and all frozen runtime/native input
+hashes still match. Pass the reconciled full current HEAD as `--expected-source`,
+initially without `--execute`; the helper requires HEAD equality and the new
+manifest records that exact build commit. It requires 10 GiB free, a 2 GiB artifact budget, frozen committed
 inputs and exact predecessor identities. Then execute fresh 52-input optimized
 compilation/assembly; retain only inspected 9.44 rollback after success. Run
 actual packaged approvals/selected-vision and backend lifecycle probes, plus
