@@ -44,6 +44,10 @@ from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
 from voice.transcript_order import TRANSCRIPT_ORDER
 from voice.tool_result_envelope import serialize_realtime_tool_result
+from voice.realtime_tool_dispatch import (
+    RealtimeToolLane, MAX_TOOL_EVENT_CHARS, MAX_TURN_TOOL_IDS,
+    TOOL_FAILURE_SEND_TIMEOUT, REALTIME_SEND_TIMEOUT,
+)
 
 logger = logging.getLogger("feral.voice.openai")
 
@@ -214,6 +218,12 @@ class RealtimeSession:
         self._callback_guard: Callable[[], bool] | None = None
         self._voice_attempt = current_voice_attempt(session_id)
         self._callback_tasks: set[asyncio.Task] = set()
+        self._tool_lane = RealtimeToolLane(self._callback_tasks)
+        self._tool_failure_lane = RealtimeToolLane(self._callback_tasks)
+        self._tool_result_lock = asyncio.Lock()
+        self._tool_waiting: dict[str, int] = {}
+        self._tool_result_epoch: int | None = None
+        self._tool_continuation_epoch: int | None = None
         self._on_error = on_error
         self._on_conversation_item = on_conversation_item
         # Soft channel for recoverable per-event rejections. Separate
@@ -486,26 +496,23 @@ class RealtimeSession:
         })
         await self._send({"type": "response.create"})
 
-    async def send_tool_result(self, call_id: str, result: str):
+    async def send_tool_result(self, call_id: str, result: str, *, continue_response: bool = True):
         """Return a tool execution result to OpenAI and continue the response."""
         epoch = self._response_epoch
-        if not self._owns_callbacks():
-            return
-        await self._send({
-            "type": "conversation.item.create",
-            "item": {
-                "type": "function_call_output",
-                "call_id": call_id,
-                "output": result,
-            },
-        })
-        if not self._owns_callbacks() or epoch != self._response_epoch:
-            return
-        if self._active_force_tool:
-            await self.reset_tool_choice()
+        async with self._tool_result_lock:
             if not self._owns_callbacks() or epoch != self._response_epoch:
                 return
-        await self._send({"type": "response.create"})
+            await self._send({
+                "type": "conversation.item.create",
+                "item": {"type": "function_call_output", "call_id": call_id, "output": result},
+            })
+            if not self._owns_callbacks() or epoch != self._response_epoch or not continue_response:
+                return
+            if self._active_force_tool:
+                await self.reset_tool_choice()
+                if not self._owns_callbacks() or epoch != self._response_epoch:
+                    return
+            await self._send({"type": "response.create"})
 
     async def cancel_response(self):
         """Cancel the current response (e.g., user interrupted).
@@ -529,6 +536,8 @@ class RealtimeSession:
             self._response_identity_required = True
         self._response_output_cancelled = True
         self._response_epoch += 1
+        self._tool_lane.discard_obsolete()
+        self._tool_failure_lane.discard_obsolete()
         await self._send(event)
 
     async def inject_context(self, context_text: str):
@@ -548,9 +557,11 @@ class RealtimeSession:
         """Gracefully close the realtime session."""
         self._retired = True
         self._response_epoch += 1
+        self._tool_lane.close()
+        self._tool_failure_lane.close()
         current = asyncio.current_task()
         for task in tuple(self._callback_tasks):
-            if task is not current:
+            if task is not current and task not in {self._tool_lane._task, self._tool_failure_lane._task}:
                 task.cancel()
         self._connected = False
         if self._recv_task and self._recv_task is not current:
@@ -573,7 +584,7 @@ class RealtimeSession:
     async def _send(self, event: dict):
         if self._ws and self._connected:
             try:
-                await self._ws.send(json.dumps(event))
+                await asyncio.wait_for(self._ws.send(json.dumps(event)), REALTIME_SEND_TIMEOUT)
             except Exception as e:
                 # Symmetry with ``_receive_loop`` below: a failed send is
                 # just as terminal as a failed receive, so it must reach
@@ -601,7 +612,13 @@ class RealtimeSession:
             async for raw_msg in self._ws:
                 try:
                     event = json.loads(raw_msg)
-                    await self._handle_event(event)
+                    if event.get("type") == "response.function_call_arguments.done":
+                        await self._queue_tool_event(event)
+                        # Let the retained lane start before intake advances;
+                        # never await its tool execution here.
+                        await asyncio.sleep(0)
+                    else:
+                        await self._handle_event(event)
                 except json.JSONDecodeError:
                     continue
                 except asyncio.CancelledError:
@@ -630,6 +647,124 @@ class RealtimeSession:
                     await self._on_error(self.session_id, str(e))
                 except Exception:
                     logger.exception("Realtime on_error callback failed")
+        finally:
+            self._connected = False
+            self._response_epoch += 1
+            self._tool_lane.close()
+            self._tool_failure_lane.close()
+
+    def _tool_event_current(self, epoch: int, response_id: str) -> bool:
+        return (
+            self._owns_callbacks()
+            and (self._voice_attempt is None or self._voice_attempt.current())
+            and epoch == self._response_epoch and response_id == self._active_response_id
+            and not self._response_output_cancelled
+        )
+
+    async def _tool_dispatch_failure(self, call_id: str, code: str, current: Callable[[], bool]) -> None:
+        if not current():
+            return
+        result = serialize_realtime_tool_result("realtime_dispatch", {
+            "success": False, "data": None, "error_code": code,
+            "error": "Realtime tool was not dispatched" if code != "REALTIME_TOOL_FAILED" else "Realtime tool outcome is unverified",
+            "outcome_unknown": code == "REALTIME_TOOL_FAILED",
+        })
+        try:
+            await asyncio.wait_for(self.send_tool_result(call_id, result, continue_response=False), TOOL_FAILURE_SEND_TIMEOUT)
+            if current():
+                self._queued_tool_result_sent(call_id, self._response_epoch, self._active_response_id)
+        except Exception as exc:
+            logger.warning("Realtime tool failure publication unavailable: %s", type(exc).__name__)
+
+    def _queue_tool_failure(self, epoch: int, call_id: str, code: str, current: Callable[[], bool]) -> None:
+        async def publish() -> None:
+            await self._tool_dispatch_failure(call_id, code, current)
+        if self._tool_failure_lane.submit((epoch, call_id), current, publish) == "full":
+            logger.warning("Realtime refusal publication queue full; tool not dispatched")
+
+    async def _queue_tool_event(self, event: dict) -> None:
+        if (not self._owns_callbacks() or not self._matches_response(event)
+                or self._response_output_cancelled
+                or (self._active_response_id and not self._response_in_progress)):
+            return
+        call_id = event.get("call_id", "")
+        name = event.get("name", "")
+        if (not isinstance(call_id, str) or not call_id or len(call_id) > 256
+                or not isinstance(name, str) or len(name) > 256):
+            logger.warning("Realtime malformed tool identity; tool not dispatched")
+            return
+        epoch, response_id = self._response_epoch, self._active_response_id
+        def current() -> bool:
+            return self._connected and self._tool_event_current(epoch, response_id)
+        if (call_id in self._tool_waiting or self._tool_lane.seen((epoch, call_id))
+                or self._tool_failure_lane.seen((epoch, call_id))):
+            return
+        self._tool_waiting = {identifier: generation for identifier, generation in self._tool_waiting.items() if generation == epoch}
+        if len(self._tool_waiting) >= MAX_TURN_TOOL_IDS:
+            logger.warning("Realtime outstanding tool limit reached; tool not dispatched")
+            return
+        self._tool_waiting[call_id] = epoch
+        if len(json.dumps(event)) > MAX_TOOL_EVENT_CHARS:
+            self._queue_tool_failure(epoch, call_id, "REALTIME_TOOL_INPUT_TOO_LARGE", current)
+            return
+
+        async def run() -> None:
+            try:
+                await self._execute_tool_call(event, epoch, response_id, queued=True)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.warning("Realtime tool execution produced no verified result: %s", type(exc).__name__)
+                await self._tool_dispatch_failure(call_id, "REALTIME_TOOL_FAILED", current)
+
+        admission = self._tool_lane.submit((epoch, call_id), current, run)
+        if admission == "full":
+            self._queue_tool_failure(epoch, call_id, "REALTIME_TOOL_QUEUE_FULL", current)
+        elif admission in {"duplicate", "stale"}:
+            self._tool_waiting.pop(call_id, None)
+
+    def _queued_tool_result_sent(self, call_id: str, epoch: int, response_id: str) -> None:
+        self._tool_waiting.pop(call_id, None)
+        self._tool_result_epoch = epoch
+        self._queue_tool_continuation(epoch, response_id)
+
+    def _queue_tool_continuation(self, epoch: int, response_id: str) -> None:
+        def current() -> bool:
+            return self._connected and self._tool_event_current(epoch, response_id)
+        if (not current() or self._response_in_progress or self._tool_result_epoch != epoch
+                or epoch == self._tool_continuation_epoch
+                or any(generation == epoch for generation in self._tool_waiting.values())):
+            return
+
+        async def publish() -> None:
+            async with self._tool_result_lock:
+                if not current() or self._response_in_progress:
+                    return
+                if self._active_force_tool:
+                    await self.reset_tool_choice()
+                    if not current():
+                        return
+                await self._send({"type": "response.create"})
+
+        if self._tool_failure_lane.submit((epoch, "\x00continuation"), current, publish) == "accepted":
+            self._tool_continuation_epoch = epoch
+
+    async def _execute_tool_call(self, event: dict, epoch: int, response_id: str, *, queued: bool = False) -> None:
+        call_id, name = event.get("call_id", ""), event.get("name", "")
+        if not self._on_tool_call or not self._tool_event_current(epoch, response_id):
+            return
+        logger.info("Realtime tool call: %s (call_id=%s)", name, call_id)
+        result = await self._on_tool_call(self.session_id, call_id, name, event.get("arguments", "{}"))
+        if not self._tool_event_current(epoch, response_id):
+            return
+        if name:
+            self._turn_tools_executed.add(name)
+        if queued:
+            await self.send_tool_result(call_id, result, continue_response=False)
+        else:
+            await self.send_tool_result(call_id, result)
+        if queued and self._tool_event_current(epoch, response_id) and self._connected:
+            self._queued_tool_result_sent(call_id, epoch, response_id)
 
     async def _emit_transcript(self, event: dict, text: str, is_final: bool):
         """Forward a transcript with the ordering metadata OpenAI gave us.
@@ -767,24 +902,16 @@ class RealtimeSession:
                 await self._emit_transcript(event, f"[user] {text}", True)
 
         elif event_type == "input_audio_buffer.speech_started":
+            self._response_epoch += 1
+            self._response_output_cancelled = True
+            self._tool_lane.discard_obsolete()
+            self._tool_failure_lane.discard_obsolete()
             self._turn_tools_executed.clear()
             if self._on_speech_started:
                 await self._on_speech_started(self.session_id)
 
         elif event_type == "response.function_call_arguments.done":
-            call_id = event.get("call_id", "")
-            name = event.get("name", "")
-            arguments = event.get("arguments", "{}")
-            logger.info(f"Realtime tool call: {name} (call_id={call_id})")
-
-            if self._on_tool_call:
-                response_id = self._active_response_id
-                result = await self._on_tool_call(self.session_id, call_id, name, arguments)
-                if not self._owns_callbacks() or response_id != self._active_response_id or self._response_output_cancelled:
-                    return
-                if name:
-                    self._turn_tools_executed.add(name)
-                await self.send_tool_result(call_id, result)
+            await self._execute_tool_call(event, self._response_epoch, self._active_response_id)
 
         elif event_type == "error":
             err = event.get("error", {})
@@ -850,6 +977,8 @@ class RealtimeSession:
             self._response_epoch += 1
             self._response_output_cancelled = False
             self._response_in_progress = True
+            self._tool_lane.discard_obsolete()
+            self._tool_failure_lane.discard_obsolete()
             logger.info("Realtime response.created session=%s", self.session_id)
             if self._on_response_created:
                 await self._on_response_created(self.session_id)
@@ -861,6 +990,13 @@ class RealtimeSession:
             # "failed", "incomplete"). A healthy response is "completed".
             resp = event.get("response", {}) or {}
             status = resp.get("status", "") or ""
+            if status == "completed":
+                self._queue_tool_continuation(self._response_epoch, self._active_response_id)
+            if status in {"cancelled", "failed", "incomplete"}:
+                self._response_output_cancelled = True
+                self._response_epoch += 1
+                self._tool_lane.discard_obsolete()
+                self._tool_failure_lane.discard_obsolete()
             status_details = resp.get("status_details", {}) or {}
             if status and status != "completed":
                 logger.warning(
@@ -880,6 +1016,10 @@ class RealtimeSession:
 
         elif event_type in {"response.failed", "response.cancelled", "response.canceled"}:
             self._response_in_progress = False
+            self._response_output_cancelled = True
+            self._response_epoch += 1
+            self._tool_lane.discard_obsolete()
+            self._tool_failure_lane.discard_obsolete()
             logger.warning("Realtime %s session=%s", event_type, self.session_id)
             if self._on_response_done:
                 legacy_status = "failed" if event_type == "response.failed" else "cancelled"

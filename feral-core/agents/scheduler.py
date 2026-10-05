@@ -382,6 +382,7 @@ class CronService:
             self._timezone = ZoneInfo(local_timezone_name())
         self._max_concurrent: int = int(config.get("max_concurrent_jobs", 5))
         self._running_jobs: set[int] = set()
+        self._active_occurrences: dict[int, str] = {}
         self._occurrence_warnings: dict[str, None] = {}
         # Liveness bookkeeping. A scheduler that stops scheduling has to be
         # visible somewhere other than the server log.
@@ -576,7 +577,10 @@ class CronService:
         with self._lock:
             conn = self._conn
             cur = conn.execute(
-                "DELETE FROM scheduled_jobs WHERE id = ?", (job_id,)
+                "DELETE FROM scheduled_jobs WHERE id = ? AND NOT EXISTS "
+                "(SELECT 1 FROM routine_occurrences WHERE job_id = scheduled_jobs.id "
+                "AND (status IN ('claimed','outcome_unknown') OR "
+                "(status = 'callback_returned' AND rearmed_at IS NULL)))", (job_id,)
             )
             conn.commit()
             return cur.rowcount > 0
@@ -1239,6 +1243,41 @@ class CronService:
             ).fetchall()
         return [dict(row) for row in rows]
 
+    def get_dispatch_state(self, job_id: int) -> dict:
+        """Read the whole journal's current fence, never grant replay authority.
+
+        A bounded history page can omit an older unresolved claim. Select that
+        claim directly so an apparently complete recent page cannot hide it.
+        """
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT occurrence_id, job_id, scheduled_for, claimed_at, status, "
+                "finished_at, rearmed_at FROM routine_occurrences WHERE job_id = ? "
+                "AND status IN ('claimed', 'outcome_unknown') "
+                "ORDER BY claimed_at DESC LIMIT 1", (job_id,),
+            ).fetchone()
+            if row is not None:
+                active = row["status"] == "claimed" and self._active_occurrences.get(job_id) == row["occurrence_id"]
+                return {
+                    "tracking_available": True,
+                    "dispatch_state": "in_progress" if active else "reconciliation_required",
+                    "reconciliation_required": not active,
+                    "occurrence": dict(row),
+                }
+            row = self._conn.execute(
+                "SELECT occurrence_id, job_id, scheduled_for, claimed_at, status, "
+                "finished_at, rearmed_at FROM routine_occurrences WHERE job_id = ? "
+                "AND status = 'callback_returned' AND rearmed_at IS NULL "
+                "AND scheduled_for = (SELECT next_run FROM scheduled_jobs WHERE id = ?) "
+                "ORDER BY claimed_at DESC LIMIT 1", (job_id, job_id),
+            ).fetchone()
+        return {
+            "tracking_available": True,
+            "dispatch_state": "bookkeeping_pending" if row is not None else "scheduled",
+            "reconciliation_required": False,
+            "occurrence": dict(row) if row is not None else None,
+        }
+
     def _warn_occurrence_once(self, key: str, job_id: int, reason: str) -> None:
         # A blocked due job can be polled every second. Bound retained warnings
         # and emit no repeated event writes or logs for the same fence.
@@ -1338,6 +1377,8 @@ class CronService:
             return False
         ok = status == "callback_returned"
         if admitted_job is not None:
+            with self._lock:
+                self._active_occurrences[job.id] = occurrence_id
             try:
                 self._callback(admitted_job)
                 self._finish_occurrence(occurrence_id, "callback_returned")
@@ -1352,6 +1393,10 @@ class CronService:
                     self._warn_occurrence_once(f"finish:{occurrence_id}", job.id,
                                                "uncertainty persistence unavailable; claim retained")
                 return False
+            finally:
+                with self._lock:
+                    if self._active_occurrences.get(job.id) == occurrence_id:
+                        self._active_occurrences.pop(job.id, None)
         if ok:
             try:
                 self.mark_completed(job.id, occurrence_id=occurrence_id)

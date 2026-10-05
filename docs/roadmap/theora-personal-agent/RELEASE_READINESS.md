@@ -1,5 +1,11 @@
 # Theora / FERAL full-product release readiness
 
+**Active source wave (October 4).** Responsive realtime tool intake, persistent
+text-model reservations, bounded independent TaskFlow work and routine uncertainty
+visibility pass frozen integration (1,765 tests across 88 suites). They are not
+in 9.41; exact-source 9.42 packaging and actual GUI acceptance remain pending.
+[Behavior, limitations and acceptance](RUNTIME_MULTITASKING_EVIDENCE.md).
+
 **Review priority update (October 4).** Existing AX/GUI/vision computer-control
 paths are confirmed and should be reused. Independent routine-policy/recovery,
 budget/settlement, voice/result, memory-attribution and inner desktop-dispatch
@@ -16,7 +22,9 @@ bundled-runtime and strict ad-hoc signature checks pass. Isolated packaged-metho
 tests and actual backend startup/lifeline acceptance pass. This does not replace
 physical, account, clean-install or native GUI acceptance. Remote Ubuntu backend
 CI identified a legacy untracked-dispatch assertion; the corrected test passes
-the 1,418-test reconciled local gate. New remote acceptance is pending.
+the 1,418-test reconciled local gate. Reconciled source `02b8ee5b3...` passes
+18 remote checks with four opt-in/conditional skips; subsequent local changes
+require their own acceptance.
 [Artifact and rollback limits](NATIVE_9_41_ACCEPTANCE.md).
 
 **Preceding GUI-verified Mac checkpoint (October 4).** Immutable 9.40/build2026100404,

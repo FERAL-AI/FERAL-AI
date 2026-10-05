@@ -1,5 +1,13 @@
 # FERAL Native Preview: feature parity inventory
 
+**Active source wave (October 4).** Routine inspection now validates occurrence
+identity and distinguishes active, unresolved and bookkeeping-pending actions.
+Automation passes 51 fixture assertions, followed by the linked model/desktop
+checks. New runtime intake/reservation/concurrency changes pass 1,765 combined
+checks across 88 suites; exact-source 9.42 packaging and actual GUI acceptance
+remain pending. They are outside 9.41.
+[Behavior and limits](../docs/roadmap/theora-personal-agent/RUNTIME_MULTITASKING_EVIDENCE.md).
+
 **Current packaged checkpoint (October 4).** 9.41/build2026100405 contains the
 runtime reliability wave. All 494 packaged Python files equal source `a3f99db02...`;
 runtime/signature audits, isolated packaged-method checks and actual backend

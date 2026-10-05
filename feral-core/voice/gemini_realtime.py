@@ -22,6 +22,10 @@ from skills.call_context import bind_context
 from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
 from voice.tool_result_envelope import serialize_realtime_tool_result
+from voice.realtime_tool_dispatch import (
+    RealtimeToolLane, MAX_PENDING_TOOLS, MAX_TOOL_EVENT_CHARS,
+    MAX_TURN_TOOL_IDS, TOOL_FAILURE_SEND_TIMEOUT, REALTIME_SEND_TIMEOUT,
+)
 
 logger = logging.getLogger("feral.voice.gemini")
 
@@ -29,6 +33,7 @@ _CallbackArgs = ParamSpec("_CallbackArgs")
 _CallbackResult = TypeVar("_CallbackResult")
 _CALLBACK_OWNER: ContextVar["GeminiRealtimeSession | None"] = ContextVar("gemini_voice_callback_owner", default=None)
 _CALLBACK_RESPONSE: ContextVar["tuple[GeminiRealtimeSession, int] | None"] = ContextVar("gemini_voice_callback_response", default=None)
+_CALLBACK_TOOL: ContextVar["tuple[GeminiRealtimeSession, str] | None"] = ContextVar("gemini_voice_callback_tool", default=None)
 
 GEMINI_WS_URL = (
     "wss://generativelanguage.googleapis.com/ws/"
@@ -83,6 +88,10 @@ class GeminiRealtimeSession:
         self._callback_guard: Callable[[], bool] | None = None
         self._voice_attempt = current_voice_attempt(session_id)
         self._callback_tasks: set[asyncio.Task] = set()
+        self._tool_lane = RealtimeToolLane(self._callback_tasks)
+        self._tool_failure_lane = RealtimeToolLane(self._callback_tasks)
+        self._tool_result_lock = asyncio.Lock()
+        self._cancelled_tool_ids: set[str] = set()
         self._output_epoch = 0
 
     @property
@@ -196,18 +205,22 @@ class GeminiRealtimeSession:
 
     async def send_tool_response(self, function_responses: list[dict]):
         """Return tool results to the model so it can continue generating."""
-        await self._send({
-            "toolResponse": {
-                "functionResponses": function_responses,
-            },
-        })
+        epoch = self._output_epoch
+        async with self._tool_result_lock:
+            if not self._owns_callbacks() or epoch != self._output_epoch:
+                return
+            current = [response for response in function_responses if response.get("id") not in self._cancelled_tool_ids]
+            if current:
+                await self._send({"toolResponse": {"functionResponses": current}})
 
     async def disconnect(self):
         self._retired = True
         self._output_epoch += 1
+        self._tool_lane.close()
+        self._tool_failure_lane.close()
         current = asyncio.current_task()
         for task in tuple(self._callback_tasks):
-            if task is not current:
+            if task is not current and task not in {self._tool_lane._task, self._tool_failure_lane._task}:
                 task.cancel()
         self._connected = False
         if self._recv_task and self._recv_task is not current:
@@ -228,7 +241,7 @@ class GeminiRealtimeSession:
     async def _send(self, message: dict):
         if self._ws and self._connected:
             try:
-                await self._ws.send(json.dumps(message))
+                await asyncio.wait_for(self._ws.send(json.dumps(message)), REALTIME_SEND_TIMEOUT)
             except Exception as e:
                 logger.error(f"Gemini send error: {e}")
                 self._connected = False
@@ -238,7 +251,14 @@ class GeminiRealtimeSession:
             async for raw_msg in self._ws:
                 try:
                     event = json.loads(raw_msg)
-                    await self._handle_event(event)
+                    if event.get("toolCall"):
+                        epoch = self._output_epoch
+                        await self._handle_event({key: value for key, value in event.items() if key != "toolCall"})
+                        if self._owns_callbacks() and epoch == self._output_epoch:
+                            await self._queue_tool_event(event["toolCall"])
+                            await asyncio.sleep(0)
+                    else:
+                        await self._handle_event(event)
                 except json.JSONDecodeError:
                     continue
                 except asyncio.CancelledError:
@@ -251,6 +271,70 @@ class GeminiRealtimeSession:
         except Exception as e:
             logger.error(f"Gemini receive error: {e}")
             self._connected = False
+        finally:
+            self._connected = False
+            self._output_epoch += 1
+            self._tool_lane.close()
+            self._tool_failure_lane.close()
+
+    def _tool_event_current(self, epoch: int, call_id: str) -> bool:
+        return (
+            self._owns_callbacks() and epoch == self._output_epoch
+            and call_id not in self._cancelled_tool_ids
+            and (self._voice_attempt is None or self._voice_attempt.current())
+        )
+
+    async def _tool_dispatch_failure(self, fc: dict, code: str, current: Callable[[], bool]) -> None:
+        if not current():
+            return
+        result = serialize_realtime_tool_result("realtime_dispatch", {
+            "success": False, "data": None, "error_code": code,
+            "error": "Realtime tool was not dispatched" if code != "REALTIME_TOOL_FAILED" else "Realtime tool outcome is unverified",
+            "outcome_unknown": code == "REALTIME_TOOL_FAILED",
+        })
+        try:
+            await asyncio.wait_for(self.send_tool_response([{
+                "name": fc.get("name", ""), "id": fc.get("id", ""), "response": json.loads(result),
+            }]), TOOL_FAILURE_SEND_TIMEOUT)
+        except Exception as exc:
+            logger.warning("Gemini tool failure publication unavailable: %s", type(exc).__name__)
+
+    def _queue_tool_failure(self, epoch: int, fc: dict, code: str, current: Callable[[], bool]) -> None:
+        async def publish() -> None:
+            await self._tool_dispatch_failure(fc, code, current)
+        if self._tool_failure_lane.submit((epoch, fc["id"]), current, publish) == "full":
+            logger.warning("Gemini refusal publication queue full; tool not dispatched")
+
+    async def _queue_tool_event(self, tool_call: dict) -> None:
+        calls = tool_call.get("functionCalls", [])
+        if not isinstance(calls, list):
+            return
+        epoch = self._output_epoch
+        for fc in calls[:MAX_PENDING_TOOLS]:
+            if (not isinstance(fc, dict) or not isinstance(fc.get("id"), str)
+                    or not fc["id"] or len(fc["id"]) > 256
+                    or not isinstance(fc.get("name", ""), str) or len(fc.get("name", "")) > 256):
+                continue
+            call_id = fc["id"]
+            def current(call_id=call_id) -> bool:
+                return self._connected and self._tool_event_current(epoch, call_id)
+            if len(calls) > MAX_PENDING_TOOLS or len(json.dumps(fc)) > MAX_TOOL_EVENT_CHARS:
+                # Refuse the entire oversized batch, bounded to the maximum
+                # correlatable refusal count; never dispatch its prefix.
+                self._queue_tool_failure(epoch, fc, "REALTIME_TOOL_INPUT_TOO_LARGE", current)
+                continue
+
+            async def run(fc=fc, current=current) -> None:
+                try:
+                    await self._handle_tool_call_event({"functionCalls": [fc]})
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    logger.warning("Gemini tool execution produced no verified result: %s", type(exc).__name__)
+                    await self._tool_dispatch_failure(fc, "REALTIME_TOOL_FAILED", current)
+
+            if self._tool_lane.submit((epoch, call_id), current, run) == "full":
+                self._queue_tool_failure(epoch, fc, "REALTIME_TOOL_QUEUE_FULL", current)
 
     def _owns_callbacks(self) -> bool:
         return not self._retired and (self._callback_guard is None or self._callback_guard())
@@ -259,6 +343,17 @@ class GeminiRealtimeSession:
         if not self._owns_callbacks():
             return
         epoch = self._output_epoch
+        cancellation = event.get("toolCallCancellation")
+        if isinstance(cancellation, dict):
+            ids = cancellation.get("ids", [])
+            if isinstance(ids, list):
+                if len(ids) + len(self._cancelled_tool_ids) > MAX_TURN_TOOL_IDS:
+                    self._output_epoch += 1
+                    self._cancelled_tool_ids.clear()
+                else:
+                    self._cancelled_tool_ids.update(identifier for identifier in ids if isinstance(identifier, str) and len(identifier) <= 256)
+                self._tool_lane.discard_obsolete()
+                self._tool_failure_lane.discard_obsolete()
         if "setupComplete" in event:
             logger.info("Gemini setup complete")
             return
@@ -287,6 +382,9 @@ class GeminiRealtimeSession:
         # work after a known interruption, not arbitrary unmarked late packets.
         if sc.get("interrupted"):
             self._output_epoch += 1
+            self._cancelled_tool_ids.clear()
+            self._tool_lane.discard_obsolete()
+            self._tool_failure_lane.discard_obsolete()
             if self._on_speech_started:
                 await self._on_speech_started(self.session_id)
             # Input transcription is independent user content, even when
@@ -339,12 +437,18 @@ class GeminiRealtimeSession:
             name = fc.get("name", "")
             args = json.dumps(fc.get("args", {}))
             call_id = fc.get("id", str(uuid4())[:8])
+            if not self._tool_event_current(epoch, call_id):
+                continue
             logger.info(f"Gemini tool call: {name}")
             if self._on_tool_call:
-                result = await self._on_tool_call(
-                    self.session_id, call_id, name, args,
-                )
-                if not self._owns_callbacks() or epoch != self._output_epoch:
+                token = _CALLBACK_TOOL.set((self, call_id))
+                try:
+                    result = await self._on_tool_call(
+                        self.session_id, call_id, name, args,
+                    )
+                finally:
+                    _CALLBACK_TOOL.reset(token)
+                if not self._tool_event_current(epoch, call_id):
                     return
                 await self.send_tool_response([{
                     "name": name,
@@ -419,6 +523,9 @@ class GeminiRealtimeProxy:
             raise asyncio.CancelledError("Retired voice attempt")
         if owner is not None and response is not None and response[0] is owner and response[1] != owner._output_epoch:
             raise asyncio.CancelledError("Retired voice response")
+        tool = _CALLBACK_TOOL.get()
+        if owner is not None and tool is not None and tool[0] is owner and tool[1] in owner._cancelled_tool_ids:
+            raise asyncio.CancelledError("Retired voice tool")
 
     def _bind_callback(
         self, owner: GeminiRealtimeSession,

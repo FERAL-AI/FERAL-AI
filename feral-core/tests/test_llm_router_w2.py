@@ -526,7 +526,9 @@ def test_extract_usage_picks_up_reasoning_tokens():
     }
     prompt, completion, reasoning = LLMProvider._extract_usage(result)
     assert prompt == 100
-    assert completion == 200
+    # The detail count is included in OpenAI's completion total; the ledger
+    # records non-reasoning completion separately before adding reasoning.
+    assert completion == 150
     assert reasoning == 50
 
 

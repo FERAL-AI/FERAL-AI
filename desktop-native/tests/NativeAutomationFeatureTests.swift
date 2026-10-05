@@ -110,12 +110,32 @@ final class AutomationFixture:URLProtocol {
         check(!(await model.perform(try model.review(.load(.outgoing)))) && model.rows[.outgoing] == nil,"duplicate IDs fail closed")
         AutomationFixture.handler = normal
         check(await model.perform(try model.review(.runs("7"))) && model.runRows?.count == 1 && model.runRows?.first?["result"] == nil && model.runRows?.first?["error"] == nil,"bounded exact routine metadata excludes private raw output/error")
+        check(model.routineDispatch?.state == "unavailable","legacy response never invents available occurrence tracking")
+        let occurrence:[String:Any] = ["occurrence_id":"12345678-1234-1234-1234-123456789012","job_id":7,"status":"outcome_unknown","rearmed_at":NSNull(),"payload":"private-occurrence-content"]
+        let dispatch:[String:Any] = ["tracking_available":true,"dispatch_state":"reconciliation_required","reconciliation_required":true,"occurrence":occurrence]
+        AutomationFixture.handler = { req in
+            if req.url!.path == "/api/routines/7" { return (200,["routine":["id":7],"runs":[],"dispatch":dispatch]) }
+            return normal(req)
+        }
+        check(await model.perform(try model.review(.runs("7"))) && model.runRows?.isEmpty == true && model.routineDispatch?.requiresReconciliation == true,"empty run history retains unresolved action instead of implying successful or idle automation")
+        check(model.routineDispatch?.message.contains("Automatic replay is blocked") == true && model.routineDispatch?.message.contains("private-occurrence-content") == false,"review-needed message explains replay fence without displaying raw action content")
+        for invalid in [
+            ["tracking_available":1,"dispatch_state":"scheduled","reconciliation_required":false,"occurrence":NSNull()],
+            ["tracking_available":true,"dispatch_state":"scheduled","reconciliation_required":false,"occurrence":occurrence],
+            ["tracking_available":true,"dispatch_state":"reconciliation_required","reconciliation_required":false,"occurrence":occurrence],
+            ["tracking_available":true,"dispatch_state":"in_progress","reconciliation_required":false,"occurrence":occurrence],
+            ["tracking_available":true,"dispatch_state":"reconciliation_required","reconciliation_required":true,"occurrence":["occurrence_id":"12345678-1234-1234-1234-123456789012","job_id":8,"status":"claimed"]]
+        ] as [[String:Any]] {
+            AutomationFixture.handler = { _ in (200,["routine":["id":7],"runs":[],"dispatch":invalid]) }
+            check(!(await model.perform(try model.review(.runs("7")))) && model.routineDispatch == nil && model.runRows == nil,"malformed or foreign occurrence cannot establish ready/running/review state")
+        }
+        AutomationFixture.handler = normal
         check(!AutomationFixture.requests.contains {$0.url!.path == "/api/routines"},"run inspection never starts scheduler via list endpoint")
         AutomationFixture.handler = {req in req.url!.path == "/api/routines/7" ? (200,["routine":["id":8],"runs":[]]) : normal(req)}
         check(!(await model.perform(try model.review(.runs("7")))) && model.receipt == nil,"foreign routine ID never adopted")
         AutomationFixture.handler = normal
         let stale = try model.review(.load(.inbound));model.configure(nil);let staleCount = AutomationFixture.requests.count
-        check(!(await model.perform(stale)) && AutomationFixture.requests.count == staleCount && model.runRows == nil,"connection clears private metadata and invalidates review")
+        check(!(await model.perform(stale)) && AutomationFixture.requests.count == staleCount && model.runRows == nil && model.routineDispatch == nil,"connection clears private metadata and invalidates review")
         model.configure(URL(string:"https://external.fixture")!);check(!(await model.perform(try model.review(.load(.inbound)))) && AutomationFixture.requests.count == staleCount,"nonloopback refused before transport")
         AutomationFixture.handler = normal;model.configure(base)
         let blockedPolicy = NativeSelectedContextPolicy(sessionID:"blocked",connectionID:UUID(),taskReady:false,managed:true)

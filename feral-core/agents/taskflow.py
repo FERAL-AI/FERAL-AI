@@ -14,7 +14,6 @@ import sqlite3
 import threading
 import time
 from enum import Enum
-from pathlib import Path
 from typing import Optional, Any
 from uuid import uuid4
 
@@ -51,8 +50,16 @@ class TaskFlowRuntime:
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.Lock()
         self._runner_task: Optional[asyncio.Task] = None
-        self._step_task: Optional[asyncio.Task] = None
-        self._active_flow_id = ""
+        self._flow_tasks: dict[str, asyncio.Task] = {}
+        self._step_tasks: dict[str, asyncio.Task] = {}
+        self._max_active_flows = 4
+        self._ready_scan_offset = 0
+        self._wake_event = asyncio.Event()
+        self._effect_owner: Optional[tuple[str, int]] = None
+        self._effect_depth = 0
+        self._lane_changed = asyncio.Event()
+        self._lane_changed.set()
+        self._approved_lane_owners: dict[str, tuple[str, int]] = {}
         self._approved_tasks: dict[str, asyncio.Task] = {}
         self._stop_event = asyncio.Event()
         self._http = httpx.AsyncClient(timeout=20.0)
@@ -104,19 +111,19 @@ class TaskFlowRuntime:
     async def start(self):
         if self._runner_task and not self._runner_task.done():
             return
+        if any(not task.done() for task in
+               [*self._flow_tasks.values(), *self._step_tasks.values(), *self._approved_tasks.values()]):
+            raise RuntimeError("Cannot recover TaskFlow while an owned dispatch is active")
         self._recover_after_restart()
         self._stop_event.clear()
+        if self._http.is_closed:
+            self._http = httpx.AsyncClient(timeout=20.0)
         self._runner_task = asyncio.create_task(self._runner_loop())
         logger.info("TaskFlow runtime started")
 
     async def stop(self):
         self._stop_event.set()
-        active = [task for task in self._approved_tasks.values()
-                  if task is not asyncio.current_task() and not task.done()]
-        for task in active:
-            task.cancel()
-        if active:
-            await asyncio.gather(*active, return_exceptions=True)
+        self._wake_event.set()
         if self._runner_task:
             self._runner_task.cancel()
             try:
@@ -124,6 +131,13 @@ class TaskFlowRuntime:
             except asyncio.CancelledError:
                 pass
             self._runner_task = None
+        active = [task for task in {*self._flow_tasks.values(), *self._step_tasks.values(),
+                                    *self._approved_tasks.values()}
+                  if task is not asyncio.current_task() and not task.done()]
+        for task in active:
+            task.cancel()
+        if active:
+            await asyncio.gather(*active, return_exceptions=True)
         await self._http.aclose()
 
     def _recover_after_restart(self):
@@ -206,6 +220,7 @@ class TaskFlowRuntime:
                     (flow_id, i, step["type"], json.dumps(payload)),
                 )
             conn.commit()
+        self._wake_event.set()
         flow = self.get_flow(flow_id)
         # Consciousness-layer write: record the flow as an in-flight
         # entity so "where did I leave off" queries surface it across
@@ -279,7 +294,8 @@ class TaskFlowRuntime:
             return None
         # Review completion belongs to the existing approval dispatcher.
         # Manual resume is never a reconciliation of an uncertain effect.
-        if flow["status"] in (TaskFlowStatus.COMPLETED.value, TaskFlowStatus.CANCELLED.value):
+        if flow["status"] in (TaskFlowStatus.COMPLETED.value, TaskFlowStatus.CANCELLED.value,
+                              TaskFlowStatus.RUNNING.value):
             return flow
         if any(s["status"] == "outcome_unknown" or
                (s.get("result") or {}).get("reason") == "approval_required"
@@ -307,6 +323,7 @@ class TaskFlowRuntime:
                 (flow_id,),
             )
             conn.commit()
+        self._wake_event.set()
         return self.get_flow(flow_id)
 
     def cancel_flow(self, flow_id: str) -> Optional[dict]:
@@ -321,8 +338,11 @@ class TaskFlowRuntime:
                 (TaskFlowStatus.CANCELLED.value, now, flow_id),
             )
             conn.commit()
-        if self._active_flow_id == flow_id and self._step_task and not self._step_task.done():
-            self._step_task.cancel()
+        step_task = self._step_tasks.get(flow_id)
+        if step_task and not step_task.done():
+            step_task.cancel()
+        elif flow_id in self._flow_tasks:
+            self._flow_tasks[flow_id].cancel()
         approved_task = self._approved_tasks.get(flow_id)
         if approved_task and approved_task is not asyncio.current_task() and not approved_task.done():
             approved_task.cancel()
@@ -334,6 +354,41 @@ class TaskFlowRuntime:
                 if approval.get("request_id") and runner is not None:
                     runner.deny_pending(approval["request_id"], session_id=approval["session_id"])
         return self.get_flow(flow_id)
+
+    def _independent_step(self, step: dict) -> bool:
+        """Only proven local reads/computation bypass the shared resource lane.
+
+        Browser, desktop, device, HTTP and model turns remain serialized even
+        when a manifest calls them read-only. Their resource ownership is not
+        yet a durable workflow contract. A skill name alone grants no lane.
+        """
+        if step["step_type"] in {"noop", "condition", "sleep", "memory.search"}:
+            return True
+        raw = step.get("payload") or {}
+        if not isinstance(raw, dict):
+            return False
+        payload = raw.get("config", raw)
+        return bool(step["step_type"] == "skill.invoke" and isinstance(payload, dict)
+                    and payload.get("skill_id") == "notes_memory"
+                    and isinstance(payload.get("args", {}), dict)
+                    and self._restart_safe(step))
+
+    def _claim_effect_lane(self, owner: tuple[str, int]) -> bool:
+        if self._effect_owner not in (None, owner):
+            return False
+        self._effect_owner = owner
+        self._effect_depth += 1
+        self._lane_changed.clear()
+        return True
+
+    def _release_effect_lane(self, owner: tuple[str, int]) -> None:
+        if self._effect_owner != owner:
+            return
+        self._effect_depth -= 1
+        if self._effect_depth == 0:
+            self._effect_owner = None
+            self._lane_changed.set()
+            self._wake_event.set()
 
     def _restart_safe(self, step: dict) -> bool:
         if step["step_type"] in {"noop", "condition", "sleep", "memory.search"}:
@@ -379,19 +434,33 @@ class TaskFlowRuntime:
         """Claim the existing review once, before its central execution."""
         flow, step = self._approval_step(pending)
         if (not flow or flow["status"] != "waiting" or step["status"] != "waiting"
+                or self._stop_event.is_set()
                 or (self._supervisor is not None and self._supervisor.paused)):
             return False
         runner = getattr(self._orchestrator, "tool_runner", None)
         if runner is None or runner.enforce_plan_mode(pending["tool_name"], pending["session_id"]):
             return False
-        with self._lock:
-            changed = self._conn.execute("UPDATE taskflow_steps SET status = 'running', started_at = ?, finished_at = NULL WHERE id = ? AND status = 'waiting'",
-                                         (time.time(), step["id"])).rowcount
-            if not changed:
-                return False
-            self._conn.execute("UPDATE taskflows SET status = 'running', updated_at = ? WHERE id = ? AND status = 'waiting'",
-                               (time.time(), flow["id"]))
-            self._conn.commit()
+        retained = set(self._flow_tasks) | set(self._step_tasks) | set(self._approved_tasks)
+        if flow["id"] not in retained and len(retained) >= self._max_active_flows:
+            return False
+        owner = (flow["id"], step["id"])
+        if not self._claim_effect_lane(owner):
+            return False
+        claimed = False
+        try:
+            with self._lock:
+                changed = self._conn.execute("UPDATE taskflow_steps SET status = 'running', started_at = ?, finished_at = NULL WHERE id = ? AND status = 'waiting'",
+                                             (time.time(), step["id"])).rowcount
+                if not changed:
+                    return False
+                self._conn.execute("UPDATE taskflows SET status = 'running', updated_at = ? WHERE id = ? AND status = 'waiting'",
+                                   (time.time(), flow["id"]))
+                self._conn.commit()
+            claimed = True
+            self._approved_lane_owners[flow["id"]] = owner
+        finally:
+            if not claimed:
+                self._release_effect_lane(owner)
         task = asyncio.current_task()
         if task is not None:
             self._approved_tasks[flow["id"]] = task
@@ -400,16 +469,34 @@ class TaskFlowRuntime:
     def approved_dispatch_allowed(self, pending: dict) -> bool:
         flow, step = self._approval_step(pending)
         return bool(flow and flow["status"] == "running" and step["status"] == "running"
+                    and not self._stop_event.is_set()
+                    and self._approved_lane_owners.get(flow["id"]) == (flow["id"], step["id"])
                     and not (self._supervisor is not None and self._supervisor.paused))
 
     async def finish_approved_dispatch(self, pending: dict, result: Optional[dict] = None,
                                        *, rejected: bool = False, uncertain: bool = False):
+        flow_id = (pending.get("taskflow") or {}).get("flow_id", "")
+        flow, step = self._approval_step(pending)
+        expected_owner = (flow_id, step["id"]) if flow and step else None
+        try:
+            return await self._finish_approved_dispatch(pending, result, rejected=rejected,
+                                                        uncertain=uncertain)
+        finally:
+            owner = self._approved_lane_owners.get(flow_id)
+            if owner is not None and owner == expected_owner:
+                assert owner is not None
+                self._approved_lane_owners.pop(flow_id, None)
+                self._release_effect_lane(owner)
+            self._wake_event.set()
+
+    async def _finish_approved_dispatch(self, pending: dict, result: Optional[dict] = None,
+                                       *, rejected: bool = False, uncertain: bool = False):
         """Persist the actual dispatcher response, never dispatch again."""
         flow, step = self._approval_step(pending)
         binding = pending.get("taskflow") or {}
-        self._approved_tasks.pop(binding.get("flow_id", ""), None)
         if not flow or step["status"] not in {"waiting", "running"}:
             return False
+        self._approved_tasks.pop(binding.get("flow_id", ""), None)
         if uncertain or flow["status"] == "cancelled":
             self._mark_unknown(flow, step, "Approval dispatch interrupted; external effect outcome is unknown")
             return True
@@ -453,33 +540,70 @@ class TaskFlowRuntime:
 
     async def _runner_loop(self):
         while not self._stop_event.is_set():
-            flow_id = self._next_ready_flow_id()
-            if not flow_id:
-                await asyncio.sleep(1.0)
-                continue
+            self._wake_event.clear()
+            while len(set(self._flow_tasks) | set(self._approved_tasks)) < self._max_active_flows:
+                flow_id = self._next_ready_flow_id()
+                if not flow_id:
+                    break
+                task = asyncio.create_task(self._run_retained_flow(flow_id))
+                self._flow_tasks[flow_id] = task
+                # Let the persisted flow/step claim and resource lane settle
+                # before admitting another candidate from the queue.
+                await asyncio.sleep(0)
             try:
-                await self._run_flow(flow_id)
-            except Exception as e:
-                logger.error(f"TaskFlow runner error ({flow_id}): {e}", exc_info=True)
+                await asyncio.wait_for(self._wake_event.wait(), timeout=0.1)
+            except asyncio.TimeoutError:
+                continue
+
+    async def _run_retained_flow(self, flow_id: str):
+        try:
+            await self._run_flow(flow_id, single_step=True)
+        except Exception as exc:
+            logger.error("TaskFlow runner interrupted (%s, %s)", flow_id, type(exc).__name__)
+        finally:
+            self._flow_tasks.pop(flow_id, None)
+            self._wake_event.set()
 
     def _next_ready_flow_id(self) -> Optional[str]:
         now = time.time()
         with self._lock:
             conn = self._conn
-            row = conn.execute(
+            rows = conn.execute(
                 """
                 SELECT id
                 FROM taskflows
                 WHERE status = ?
                    OR (status = ? AND wait_until IS NOT NULL AND wait_until <= ?)
-                ORDER BY updated_at ASC
-                LIMIT 1
+                ORDER BY updated_at ASC, id ASC
+                LIMIT 200 OFFSET ?
                 """,
-                (TaskFlowStatus.QUEUED.value, TaskFlowStatus.WAITING.value, now),
-            ).fetchone()
-        return row["id"] if row else None
+                (TaskFlowStatus.QUEUED.value, TaskFlowStatus.WAITING.value, now,
+                 self._ready_scan_offset),
+            ).fetchall()
+        for row in rows:
+            flow_id = row["id"]
+            if flow_id in self._flow_tasks or flow_id in self._approved_tasks:
+                continue
+            flow = self.get_flow(flow_id)
+            if flow is None:
+                continue
+            index = int(flow["current_step"])
+            if (self._effect_owner is not None and index < len(flow["steps"])
+                    and not self._independent_step(flow["steps"][index])):
+                continue
+            self._ready_scan_offset = 0
+            return flow_id
+        # Bound each queue scan, but keep a blocked first page from starving
+        # independent reads further down the persisted queue. Polling yields
+        # between pages; no extra action or task is admitted by this cursor.
+        if len(rows) == 200:
+            self._ready_scan_offset += len(rows)
+            self._wake_event.set()
+        else:
+            self._ready_scan_offset = 0
+        return None
 
-    async def _run_flow(self, flow_id: str):
+    async def _run_flow(self, flow_id: str, *, single_step: bool = False):
         flow = self.get_flow(flow_id)
         if not flow:
             return
@@ -493,15 +617,18 @@ class TaskFlowRuntime:
         now = time.time()
         with self._lock:
             conn = self._conn
-            conn.execute(
+            changed = conn.execute(
                 """
                 UPDATE taskflows
                 SET status = ?, started_at = COALESCE(started_at, ?), updated_at = ?
-                WHERE id = ?
+                WHERE id = ? AND (status = 'queued' OR
+                    (status = 'waiting' AND wait_until IS NOT NULL AND wait_until <= ?))
                 """,
-                (TaskFlowStatus.RUNNING.value, now, now, flow_id),
-            )
+                (TaskFlowStatus.RUNNING.value, now, now, flow_id, now),
+            ).rowcount
             conn.commit()
+        if not changed:
+            return
 
         current_step = int(flow.get("current_step", 0))
         while True:
@@ -528,22 +655,36 @@ class TaskFlowRuntime:
 
             step = steps[current_step]
             step_id = step["id"]
-            with self._lock:
-                conn = self._conn
-                conn.execute(
-                    """
-                    UPDATE taskflow_steps
-                    SET status = 'running', started_at = COALESCE(started_at, ?), error = NULL
-                    WHERE id = ?
-                    """,
-                    (time.time(), step_id),
-                )
-                conn.commit()
-
-            self._active_flow_id = flow_id
-            self._step_task = asyncio.create_task(self._execute_step(flow, step))
+            lane_owner = None
+            if not self._independent_step(step):
+                lane_owner = (flow_id, step_id)
+                while not self._claim_effect_lane(lane_owner):
+                    await self._lane_changed.wait()
+                latest = self.get_flow(flow_id)
+                if self._stop_event.is_set() or latest is None or latest["status"] == "cancelled":
+                    self._release_effect_lane(lane_owner)
+                    return
             try:
-                outcome = await self._step_task
+                with self._lock:
+                    conn = self._conn
+                    conn.execute(
+                        """
+                        UPDATE taskflow_steps
+                        SET status = 'running', started_at = COALESCE(started_at, ?), error = NULL
+                        WHERE id = ?
+                        """,
+                        (time.time(), step_id),
+                    )
+                    conn.commit()
+            except BaseException:
+                if lane_owner is not None:
+                    self._release_effect_lane(lane_owner)
+                raise
+
+            step_task = asyncio.create_task(self._execute_step(flow, step))
+            self._step_tasks[flow_id] = step_task
+            try:
+                outcome = await step_task
             except asyncio.CancelledError:
                 latest = self.get_flow(flow_id)
                 finished = next((s for s in latest["steps"] if s["id"] == step_id), None) if latest else None
@@ -560,8 +701,10 @@ class TaskFlowRuntime:
                     self._mark_unknown(flow, step, "Step interrupted by an execution error; reconcile before continuing")
                 return
             finally:
-                self._step_task = None
-                self._active_flow_id = ""
+                if self._step_tasks.get(flow_id) is step_task:
+                    self._step_tasks.pop(flow_id, None)
+                if lane_owner is not None:
+                    self._release_effect_lane(lane_owner)
             if outcome.get("status") == "deferred":
                 return  # The persisted review/callback owns its state.
             latest = self.get_flow(flow_id)
@@ -671,6 +814,12 @@ class TaskFlowRuntime:
                 conn.commit()
             current_step = next_step
             self._record_flow_progress(flow, next_step)
+            if single_step and current_step < len(steps):
+                with self._lock:
+                    self._conn.execute("UPDATE taskflows SET status = 'queued' WHERE id = ? AND status = 'running'",
+                                       (flow_id,))
+                    self._conn.commit()
+                return
 
     async def _execute_step(self, flow: dict, step: dict) -> dict:
         step_type = step.get("step_type", "")

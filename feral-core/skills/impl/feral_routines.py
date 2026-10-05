@@ -320,6 +320,12 @@ class FeralRoutinesSkill(BaseSkill):
         if op == "delete":
             ok = scheduler.delete_job(routine_id)
             key = "deleted"
+            if not ok and scheduler.get_job(routine_id) is not None:
+                return {
+                    "success": False, "status_code": 409, "data": None,
+                    "error": "Routine has an unfinished action record. Pause future scheduling and reconcile before deletion.",
+                    "reason": "routine_action_pending",
+                }
         elif op == "pause":
             ok = scheduler.pause_job(routine_id)
             key = "paused"

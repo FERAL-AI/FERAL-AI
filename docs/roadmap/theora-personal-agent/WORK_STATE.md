@@ -7,7 +7,39 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current status at a glance
 
-### Current reliability source checkpoint
+### Current multitasking and admission source
+
+- Three workers completed responsive realtime intake (RT-01), persistent
+  model-call reservations (COST-01), and bounded independent TaskFlow execution
+  (WF-01). The parent owns routine occurrence visibility in API/jobs/native UI,
+  integration, documentation, packaging and Git publication. Coding expansion
+  remains last. Sources are frozen and are not yet in the immutable 9.41 app.
+- Voice owns both provider receive loops, the new retained dispatch helper and
+  its regressions. Budget owns the cost ledger/pricing, provider budget wrappers
+  and reservation tests. TaskFlow owns its runner and concurrency regressions.
+  These allocations are exclusive; preserve unrelated AUDIT-FIXES.md.
+- Parent routine visibility gate passes 55 tests. Native Automation passes
+  51 assertions, followed by 28 linked model groups, 39 desktop assertions and
+  five error-presentation assertions. These use isolated or mocked collaborators;
+  no actual GUI, microphone, provider, message or purchase is claimed.
+- Final parent integration passes 1,765 tests across 88 suites with two opt-in
+  skips and 58 warnings in 121.30 seconds. All 1,322 Python inputs remain frozen;
+  digest `ed6966e83739beca13cd4954a9f7a881133374df40226accb45df36c81741221`.
+  Ruff passes. Full local mypy completes with 801 errors in 233 files, zero
+  normalized additions and eight optional-usage diagnostics removed; the public
+  platform-specific baseline is unchanged. [Behavior and limits](RUNTIME_MULTITASKING_EVIDENCE.md).
+- Independent review caught early OpenAI continuation, partial-counter false
+  settlement, inclusive reasoning double billing and deletion hiding unresolved
+  routine receipts. Regressions cover these corrections, bounded queue fairness,
+  cancellation-resistant work and restart uncertainty. Worker files are released.
+  Parent owns the frozen source. No personal deployment/account/audio is used.
+- Next: publish coherent source and build 9.42 with fresh native compilation.
+  Measured headroom is 21 GiB; planned new artifacts are bounded to 2 GiB.
+  Inspect identity/signature/ownership/in-use status before retiring generated
+  9.40, retaining 9.41 as the sole rollback. Packaging and actual GUI acceptance
+  have not yet run. Unrelated AUDIT-FIXES.md remains unstaged.
+
+### Preserved reliability source checkpoint
 
 Implementation follows the completed independent review. Mac reliability and
 product functionality take priority; expansion of coding/OpenCode and CLI
@@ -37,8 +69,11 @@ oversight is last. Existing coding functionality remains available.
   Ubuntu backend fast lane. Independent log review identified one legacy assertion
   expecting dispatch without persisted run identity; 13,911 other tests passed,
   86 skipped, with 75.89% coverage. That assertion is corrected without changing
-  the runtime guard or CI configuration. New remote acceptance remains pending.
-  Main is unchanged.
+  the runtime guard or CI configuration. Reconciled source
+  `02b8ee5b3287abbeaaafd74addcfef70edff565c` now has 18 passing remote checks
+  and four opt-in/conditional skips, including backend fast lane, native contracts,
+  client Playwright and Linux bundle. This acceptance belongs to that checkpoint,
+  not the subsequent local multitasking changes. Main is unchanged.
 - Reconciled parent gate, including the complete liveness suite: 1,418 passed,
   two skips, 61 warnings across 73 suites in 40.11 seconds. All 1,317 Python inputs
   remain frozen; digest `41db6cbc4ce20409129588df55d26857a552e1086f3dd5989b9efb54e7379943`.
@@ -100,8 +135,8 @@ oversight is last. Existing coding functionality remains available.
 | Installable self-contained app, updates, local provisioning | Bundled Python/core/SDK/OpenCode; 9.40 source/signature/lifecycle audited | Missing input/speech assets; empty PATH/cache, denied permissions, download/cancel/resource gates, migration and signed clean install |
 | Cloud/API/subscription/local text, vision and voice | Shared config/catalog and provider adapters; bounded earlier local inference | Genuine account entitlement/tool/audio capability, supported sign-in, local vision wiring and M1/8GiB measurements |
 | Computer/browser control and screen sharing | Existing AX/GUI/VLM source; 9.40 Chrome outcome verified; later central inner capture/action gates tested | Bundle dependencies, target ownership, desktop watch/stop/takeover and actual model-selected Mac task |
-| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; later routine authority/occurrence fence tested | Exact durable grants/external receipts, atomic reservations, detached ownership, resource concurrency and single-writer service |
-| Natural voice/calls/interruption | Bounded managed utterance; later truthful realtime result envelopes tested | Responsive intake, continuous same-session duplex/delegation, headset/speaker/noise/latency acceptance |
+| Multiple agents/jobs while talking; always-on work | Existing multi-agent/ToolRunner/ACP/TaskFlow; routine fences, text-call reservations and bounded local workflow concurrency tested | Exact durable grants/external receipts, detached ownership, global resource lanes, all-subsystem accounting and single-writer service |
+| Natural voice/calls/interruption | Bounded managed utterance; truthful realtime results and responsive tool intake tested | Continuous native same-session duplex/delegation, other inline sinks, headset/speaker/noise/latency acceptance |
 | Texting experience, sent/read/seen and task progress | Tracked chat receipts, rich history and events | Distinct transport/read/task receipts, truthful incomplete states and reconnect/reordering acceptance |
 | Memory across sessions/devices/life | Existing layered memory/KG/sync; later committed-row role/source/alias guards and query retrieval tested | Authenticated evidence stamping, full provenance through codec/merge/sync, correction/deletion/export and same-owner sync acceptance |
 | Coding and CLI oversight | Bundled OpenCode, ACP adapters, scoped activity and bounded actual command | End-to-end project/cancel/restart parity, provider tool capability and opted-in independent CLI event ingestion |

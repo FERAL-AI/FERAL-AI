@@ -15,7 +15,9 @@ import time
 import uuid
 import ipaddress
 import httpx
-from typing import Any, Optional, AsyncGenerator
+from contextvars import ContextVar
+from functools import wraps
+from typing import Any, Optional, AsyncGenerator, Callable, TypeVar, cast
 
 from config.loader import ChatOutputBudgetError, feral_data_home, resolve_chat_output_budget
 from config.runtime import ollama_base_url, ollama_openai_base_url
@@ -88,6 +90,73 @@ except Exception:  # pragma: no cover - defensive
         """Stand-in when the cost module is unavailable in stripped builds."""
 
 logger = logging.getLogger("feral.llm")
+
+
+_budget_scope: ContextVar[Any] = ContextVar("llm_budget_scope", default=None)
+_BudgetCallable = TypeVar("_BudgetCallable", bound=Callable[..., Any])
+
+
+def _scoped_budget(*, streaming: bool = False) -> Callable[[_BudgetCallable], _BudgetCallable]:
+    """Keep attempt receipts within one task, including explicit nested fallback."""
+    def decorate(method: _BudgetCallable) -> _BudgetCallable:
+        @wraps(method)
+        async def call(self, *args, **kwargs):
+            existing = _budget_scope.get()
+            if existing is not None and existing["provider"] is self and existing["task"] is asyncio.current_task():
+                return await method(self, *args, **kwargs)
+            scope = {"provider": self, "task": asyncio.current_task(), "site": kwargs.get("call_site", "chat"), "attempts": []}
+            token = _budget_scope.set(scope)
+            try:
+                result = await method(self, *args, **kwargs)
+                if scope["attempts"]:
+                    attempt = scope["attempts"][-1]
+                    if (attempt["status"] == "dispatched" and not scope.get("unmatched_usage")
+                            and isinstance(result, dict) and not result.get("error")):
+                        await self._budget_record(scope["site"], attempt["model"], result)
+                if isinstance(result, dict) and result.get("error") and scope.get("block"):
+                    return scope["block"]
+                return result
+            finally:
+                try:
+                    await self._budget_finish_scope(scope)
+                finally:
+                    _budget_scope.reset(token)
+
+        @wraps(method)
+        async def stream(self, *args, **kwargs):
+            existing = _budget_scope.get()
+            nested = existing is not None and existing["provider"] is self and existing["task"] is asyncio.current_task()
+            scope = existing if nested else {"provider": self, "task": asyncio.current_task(), "site": kwargs.get("call_site", "chat"), "attempts": []}
+            iterator = method(self, *args, **kwargs)
+            try:
+                while True:
+                    if scope["task"] is not asyncio.current_task():
+                        raise RuntimeError("Budget stream cannot migrate to another task")
+                    token = _budget_scope.set(scope)
+                    try:
+                        event = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        return
+                    finally:
+                        # Never leak reservation authority into the consumer
+                        # while an async generator is suspended at its yield.
+                        _budget_scope.reset(token)
+                    if event.get("type") == "error" and scope.get("block"):
+                        block = scope["block"]
+                        event = {"type": "budget_exceeded" if "budget_exceeded" in block else "error",
+                                 "content": block["error"], "error_code": block.get("error_code"),
+                                 "payload": block.get("budget_exceeded", {})}
+                    yield event
+            finally:
+                token = _budget_scope.set(scope)
+                try:
+                    await iterator.aclose()
+                    if not nested:
+                        await self._budget_finish_scope(scope)
+                finally:
+                    _budget_scope.reset(token)
+        return cast(_BudgetCallable, stream if streaming else call)
+    return decorate
 
 
 # Endpoints (provider, base_url) known to reject
@@ -1063,6 +1132,7 @@ class LLMProvider:
                 timeout=30.0,
             )
 
+    @_scoped_budget()
     async def chat(
         self,
         messages: list[dict],
@@ -1342,6 +1412,7 @@ class LLMProvider:
         increment("feral.llm.calls_total", attributes={"provider": self.provider, "model": self.model})
         try:
             async def _do_chat():
+                await self._budget_dispatch(body, local_free=self.provider in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                 resp = await self.client.post("/chat/completions", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -1675,6 +1746,7 @@ class LLMProvider:
 
         try:
             async def _do_anthropic():
+                await self._budget_dispatch(body)
                 resp = await self.client.post("/messages", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -1732,6 +1804,7 @@ class LLMProvider:
                 await self._local_engine.load_model()
 
             prompt = self._local_engine.format_chat(messages, tools)
+            await self._budget_dispatch({"model": self.model, "input": prompt, "max_tokens": max_tokens}, local_free=True)
             text = await self._local_engine.generate(prompt, max_tokens=max_tokens, temperature=temperature)
 
             clean_text, tool_calls = self._local_engine.parse_tool_calls(text)
@@ -2281,6 +2354,7 @@ class LLMProvider:
         )
 
         async def _do_responses():
+            await self._budget_dispatch(body)
             resp = await client.post("/responses", json=body)
             resp.raise_for_status()
             return resp.json()
@@ -2522,6 +2596,7 @@ class LLMProvider:
         try:
             for _attempt in range(MAX_RETRIES):
                 try:
+                    await self._budget_dispatch(body)
                     stream_cm = self.client.stream("POST", "/responses", json=body)
                     resp = await stream_cm.__aenter__()
                     # v2026.5.28 — pull the body BEFORE raise_for_status so
@@ -2668,13 +2743,13 @@ class LLMProvider:
                         # Responses names these input_/output_tokens; keep the
                         # provider's own keys AND the normalised pair so
                         # downstream readers don't need to know the shape.
-                        _in = _u.get("input_tokens") or _u.get("prompt_tokens") or 0
-                        _out = _u.get("output_tokens") or _u.get("completion_tokens") or 0
-                        _done["usage"] = {
-                            "input_tokens": int(_in),
-                            "output_tokens": int(_out),
-                            "total_tokens": int(_u.get("total_tokens") or (_in + _out)),
-                        }
+                        # Retain detail fields and absence. A terminal marker
+                        # does not turn an omitted counter into observed zero.
+                        _done["usage"] = dict(_u)
+                        if "input_tokens" not in _u and "prompt_tokens" in _u:
+                            _done["usage"]["input_tokens"] = _u["prompt_tokens"]
+                        if "output_tokens" not in _u and "completion_tokens" in _u:
+                            _done["usage"]["output_tokens"] = _u["completion_tokens"]
                     if _resp.get("model"):
                         # The model that actually answered, which can differ
                         # from the configured one after failover.
@@ -2796,6 +2871,7 @@ class LLMProvider:
         events.append({"type": "done"})
         return events
 
+    @_scoped_budget(streaming=True)
     async def chat_stream(
         self,
         messages: list[dict],
@@ -2869,6 +2945,7 @@ class LLMProvider:
             try:
                 adapter = self._get_codex_adapter()
                 converted = self._codex_messages(messages)
+                await self._budget_dispatch({"model": self.model, "messages": messages, "tools": tools, "max_tokens": max_tokens})
                 async for event in adapter.stream_events(
                     converted, model=self.model, tools=tools
                 ):
@@ -3103,7 +3180,7 @@ class LLMProvider:
         answering_model = ""
         billed = False
 
-        async def _record_stream_usage() -> None:
+        async def _record_stream_usage(*, complete: bool = True) -> None:
             """Bill this turn exactly once, on stream completion.
 
             Guarded by ``billed`` because the SSE loop has two exits
@@ -3119,7 +3196,7 @@ class LLMProvider:
             await self._budget_record(
                 call_site,
                 answering_model or self.model,
-                {"usage": usage_raw},
+                {"usage": usage_raw, "_feral_usage_complete": complete},
             )
 
         async def _open_stream(req_body: dict):
@@ -3132,6 +3209,7 @@ class LLMProvider:
             nonlocal stream_cm
             for _attempt in range(MAX_RETRIES):
                 try:
+                    await self._budget_dispatch(req_body, local_free=self.provider in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                     stream_cm = self.client.stream("POST", "/chat/completions", json=req_body)
                     _resp = await stream_cm.__aenter__()
                     # v2026.5.28 — see ``_responses_stream`` for the
@@ -3278,7 +3356,7 @@ class LLMProvider:
             # delivered its text, so bill whatever usage arrived rather
             # than losing the turn's cost. ``_record_stream_usage`` is
             # idempotent, so the ``[DONE]`` path above cannot double-bill.
-            await _record_stream_usage()
+            await _record_stream_usage(complete=False)
 
         except httpx.HTTPStatusError as e:
             detail = _describe_http_status_error(e)
@@ -3418,6 +3496,8 @@ class LLMProvider:
         # response grows. Neither event alone can bill a turn.
         usage_input = 0
         usage_output = 0
+        usage_input_observed = False
+        usage_output_final = False
         # Prompt-cache tokens ride the SAME ``message_start`` usage
         # block as ``input_tokens``, as two sibling fields, and are
         # NOT included in it. They are billed at their own rates now
@@ -3429,7 +3509,17 @@ class LLMProvider:
         billed = False
         answering_model = ""
 
-        async def _record_anthropic_usage() -> None:
+        def _observed_anthropic_usage() -> dict[str, int]:
+            usage = {}
+            if usage_input_observed:
+                usage["input_tokens"] = usage_input
+            if usage_output_final:
+                usage["output_tokens"] = usage_output
+            if usage_input_observed and usage_output_final:
+                usage["total_tokens"] = usage_input + usage_output
+            return usage
+
+        async def _record_anthropic_usage(*, complete: bool = True) -> None:
             """Bill this turn exactly once, on stream completion.
 
             ``billed`` guards the two completion exits (``message_stop``
@@ -3449,9 +3539,8 @@ class LLMProvider:
             await self._budget_record(
                 call_site,
                 answering_model or self.model,
-                {"usage": {
-                    "input_tokens": usage_input,
-                    "output_tokens": usage_output,
+                {"_feral_usage_complete": complete and usage_input_observed and usage_output_final, "usage": {
+                    **_observed_anthropic_usage(),
                     "cache_creation_input_tokens": usage_cache_write,
                     "cache_read_input_tokens": usage_cache_read,
                 }},
@@ -3493,6 +3582,7 @@ class LLMProvider:
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
+                await self._budget_dispatch(body)
                 async with client.stream(
                     "POST", url,
                     headers={
@@ -3535,6 +3625,7 @@ class LLMProvider:
                                 if _in is not None:
                                     try:
                                         usage_input = int(_in)
+                                        usage_input_observed = (type(_in) is int and _in >= 0) or (isinstance(_in, str) and _in.isdecimal())
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
@@ -3590,6 +3681,7 @@ class LLMProvider:
                                 if _out is not None:
                                     try:
                                         usage_output = int(_out)
+                                        usage_output_final = (type(_out) is int and _out >= 0) or (isinstance(_out, str) and _out.isdecimal())
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
@@ -3600,6 +3692,7 @@ class LLMProvider:
                                 if _in is not None and not usage_input:
                                     try:
                                         usage_input = int(_in)
+                                        usage_input_observed = (type(_in) is int and _in >= 0) or (isinstance(_in, str) and _in.isdecimal())
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
@@ -3623,11 +3716,7 @@ class LLMProvider:
                                 yield {"type": "tool_call_delta", "tool_call": tc}
                             _stop_event: dict = {"type": "done"}
                             if saw_usage:
-                                _stop_event["usage"] = {
-                                    "input_tokens": usage_input,
-                                    "output_tokens": usage_output,
-                                    "total_tokens": usage_input + usage_output,
-                                }
+                                _stop_event["usage"] = _observed_anthropic_usage()
                             yield _stop_event
                             return
 
@@ -3635,14 +3724,10 @@ class LLMProvider:
             # delivered its text, so bill whatever usage arrived.
             # ``_record_anthropic_usage`` is idempotent, so the
             # ``message_stop`` path above cannot double-bill.
-            await _record_anthropic_usage()
+            await _record_anthropic_usage(complete=False)
             _end_event: dict = {"type": "done"}
             if saw_usage:
-                _end_event["usage"] = {
-                    "input_tokens": usage_input,
-                    "output_tokens": usage_output,
-                    "total_tokens": usage_input + usage_output,
-                }
+                _end_event["usage"] = _observed_anthropic_usage()
             yield _end_event
             return
         except httpx.HTTPStatusError as e:
@@ -4339,7 +4424,7 @@ class LLMProvider:
         After this call every ``chat`` / ``chat_stream`` /
         ``chat_with_failover`` invocation:
 
-        * pre-flights ``check_and_reserve`` — if the projected cost
+        * durably reserves each shaped wire attempt — if its estimated cost
           would breach a cap, the call short-circuits with a
           structured ``{error, budget_exceeded: {...}}`` response
           shape (no upstream HTTP traffic, no token spend).
@@ -4379,7 +4464,8 @@ class LLMProvider:
         """
         if not isinstance(result, dict):
             return (0, 0, 0)
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        raw_usage = result.get("usage")
+        usage = raw_usage if isinstance(raw_usage, dict) else {}
         prompt = (
             usage.get("prompt_tokens")
             if usage.get("prompt_tokens") is not None
@@ -4391,7 +4477,11 @@ class LLMProvider:
             else usage.get("output_tokens")
         ) or 0
         reasoning = 0
-        details = usage.get("completion_tokens_details")
+        # These OpenAI detail fields are subsets of the reported output total.
+        # Keep the ledger's separate reasoning count, but avoid billing that
+        # subset twice when compute_token_cost adds completion + reasoning.
+        details = usage.get("completion_tokens_details") if "completion_tokens" in usage else usage.get("output_tokens_details")
+        reasoning_inclusive = isinstance(details, dict) and "reasoning_tokens" in details
         if isinstance(details, dict):
             reasoning = details.get("reasoning_tokens") or 0
         # Anthropic reports thinking tokens at the top level when
@@ -4400,7 +4490,10 @@ class LLMProvider:
         if not reasoning:
             reasoning = usage.get("reasoning_tokens") or usage.get("thinking_tokens") or 0
         try:
-            return int(prompt), int(completion), int(reasoning)
+            prompt, completion, reasoning = int(prompt), int(completion), int(reasoning)
+            if reasoning_inclusive:
+                completion = max(0, completion - reasoning)
+            return prompt, completion, reasoning
         except (TypeError, ValueError):
             return (0, 0, 0)
 
@@ -4512,6 +4605,11 @@ class LLMProvider:
         budget = getattr(self, "_cost_budget", None)
         if budget is None:
             return None
+        scope = _budget_scope.get()
+        if scope is not None and scope["provider"] is self and scope["task"] is asyncio.current_task():
+            # A nested stream fallback must retain the original call site.
+            if not scope["attempts"]:
+                scope["site"] = call_site
         def unavailable() -> Optional[dict]:
             # A configured cap cannot be enforced when admission accounting
             # is unavailable. Preserve the operator's disabled/unlimited mode.
@@ -4531,6 +4629,13 @@ class LLMProvider:
         except Exception as exc:
             logger.warning("CostBudget admission ledger unavailable (%s)", type(exc).__name__)
             return unavailable()
+        from cost.budget import CostBudget
+        if (isinstance(budget, CostBudget) and scope is not None
+                and scope["provider"] is self and scope["task"] is asyncio.current_task()):
+            # The actual shaped model attempt is priced atomically at its wire
+            # boundary. A fallback or explicit local model may have different
+            # rates from the primary selected before routing.
+            return None
         try:
             ok = budget.check_and_reserve(call_site, model, int(max_tokens or 0))
         except Exception as exc:
@@ -4563,6 +4668,93 @@ class LLMProvider:
                 "choices": [],
                 "budget_exceeded": {"call_site": call_site, "window": "hour"},
             }
+
+    async def _budget_dispatch(self, body: dict, *, model: str | None = None,
+                               local_free: bool = False) -> None:
+        """Durable, model-specific admission immediately before every wire attempt."""
+        budget = getattr(self, "_cost_budget", None)
+        if budget is None:
+            return
+        scope = _budget_scope.get()
+        if scope is None:
+            # Internal health/probe calls are outside public chat admission.
+            return
+        if scope["provider"] is not self or scope["task"] is not asyncio.current_task():
+            raise RuntimeError("Budget scope cannot authorize a copied child task")
+        from cost.budget import CostBudget, PricingUnavailable
+        if not isinstance(budget, CostBudget):
+            # Compatibility for integrations supplying the legacy budget protocol.
+            # Such a collaborator cannot establish durable atomic reservations.
+            if getattr(budget, "enabled", False) and getattr(budget, "_active_caps", lambda site: [])(scope["site"]):
+                raise RuntimeError("Atomic budget admission is unavailable")
+            return
+        wire_model = str(model or body.get("model") or getattr(self, "model", ""))
+        maximum = body.get("max_output_tokens", body.get("max_completion_tokens", body.get("max_tokens", 1024)))
+        input_payload = {key: value for key, value in body.items() if key not in {"temperature", "stream", "stream_options"}}
+        serialized = json.dumps(input_payload, ensure_ascii=False, default=str)
+        def multimodal(value):
+            if isinstance(value, dict):
+                if isinstance(value.get("type"), str) and value["type"] in {"input_audio", "audio", "audio_url", "video_url", "image_url", "input_image", "image", "image_base64"}:
+                    return True
+                if any(key in value for key in ("image_url", "audio_url", "video_url")):
+                    return True
+                return any(multimodal(item) for item in value.values())
+            return isinstance(value, list) and any(multimodal(item) for item in value)
+        unpriceable = multimodal(input_payload)
+        identity = str(uuid.uuid4())
+        attempt = {"budget": budget, "id": identity, "model": wire_model, "status": "held"}
+        scope["attempts"].append(attempt)
+        try:
+            receipt = await budget.reserve(scope["site"], wire_model,
+                                           estimate_tokens(serialized) + 256, int(maximum),
+                                           reservation_id=identity, local_free=local_free,
+                                           unpriceable_input=unpriceable)
+        except BudgetExceeded as exc:
+            scope["block"] = self._budget_exceeded_response(exc)
+            attempt["status"] = "rejected"
+            # Retry classification scans provider error text for HTTP codes.
+            # A monetary amount must not turn admission refusal into a retry.
+            raise RuntimeError("Model attempt admission refused") from None
+        except PricingUnavailable as exc:
+            scope["block"] = {"error": str(exc), "error_code": "pricing_unavailable", "choices": []}
+            attempt["status"] = "rejected"
+            raise
+        except Exception as exc:
+            if not budget._active_caps(scope["site"]):
+                attempt["status"] = "disabled"
+                logger.warning("Unlimited cost accounting is unavailable (%s)", type(exc).__name__)
+                return
+            scope["block"] = {"error": "Cost budget unavailable; no model request was dispatched.",
+                              "error_code": "budget_unavailable", "choices": []}
+            raise
+        except BaseException:
+            # A commit may have finished before cancellation reached the caller.
+            # Cleanup consults the durable receipt rather than assuming no hold.
+            raise
+        if receipt is None:
+            attempt["status"] = "disabled"
+            return
+        await budget.mark_dispatched(identity)
+        attempt["status"] = "dispatched"
+        scope.pop("block", None)
+
+    async def _budget_finish_scope(self, scope: dict) -> None:
+        for attempt in scope["attempts"]:
+            if attempt["status"] in {"settled", "disabled", "rejected"}:
+                continue
+            budget, identity = attempt["budget"], attempt["id"]
+            try:
+                # Release is legal only while the persisted row is held. If the
+                # dispatch marker committed before cancellation, retain it.
+                if attempt["status"] == "held":
+                    try:
+                        await budget.release(identity)
+                    except ValueError:
+                        await budget.mark_unknown(identity)
+                else:
+                    await budget.mark_unknown(identity)
+            except Exception as exc:
+                logger.warning("Cost attempt recovery remains pending (%s)", type(exc).__name__)
 
     async def _budget_record(
         self,
@@ -4603,6 +4795,7 @@ class LLMProvider:
         if budget is None:
             return
         try:
+            usage: dict[str, Any] = {}
             prompt, completion, reasoning = self._extract_usage(result)
             cache_write, cache_read = self._extract_cache_usage(result)
             # OpenAI's cached tokens are already counted inside the input
@@ -4631,13 +4824,56 @@ class LLMProvider:
                         "cache-token pricing failed for %s (non-fatal): %s",
                         model, exc,
                     )
+            scope = _budget_scope.get()
+            attempt = None
+            if scope is not None and scope["provider"] is self and scope["task"] is asyncio.current_task():
+                # Receipts belong to the current wire attempt. An earlier
+                # retry may still be unknown; never settle it with a later
+                # response, including repeated cumulative partial usage.
+                current = scope["attempts"][-1] if scope["attempts"] else None
+                if (current is not None and current["model"] != model
+                        and current["budget"].pricing.same_known_basis(current["model"], model)):
+                    # Some providers report a dated snapshot of the requested
+                    # alias. Preserve the wire-model receipt identity only when
+                    # the catalog explicitly recognizes that exact relationship.
+                    model = current["model"]
+                if (current is not None and current["model"] == model
+                        and current["status"] in {"dispatched", "partial"}):
+                    attempt = current
+                if (attempt is None and current is not None
+                        and current["model"] == model and current["status"] == "settled"):
+                    return
+                if attempt is None and scope["attempts"]:
+                    recorded = scope.setdefault("unmatched_usage", set())
+                    if model in recorded:
+                        return
+                    recorded.add(model)
+                if attempt is not None:
+                    raw_usage = result.get("usage") if isinstance(result, dict) else None
+                    if not isinstance(raw_usage, dict) or not any(key in raw_usage for key in
+                            ("prompt_tokens", "completion_tokens", "input_tokens", "output_tokens")):
+                        return
+                    usage = raw_usage
+                    call_site = scope["site"]
+                    budget = attempt["budget"]
+            usage_complete = True
+            if attempt is not None:
+                def count_present(value):
+                    return (type(value) is int and value >= 0) or (isinstance(value, str) and value.isdecimal())
+                usage_complete = any(all(key in usage and count_present(usage[key]) for key in pair)
+                                     for pair in (("prompt_tokens", "completion_tokens"), ("input_tokens", "output_tokens")))
+                usage_complete = usage_complete and result.get("_feral_usage_complete", True) is not False
+                usage_complete = usage_complete and not result.get("truncated") and not usage.get("truncated")
             await budget.record_usage(
                 call_site=call_site,
                 model=model,
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 reasoning_tokens=reasoning,
+                **({"reservation_id": attempt["id"], "usage_complete": usage_complete} if attempt is not None else {}),
             )
+            if attempt is not None:
+                attempt["status"] = "settled" if usage_complete else "partial"
         except Exception as exc:
             # Non-fatal: a billing failure must never take down a chat
             # turn. The cap-exceeded path is exercised through
@@ -5226,6 +5462,7 @@ class LLMProvider:
 
         if provider_name == "codex":
             adapter = self._get_codex_adapter()
+            await self._budget_dispatch({"model": selected_model, "messages": messages, "tools": tools, "max_tokens": max_tokens})
             response = await adapter.chat(
                 self._codex_messages(messages),
                 model=selected_model,
@@ -5248,6 +5485,7 @@ class LLMProvider:
                 )
 
                 async def _do_primary_anthropic():
+                    await self._budget_dispatch(body)
                     resp = await self.client.post("/messages", json=body)
                     resp.raise_for_status()
                     return resp.json()
@@ -5295,6 +5533,7 @@ class LLMProvider:
             await self._prepare_local_request(self.client, body, provider_name, force_tool)
 
             async def _do_primary():
+                await self._budget_dispatch(body, local_free=self.provider in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                 resp = await self.client.post("/chat/completions", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -5327,6 +5566,7 @@ class LLMProvider:
                 )
 
                 async def _do_fb_anthropic():
+                    await self._budget_dispatch(body)
                     resp = await tmp.post("/messages", json=body)
                     resp.raise_for_status()
                     return resp.json()
@@ -5370,6 +5610,7 @@ class LLMProvider:
             await self._prepare_local_request(tmp, body, provider_name, force_tool)
 
             async def _do_fb():
+                await self._budget_dispatch(body, local_free=provider_name in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                 resp = await tmp.post("/chat/completions", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -5380,6 +5621,7 @@ class LLMProvider:
                 delays=retry_delays,
             )
 
+    @_scoped_budget()
     async def chat_with_failover(
         self,
         messages: list[dict],

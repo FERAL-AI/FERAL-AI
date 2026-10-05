@@ -1,5 +1,8 @@
 # Runtime reliability implementation
 
+This records the preceding 9.41 wave. Subsequent intake/reservation/concurrency
+work has its own [behavior and acceptance ledger](RUNTIME_MULTITASKING_EVIDENCE.md).
+
 October 4, 2026. This extends the existing runtime after the
 [independent review](RUNTIME_REVIEW_20261004.md). It does not replace the executor,
 memory store, scheduler, voice protocol or native host.
@@ -100,7 +103,9 @@ gate passes 1,418 tests across 73 suites with two skips and 61 warnings in
 `41db6cbc4ce20409129588df55d26857a552e1086f3dd5989b9efb54e7379943`.
 Receipt: `/private/tmp/feral-reliability-integration-941-reconciled-20261004/result.json`.
 The preceding remote run passed 13,911 other tests and 75.89% coverage with
-86 skips. New remote acceptance is pending; these counts are not summed.
+86 skips. Reconciled source `02b8ee5b3287abbeaaafd74addcfef70edff565c`
+passes 18 remote checks with four opt-in/conditional skips. Those checks belong
+to this preceding source; these counts are not summed.
 
 ## Remaining dependencies
 

@@ -1,5 +1,13 @@
 # FERAL app completion: executable plan
 
+**Active source wave (October 4).** Three exclusive workers own responsive
+realtime intake, atomic model-call reservations and bounded TaskFlow concurrency.
+Frozen integration passes 1,765 tests across 88 suites. The parent owns routine
+uncertainty visibility, integration and publication. 9.41 remains the preceding
+immutable artifact until exact-source 9.42 packaging passes.
+[Behavior and acceptance](RUNTIME_MULTITASKING_EVIDENCE.md),
+[current ownership](WORK_STATE.md). Coding expansion remains last.
+
 **Review priority update (October 4).** Existing AX/GUI/vision computer-control
 paths are confirmed and should be reused. Independent routine-policy/recovery,
 budget/settlement, voice/result, memory-attribution and inner desktop-dispatch

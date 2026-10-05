@@ -31,6 +31,36 @@ struct NativeAutomationReview:Identifiable {
     let expected:[String:Any]?
 }
 struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
+struct NativeRoutineDispatchSnapshot {
+    let state:String
+    let requiresReconciliation:Bool
+    var message:String {
+        switch state {
+        case "scheduled":return "No unresolved action reported. Scheduled actions still require their normal permissions."
+        case "in_progress":return "Action in progress. Its outcome has not been verified."
+        case "reconciliation_required":return "Needs review: an earlier action outcome is unresolved. Automatic replay is blocked."
+        case "bookkeeping_pending":return "The callback returned; schedule updates are pending. A completed external action is not established."
+        default:return "Action status unavailable. Reload before relying on this schedule."
+        }
+    }
+    static func parse(_ value:Any?,routineID:String) throws -> NativeRoutineDispatchSnapshot {
+        guard let value else { return NativeRoutineDispatchSnapshot(state:"unavailable",requiresReconciliation:false) }
+        guard let raw = value as? [String:Any],let available = NativeAutomationWire.bool(raw["tracking_available"]),let state = raw["dispatch_state"] as? String else { throw NativeAutomationError("Routine action status is unreadable.") }
+        if !available {
+            guard state == "unavailable",raw["occurrence"] == nil || raw["occurrence"] is NSNull else { throw NativeAutomationError("Unavailable action status contains inconsistent evidence.") }
+            return NativeRoutineDispatchSnapshot(state:state,requiresReconciliation:false)
+        }
+        guard ["scheduled","in_progress","reconciliation_required","bookkeeping_pending"].contains(state),let needsReview = NativeAutomationWire.bool(raw["reconciliation_required"]),needsReview == (state == "reconciliation_required") else { throw NativeAutomationError("Routine action status is inconsistent.") }
+        if state == "scheduled" {
+            guard raw["occurrence"] is NSNull else { throw NativeAutomationError("Ready schedule contains an unresolved action.") }
+        } else {
+            guard let occurrence = raw["occurrence"] as? [String:Any],String(describing:occurrence["job_id"] ?? "") == routineID,let id = occurrence["occurrence_id"] as? String,UUID(uuidString:id) != nil,let status = occurrence["status"] as? String else { throw NativeAutomationError("Exact routine action identity was not confirmed.") }
+            let allowed = state == "in_progress" ? ["claimed"] : state == "bookkeeping_pending" ? ["callback_returned"] : ["claimed","outcome_unknown"]
+            guard allowed.contains(status),occurrence["rearmed_at"] == nil || occurrence["rearmed_at"] is NSNull else { throw NativeAutomationError("Routine action status contradicts its outcome record.") }
+        }
+        return NativeRoutineDispatchSnapshot(state:state,requiresReconciliation:needsReview)
+    }
+}
 @MainActor final class NativeAutomationModel:ObservableObject {
     @Published private(set) var rows:[NativeAutomationKind:[NativeAutomationRow]] = [:]
     @Published private(set) var errors:[NativeAutomationKind:String] = [:]
@@ -39,6 +69,7 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
     @Published private(set) var busy = false
     @Published private(set) var runRows:[[String:Any]]?
     @Published private(set) var routineID:String?
+    @Published private(set) var routineDispatch:NativeRoutineDispatchSnapshot?
     private var baseURL:URL?,generation = UUID(),issued = Set<UUID>()
     private var originals:[NativeAutomationKind:[String:[String:Any]]] = [:]
     private var contextGate = NativeContextActionGate()
@@ -50,7 +81,7 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
     init(session:URLSession? = nil) {
         if let session { self.session = session } else { let config = URLSessionConfiguration.ephemeral;config.timeoutIntervalForResource = 30;self.session = URLSession(configuration:config,delegate:NativeAutomationRedirectGuard(),delegateQueue:nil) }
     }
-    func configure(_ url:URL?) { baseURL = url;generation = UUID();issued = [];rows = [:];originals = [:];errors = [:];receipt = nil;error = nil;runRows = nil;routineID = nil;busy = false }
+    func configure(_ url:URL?) { baseURL = url;generation = UUID();issued = [];rows = [:];originals = [:];errors = [:];receipt = nil;error = nil;runRows = nil;routineID = nil;routineDispatch = nil;busy = false }
     private func request(_ path:String,method:String = "GET",body:[String:Any]? = nil) async throws -> [String:Any] {
         guard let baseURL,baseURL.scheme == "http",["127.0.0.1","::1","[::1]"].contains(baseURL.host ?? ""),baseURL.user == nil,baseURL.password == nil,var parts = URLComponents(url:baseURL,resolvingAgainstBaseURL:false) else { throw NativeAutomationError("Automation requires the local app service.") }
         parts.percentEncodedPath = path;parts.query = nil;parts.fragment = nil
@@ -124,11 +155,12 @@ struct NativeAutomationRow:Identifiable { let id:String,fields:[String:Any] }
             case .load(let kind):
                 let records = try parse(kind,try await request(kind.path));guard generation == version else { return false };install(kind,records);text = "Inventory response loaded. Engine/store availability is not proven by an empty list."
             case .runs(let id):
-                runRows = nil;routineID = nil
+                runRows = nil;routineID = nil;routineDispatch = nil
                 let value = try await request("/api/routines/" + id)
                 guard let routine = value["routine"] as? [String:Any],String(describing:routine["id"] ?? "") == id,let runs = value["runs"] as? [[String:Any]],runs.count <= 20,runs.allSatisfy({String(describing:$0["job_id"] ?? "") == id}) else { throw NativeAutomationError("Exact routine and bounded run history were not confirmed.") }
+                let dispatch = try NativeRoutineDispatchSnapshot.parse(value["dispatch"],routineID:id)
                 guard generation == version else { return false }
-                routineID = id;runRows = runs.map { NativeAutomationWire.safe($0,["id","job_id","started_at","finished_at","status","duration_ms"]) };text = "Routine \(id) metadata read; \(runs.count) run records returned. Completed external effects are not established by run status alone."
+                routineID = id;routineDispatch = dispatch;runRows = runs.map { NativeAutomationWire.safe($0,["id","job_id","started_at","finished_at","status","duration_ms"]) };text = "Routine \(id) metadata read; \(runs.count) run records returned. Completed external effects are not established by run status alone."
             case .create(let kind,let body):
                 let fresh = try parse(kind,try await request(kind.path));guard generation == version else { return false }
                 if kind == .geofences,let name = body["name"] as? String,fresh[name] != nil { throw NativeAutomationError("That geofence name now exists. Reload and review a new name.") }
@@ -206,6 +238,7 @@ struct NativeAutomationFeatureView:View {
                         draft
                     } else { Text(model.errors[kind] == nil ? "Not loaded. Review the local read first." : "Unavailable; no empty inventory is assumed.") }
                     Divider();Text("Routine run inspection").font(.headline);TextField("Existing routine ID",text:$routine);Button("Review reading last 20 runs…") { prepare(.runs(routine)) }
+                    if let dispatch = model.routineDispatch { Text(dispatch.message).foregroundStyle(dispatch.requiresReconciliation ? Color.orange : Color.secondary) }
                     if let runs = model.runRows { Text("\(runs.count) run records for routine \(model.routineID ?? ""). Raw payload/output/error content withheld.");ForEach(Array(runs.enumerated()),id:\.offset) { _,run in Text("Status: \(safeRunStatus(run["status"])) · Started: \(String(describing:run["started_at"] ?? "Unknown"))").font(.caption) } }
                 }.disabled(model.busy)
             }
