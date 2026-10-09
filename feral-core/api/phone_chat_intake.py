@@ -11,7 +11,7 @@ from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
-from security.agent_turn_lease import spawn_agent_turn
+from security.agent_turn_lease import bind_agent_dispatch_owner, spawn_agent_turn
 
 logger = logging.getLogger(__name__)
 MAX_PHONE_CHAT_TASKS = 16
@@ -63,10 +63,23 @@ class PhoneChatIntake:
         if len(self.tasks) >= MAX_PHONE_CHAT_TASKS:
             return False
 
+        orchestrator = self.state.orchestrator
+        memory = self.state.memory
+
+        def owner_current():
+            return (
+                self.current()
+                and self.state.orchestrator is orchestrator
+                and self.state.memory is memory
+            )
+
         async def run():
             async with phone_scope_lock(self.state, "session", session_id):
                 self.guard()
-                await operation()
+                # The existing central dispatch guard consults this task-local
+                # owner even when a collaborator suppresses cancellation.
+                with bind_agent_dispatch_owner(owner_current):
+                    await operation()
 
         task = spawn_agent_turn(self.state, run())
         self.tasks.add(task)

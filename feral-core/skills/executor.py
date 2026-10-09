@@ -907,6 +907,10 @@ class SkillExecutor:
                 getattr(type(runner), "approved_backing_transfer", None)) else None
 
             async def invoke_backing():
+                # wait_for schedules a child task after admission. Revalidate
+                # inherited ingress ownership immediately before new effects.
+                from security.agent_turn_lease import guard_agent_dispatch
+                guard_agent_dispatch()
                 if transfer is None:
                     return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
                 from agents.chat_turns import bind_task_origin_transfer
@@ -1184,6 +1188,14 @@ class SkillExecutor:
 
         from security.sandbox_policy import SandboxPolicy
 
+        def run_guarded(*args, **kwargs):
+            # to_thread copies the dispatch context, but queued work can start
+            # after its owner is revoked. Cancellation cannot recall a started
+            # subprocess; this check fences only work not yet dispatched.
+            from security.agent_turn_lease import guard_agent_dispatch
+            guard_agent_dispatch()
+            return subprocess.run(*args, **kwargs)
+
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command or script provided"}
 
@@ -1194,7 +1206,7 @@ class SkillExecutor:
                 return {"success": False, "status_code": 403, "data": None, "error": reason}
             try:
                 proc = await asyncio.to_thread(
-                    subprocess.run,
+                    run_guarded,
                     ["osascript", "-e", command],
                     capture_output=True, text=True, timeout=15,
                 )
@@ -1221,7 +1233,7 @@ class SkillExecutor:
 
             try:
                 proc = await asyncio.to_thread(
-                    subprocess.run,
+                    run_guarded,
                     argv,
                     shell=False,
                     capture_output=True, text=True, timeout=15,

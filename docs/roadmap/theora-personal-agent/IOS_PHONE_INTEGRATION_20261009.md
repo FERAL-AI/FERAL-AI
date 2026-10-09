@@ -1,5 +1,32 @@
 # October 9 iOS conversation and phone intake source integration
 
+## Subsequent phone dispatch-ownership correction
+
+The initial responsive-intake change fenced stale replies but did not revoke
+new tool dispatch inside a collaborator that suppressed cancellation. Task-local
+ownership now follows inherited child contexts and is checked by the existing
+central dispatch guard. It captures the exact phone socket, runtime, orchestrator
+and memory instance; replacement or disconnect cannot reuse that authority.
+This does not change native bootstrap generations or unrelated sessions.
+
+The existing executor also rechecks ownership immediately before queued backing
+implementation and subprocess-thread work starts. Already-started external work
+remains uncertain; cancellation is never reported as rollback or permission to
+repeat it.
+
+Frozen targeted verification passes 47 tests across phone intake, native turn
+leases and retained-task references, 63 warnings, 5.03 seconds. Independent
+actual ToolRunner/executor probes pass nine cases, one warning, 0.55 seconds,
+including cancellation suppression, replacement, inherited children, unrelated
+session compatibility and both queued pre-effect races. CI-rule Ruff and scoped
+whitespace checks pass. Evidence: feral-oct9-phone-owner-fix-evidence.json,
+feral-oct9-phone-owner-fix-final-tests.log and
+feral-oct9-phone-final-independent-probes.log. Combined source acceptance and a
+new exact-source application remain pending; immutable 9.47 is unchanged.
+These tests use inert effects and do not establish physical phone connectivity.
+
+## Initial source integration
+
 This is local implementation and bounded verification, separate from installed
 device acceptance. Theora iOS baseline is
 `dfe2b08541e597c738bacd5fdc61275fc4f476a3`. Backend integration was captured from

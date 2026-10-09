@@ -10,6 +10,7 @@ from starlette.websockets import WebSocketDisconnect
 
 from tests.test_daemon_session_phone_branches import _mock_state_with_supervisor, _flush_with_known_error
 from tests.test_hup_protocol import _TEST_NODE_KEY, _node_client, _register_node
+from tests.test_taskflow_model_steps import wired as taskflow_wired  # noqa: F401
 
 pytestmark = [pytest.mark.no_auto_feral_home, pytest.mark.timeout(15)]
 
@@ -522,3 +523,361 @@ def test_state_replacement_during_node_connected_prevents_ack(monkeypatch):
         assert brain.daemons == {} and replacement.daemons == {}
         replacement.skill_executor.register_daemon_type.assert_not_called()
         replacement.capability_registry.register_node.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "invalidation", ["stop", "socket", "state", "orchestrator", "memory"]
+)
+def test_invalidated_phone_cannot_dispatch_after_collaborator_suppresses_cancel(
+    invalidation,
+):
+    """Actual public ToolRunner dispatch entry, with an inert inner boundary."""
+    from types import SimpleNamespace
+    from api.phone_chat_intake import PhoneChatIntake
+    from agents.tool_runner import ToolRunner
+    from security.agent_turn_lease import AgentTurnRevoked, attach_agent_dispatch_lease
+
+    async def exercise():
+        socket = object()
+        runner = ToolRunner.__new__(ToolRunner)
+        orchestrator = SimpleNamespace(tool_runner=runner)
+        runner._orch = orchestrator
+        runner._native_agent_dispatch_lease = None
+        effects = []
+        runner._resolve_surface_for_session = lambda sid: "brain_host"
+        runner._record_tool_invocation = MagicMock()
+        runner._turn_id_for = lambda sid: ""
+
+        async def inert_inner(*args, **kwargs):
+            effects.append("inert dispatcher boundary")
+
+        runner._execute_tool_call_inner = AsyncMock(side_effect=inert_inner)
+        brain = SimpleNamespace(
+            _native_vault_deferred=True,
+            _native_bootstrap_required=False,
+            _native_agent_turn_generation=7,
+            agent_bootstrap_controller=SimpleNamespace(
+                _completed=object(), _active_binding=None
+            ),
+            orchestrator=orchestrator,
+            memory=object(),
+            daemons={"fixture-phone": socket},
+            _background_tasks=set(),
+        )
+
+        def retain(task):
+            brain._background_tasks.add(task)
+            task.add_done_callback(brain._background_tasks.discard)
+
+        brain.register_background_task = retain
+        attach_agent_dispatch_lease(brain)
+        current = [brain]
+        intake = PhoneChatIntake(brain, socket, lambda: current[0])
+        intake.node_id = "fixture-phone"
+        entered = asyncio.Event()
+        denied = []
+
+        async def operation():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                with pytest.raises(AgentTurnRevoked):
+                    await runner.execute_tool_call(
+                        "fixture-session",
+                        {"id": "one", "name": "fixture__inert", "args": {}},
+                        [],
+                    )
+                denied.append(True)
+
+        assert intake.submit("fixture-session", operation)
+        await entered.wait()
+        if invalidation == "socket":
+            brain.daemons["fixture-phone"] = object()
+        elif invalidation == "state":
+            current[0] = object()
+        elif invalidation == "orchestrator":
+            brain.orchestrator = object()
+        elif invalidation == "memory":
+            brain.memory = object()
+        task = next(iter(intake.tasks))
+        if invalidation == "stop":
+            intake.stop()
+        else:
+            # Cancel without closing intake: each captured identity must fence
+            # dispatch on its own, including same-state runtime replacement.
+            task.cancel()
+        await task
+        assert denied == [True] and effects == []
+        await intake.drain()
+        assert denied == [True] and effects == []
+        assert runner._execute_tool_call_inner.await_count == 0
+        assert brain._native_agent_turn_generation == 7
+        # Owner revocation is local to inherited phone work; an unrelated
+        # foreground call keeps the same unchanged native lease/approval path.
+        brain.orchestrator = orchestrator
+        await runner.execute_tool_call(
+            "foreground-session",
+            {"id": "two", "name": "fixture__inert", "args": {}},
+            [],
+        )
+        assert effects == ["inert dispatcher boundary"]
+        assert brain._phone_intake_locks == {}
+
+    asyncio.run(exercise())
+
+
+def test_child_task_inherits_phone_dispatch_fence_without_revoking_other_sessions():
+    from types import SimpleNamespace
+    from api.phone_chat_intake import PhoneChatIntake
+    from agents.tool_runner import ToolRunner
+    from security.agent_turn_lease import AgentTurnRevoked
+
+    async def exercise():
+        socket = object()
+        runner = ToolRunner.__new__(ToolRunner)
+        runner._orch = SimpleNamespace()
+        runner._native_agent_dispatch_lease = None
+        runner._resolve_surface_for_session = lambda sid: "brain_host"
+        runner._record_tool_invocation = MagicMock()
+        runner._turn_id_for = lambda sid: ""
+        runner._execute_tool_call_inner = AsyncMock()
+        brain = SimpleNamespace(
+            orchestrator=runner._orch,
+            memory=object(),
+            daemons={"fixture-phone": socket},
+            _background_tasks=set(),
+        )
+
+        def retain(task):
+            brain._background_tasks.add(task)
+            task.add_done_callback(brain._background_tasks.discard)
+
+        brain.register_background_task = retain
+        intake = PhoneChatIntake(brain, socket, lambda: brain)
+        intake.node_id = "fixture-phone"
+        entered, release = asyncio.Event(), asyncio.Event()
+        children = []
+
+        async def child():
+            await release.wait()
+            with pytest.raises(AgentTurnRevoked):
+                await runner.execute_tool_call(
+                    "fixture-session",
+                    {"id": "child", "name": "fixture__inert", "args": {}},
+                    [],
+                )
+
+        async def operation():
+            task = asyncio.create_task(child())
+            children.append(task)
+            brain.register_background_task(task)
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                release.set()
+                await task
+
+        assert intake.submit("fixture-session", operation)
+        await entered.wait()
+        intake.stop()
+        await intake.drain()
+        await asyncio.gather(*children)
+        runner._execute_tool_call_inner.assert_not_awaited()
+        assert brain._phone_intake_locks == {}
+        await runner.execute_tool_call(
+            "unrelated", {"id": "foreground", "name": "fixture__inert", "args": {}}, []
+        )
+        runner._execute_tool_call_inner.assert_awaited_once()
+
+    asyncio.run(exercise())
+
+
+def test_nested_dispatch_owner_cannot_replace_revoked_outer_owner():
+    from security.agent_turn_lease import (
+        AgentTurnRevoked,
+        bind_agent_dispatch_owner,
+        guard_agent_dispatch,
+    )
+
+    allowed = [True]
+    with bind_agent_dispatch_owner(lambda: allowed[0]):
+        guard_agent_dispatch()
+        allowed[0] = False
+        with pytest.raises(AgentTurnRevoked):
+            with bind_agent_dispatch_owner(lambda: True):
+                guard_agent_dispatch()
+    guard_agent_dispatch()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("owner", ["phone", "native"])
+@pytest.mark.usefixtures("taskflow_wired")
+async def test_executor_backing_rechecks_owner_after_child_is_scheduled(
+    request, monkeypatch, owner
+):
+    from types import SimpleNamespace
+    from api.phone_chat_intake import PhoneChatIntake
+    from api import state as state_module
+    from security.agent_turn_lease import attach_agent_dispatch_lease
+    from skills import impl
+    from skills.executor import SkillExecutor
+    from tests.test_taskflow_model_steps import action
+
+    _, orch, _ = request.getfixturevalue("taskflow_wired")
+    socket = object()
+    brain = SimpleNamespace(
+        orchestrator=orch,
+        memory=object(),
+        daemons={"phone": socket},
+        _background_tasks=set(),
+        _native_vault_deferred=True,
+        _native_bootstrap_required=False,
+        _native_agent_turn_generation=7,
+        agent_bootstrap_controller=SimpleNamespace(
+            _completed=object(), _active_binding=None
+        ),
+    )
+
+    def retain(task):
+        brain._background_tasks.add(task)
+        task.add_done_callback(brain._background_tasks.discard)
+
+    brain.register_background_task = retain
+    attach_agent_dispatch_lease(brain)
+    intake = PhoneChatIntake(brain, socket, lambda: brain)
+    intake.node_id = "phone"
+    effects = []
+
+    async def inert_effect(*args):
+        effects.append("new backing effect")
+        return {"success": True, "data": {"nonce": "fixture"}}
+
+    monkeypatch.setattr(
+        impl, "get_implementation", lambda _: SimpleNamespace(execute=inert_effect)
+    )
+    monkeypatch.setattr(state_module, "state", brain)
+    executor = SkillExecutor()
+    executor._record_audit = AsyncMock()
+    orch.executor = executor
+    original = orch.tool_runner.approved_backing_transfer
+
+    def invalidate():
+        if owner == "phone":
+            intake.stop()
+        else:
+            brain._native_agent_turn_generation += 1
+
+    def schedule_invalidation(*args):
+        transfer = original(*args)
+        asyncio.get_running_loop().call_soon(invalidate)
+        return transfer
+
+    monkeypatch.setattr(
+        orch.tool_runner, "approved_backing_transfer", schedule_invalidation
+    )
+
+    async def operation():
+        await action(orch, "phone-session", endpoint="search_notes")
+
+    try:
+        assert intake.submit("phone-session", operation)
+        results = await asyncio.gather(*tuple(intake.tasks), return_exceptions=True)
+        assert effects == []
+        assert len(results) == 1 and isinstance(results[0], asyncio.CancelledError)
+        assert brain._native_agent_turn_generation == (7 if owner == "phone" else 8)
+    finally:
+        await intake.drain()
+        await executor.client.aclose()
+
+
+@pytest.mark.parametrize("owner", ["phone", "native"])
+@pytest.mark.parametrize(
+    "path,command", [("shell", "echo fixture"), ("applescript", 'return "fixture"')]
+)
+def test_queued_local_daemon_rechecks_owner_in_thread(
+    monkeypatch, owner, path, command
+):
+    from concurrent.futures import ThreadPoolExecutor
+    from types import SimpleNamespace
+    from api.phone_chat_intake import PhoneChatIntake
+    from security.sandbox_policy import SandboxPolicy
+    from skills.executor import SkillExecutor
+    import subprocess
+
+    policy = SimpleNamespace(
+        validate_shell_command=lambda _: (True, ""),
+        validate_applescript=lambda _: (True, ""),
+    )
+    monkeypatch.setattr(SandboxPolicy, "load_default", lambda: policy)
+    effect = MagicMock(
+        return_value=SimpleNamespace(stdout="fixture", stderr="", returncode=0)
+    )
+    monkeypatch.setattr(subprocess, "run", effect)
+
+    async def exercise():
+        loop = asyncio.get_running_loop()
+        pool = ThreadPoolExecutor(max_workers=1)
+        loop.set_default_executor(pool)
+        release, occupied = threading.Event(), threading.Event()
+
+        def hold():
+            occupied.set()
+            assert release.wait(3)
+
+        blocked = pool.submit(hold)
+        assert occupied.wait(1)
+        queued = asyncio.Event()
+        original = loop.run_in_executor
+
+        def capture_queue(executor, func, *args):
+            future = original(executor, func, *args)
+            queued.set()
+            return future
+
+        monkeypatch.setattr(loop, "run_in_executor", capture_queue)
+        socket = object()
+        brain = SimpleNamespace(
+            orchestrator=object(),
+            memory=object(),
+            daemons={"phone": socket},
+            _background_tasks=set(),
+            _native_vault_deferred=True,
+            _native_bootstrap_required=False,
+            _native_agent_turn_generation=7,
+            agent_bootstrap_controller=SimpleNamespace(
+                _completed=object(), _active_binding=None
+            ),
+        )
+
+        def retain(task):
+            brain._background_tasks.add(task)
+            task.add_done_callback(brain._background_tasks.discard)
+
+        brain.register_background_task = retain
+        intake = PhoneChatIntake(brain, socket, lambda: brain)
+        intake.node_id = "phone"
+
+        async def operation():
+            await SkillExecutor._execute_local_daemon(path, command)
+
+        try:
+            assert intake.submit("phone-session", operation)
+            tasks = tuple(intake.tasks)
+            await asyncio.wait_for(queued.wait(), 1)
+            # Do not cancel the queued Future; exercise the callable's guard.
+            if owner == "phone":
+                brain.orchestrator = object()
+            else:
+                brain._native_agent_turn_generation += 1
+            release.set()
+            results = await asyncio.gather(*tasks, return_exceptions=True)
+            assert len(results) == 1 and isinstance(results[0], asyncio.CancelledError)
+            effect.assert_not_called()
+        finally:
+            release.set()
+            blocked.result(timeout=2)
+            await intake.drain()
+
+    asyncio.run(exercise())

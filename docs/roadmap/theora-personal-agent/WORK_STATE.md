@@ -49,8 +49,11 @@ c8749b56a with its regression tests and evidence. Frozen verification passes 274
 tests, two skipped. It remains outside immutable 9.47; full combined source-wave
 and candidate acceptance remains separate. A further actual-class review found
 that stale reply fencing did not stop new tool dispatch when a collaborator
-suppressed task cancellation. A task-local phone dispatch ownership correction
-and regressions are active; unrelated sessions must retain their authority.
+suppressed task cancellation. The task-local phone dispatch ownership correction
+and queued pre-effect checks pass 47 targeted tests and nine independent probes;
+unrelated sessions retain their authority and earlier unknown outcomes remain
+unknown. Combined acceptance remains pending. A separate reproduced routine/REST
+workflow surface bypass is under repair before unattended effects are accepted.
 Details of the preceding phone integration and ownership are below.
 
 Sources will freeze after worker release, then receive combined tests, coherent

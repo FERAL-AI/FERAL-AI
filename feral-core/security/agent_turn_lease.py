@@ -6,6 +6,7 @@ operations can remain uncertain and are never described as rolled back.
 """
 
 import asyncio
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
@@ -22,6 +23,49 @@ class AgentTurnLease:
 
 
 _lease = ContextVar("feral_reviewed_agent_turn_lease", default=None)
+
+
+@dataclass(frozen=True)
+class _DispatchOwnerFence:
+    current: Callable[[], bool] = field(repr=False)
+
+
+_dispatch_owners = ContextVar("feral_agent_dispatch_owners", default=())
+
+
+@contextmanager
+def bind_agent_dispatch_owner(current: Callable[[], bool]):
+    """Add a revocable ingress fence without granting or replacing authority.
+
+    Child tasks inherit the callbacks. Leaving this binding restores the caller's
+    context; children remain fenced against socket/runtime invalidation.
+    """
+    owners = _dispatch_owners.get()
+    if not isinstance(owners, tuple) or len(owners) >= 32 or not callable(current):
+        raise AgentTurnRevoked("Agent connection ownership is unavailable")
+    token = _dispatch_owners.set((*owners, _DispatchOwnerFence(current)))
+    try:
+        guard_agent_dispatch()
+        yield
+    finally:
+        _dispatch_owners.reset(token)
+
+
+def _guard_dispatch_owners():
+    owners = _dispatch_owners.get()
+    if not isinstance(owners, tuple):
+        raise AgentTurnRevoked("Agent connection ownership is unavailable")
+    for owner in owners:
+        if not isinstance(owner, _DispatchOwnerFence):
+            raise AgentTurnRevoked("Agent connection ownership is unavailable")
+        try:
+            allowed = owner.current() is True
+        except Exception:
+            allowed = False
+        if not allowed:
+            raise AgentTurnRevoked(
+                "Agent connection ownership was revoked; no new dispatch is allowed"
+            )
 
 
 def lease_required(state):
@@ -42,6 +86,7 @@ def capture_agent_lease(state):
 
 
 def guard_agent_dispatch(attached=None):
+    _guard_dispatch_owners()
     current = _lease.get()
     lease = current if current is not None else attached
     if lease is None:
