@@ -6,6 +6,7 @@ private final class SetupFixture:URLProtocol {
     static var completed=false,vaultReady=false,cloudConfigured=false,rejectWrite=false,partialPersistence=false,denyCompletionReadback=false
     static var delayActivation=false,includeTemplate=false,foreignResponse=false
     static var modelRows:[Any]=["cached-model"]
+    static var modelSource="cache"
     static var probeReply:[String:Any]?
     static var activationError:Any?
     static let template="https://[{WorkspaceId}].ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
@@ -33,7 +34,7 @@ private final class SetupFixture:URLProtocol {
         else if path=="/api/setup/status"{value=["setup_complete":Self.completed && !Self.denyCompletionReadback,"has_identity":true,"settings":[:]];code=200}
         else if path=="/api/llm/status"{value=["available":false,"supported":true];code=200}
         else if path=="/api/security/vault/status"{value=["state":Self.vaultReady ? "ready" : "locked","credentials_available":Self.vaultReady,"in_flight":false];code=200}
-        else if path.hasSuffix("/models"){let id=path.contains("ollama") ? "ollama" : path.contains("qwen") ? "qwen" : "openai";value=["provider_id":id,"models":Self.modelRows,"source":"cache"];code=200}
+        else if path.hasSuffix("/models"){let id=path.contains("ollama") ? "ollama" : path.contains("qwen") ? "qwen" : "openai";value=["provider_id":id,"models":Self.modelRows,"source":Self.modelSource];code=200}
         else if path=="/api/llm/config",post{Self.config["provider"]=body["provider"];Self.config["model"]=body["model"];Self.config["base_url"]=body["base_url"];Self.config["fallback_providers"]=body["fallback_providers"];var receipt:[String:Any]=["success":true,"provider":body["provider"]!,"model":body["model"]!,"reconfigured":["ok":true,"available":false]];if let error=Self.activationError{receipt["error"]=error};value=receipt;code=200}
         else if path.hasSuffix("/configure"){Self.cloudConfigured=true;value=["success":true,"status":["id":"openai"],"persisted":["ok":!Self.partialPersistence,"warnings":["private-provider-secret-canary"]]];code=200}
         else if path.hasSuffix("/probe"){value=Self.probeReply ?? ["id":path.contains("ollama") ? "ollama" : "openai","reachable":false];code=200}
@@ -77,7 +78,12 @@ private final class SetupFixture:URLProtocol {
         check(malformedModel.error != nil && malformedModel.models.isEmpty && SetupFixture.posts.isEmpty,"actual mixed-response refresh refuses before any setup write")
         SetupFixture.modelRows=["cached-model"]
         check(model.providers.count==2 && !model.vaultReady && model.runtimeAvailable==false,"cached readiness stays separate from vault and runtime")
-        check(SetupFixture.posts.isEmpty && SetupFixture.requests.filter{$0.url?.path.hasSuffix("/models")==true}.allSatisfy{URLComponents(url:$0.url!,resolvingAgainstBaseURL:false)?.queryItems?.first{$0.name=="live"}?.value=="false"},"ambient setup only passive catalogue/config/cached models and no provider calls")
+        check(SetupFixture.posts.isEmpty && SetupFixture.requests.filter{$0.url?.path.hasSuffix("/models")==true}.allSatisfy{isPassiveChatSuggestions($0)},"ambient setup only passive recommended chat suggestions and no provider calls")
+        for (source,label) in [("cache","Cached; no live request"),("fallback","Bundled fallback; no live request"),("live","Previously discovered; no live request")] {
+            SetupFixture.modelSource=source;await model.refresh()
+            check(model.modelsSource==label && model.model=="existing-local-model","passive refresh labels \(source) provenance without claiming live discovery or changing active model")
+        }
+        SetupFixture.modelSource="cache"
         model.model="explicit-new-model";let activation=try model.review(.activate)
         check(activation.explanation.contains("fallback") && activation.explanation.contains("Coding and voice") && activation.explanation.contains("contact"),"activation scope states exact endpoint/model and preserved fallback boundaries")
         check(await model.perform(activation),"reviewed activation readback matches model/endpoint")
@@ -120,6 +126,7 @@ private final class SetupFixture:URLProtocol {
         }
         SetupFixture.activationError=nil
         await model.select("openai")
+        check(SetupFixture.requests.last.map{isPassiveChatSuggestions($0) && $0.url?.path=="/api/llm/providers/openai/models"}==true,"provider selection reads passive chat suggestions with canonical filters")
         reject({_ = try model.review(.saveCredential,secret:"fixture-secret")},"cloud key review blocked before existing vault authenticated")
         reject({_ = try model.review(.activate)},"cloud activation without configured key refused")
         SetupFixture.vaultReady=true;await model.refresh();let secret="fixture-private-key-DO-NOT-ECHO",key=try model.review(.saveCredential,secret:secret)
@@ -164,5 +171,9 @@ private final class SetupFixture:URLProtocol {
         reject({_ = try NativeSetupWire.endpoint("https://user:secret@example.com/v1")},"endpoint embedded credentials refused")
         reject({_ = try NativeSetupWire.endpoint("https://example.com/v1?api_key=secret")},"endpoint query secret refused")
         print("Native onboarding setup: \(count) assertions passed.")
+    }
+    static func isPassiveChatSuggestions(_ request:URLRequest)->Bool {
+        guard request.httpMethod=="GET",let url=request.url,url.path.hasSuffix("/models"),let query=URLComponents(url:url,resolvingAgainstBaseURL:false)?.queryItems else{return false}
+        return query.count==3 && query.first{$0.name=="live"}?.value=="false" && query.first{$0.name=="recommended"}?.value=="true" && query.first{$0.name=="model_class"}?.value=="chat"
     }
 }

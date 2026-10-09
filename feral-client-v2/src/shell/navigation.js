@@ -39,7 +39,7 @@ import {
  */
 export const DESTINATIONS = [
   // Core loop
-  // Chat is the everyday entry. Detailed runtime views remain searchable.
+  // Home is the overview entry. Detailed runtime views remain searchable.
   { to: '/console', label: 'Console', Icon: Gauge, desc: 'What the machine is doing right now', group: 'Core' },
   { to: '/jobs', label: 'Jobs', Icon: Activity, desc: 'Everything running, across all six sources', group: 'Core' },
   { to: '/home', label: 'Home', Icon: LayoutDashboard, desc: 'Overview, daily briefing and suggestions', group: 'Core' },
@@ -96,10 +96,10 @@ export const DESTINATIONS = [
  * `DESTINATIONS`; the guard test enforces that, because a Dock path
  * with no destination entry is a tile the palette cannot find.
  */
-// Four everyday destinations, plus approval and settings utilities.
+// Home and everyday destinations, plus approval and settings utilities.
 // Every other destination remains one explicit More/search interaction away.
 export const DOCK_PATHS = [
-  '/chat', '/coding', '/memory', '/devices', '/approvals', '/settings',
+  '/home', '/chat', '/coding', '/memory', '/devices', '/approvals', '/settings',
 ];
 
 const byPath = new Map(DESTINATIONS.map((d) => [d.to, d]));

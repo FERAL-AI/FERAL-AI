@@ -106,12 +106,14 @@ import Darwin
         let home = layout.configRoot
         profileConfigRoot = layout.configRoot
         profileDataRoot = layout.dataRoot
+        let number = try NativeRuntimePortFeature.resolve(environment: env) {
+            try NativeRuntimePortFeature.readSavedSettings(at: home.appendingPathComponent("settings.json"))
+        }
+        let port = String(number)
         try FileManager.default.createDirectory(at: home, withIntermediateDirectories: true)
         logURL = home.appendingPathComponent("native-desktop.log")
         FileManager.default.createFile(atPath: logURL!.path, contents: nil)
         logHandle = try FileHandle(forWritingTo: logURL!)
-        let port = try env["FERAL_PORT"] ?? String(availablePort())
-        guard let number = UInt16(port), number > 0 else { throw NativeFailure("The configured local port is invalid.") }
         baseURL = URL(string: "http://127.0.0.1:\(number)")!
         env["FERAL_PORT"] = port
         // The reviewed Access setting owns the listener profile. Inherited
@@ -255,26 +257,6 @@ private func nativeProfilePathKind(_ url: URL) -> NativeProfilePathKind {
     case S_IFLNK: return .symbolicLink
     default: return .other
     }
-}
-
-private func availablePort() throws -> UInt16 {
-    let descriptor = Darwin.socket(AF_INET, SOCK_STREAM, 0)
-    guard descriptor >= 0 else { throw NativeFailure("Could not create a local network socket.") }
-    defer { Darwin.close(descriptor) }
-    var address = sockaddr_in()
-    address.sin_len = UInt8(MemoryLayout<sockaddr_in>.size)
-    address.sin_family = sa_family_t(AF_INET)
-    address.sin_addr.s_addr = inet_addr("127.0.0.1")
-    let result = withUnsafePointer(to: &address) { pointer in
-        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { Darwin.bind(descriptor, $0, socklen_t(MemoryLayout<sockaddr_in>.size)) }
-    }
-    guard result == 0 else { throw NativeFailure("Could not reserve a local port.") }
-    var length = socklen_t(MemoryLayout<sockaddr_in>.size)
-    let named = withUnsafeMutablePointer(to: &address) { pointer in
-        pointer.withMemoryRebound(to: sockaddr.self, capacity: 1) { getsockname(descriptor, $0, &length) }
-    }
-    guard named == 0 else { throw NativeFailure("Could not identify the local port.") }
-    return UInt16(bigEndian: address.sin_port)
 }
 
 struct NativeFailure: LocalizedError {

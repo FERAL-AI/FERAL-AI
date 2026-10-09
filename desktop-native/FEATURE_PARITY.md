@@ -1,6 +1,19 @@
 # FERAL Native Preview: feature parity inventory
 
-**Current Mac artifact (October 4).** Immutable 9.44/build2026100408 contains
+**Current checkpoint (October 9).** The installed canonical candidate is immutable
+9.46/build2026100502, source `af7ecd804f02123bb8cb9c33c1d5e8e6f8d1f88a`.
+Its exact-source bundle/runtime/signature and isolated startup/lifeline checks
+passed; 9.45 is the sole generated rollback. The current repair wave is outside
+that artifact: restored Home routing/navigation, stable native saved port,
+truthful passive setup discovery and a disabled signed messaging admission
+foundation. Focused source checks pass; actual source Home has rendered against
+an isolated backend through restored Computer Use. New 9.47 packaging and saved
+endpoint restart acceptance are next. Actual phone/browser handoff, iMessage
+transport, physical voice/accounts and distribution remain open.
+[Repair evidence and remaining gates](../docs/roadmap/theora-personal-agent/END_TO_END_REPAIR_20261009.md).
+Coding expansion, Linux expansion and Gen-UI remain deferred.
+
+**Historical Mac artifact (October 4).** Immutable 9.44/build2026100408 contains
 published source `4c8498bf0`: truthful local inventory, guarded vision preset
 selection and task-status/endpoint corrections. Frozen integration passes 2,337
 tests across 106 suites; typing adds no diagnostics. All 496 packaged Python

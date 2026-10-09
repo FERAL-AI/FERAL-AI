@@ -1,6 +1,19 @@
 # FERAL app completion: executable plan
 
-**Current Mac artifact (October 5).** Immutable 9.45/build2026100501 contains
+**Current checkpoint (October 9).** The installed canonical candidate is immutable
+9.46/build2026100502, source `af7ecd804f02123bb8cb9c33c1d5e8e6f8d1f88a`.
+Its exact-source bundle/runtime/signature and isolated startup/lifeline checks
+passed; 9.45 is the sole generated rollback. The current repair wave is outside
+that artifact: restored Home routing/navigation, stable native saved port,
+truthful passive setup discovery and a disabled signed messaging admission
+foundation. Focused source checks pass; actual source Home has rendered against
+an isolated backend through restored Computer Use. New 9.47 packaging and saved
+endpoint restart acceptance are next. Actual phone/browser handoff, iMessage
+transport, physical voice/accounts and distribution remain open.
+[Repair evidence and remaining gates](END_TO_END_REPAIR_20261009.md).
+Coding expansion, Linux expansion and Gen-UI remain deferred.
+
+**Historical Mac artifact (October 5).** Immutable 9.45/build2026100501 contains
 published exact source `3cfe733b4`, with exact tracked-task approval and selected
 vision routing. Fresh 52-input optimized native compilation, all 496 packaged
 Python comparisons, independent source/signature/import review, bundled actual

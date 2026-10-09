@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 sources=(
-  BrainRuntime.swift NativeProfileLayoutFeature.swift NativeLocalActionGate.swift APIModel.swift NativeViews.swift NativeHealthFeature.swift
+  BrainRuntime.swift NativeRuntimePortFeature.swift NativeProfileLayoutFeature.swift NativeLocalActionGate.swift APIModel.swift NativeViews.swift NativeHealthFeature.swift
   NativeHealthHistoryFeature.swift NativeRuntimeHealthFeature.swift NativeMemoryFeature.swift
   NativeOversightFeature.swift NativeConversationFeature.swift NativeContextCheckpointFeature.swift NativeProvidersFeature.swift
   NativeConfigurationFeature.swift NativeAttachmentFeature.swift NativeOperationsFeature.swift

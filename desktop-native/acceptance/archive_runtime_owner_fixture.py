@@ -16,6 +16,7 @@ from pathlib import Path
 import platform
 import plistlib
 import shutil
+import socket
 import subprocess
 import sys
 import tempfile
@@ -26,7 +27,7 @@ import uuid
 NATIVE = Path(__file__).resolve().parents[1]
 TEST = NATIVE / "tests/NativeArchiveRuntimeOwnershipTests.swift"
 SOURCES = [NATIVE / name for name in (
-    "BrainRuntime.swift", "NativeProfileLayoutFeature.swift", "NativeRuntimeHealthFeature.swift",
+    "BrainRuntime.swift", "NativeProfileLayoutFeature.swift", "NativeRuntimePortFeature.swift", "NativeRuntimeHealthFeature.swift",
 )] + [TEST]
 LAUNCHER = NATIVE / "native_backend_launcher.py"
 ASSEMBLER = NATIVE / "assemble.py"
@@ -252,6 +253,12 @@ def stage(root: Path, interpreter: Path) -> tuple[Path, dict]:
     binary = contents / "MacOS/archive-runtime-owner-tests"
     for directory in (binary.parent, resources / "python/bin", resources / "feral-core/api", root / "profile"):
         directory.mkdir(mode=0o700, parents=True)
+    with socket.socket() as listener:
+        listener.bind(("127.0.0.1", 0))
+        saved_port = listener.getsockname()[1]
+    settings = root / "profile/settings.json"
+    settings.write_text(json.dumps({"network": {"port": saved_port}}))
+    os.chmod(settings, 0o600)
     (resources / "python/bin/python3").symlink_to(python)
     shutil.copyfile(LAUNCHER, resources / LAUNCHER.name)
     (resources / "feral-core/api/__init__.py").write_text("")
@@ -267,7 +274,7 @@ def stage(root: Path, interpreter: Path) -> tuple[Path, dict]:
     architecture = platform.machine()
     if architecture not in {"arm64", "x86_64"}:
         raise ValueError("Unsupported native fixture architecture")
-    manifest = {"source_sha256": {path.name: digest(path) for path in SOURCES},
+    manifest = {"saved_port": saved_port, "source_sha256": {path.name: digest(path) for path in SOURCES},
                 "launcher_sha256": digest(LAUNCHER), "python_sha256": digest(python),
                 "python_version": version, "fixture_server_sha256": digest(resources / "feral-core/api/server.py"),
                 "assembler_sha256": digest(ASSEMBLER), "local_network_policy": local_network_policy(),
@@ -319,7 +326,8 @@ def main() -> int:
             print(json.dumps({"status": "prepared", "fixture_root": str(root), "executable": str(binary), "manifest": manifest}, sort_keys=True))
             return 0
         environment = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "FERAL_HOME": str(root / "profile"),
-                       "FERAL_DATA_HOME": str(root / "profile"), "FERAL_ARCHIVE_OWNER_FIXTURE_ROOT": str(root)}
+                       "FERAL_DATA_HOME": str(root / "profile"), "FERAL_ARCHIVE_OWNER_FIXTURE_ROOT": str(root),
+                       "FERAL_ARCHIVE_OWNER_SAVED_PORT": str(manifest["saved_port"])}
         # File streams persist even if run() kills the native host on timeout.
         # Do not lose the actual startup/retirement phase as the old harness did.
         with (root / "stdout.log").open("xb") as stdout, (root / "stderr.log").open("xb") as stderr:

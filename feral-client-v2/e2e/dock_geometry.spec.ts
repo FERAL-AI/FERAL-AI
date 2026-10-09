@@ -1,4 +1,4 @@
-/** Consumer dock geometry: persistent labels, six pinned destinations and
+/** Consumer dock geometry: persistent labels, seven pinned destinations and
  * More, gentle lift without resizing, and reachable controls on phones. */
 import { test, expect } from '@playwright/test';
 
@@ -63,7 +63,7 @@ test('labeled tiles and icons meet the consumer design dimensions', async ({ pag
 test('hover gives a gentle lift without resizing labeled destinations', async ({ page }) => {
   await stub(page); await page.goto('/console');
   const tiles = page.locator('.v2-dock-btn');
-  await expect(tiles).toHaveCount(7);
+  await expect(tiles).toHaveCount(8);
   const before = await tiles.evaluateAll((items) => items.map((item) => {
     const r = item.getBoundingClientRect(); return { width: r.width, height: r.height, top: r.top };
   }));
@@ -96,7 +96,21 @@ test('the magnify is off when the operator asked for reduced motion', async ({ p
   expect(anyScaled, 'the dock magnified despite prefers-reduced-motion').toBe(false);
 });
 
-test('Home remains reachable through More and marks its navigation context', async ({ page }) => {
+test('Home is a primary destination and the root landing surface', async ({ page }) => {
+  await stub(page); await page.goto('/console');
+  const home = page.locator('.v2-dock-btn').filter({ hasText: /^Home$/ });
+  await expect(home).toBeVisible();
+  await home.click();
+  await expect(page).toHaveURL(/\/home$/);
+  await expect(home).toHaveClass(/is-active/);
+  await expect(page.locator('.v2-home-hero-body')).toBeVisible();
+
+  await page.goto('/');
+  await expect(page).toHaveURL(/\/home$/);
+  await expect(page.locator('.v2-home-hero-body')).toBeVisible();
+});
+
+test('Home remains searchable alongside its primary navigation tile', async ({ page }) => {
   await stub(page); await page.goto('/console');
   const more = page.locator('.v2-dock-btn').filter({ hasText: 'More' });
   await more.click();
@@ -105,7 +119,8 @@ test('Home remains reachable through More and marks its navigation context', asy
   await palette.getByRole('searchbox', { name: 'Search commands and pages' }).fill('Home');
   await palette.getByRole('option').filter({ hasText: 'Home' }).first().click();
   await expect(page).toHaveURL(/\/home$/);
-  await expect(more).toHaveClass(/is-active/);
+  await expect(page.locator('.v2-dock-btn').filter({ hasText: /^Home$/ })).toHaveClass(/is-active/);
+  await expect(more).not.toHaveClass(/is-active/);
   await expect(more).toHaveAttribute('aria-pressed', 'false');
   await expect(palette).toHaveCount(0);
 });
@@ -133,7 +148,7 @@ for (const width of [320, 375, 430]) {
 
     const tiles = page.locator('.v2-dock a, .v2-dock button');
     const n = await tiles.count();
-    expect(n).toBe(7);
+    expect(n).toBe(8);
     await expect(page.locator('.v2-dock-btn[href="/approvals"]')).toBeVisible();
 
     // Reachable means clickable, scrolling to it if the row is a

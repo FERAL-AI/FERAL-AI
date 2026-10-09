@@ -105,8 +105,11 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
         }catch{guard generation==started else{return};self.error=(error as? NativeSetupFailure)?.message ?? "Provider setup is unavailable. Encrypted-memory installs may require explicit vault unlock and separately reviewed bootstrap continuation."}
     }
     private func loadModels(_ base:URL,provider:String,started:UUID)async throws{
-        let raw=try await request(base,path:"/api/llm/providers/"+provider+"/models",query:[URLQueryItem(name:"live",value:"true"),URLQueryItem(name:"recommended",value:"true"),URLQueryItem(name:"model_class",value:"chat")]);guard generation==started,selected==provider else{return}
-        let parsed=try NativeSetupWire.models(raw,provider:provider);models=parsed.ids;modelsSource=parsed.source=="live" ? "Previously discovered models; this request did not probe" : parsed.source
+        // Ambient refresh and selection read existing suggestions only. Provider
+        // contact belongs to the separately reviewed connection operation.
+        let raw=try await request(base,path:"/api/llm/providers/"+provider+"/models",query:[URLQueryItem(name:"live",value:"false"),URLQueryItem(name:"recommended",value:"true"),URLQueryItem(name:"model_class",value:"chat")]);guard generation==started,selected==provider else{return}
+        let parsed=try NativeSetupWire.models(raw,provider:provider);models=parsed.ids
+        switch parsed.source{case "live":modelsSource="Previously discovered; no live request";case "cache":modelsSource="Cached; no live request";default:modelsSource="Bundled fallback; no live request"}
     }
     func select(_ id:String)async {guard !busy,let choice=providers.first(where:{$0.id==id}),let base=baseURL else{return};generation=UUID();let started=generation,op=UUID();operation=op;busy=true;selected=id;models=[];modelsSource="Not loaded";model=(saved["provider"] as? String)==id ? saved["model"] as? String ?? "" : choice.defaultModel;endpoint=(saved["provider"] as? String)==id ? saved["base_url"] as? String ?? "" : choice.defaultEndpoint;defer{if operation==op{operation=nil;busy=false}};do{try await loadModels(base,provider:id,started:started)}catch{guard generation==started else{return};self.error="Cached models could not be read. No live discovery was requested; enter a model explicitly."}}
     func review(_ action:NativeSetupOperation,secret:String="")throws->NativeSetupReview {
@@ -169,7 +172,7 @@ struct NativeOnboardingSetupFeatureView:View {
             if let provider=model.providers.first(where:{$0.id==model.selected}){
                 Text(provider.reachable.map{$0 ? "Cached status: reachable" : "Cached status: unreachable"} ?? "Provider has not been probed.").font(.caption).foregroundStyle(.secondary)
                 TextField("Model name",text:$model.model).textFieldStyle(.roundedBorder)
-                if !model.models.isEmpty{Menu("Cached suggestions (\(model.modelsSource))"){ForEach(model.models,id:\.self){id in Button(id){model.model=id}}}}
+                if !model.models.isEmpty{Menu("Chat suggestions (\(model.modelsSource))"){ForEach(model.models,id:\.self){id in Button(id){model.model=id}}}}
                 TextField("Provider endpoint (empty selects runtime default)",text:$model.endpoint).textFieldStyle(.roundedBorder)
                 if let template=provider.endpointTemplate{NativeSelectableText("Workspace endpoint template (not a usable default): "+template).font(.caption);Text("Enter the resolved endpoint explicitly before activation or key storage.").font(.caption).foregroundStyle(.secondary)}
                 if provider.needsKey{

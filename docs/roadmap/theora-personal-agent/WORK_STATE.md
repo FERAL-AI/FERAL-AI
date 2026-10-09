@@ -1,11 +1,58 @@
 # FERAL completion checkpoint
 
-Updated October 5, 2026. Parent/integrator owns this file. Reconcile it with actual
+Updated October 9, 2026. Parent/integrator owns this file. Reconcile it with actual
 Git, CI and processes after resuming; it is a checkpoint, not a live process lock.
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
-## Current execution checkpoint, October 5
+## Current execution checkpoint, October 9
+
+**Current checkpoint (October 9).** The installed canonical candidate is immutable
+9.46/build2026100502, source `af7ecd804f02123bb8cb9c33c1d5e8e6f8d1f88a`.
+Its exact-source bundle/runtime/signature and isolated startup/lifeline checks
+passed; 9.45 is the sole generated rollback. The current repair wave is outside
+that artifact: restored Home routing/navigation, stable native saved port,
+truthful passive setup discovery and a disabled signed messaging admission
+foundation. Focused source checks pass; actual source Home has rendered against
+an isolated backend through restored Computer Use. New 9.47 packaging and saved
+endpoint restart acceptance are next. Actual phone/browser handoff, iMessage
+transport, physical voice/accounts and distribution remain open.
+[Repair evidence and remaining gates](END_TO_END_REPAIR_20261009.md).
+Coding expansion, Linux expansion and Gen-UI remain deferred.
+
+Branch: `feat/native-product-release-foundation-20261001`; resumed HEAD:
+`8fac3d571`. Changes are currently local and require reviewed commits/publication.
+Pre-existing unrelated AUDIT-FIXES.md remains unstaged. No personal profile,
+account, message, purchase or microphone operation is part of this repair wave.
+
+Current 9.46 native binary SHA256:
+`391ed880972a2e693dc959a9b2209f2f5dc7bda46d01992307a428a17b4cc504`.
+Manifest SHA256:
+`3eb3d98a7063afaf73fedd4412c41e48eb3eb838299d318d00aa52a1877df5a9`.
+Packaging receipt: feral-native-9-46-build-20261005/result.json. The original
+receipt records 26,671,509,504 bytes free before and 26,583,822,336 after,
+172.71 seconds; previous prose estimates are superseded by these byte counts.
+
+Verification: WebUI seven suites 81 passed; generated assets rebuilt and served
+by the actual isolated backend. Native setup 77 assertions; port selector 176
+assertions after nonblocking regular-file hardening. Final linked/typecheck
+acceptance passed: 28 model groups, 39 desktop and five error assertions. Actual
+BrainRuntime/launcher health-only process restart passed 30 assertions, including
+identical saved endpoint without a port override; full installed GUI remains next. Channel/phone/Chrome ten suites: 244 passed, one skipped. Playwright
+geometry remains unexecuted because its browser binary is missing. Computer Use
+is restored, so its former startup failure is historical rather than an active
+blanket blocker. Independent workers own only final port-read and messaging-stop
+hardening; parent owns integration, documentation, exact-source build and push.
+
+Next: integrate those reviews, freeze sources, run affected checks, publish a
+coherent source checkpoint, build 9.47 with 54 native inputs, and test saved-port
+restart in the actual disposable native profile. Preserve 9.46 as sole rollback;
+retire inspected unused 9.45 only at successful assembly preconditions. Reconfirm
+at least 10 GiB free before staging, estimated new writes at most 2 GiB, and at
+least 5 GiB at completion. Physical phone handoff and messaging activation remain
+separate gates; do not report them as passed by fixtures.
+
+## Historical execution checkpoint, October 5
 
 Immutable Mac 9.45/build2026100501 is built from published exact source
 `3cfe733b4f94ae18dd1755d13b7b5fbd7a34be5a`; runtime implementation is `99f94dda1`.
@@ -1301,10 +1348,10 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
   `/private/tmp/feral-candidate-9-46-manifest.json` (SHA
   `3eb3d98a7063afaf73fedd4412c41e48eb3eb838299d318d00aa52a1877df5a9`). Native
   binary SHA is `391ed880972a2e693dc959a9b2209f2f5dc7bda46d01992307a428a17b4cc504`.
-  9.45 remains at `/private/tmp/feral-candidate-9-45-preserved.app`; 9.44 remains
-  the prior rollback.
-- The exact-source builder passed in 172.71 seconds with 25.51 GiB free before
-  and 24.74 GiB after; bundle and packaged-core audits passed. Bundled task/
+  9.45 is the sole rollback at `/private/tmp/feral-candidate-9-45-preserved.app`;
+  the inspected generated 9.44 copy was retired by the exact-source builder.
+- The exact-source builder passed in 172.71 seconds with 26,671,509,504 bytes free before
+  and 26,583,822,336 bytes after; bundle and packaged-core audits passed. Bundled task/
   approval/selected-vision methods passed with no network or subprocess attempts
   (`/private/tmp/feral-946-approval-vision-packaged-evidence.json`). Bundled
   backend startup passed health in 2.10 seconds, owned-process/lifeline EOF

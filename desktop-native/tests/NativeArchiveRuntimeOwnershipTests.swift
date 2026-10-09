@@ -91,6 +91,11 @@ import Darwin
             throw NativeFailure("The disposable fixture requires the actual app local-network policy.")
         }
         phaseRoot = URL(fileURLWithPath: root, isDirectory: true)
+        guard ProcessInfo.processInfo.environment["FERAL_PORT"] == nil,
+              ProcessInfo.processInfo.environment["FERAL_BRAIN_PORT"] == nil,
+              let savedPort = ProcessInfo.processInfo.environment["FERAL_ARCHIVE_OWNER_SAVED_PORT"].flatMap(Int.init) else {
+            throw NativeFailure("Fixture requires saved settings without a runtime port override.")
+        }
         try checkpoint("fixture validated; preparing actual BrainRuntime")
         let runtime = BrainRuntime(); var events: [NativeRuntimeHealthEvent] = [], progress: [String] = []
         runtime.onHealthEvent = { events.append($0); try? checkpoint("health: " + $0.phase.rawValue) }
@@ -99,6 +104,7 @@ import Darwin
             try await runtime.start { progress.append($0); try? checkpoint("first startup: " + $0) }
             try checkpoint("first start returned; observing actual health")
             let first = try await observe(runtime, profile: home)
+            try check(first.owner.baseURL.port == savedPort, "first real runtime uses saved settings port without environment override")
             try check(runtime.profileConfigRoot?.path == home && runtime.profileDataRoot?.path == home, "actual runtime uses reviewed same-root backend policy")
             try check(!runtime.isQuiesced(first.owner), "a running owner never has archive stop proof")
             let wrong = NativeRuntimeOwnership(generation: UUID(), instanceID: first.owner.instanceID,
@@ -123,6 +129,8 @@ import Darwin
             try await runtime.start { progress.append($0); try? checkpoint("replacement startup: " + $0) }
             try checkpoint("replacement start returned; observing actual health")
             let second = try await observe(runtime, profile: home)
+            try check(second.owner.baseURL == first.owner.baseURL && second.owner.baseURL.port == savedPort,
+                      "replacement real runtime retains exact saved endpoint")
             try check(second.owner != first.owner && second.owner.generation != first.owner.generation,
                       "new real launch owns a new lifecycle generation")
             try check(second.owner.processIdentity != first.owner.processIdentity && second.owner.instanceID != first.owner.instanceID,

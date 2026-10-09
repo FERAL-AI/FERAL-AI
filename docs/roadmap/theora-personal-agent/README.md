@@ -1,14 +1,18 @@
 # Theora personal agent: product and engineering plan
 
-**Current checkpoint: October 4, 2026.** Immutable native9.41/sourcea3f99db02
-contains the runtime reliability fixes, with exact payload/runtime/signature checks
-and isolated backend startup/lifeline acceptance. Source verification passes
-1,418 tests across 73 suites. Native GUI acceptance belongs to predecessor9.40;
-actual audio, accounts/devices, local control provisioning and distribution remain
-open. The new
-[multitasking and setup plan](MULTITASKING_AND_EASY_SETUP_PLAN.md) covers background
-jobs during voice, subscription/API/local access, three-step installation,
-computer/browser ownership, Messages shopping offers and phone/glasses handoff.
+**Current checkpoint (October 9).** The installed canonical candidate is immutable
+9.46/build2026100502, source `af7ecd804f02123bb8cb9c33c1d5e8e6f8d1f88a`.
+Its exact-source bundle/runtime/signature and isolated startup/lifeline checks
+passed; 9.45 is the sole generated rollback. The current repair wave is outside
+that artifact: restored Home routing/navigation, stable native saved port,
+truthful passive setup discovery and a disabled signed messaging admission
+foundation. Focused source checks pass; actual source Home has rendered against
+an isolated backend through restored Computer Use. New 9.47 packaging and saved
+endpoint restart acceptance are next. Actual phone/browser handoff, iMessage
+transport, physical voice/accounts and distribution remain open.
+[Repair evidence and remaining gates](END_TO_END_REPAIR_20261009.md).
+Coding expansion, Linux expansion and Gen-UI remain deferred.
+
 Start with [current work](WORK_STATE.md), [completion plan](EXECUTION_PLAN.md),
 [request coverage](REQUEST_COVERAGE.md), [release readiness](RELEASE_READINESS.md)
 and [native inventory](../../../desktop-native/FEATURE_PARITY.md).

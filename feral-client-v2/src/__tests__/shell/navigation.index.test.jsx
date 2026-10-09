@@ -125,12 +125,13 @@ describe('the palette indexes what the Dock pins', () => {
     expect(new Set(DOCK_ITEMS.map((d) => d.to)).size).toBe(DOCK_PATHS.length);
   });
 
-  it('leads with Chat and keeps the detailed overview discoverable', () => {
-    expect(DOCK_PATHS[0]).toBe('/chat');
+  it('leads with Home and keeps Chat and Coding directly reachable', () => {
+    expect(DOCK_PATHS[0]).toBe('/home');
+    expect(DOCK_PATHS).toContain('/chat');
     expect(DOCK_PATHS).toContain('/coding');
     expect(DOCK_PATHS.length).toBeLessThan(9);
     expect(GO_ITEMS.find((d) => d.to === '/home')?.label).toBe('Home');
-    expect(appSource).toContain('<Route path="/" element={<Navigate to="/chat" replace />}');
+    expect(appSource).toContain('<Route path="/" element={<Navigate to="/home" replace />}');
   });
 
   it('gives every destination exactly one owner: a Dock tile or the palette', () => {
