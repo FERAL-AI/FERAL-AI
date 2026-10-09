@@ -7,50 +7,58 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 9
 
-**Current checkpoint (October 9).** The installed canonical candidate is immutable
-9.46/build2026100502, source `af7ecd804f02123bb8cb9c33c1d5e8e6f8d1f88a`.
-Its exact-source bundle/runtime/signature and isolated startup/lifeline checks
-passed; 9.45 is the sole generated rollback. The current repair wave is outside
-that artifact: restored Home routing/navigation, stable native saved port,
-truthful passive setup discovery and a disabled signed messaging admission
-foundation. Focused source checks pass; actual source Home has rendered against
-an isolated backend through restored Computer Use. New 9.47 packaging and saved
-endpoint restart acceptance are next. Actual phone/browser handoff, iMessage
-transport, physical voice/accounts and distribution remain open.
-[Repair evidence and remaining gates](END_TO_END_REPAIR_20261009.md).
+**Current checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
+published exact runtime source `4bc4128cc74c85f6eaba08cf613b7730fc60ab76`:
+restored Home routing/navigation, stable native saved endpoint, truthful passive
+setup discovery and a disabled signed messaging admission foundation. Fresh
+54-input native compilation, 499 packaged Python comparisons, 70 WebUI
+comparisons, runtime/import/signature audits and backend lifecycle checks pass.
+Actual isolated native avatar/setup/Home and normal Quit/relaunch pass with the
+same saved port and distinct instance identities. 9.46 is the sole rollback.
+Actual Theora/browser handoff, messaging transport, physical voice/accounts and
+distribution remain open. [Artifact and executed acceptance](NATIVE_9_47_ACCEPTANCE.md),
+[repair evidence and next gates](END_TO_END_REPAIR_20261009.md).
 Coding expansion, Linux expansion and Gen-UI remain deferred.
 
-Branch: `feat/native-product-release-foundation-20261001`; resumed HEAD:
-`8fac3d571`. Changes are currently local and require reviewed commits/publication.
-Pre-existing unrelated AUDIT-FIXES.md remains unstaged. No personal profile,
-account, message, purchase or microphone operation is part of this repair wave.
+Branch: `feat/native-product-release-foundation-20261001`, draft PR310.
+Runtime source `4bc4128cc` is published. Acceptance documentation is committed
+separately from that immutable runtime source. Pre-existing AUDIT-FIXES.md stays
+unstaged. All worker ownership is released and test hosts are stopped.
 
-Current 9.46 native binary SHA256:
-`391ed880972a2e693dc959a9b2209f2f5dc7bda46d01992307a428a17b4cc504`.
+9.47 native SHA256:
+`92801661ed3c926a607ed368c69d34fa37bfc8ce682c5dfe7eb7aa98dc425428`.
 Manifest SHA256:
-`3eb3d98a7063afaf73fedd4412c41e48eb3eb838299d318d00aa52a1877df5a9`.
-Packaging receipt: feral-native-9-46-build-20261005/result.json. The original
-receipt records 26,671,509,504 bytes free before and 26,583,822,336 after,
-172.71 seconds; previous prose estimates are superseded by these byte counts.
+`d121794fd2dcc9e872b6f63116944773e8e389a8e19d6a771ca9e930ff9cd8e6`.
+Builder: 192.09 seconds, free 19,622,211,584 bytes before / 18,457,985,024 after.
+Native compilation and signatures are ad-hoc arm64/macOS13, not distribution acceptance.
 
-Verification: WebUI seven suites 81 passed; generated assets rebuilt and served
-by the actual isolated backend. Native setup 77 assertions; port selector 176
-assertions after nonblocking regular-file hardening. Final linked/typecheck
-acceptance passed: 28 model groups, 39 desktop and five error assertions. Actual
-BrainRuntime/launcher health-only process restart passed 30 assertions, including
-identical saved endpoint without a port override; full installed GUI remains next. Channel/phone/Chrome ten suites: 244 passed, one skipped. Playwright
-geometry remains unexecuted because its browser binary is missing. Computer Use
-is restored, so its former startup failure is historical rather than an active
-blanket blocker. Independent workers own only final port-read and messaging-stop
-hardening; parent owns integration, documentation, exact-source build and push.
+Source verification: seven WebUI suites 81 passed; ten channel/phone/Chrome
+suites 244 passed, one skipped. Native port selection/file reads 176 assertions,
+setup 77, linked model 28 groups, desktop 39 and error five passed, as did
+production typecheck. Actual BrainRuntime synthetic-backend saved-port restart
+passed 30 assertions. Actual full bundled native two-launch acceptance then
+confirmed the same saved endpoint, distinct instance headers, avatar/setup/Home,
+normal exits and closed listener. Playwright geometry remains unexecuted due to
+its missing browser. Initial sandbox/compiler/concurrent-edit failures are
+retained separately, not erased or reported as product acceptance.
 
-Next: integrate those reviews, freeze sources, run affected checks, publish a
-coherent source checkpoint, build 9.47 with 54 native inputs, and test saved-port
-restart in the actual disposable native profile. Preserve 9.46 as sole rollback;
-retire inspected unused 9.45 only at successful assembly preconditions. Reconfirm
-at least 10 GiB free before staging, estimated new writes at most 2 GiB, and at
-least 5 GiB at completion. Physical phone handoff and messaging activation remain
-separate gates; do not report them as passed by fixtures.
+Next ready work:
+
+1. Reconcile the phone's configured endpoint/error with native saved LAN access
+   and actual device pairing. No phone response is available for this gate yet.
+2. Add an explicit owner-controlled phone/canonical-session browser task handoff
+   through existing contracts. Do not turn a different chat's Chrome attachment
+   into an implicit grant or widen local-only connection routes.
+3. Wire a reviewed iMessage transport only after preserving account/thread/event
+   identity through the existing handler and removing unsupported completion
+   claims. Signed inbound foundation is disabled and not user-ready messaging.
+4. Continue the existing voice/providers/local provisioning/desktop ownership/
+   durable jobs and distribution acceptance cards. Keep coding last.
+
+Do not rebuild the passing artifact for documentation-only edits. Resume by
+checking current root/HEAD/diff/artifact/CI; preserve unrelated AUDIT-FIXES.md,
+9.46 rollback and private evidence. Actual clean installation, inference,
+physical device/audio/account/commerce acceptance remains separate.
 
 ## Historical execution checkpoint, October 5
 

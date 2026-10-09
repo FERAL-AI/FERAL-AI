@@ -69,10 +69,10 @@ logs are excluded from source control.
 
 ## Remaining end-to-end gates
 
-1. Build a new exact-source 9.47 candidate, preserving 9.46 as the sole rollback.
-   Verify packaged source, dependencies, signature and startup/shutdown.
-2. Launch the actual candidate with a disposable saved-port profile and no
-   FERAL_PORT override; quit and relaunch, asserting the same endpoint.
+1. Exact-source 9.47 assembly and actual native saved-port Quit/relaunch passed.
+   9.46 remains the sole rollback. [Artifact and detailed acceptance](NATIVE_9_47_ACCEPTANCE.md).
+2. Retain this evidence while checking clean installation and actual inference;
+   lifecycle/source equality is not full device or provider acceptance.
 3. Test an explicitly paired Theora phone against the reviewed LAN endpoint.
    A selected Mac-chat Chrome attachment is not automatically the phone's
    canonical session: establish an owner-controlled shared-task handoff without

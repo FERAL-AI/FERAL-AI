@@ -1,16 +1,16 @@
 # Theora personal agent: product and engineering plan
 
-**Current checkpoint (October 9).** The installed canonical candidate is immutable
-9.46/build2026100502, source `af7ecd804f02123bb8cb9c33c1d5e8e6f8d1f88a`.
-Its exact-source bundle/runtime/signature and isolated startup/lifeline checks
-passed; 9.45 is the sole generated rollback. The current repair wave is outside
-that artifact: restored Home routing/navigation, stable native saved port,
-truthful passive setup discovery and a disabled signed messaging admission
-foundation. Focused source checks pass; actual source Home has rendered against
-an isolated backend through restored Computer Use. New 9.47 packaging and saved
-endpoint restart acceptance are next. Actual phone/browser handoff, iMessage
-transport, physical voice/accounts and distribution remain open.
-[Repair evidence and remaining gates](END_TO_END_REPAIR_20261009.md).
+**Current checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
+published exact runtime source `4bc4128cc74c85f6eaba08cf613b7730fc60ab76`:
+restored Home routing/navigation, stable native saved endpoint, truthful passive
+setup discovery and a disabled signed messaging admission foundation. Fresh
+54-input native compilation, 499 packaged Python comparisons, 70 WebUI
+comparisons, runtime/import/signature audits and backend lifecycle checks pass.
+Actual isolated native avatar/setup/Home and normal Quit/relaunch pass with the
+same saved port and distinct instance identities. 9.46 is the sole rollback.
+Actual Theora/browser handoff, messaging transport, physical voice/accounts and
+distribution remain open. [Artifact and executed acceptance](NATIVE_9_47_ACCEPTANCE.md),
+[repair evidence and next gates](END_TO_END_REPAIR_20261009.md).
 Coding expansion, Linux expansion and Gen-UI remain deferred.
 
 Start with [current work](WORK_STATE.md), [completion plan](EXECUTION_PLAN.md),
