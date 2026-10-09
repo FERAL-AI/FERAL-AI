@@ -3284,6 +3284,7 @@ _UNKNOWN_EVENT_TYPES_SEEN: set[tuple[str, str]] = set()
 
 @app.websocket("/v1/node")
 async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
+    phone_state = state
     credential_source = ""
     credential = ""
 
@@ -3306,10 +3307,13 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         if credential:
             credential_source = "query"
 
-    store = state.device_pairing_store
+    store = phone_state.device_pairing_store
     paired_device_id, bearer_kind = _verify_credential(store, credential)
 
     await ws.accept()
+    if state is not phone_state:
+        await ws.close(code=4003, reason="Node connection superseded")
+        return
 
     if credential_source == "query" and credential:
         logger.warning(
@@ -3386,7 +3390,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         detail: dict | None = None,
         payload_for_hash=None,
     ) -> None:
-        supervisor = getattr(state, "supervisor", None)
+        supervisor = getattr(phone_state, "supervisor", None)
         if supervisor is None:
             return
         info = {"message_type": message_type}
@@ -3410,6 +3414,284 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
     # (msg.type, tier) pairs already reported for this socket. See the
     # capability-tier gate in the loop below.
     _tier_drops_reported: set = set()
+
+    from api.phone_chat_intake import PhoneChatIntake, phone_scope_lock
+    phone_chats = PhoneChatIntake(phone_state, ws, lambda: state)
+    setattr(ws, "_feral_phone_chat_intake", phone_chats)
+
+    async def run_phone_chat(payload_dict, target_sid, source_node, orchestrator, memory):
+        state = phone_state
+        node_id = source_node
+
+        def guard_phone_chat():
+            phone_chats.guard()
+            if state.orchestrator is not orchestrator or state.memory is not memory:
+                raise asyncio.CancelledError("Phone runtime changed")
+
+        text = payload_dict.get("text", "")
+        channel = payload_dict.get("channel", "chat")
+        reply_mode = payload_dict.get("reply_mode", "final")
+        reply_to = payload_dict.get("reply_to")
+        guard_phone_chat()
+        if not text or not state.orchestrator:
+            _record_phone_envelope(
+                "denied",
+                "chat_request",
+                detail={"reason": "missing_text_or_orchestrator"},
+                payload_for_hash=payload_dict,
+            )
+            await ws.send_json(
+                hup_frame(
+                    "chat_response",
+                    {
+                        "session_id": target_sid,
+                        "text": "",
+                        "reply_mode": reply_mode,
+                        "channel": channel,
+                        "reply_to": reply_to,
+                    },
+                )
+            )
+            return
+
+        routed = state.sessions.get(target_sid)
+        routed_intake = getattr(routed, "_feral_phone_chat_intake", None)
+        if routed is None or (isinstance(routed_intake, PhoneChatIntake) and not routed_intake.current()):
+            state.sessions[target_sid] = ws
+        if node_id:
+            state.bind_session_to_daemon(target_sid, node_id)
+            if channel == "vision_ask" and getattr(state, "perception", None):
+                # First vision turn can race: phone sends frame first, then
+                # chat_request. The frame may land before this session is bound
+                # to the daemon, so refresh perception here after binding.
+                state.perception.update_vision(
+                    target_sid, state.vision_buffer, node_id
+                )
+
+        response_text = ""
+        orch_error: str | None = None
+        try:
+            async with prepared_scope(state, target_sid):
+                guard_phone_chat()
+                if state.memory:
+                    state.memory.working_push(
+                        target_sid, {"role": "user", "text": text}
+                    )
+
+                # Phase 1 (audit-r10 overhaul plan) — `device_target`
+                # tells the brain WHERE the requested action should run.
+                # When the iOS client sends "brain" (e.g. "open my Mac
+                # browser"), `resolve_surface_from_context` swaps the
+                # legacy `phone_surface → http_api` hard-deny for the
+                # `brain_host` surface, unblocking the operator's
+                # "do X on my Mac" complaint. When "phone" or "glasses"
+                # the brain dispatches to `phone_actuator` so the LLM
+                # is steered toward `phone.*` skills (Phase 4).
+                device_target_raw = payload_dict.get("device_target")
+                device_target = (
+                    device_target_raw.strip().lower()
+                    if isinstance(device_target_raw, str)
+                    else None
+                ) or None
+
+                # Phase 2 (audit-r10 overhaul plan) — PromptRefiner runs
+                # BEFORE the orchestrator so the LLM gets a cleaned,
+                # disambiguated rewrite + an inferred device_target
+                # when the iOS client didn't set one. Feature-flagged
+                # via FERAL_PROMPT_REFINER (default off) so this PR
+                # lands the wiring without changing behavior; flip the
+                # flag once shadow metrics show it improves routing.
+                refined_text = text
+                refined_envelope = None
+                try:
+                    from agents.prompt_refiner import refine as _refine_prompt
+
+                    history = []
+                    if state.memory:
+                        try:
+                            history = state.memory.working_get(target_sid) or []
+                        except Exception:
+                            history = []
+                    refined_envelope = await _refine_prompt(
+                        text,
+                        llm=getattr(state.orchestrator, "llm", None),
+                        device_target_hint=device_target,
+                        history=history,
+                    )
+                    if refined_envelope.refined_text:
+                        refined_text = refined_envelope.refined_text
+                    if refined_envelope.device_target and not device_target:
+                        device_target = refined_envelope.device_target
+                except Exception as _refine_exc:
+                    logger.debug("PromptRefiner skipped: %s", _refine_exc)
+
+                # Device routing is decided here, not by the client.
+                # `refine` is behind FERAL_PROMPT_REFINER, which is off
+                # by default and returns an identity envelope, so with
+                # the flag off it infers nothing and a phone saying "on
+                # my Mac" resolved to http_api, where every
+                # desktop_control tool is denied. Clients worked around
+                # that by sending `device_target` themselves, which put
+                # a second copy of a security-routing rule in each SDK.
+                # This inference is deterministic and flag-independent;
+                # an explicit `device_target` from the client still
+                # wins, because the client knows things the text does
+                # not say.
+                if not device_target:
+                    try:
+                        from agents.prompt_refiner import infer_device_target
+
+                        device_target = infer_device_target(text) or None
+                    except Exception:
+                        logger.debug("device_target inference failed", exc_info=True)
+
+                context = {
+                    "source": "phone_surface",
+                    "mode": "phone_surface",
+                    "channel": channel,
+                    "reply_mode": reply_mode,
+                    "source_node": node_id or "",
+                    "paired_device_id": paired_device_id or "",
+                }
+                if device_target in ("brain", "phone", "glasses"):
+                    context["device_target"] = device_target
+                elif (
+                    str(getattr(ws, "_feral_node_type", "") or "").lower()
+                    in _PHONE_NODE_TYPES
+                ):
+                    # A paired phone that names no known device is the
+                    # operator asking the brain. Resolve to brain_host
+                    # rather than letting source "phone_surface" fall
+                    # through to http_api, which denies
+                    # agentic_computer_use__execute_task and the desktop
+                    # shell: "check my computer" failed while "check
+                    # something on my Mac" worked, and the only fix was
+                    # each client sending device_target itself. An
+                    # unrecognised value ("tv", "auto") is dropped rather
+                    # than passed on. This grants nothing new: the same
+                    # authenticated node could already send
+                    # device_target "brain".
+                    context["surface"] = "brain_host"
+                if refined_envelope is not None:
+                    context["refinement"] = refined_envelope.model_dump()
+                if reply_to:
+                    context["reply_to"] = reply_to
+
+                response_text = ""
+                # Audit-r11 fix — Bug 1: iOS double assistant bubble.
+                # The orchestrator's broadcast ``text_response`` AND
+                # the synchronous ``chat_response`` below both reach
+                # the phone WS when the phone is the only client on
+                # this session. Set a per-session suppression flag for
+                # the duration of this turn; ``response_delivery.send_text``
+                # consults it and skips the broadcast frame. The
+                # ``try/finally`` guarantees we always clear the flag
+                # so a desktop client joining the session later still
+                # gets ``text_response`` on its OWN turns.
+                guard_phone_chat()
+                state.orchestrator._text_response_suppressed[target_sid] = True
+                try:
+                    if reply_mode == "stream":
+                        result = await state.orchestrator.handle_command_stream(
+                            session_id=target_sid,
+                            text=refined_text,
+                            context=context,
+                        )
+                    else:
+                        result = await state.orchestrator.handle_command(
+                            session_id=target_sid,
+                            text=refined_text,
+                            context=context,
+                        )
+                    guard_phone_chat()
+                    if isinstance(result, str):
+                        response_text = result
+                    elif isinstance(result, dict):
+                        response_text = str(
+                            result.get("text") or result.get("message") or ""
+                        )
+                    if not response_text and state.memory:
+                        history = state.memory.working_get(target_sid) or []
+                        for item in reversed(history):
+                            if item.get("role") == "assistant" and item.get("text"):
+                                response_text = str(item["text"])
+                                break
+                finally:
+                    orchestrator._text_response_suppressed.pop(target_sid, None)
+            guard_phone_chat()
+            _record_phone_envelope(
+                "allowed", "chat_request",
+                detail={"session_id": target_sid, "channel": channel,
+                        "reply_mode": reply_mode, "text_len": len(text)},
+                payload_for_hash=payload_dict,
+            )
+        except RuntimeContextError as exc:
+            orch_error = exc.code
+            response_text = ""
+            _record_phone_envelope(
+                "error", "chat_request", detail={"reason": exc.code},
+                payload_for_hash=payload_dict,
+            )
+        except Exception as exc:
+            coordinator = coordinator_for(state)
+            managed = coordinator is not None and coordinator.known_managed(target_sid)
+            logger.warning("Phone chat processing failed (%s); managed=%s", type(exc).__name__, managed)
+            orch_error = ("context_processing_failed; inspect earlier actions before retrying"
+                          if managed else str(exc)[:500] or exc.__class__.__name__)
+            response_text = ""
+            _record_phone_envelope(
+                "error", "chat_request",
+                detail={"reason": "orchestrator_error", "error": orch_error[:200]},
+                payload_for_hash=payload_dict,
+            )
+
+        # Phase-1 validation pass (Item 2): the brain emits
+        # an explicit HUP `error` frame on the failure branch
+        # AND populates `payload.error` on the chat_response
+        # so a chat-only client (one that doesn't track the
+        # parallel `error` frame) still surfaces the real
+        # failure string. Pinned by
+        # tests/test_phone_envelopes.py round-trip + the
+        # daemon_session regression test.
+        guard_phone_chat()
+        if orch_error:
+            await _send_protocol_error(
+                ws,
+                4001,
+                f"Orchestrator failed for chat_request: {orch_error}",
+                name="orchestrator_error",
+            )
+            guard_phone_chat()
+        chat_payload = {
+            "session_id": target_sid,
+            "text": response_text,
+            "reply_mode": reply_mode,
+            "channel": channel,
+            "reply_to": reply_to,
+            "error": orch_error,
+        }
+        # The behavioural policy that shaped THIS reply, on the
+        # same frame as the reply. Without it a shortened answer
+        # is indistinguishable from an answer that happened to
+        # be short, and the adaptation cannot be demonstrated.
+        # Omitted entirely (not sent as an empty object) when no
+        # biometric reading has ever landed, so "not adapting"
+        # stays distinguishable from "adapting to neutral".
+        _somatic_turn = _somatic_state_for_turn(target_sid)
+        if _somatic_turn is not None:
+            chat_payload["somatic"] = _somatic_turn
+        # Attribution links for an answer grounded in a third
+        # party. Google Maps' terms allow grounded output to
+        # reach an end user only when its sources are viewable
+        # in the same interaction, and these glasses have no
+        # screen, so the phone renders them while the glasses
+        # speak. Popped, so an ungrounded answer never inherits
+        # the sources of the one before it.
+        _sources_turn = _grounding_sources_for_turn(target_sid)
+        if _sources_turn:
+            chat_payload["sources"] = _sources_turn
+        guard_phone_chat()
+        await ws.send_json(hup_frame("chat_response", chat_payload))
 
     try:
         while True:
@@ -3468,6 +3750,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 )
                 continue
 
+            if not phone_chats.current():
+                await ws.close(code=4003, reason="Node connection superseded")
+                return
+
             # HUP_SPEC.md section 6: drop camera / microphone frames from
             # a node whose tier the operator disabled, "even if the daemon
             # sends them". One gate ahead of the dispatch chain rather
@@ -3504,117 +3790,143 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             if msg.type in ("node_register", "register") and isinstance(
                 payload, NodeRegisterPayload
             ):
+                if node_id is not None and node_id != payload.node_id:
+                    await _send_protocol_error(ws, 1003, "A connection cannot change its node identity")
+                    continue
                 node_id = payload.node_id
-                state.daemons[node_id] = ws
-                # Stash the HUP-declared node_type on the WebSocket so
-                # /api/devices/connected can report the real type instead
-                # of the legacy "phone"-for-everyone default. `manufacturer`
-                # and `model` are HUP v1 fields that the narrower
-                # models.protocol.NodeRegisterPayload doesn't yet mirror —
-                # getattr falls back to "" when absent, so we pick them up
-                # from v1.1+ daemons without tripping on v1.0 payloads.
-                setattr(
-                    ws,
-                    "_feral_node_type",
-                    (getattr(payload, "node_type", None) or "unknown").lower(),
-                )
-                setattr(
-                    ws,
-                    "_feral_capabilities",
-                    list(getattr(payload, "capabilities", []) or []),
-                )
-                setattr(ws, "_feral_platform", getattr(payload, "platform", "") or "")
-                setattr(
-                    ws,
-                    "_feral_manufacturer",
-                    getattr(payload, "manufacturer", "") or "",
-                )
-                setattr(ws, "_feral_model", getattr(payload, "model", "") or "")
-                if state.skill_executor:
-                    state.skill_executor.register_daemon_type(
-                        node_id, payload.node_type
+                previous = phone_state.daemons.get(node_id)
+                previous_intake = getattr(previous, "_feral_phone_chat_intake", None)
+                if isinstance(previous_intake, PhoneChatIntake) and previous is not ws:
+                    previous_intake.stop()
+                async with phone_scope_lock(phone_state, "node", node_id):
+                    # The socket may have waited behind cleanup. Recheck the
+                    # captured runtime before registering or replacing a node.
+                    # An intake with no prior registration has node_id=None,
+                    # so this does not require owning the node before claiming it.
+                    if not phone_chats.current():
+                        await ws.close(code=4003, reason="Node connection superseded")
+                        return
+                    previous = phone_state.daemons.get(node_id)
+                    previous_intake = getattr(previous, "_feral_phone_chat_intake", None)
+                    if isinstance(previous_intake, PhoneChatIntake) and previous is not ws:
+                        previous_intake.stop()
+                    phone_chats.node_id = node_id
+                    phone_state.daemons[node_id] = ws
+                    # Stash the HUP-declared node_type on the WebSocket so
+                    # /api/devices/connected can report the real type instead
+                    # of the legacy "phone"-for-everyone default. `manufacturer`
+                    # and `model` are HUP v1 fields that the narrower
+                    # models.protocol.NodeRegisterPayload doesn't yet mirror —
+                    # getattr falls back to "" when absent, so we pick them up
+                    # from v1.1+ daemons without tripping on v1.0 payloads.
+                    setattr(
+                        ws,
+                        "_feral_node_type",
+                        (getattr(payload, "node_type", None) or "unknown").lower(),
                     )
-                # Phase 5 (audit-r10 overhaul) — record the structured
-                # skill manifests this node publishes so
-                # `GET /api/capabilities` and the orchestrator's
-                # capability-aware routing know which `phone.*` /
-                # `glasses.*` action names are live right now.
-                # `payload.skills` is the Phase 4 wire field; legacy
-                # nodes (v2026.5.x and earlier) don't set it and the
-                # registry happily records an empty list.
-                # Belt-and-braces with the capability registry the router
-                # also reads: surface-aware realtime ordering needs to know
-                # what kind of device is asking, and `node_type` arrives
-                # only here.
-                if state.voice_router:
-                    state.voice_router.set_node_surface(node_id, payload.node_type)
-                state.capability_registry.register_node(
-                    node_id,
-                    node_type=payload.node_type,
-                    platform=payload.platform,
-                    skills=getattr(payload, "skills", []) or [],
-                )
-                logger.info(
-                    f"Node registered: {node_id} ({payload.node_type}/{payload.platform}) — caps: {payload.capabilities}, skills: {len(getattr(payload, 'skills', []) or [])}"
-                )
-                _log_activity("device_connected", f"{node_id} ({payload.node_type})")
-
-                for sid in state.sessions:
-                    state.bind_session_to_daemon(sid, node_id)
-                    state.perception.update_connected_nodes(
-                        sid, list(state.daemons.keys())
+                    setattr(
+                        ws,
+                        "_feral_capabilities",
+                        list(getattr(payload, "capabilities", []) or []),
                     )
-
-                if state.hardware_mesh:
-                    await state.hardware_mesh.on_node_connected(
+                    setattr(ws, "_feral_platform", getattr(payload, "platform", "") or "")
+                    setattr(
+                        ws,
+                        "_feral_manufacturer",
+                        getattr(payload, "manufacturer", "") or "",
+                    )
+                    setattr(ws, "_feral_model", getattr(payload, "model", "") or "")
+                    if phone_state.skill_executor:
+                        phone_state.skill_executor.register_daemon_type(
+                            node_id, payload.node_type
+                        )
+                    # Phase 5 (audit-r10 overhaul) — record the structured
+                    # skill manifests this node publishes so
+                    # `GET /api/capabilities` and the orchestrator's
+                    # capability-aware routing know which `phone.*` /
+                    # `glasses.*` action names are live right now.
+                    # `payload.skills` is the Phase 4 wire field; legacy
+                    # nodes (v2026.5.x and earlier) don't set it and the
+                    # registry happily records an empty list.
+                    # Belt-and-braces with the capability registry the router
+                    # also reads: surface-aware realtime ordering needs to know
+                    # what kind of device is asking, and `node_type` arrives
+                    # only here.
+                    if phone_state.voice_router:
+                        phone_state.voice_router.set_node_surface(node_id, payload.node_type)
+                    phone_state.capability_registry.register_node(
                         node_id,
-                        {
-                            "node_type": payload.node_type,
-                            "platform": payload.platform,
-                            "capabilities": payload.capabilities,
-                            "device_manifest": payload.device_manifest,
-                        },
+                        node_type=payload.node_type,
+                        platform=payload.platform,
+                        skills=getattr(payload, "skills", []) or [],
                     )
-
-                session_token = str(__import__("uuid").uuid4())
-                # Stashed for the same reason as _feral_capabilities
-                # above: POST /api/devices/<id>/capabilities re-acks a
-                # live node after a grant change, and a re-ack without
-                # the token would blank the one the node latched onto.
-                setattr(ws, "_feral_session_token", session_token)
-                # HUP_SPEC.md section 6. These two lists used to be
-                # ``list(payload.capabilities)`` and ``[]`` -- the node's
-                # own self-declaration echoed straight back, with no
-                # store behind it and nothing an operator could change.
-                # They now come from the per-device grant store, which is
-                # the same store every hup_action_request sender consults
-                # before it builds a frame, so the ack tells the daemon
-                # the truth about what the brain will actually send.
-                _granted_caps, _denied_caps = live_grants().partition(
-                    node_id,
-                    list(payload.capabilities),
-                )
-                if _denied_caps:
                     logger.info(
-                        "node %s: operator has denied %s",
+                        f"Node registered: {node_id} ({payload.node_type}/{payload.platform}) — caps: {payload.capabilities}, skills: {len(getattr(payload, 'skills', []) or [])}"
+                    )
+                    _log_activity("device_connected", f"{node_id} ({payload.node_type})")
+
+                    for sid in phone_state.sessions:
+                        phone_state.bind_session_to_daemon(sid, node_id)
+                        phone_state.perception.update_connected_nodes(
+                            sid, list(phone_state.daemons.keys())
+                        )
+
+                    if phone_state.hardware_mesh:
+                        await phone_state.hardware_mesh.on_node_connected(
+                            node_id,
+                            {
+                                "node_type": payload.node_type,
+                                "platform": payload.platform,
+                                "capabilities": payload.capabilities,
+                                "device_manifest": payload.device_manifest,
+                            },
+                        )
+
+                    if not phone_chats.current():
+                        await ws.close(code=4003, reason="Node connection superseded")
+                        return
+                    session_token = str(__import__("uuid").uuid4())
+                    # Stashed for the same reason as _feral_capabilities
+                    # above: POST /api/devices/<id>/capabilities re-acks a
+                    # live node after a grant change, and a re-ack without
+                    # the token would blank the one the node latched onto.
+                    setattr(ws, "_feral_session_token", session_token)
+                    # HUP_SPEC.md section 6. These two lists used to be
+                    # ``list(payload.capabilities)`` and ``[]`` -- the node's
+                    # own self-declaration echoed straight back, with no
+                    # store behind it and nothing an operator could change.
+                    # They now come from the per-device grant store, which is
+                    # the same store every hup_action_request sender consults
+                    # before it builds a frame, so the ack tells the daemon
+                    # the truth about what the brain will actually send.
+                    _granted_caps, _denied_caps = live_grants().partition(
                         node_id,
-                        _denied_caps,
+                        list(payload.capabilities),
                     )
-                await ws.send_json(
-                    hup_frame(
-                        "node_ack",
-                        {
-                            "node_id": node_id,
-                            "session_token": session_token,
-                            "hup_version": HUP_VERSION,
-                            "heartbeat_ms": 10000,
-                            "server_time": __import__("time").time(),
-                            "capabilities": list(payload.capabilities),
-                            "granted_capabilities": _granted_caps,
-                            "denied_capabilities": _denied_caps,
-                        },
+                    if _denied_caps:
+                        logger.info(
+                            "node %s: operator has denied %s",
+                            node_id,
+                            _denied_caps,
+                        )
+                    if not phone_chats.current():
+                        await ws.close(code=4003, reason="Node connection superseded")
+                        return
+                    await ws.send_json(
+                        hup_frame(
+                            "node_ack",
+                            {
+                                "node_id": node_id,
+                                "session_token": session_token,
+                                "hup_version": HUP_VERSION,
+                                "heartbeat_ms": 10000,
+                                "server_time": __import__("time").time(),
+                                "capabilities": list(payload.capabilities),
+                                "granted_capabilities": _granted_caps,
+                                "denied_capabilities": _denied_caps,
+                            },
+                        )
                     )
-                )
 
             elif msg.type == "execute_result":
                 logger.info(f"Daemon result from {node_id}")
@@ -3844,16 +4156,6 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     node_id,
                     raw.get("payload", {}).get("reason", ""),
                 )
-                if node_id:
-                    state.daemons.pop(node_id, None)
-                    if state.skill_executor:
-                        state.skill_executor.unregister_daemon(node_id)
-                    if state.hardware_mesh:
-                        state.hardware_mesh.on_node_disconnected(node_id)
-                    state.capability_registry.unregister_node(node_id)
-                    # Same reason as the disconnect path below.
-                    for sid in state.get_sessions_for_daemon(node_id):
-                        state.perception.clear_location(sid)
                 await ws.close(code=1000)
                 return
 
@@ -3911,256 +4213,16 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     await _send_protocol_error(ws, 4001, exc.code, name=exc.code)
                     continue
 
-                if not text or not state.orchestrator:
-                    _record_phone_envelope(
-                        "denied",
-                        "chat_request",
-                        detail={"reason": "missing_text_or_orchestrator"},
-                        payload_for_hash=payload_dict,
-                    )
-                    await ws.send_json(
-                        hup_frame(
-                            "chat_response",
-                            {
-                                "session_id": target_sid,
-                                "text": "",
-                                "reply_mode": reply_mode,
-                                "channel": channel,
-                                "reply_to": reply_to,
-                            },
-                        )
-                    )
-                    continue
-
-                if target_sid not in state.sessions:
-                    state.sessions[target_sid] = ws
-                if node_id:
-                    state.bind_session_to_daemon(target_sid, node_id)
-                    if channel == "vision_ask" and getattr(state, "perception", None):
-                        # First vision turn can race: phone sends frame first, then
-                        # chat_request. The frame may land before this session is bound
-                        # to the daemon, so refresh perception here after binding.
-                        state.perception.update_vision(
-                            target_sid, state.vision_buffer, node_id
-                        )
-
-                response_text = ""
-                orch_error: str | None = None
-                try:
-                    async with prepared_scope(state, target_sid):
-                        if state.memory:
-                            state.memory.working_push(
-                                target_sid, {"role": "user", "text": text}
-                            )
-
-                        # Phase 1 (audit-r10 overhaul plan) — `device_target`
-                        # tells the brain WHERE the requested action should run.
-                        # When the iOS client sends "brain" (e.g. "open my Mac
-                        # browser"), `resolve_surface_from_context` swaps the
-                        # legacy `phone_surface → http_api` hard-deny for the
-                        # `brain_host` surface, unblocking the operator's
-                        # "do X on my Mac" complaint. When "phone" or "glasses"
-                        # the brain dispatches to `phone_actuator` so the LLM
-                        # is steered toward `phone.*` skills (Phase 4).
-                        device_target_raw = payload_dict.get("device_target")
-                        device_target = (
-                            device_target_raw.strip().lower()
-                            if isinstance(device_target_raw, str)
-                            else None
-                        ) or None
-
-                        # Phase 2 (audit-r10 overhaul plan) — PromptRefiner runs
-                        # BEFORE the orchestrator so the LLM gets a cleaned,
-                        # disambiguated rewrite + an inferred device_target
-                        # when the iOS client didn't set one. Feature-flagged
-                        # via FERAL_PROMPT_REFINER (default off) so this PR
-                        # lands the wiring without changing behavior; flip the
-                        # flag once shadow metrics show it improves routing.
-                        refined_text = text
-                        refined_envelope = None
-                        try:
-                            from agents.prompt_refiner import refine as _refine_prompt
-
-                            history = []
-                            if state.memory:
-                                try:
-                                    history = state.memory.working_get(target_sid) or []
-                                except Exception:
-                                    history = []
-                            refined_envelope = await _refine_prompt(
-                                text,
-                                llm=getattr(state.orchestrator, "llm", None),
-                                device_target_hint=device_target,
-                                history=history,
-                            )
-                            if refined_envelope.refined_text:
-                                refined_text = refined_envelope.refined_text
-                            if refined_envelope.device_target and not device_target:
-                                device_target = refined_envelope.device_target
-                        except Exception as _refine_exc:
-                            logger.debug("PromptRefiner skipped: %s", _refine_exc)
-
-                        # Device routing is decided here, not by the client.
-                        # `refine` is behind FERAL_PROMPT_REFINER, which is off
-                        # by default and returns an identity envelope, so with
-                        # the flag off it infers nothing and a phone saying "on
-                        # my Mac" resolved to http_api, where every
-                        # desktop_control tool is denied. Clients worked around
-                        # that by sending `device_target` themselves, which put
-                        # a second copy of a security-routing rule in each SDK.
-                        # This inference is deterministic and flag-independent;
-                        # an explicit `device_target` from the client still
-                        # wins, because the client knows things the text does
-                        # not say.
-                        if not device_target:
-                            try:
-                                from agents.prompt_refiner import infer_device_target
-
-                                device_target = infer_device_target(text) or None
-                            except Exception:
-                                logger.debug("device_target inference failed", exc_info=True)
-
-                        context = {
-                            "source": "phone_surface",
-                            "mode": "phone_surface",
-                            "channel": channel,
-                            "reply_mode": reply_mode,
-                            "source_node": node_id or "",
-                            "paired_device_id": paired_device_id or "",
-                        }
-                        if device_target in ("brain", "phone", "glasses"):
-                            context["device_target"] = device_target
-                        elif (
-                            str(getattr(ws, "_feral_node_type", "") or "").lower()
-                            in _PHONE_NODE_TYPES
-                        ):
-                            # A paired phone that names no known device is the
-                            # operator asking the brain. Resolve to brain_host
-                            # rather than letting source "phone_surface" fall
-                            # through to http_api, which denies
-                            # agentic_computer_use__execute_task and the desktop
-                            # shell: "check my computer" failed while "check
-                            # something on my Mac" worked, and the only fix was
-                            # each client sending device_target itself. An
-                            # unrecognised value ("tv", "auto") is dropped rather
-                            # than passed on. This grants nothing new: the same
-                            # authenticated node could already send
-                            # device_target "brain".
-                            context["surface"] = "brain_host"
-                        if refined_envelope is not None:
-                            context["refinement"] = refined_envelope.model_dump()
-                        if reply_to:
-                            context["reply_to"] = reply_to
-
-                        response_text = ""
-                        # Audit-r11 fix — Bug 1: iOS double assistant bubble.
-                        # The orchestrator's broadcast ``text_response`` AND
-                        # the synchronous ``chat_response`` below both reach
-                        # the phone WS when the phone is the only client on
-                        # this session. Set a per-session suppression flag for
-                        # the duration of this turn; ``response_delivery.send_text``
-                        # consults it and skips the broadcast frame. The
-                        # ``try/finally`` guarantees we always clear the flag
-                        # so a desktop client joining the session later still
-                        # gets ``text_response`` on its OWN turns.
-                        state.orchestrator._text_response_suppressed[target_sid] = True
-                        try:
-                            if reply_mode == "stream":
-                                result = await state.orchestrator.handle_command_stream(
-                                    session_id=target_sid,
-                                    text=refined_text,
-                                    context=context,
-                                )
-                            else:
-                                result = await state.orchestrator.handle_command(
-                                    session_id=target_sid,
-                                    text=refined_text,
-                                    context=context,
-                                )
-                            if isinstance(result, str):
-                                response_text = result
-                            elif isinstance(result, dict):
-                                response_text = str(
-                                    result.get("text") or result.get("message") or ""
-                                )
-                            if not response_text and state.memory:
-                                history = state.memory.working_get(target_sid) or []
-                                for item in reversed(history):
-                                    if item.get("role") == "assistant" and item.get("text"):
-                                        response_text = str(item["text"])
-                                        break
-                        finally:
-                            state.orchestrator._text_response_suppressed.pop(target_sid, None)
-                    _record_phone_envelope(
-                        "allowed", "chat_request",
-                        detail={"session_id": target_sid, "channel": channel,
-                                "reply_mode": reply_mode, "text_len": len(text)},
-                        payload_for_hash=payload_dict,
-                    )
-                except RuntimeContextError as exc:
-                    orch_error = exc.code
-                    response_text = ""
-                    _record_phone_envelope(
-                        "error", "chat_request", detail={"reason": exc.code},
-                        payload_for_hash=payload_dict,
-                    )
-                except Exception as exc:
-                    coordinator = coordinator_for(state)
-                    managed = coordinator is not None and coordinator.known_managed(target_sid)
-                    logger.warning("Phone chat processing failed (%s); managed=%s", type(exc).__name__, managed)
-                    orch_error = ("context_processing_failed; inspect earlier actions before retrying"
-                                  if managed else str(exc)[:500] or exc.__class__.__name__)
-                    response_text = ""
-                    _record_phone_envelope(
-                        "error", "chat_request",
-                        detail={"reason": "orchestrator_error", "error": orch_error[:200]},
-                        payload_for_hash=payload_dict,
-                    )
-
-                # Phase-1 validation pass (Item 2): the brain emits
-                # an explicit HUP `error` frame on the failure branch
-                # AND populates `payload.error` on the chat_response
-                # so a chat-only client (one that doesn't track the
-                # parallel `error` frame) still surfaces the real
-                # failure string. Pinned by
-                # tests/test_phone_envelopes.py round-trip + the
-                # daemon_session regression test.
-                if orch_error:
-                    await _send_protocol_error(
-                        ws,
-                        4001,
-                        f"Orchestrator failed for chat_request: {orch_error}",
-                        name="orchestrator_error",
-                    )
-                chat_payload = {
-                    "session_id": target_sid,
-                    "text": response_text,
-                    "reply_mode": reply_mode,
-                    "channel": channel,
-                    "reply_to": reply_to,
-                    "error": orch_error,
-                }
-                # The behavioural policy that shaped THIS reply, on the
-                # same frame as the reply. Without it a shortened answer
-                # is indistinguishable from an answer that happened to
-                # be short, and the adaptation cannot be demonstrated.
-                # Omitted entirely (not sent as an empty object) when no
-                # biometric reading has ever landed, so "not adapting"
-                # stays distinguishable from "adapting to neutral".
-                _somatic_turn = _somatic_state_for_turn(target_sid)
-                if _somatic_turn is not None:
-                    chat_payload["somatic"] = _somatic_turn
-                # Attribution links for an answer grounded in a third
-                # party. Google Maps' terms allow grounded output to
-                # reach an end user only when its sources are viewable
-                # in the same interaction, and these glasses have no
-                # screen, so the phone renders them while the glasses
-                # speak. Popped, so an ungrounded answer never inherits
-                # the sources of the one before it.
-                _sources_turn = _grounding_sources_for_turn(target_sid)
-                if _sources_turn:
-                    chat_payload["sources"] = _sources_turn
-                await ws.send_json(hup_frame("chat_response", chat_payload))
+                phone_chats.guard()
+                if not phone_chats.submit(target_sid,
+                        lambda request=payload_dict, sid=target_sid, source=node_id,
+                        orchestrator=phone_state.orchestrator, memory=phone_state.memory:
+                        run_phone_chat(request, sid, source, orchestrator, memory)):
+                    await ws.send_json(hup_frame("chat_response", {
+                        "session_id": target_sid, "text": "", "reply_mode": reply_mode,
+                        "channel": channel, "reply_to": reply_to,
+                        "error": "phone_chat_busy; request was not started",
+                    }))
 
             elif msg.type == "chat_response":
                 _record_phone_envelope(
@@ -5102,36 +5164,67 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 )
 
     except WebSocketDisconnect:
-        if node_id:
-            logger.info(f"Daemon disconnected: {node_id}")
-            state.daemons.pop(node_id, None)
-            # Same leak as the web handler: audio/perception/mesh state
-            # was cleared here but the voice router never was, so a
-            # phone that dropped LTE or went to background kept a live
-            # (billing) OpenAI Realtime socket and a stale
-            # node->session entry that poisoned its next
-            # voice_session_start. `stop_node_voice` is the
-            # node-shaped teardown — `stop_session_voice` only ever
-            # finds web sessions, whose node id is the synthetic
-            # `webclient_<sid>`.
-            if state.voice_router:
-                try:
-                    await state.voice_router.stop_node_voice(node_id)
-                except Exception as voice_exc:
-                    logger.warning(
-                        f"Voice teardown for node {node_id} failed: {voice_exc}"
-                    )
-            if state.skill_executor:
-                state.skill_executor.unregister_daemon(node_id)
-            if state.hardware_mesh:
-                state.hardware_mesh.on_node_disconnected(node_id)
-            state.capability_registry.unregister_node(node_id)
-            # Location is opt-in, held in RAM only, and true only while
-            # the phone that sent it is attached. Nothing writes it to an
-            # episode, so dropping it here is the whole of forgetting it.
-            for sid in state.get_sessions_for_daemon(node_id):
-                state.perception.update_connected_nodes(sid, list(state.daemons.keys()))
-                state.perception.clear_location(sid)
+        pass
+    finally:
+        phone_chats.stop()
+
+        async def settle_phone():
+            await phone_chats.drain()
+            # Remove only this socket's routing entries. Shared working memory,
+            # native/web owners and a replacement's routes remain untouched.
+            for sid, routed in tuple(phone_state.sessions.items()):
+                if routed is ws:
+                    phone_state.sessions.pop(sid, None)
+            if node_id:
+                async with phone_scope_lock(phone_state, "node", node_id):
+                    if phone_state.daemons.get(node_id) is ws:
+                        logger.info(f"Daemon disconnected: {node_id}")
+                        phone_state.daemons.pop(node_id, None)
+                        # Same leak as the web handler: audio/perception/mesh state
+                        # was cleared here but the voice router never was, so a
+                        # phone that dropped LTE or went to background kept a live
+                        # (billing) OpenAI Realtime socket and a stale
+                        # node->session entry that poisoned its next
+                        # voice_session_start. `stop_node_voice` is the
+                        # node-shaped teardown — `stop_session_voice` only ever
+                        # finds web sessions, whose node id is the synthetic
+                        # `webclient_<sid>`.
+                        if phone_state.voice_router:
+                            try:
+                                await phone_state.voice_router.stop_node_voice(node_id)
+                            except Exception as voice_exc:
+                                logger.warning(
+                                    f"Voice teardown for node {node_id} failed: {voice_exc}"
+                                )
+                        if phone_state.skill_executor:
+                            phone_state.skill_executor.unregister_daemon(node_id)
+                        if phone_state.hardware_mesh:
+                            phone_state.hardware_mesh.on_node_disconnected(node_id)
+                        phone_state.capability_registry.unregister_node(node_id)
+                        # Location is opt-in, held in RAM only, and true only while
+                        # the phone that sent it is attached. Nothing writes it to an
+                        # episode, so dropping it here is the whole of forgetting it.
+                        for sid in phone_state.get_sessions_for_daemon(node_id):
+                            phone_state.perception.update_connected_nodes(sid, list(phone_state.daemons.keys()))
+                            phone_state.perception.clear_location(sid)
+
+        cleanup = asyncio.create_task(settle_phone())
+        phone_state.register_background_task(cleanup)
+
+        def cleanup_completed(done):
+            if not done.cancelled() and done.exception() is not None:
+                logger.warning("Owned phone cleanup was not confirmed")
+
+        cleanup.add_done_callback(cleanup_completed)
+        # TestClient/ASGI cancellation scopes can cancel receive at the same
+        # instant as disconnect. Keep bounded cleanup owned across that scope;
+        # direct task cancellation or a deadline still leaves the retained task.
+        import anyio
+        with anyio.CancelScope(shield=True):
+            try:
+                await asyncio.wait_for(asyncio.shield(cleanup), timeout=10)
+            except asyncio.TimeoutError:
+                logger.warning("Owned phone cleanup is still pending")
 
 
 # ─────────────────────────────────────────────

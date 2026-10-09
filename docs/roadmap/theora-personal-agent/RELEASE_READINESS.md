@@ -330,6 +330,7 @@ Separate source inspection, isolated fixtures, actual app interaction, actual ex
 
 | Evidence | Established boundary | Still unverified |
 |---|---|---|
+| [October 9 iOS/phone source integration](IOS_PHONE_INTEGRATION_20261009.md): 184 Foundation assertions, full unsigned device-target build; frozen backend 274 passed / 2 skipped and Ruff passed | One visible timeline and combined available tools; strict shared-session, reply/approval ownership and responsive legacy phone intake | Installed Mac/iPhone integration, exact Chrome owner handoff, Wi-Fi/ATS, physical audio/background, unified durable memory and phone task reconciliation/cancellation |
 | Remote source `6b368ccf7`: required CI/native success; backend 12,127 passed / 83 skipped / 73.94% coverage; corrected web coverage passed | Ubuntu/Python 3.11 PR regression lane and Mac typecheck/fixtures/lifeline/auditor; API-stubbed Playwright | Mypy 859 versus baseline 812; full Linux/performance/account/device/signing acceptance remains open |
 | Actual immutable 9.26 populated acceptance | Rich persistence, search/rename/pin, local reply, review cancellation and relaunch | Confirmed AX recursion SIGSEGV; context truncation, guessed fallback and pending-review false completion require source fixes and a new assembled candidate |
 | Actual 9.26 avatar-onboarding launch, normal quit and relaunch; strict ad-hoc build and bounded audit passed, 39 desktop fixture assertions | Bounded real startup and safe unavailable-suite behavior | Full screens, existing-profile migration, backend task outcomes |
