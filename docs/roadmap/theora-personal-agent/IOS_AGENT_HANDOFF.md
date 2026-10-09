@@ -2,9 +2,101 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
+## October 9 connection and browser review
+
+Current Mac artifact is [9.47](NATIVE_9_47_ACCEPTANCE.md). The Theora iOS checkout
+was inspected at `dfe2b08541e597c738bacd5fdc61275fc4f476a3`; its existing project
+and vendor changes were preserved. No iOS files, credentials, personal logs,
+physical phone state, accounts or settings were changed. The iOS agent continues
+to own its implementation. The following distinguishes actual compatible wire
+contracts from product gaps; it does not identify the original failure without
+the active device endpoint/error and installed backend identity.
+
+### Confirmed and tested existing integration
+
+Theora stores candidate endpoints in UserDefaults and its pairing token in
+Keychain. FeralConnectionManager opens `/v1/node` with Bearer authentication,
+registers a phone/ios node, and marks Connected after node_ack. Its askBrain and
+typed chat paths request the primary session and explicitly target brain unless
+the user names the phone. OpenAI voice tools use the shared GeminiToolExecutor;
+ask_feral_brain calls this same bridge. Existing Mac execution is present.
+
+The iOS CLAUDE.md claim that native pairing tokens cannot access the REST
+allowlist is stale. Current FERAL accepts claimed, PIN-cleared native tokens on
+that existing allowlist. Unclaimed/PIN-pending tokens remain refused. Do not
+replace authentication or widen the allowlist based on that older statement.
+
+Actual unmodified FeralHUPModels.swift compiled with Foundation on this Mac.
+Its encoded registration/chat frames passed the registered FERAL ASGI route
+with a real disposable DevicePairingStore and an inert orchestrator. Tests
+verified pairing-token handshake, brain_host context, exact session/reply_to
+correlation and explicit failure. The actual Swift inbound parser then accepted
+both node acknowledgments and both success/failure replies. Model source SHA256:
+`0c5007a644ca03bb89b8235c8b4690bd36aee8dcbd1d28b9a1165851c21b7f7e`.
+This is cross-repository wire acceptance, not an iOS app build, TCP/TLS/ATS test,
+physical phone/browser task or successful inference. Private probe sources,
+frames and logs remain in feral-theora-wire-20261009. An initial harness expected
+the paired device UUID to equal the node ID; correcting that test assumption
+produced the passing result. It was not an application failure.
+
+Independent existing managed-context, primary-token, surface-routing and exact
+Chrome approval cases also passed: 23 tests, 63 warnings, 6.39 seconds. These use
+inert collaborators. Missing tracked-turn fields do not universally block phone
+tools: prepared_scope already creates the existing fenced command handoff.
+Legacy detached tasks can also start with owner_verified=False and
+replay_protected=False. Preserve these working paths while strengthening receipts.
+
+Executed selections: test_pair_token_rest_auth.py,
+test_existing_chrome_approval_integration.py, test_phone_voice_and_surface_defaults.py,
+and the test_runtime_context_ingress.py cases
+test_real_phone_chat_is_fenced_before_prelude_and_commit_before_reply and
+test_real_phone_pending_context_refuses_before_working_push_or_provider.
+No production files changed during this read-only gate; its output is retained
+in the worker tool receipt rather than a separate log file.
+
+### Required iOS and shared-contract repairs
+
+1. **Expose readiness in stages.** Connected currently proves node_ack only.
+   FeralConnectionManager.primarySessionId (around line 813) silently falls back
+   to phone-nodeId after REST failure. Show primary-session resolution failure
+   and its status separately from network connection; do not imply the fallback
+   has the Mac conversation's browser or model readiness.
+2. **Attach Chrome through an explicit owner-controlled handoff.** Mac attachment
+   belongs to the selected chat; phone uses primary or its fallback session.
+   ExistingChromeConnection and ToolRunner correctly refuse a foreign owner.
+   Offer a reviewed shared-session/task choice, preserving exact browser resource
+   and approvals. Pairing is not implicit Chrome attachment and phone credentials
+   must not bypass local-only connection/select operations.
+3. **Track request ownership and timeout outcomes.** askBrain waits 110 seconds
+   then removes its continuation without cancelling the Mac action. A late reply
+   falls into generic chat. Typed chat has neither exact request ownership nor a
+   timeout. Extend existing tracked admission/results/cancellation contracts;
+   show still-running or unknown work and never resubmit it automatically. Keep
+   socket receive/control intake responsive without adding a second runner.
+4. **Preserve truthful failures and approvals.** Nonempty text can hide response
+   errors. resolveApproval checks HTTP200 only, while the approval center removes
+   the card before its request succeeds. Keep a pending/retryable state, read the
+   authoritative resolution/result and distinguish approved from executed and
+   verified. Reject stale/wrong-session approval responses. Empty granted
+   capabilities currently fall back to every advertised capability; preserve
+   explicit empty grants instead of treating them as a missing legacy field.
+5. **Define credential recovery.** Native iOS keeps a pairing token with the
+   default 24-hour sliding expiry. Once expired, verification refuses before
+   renewal. It does not receive the 30-day bearer issued to browser_node_v2.
+   A long offline interval can require pairing again. Implement a reviewed native
+   credential lifecycle or clearly surface re-pairing; do not extend expiry or
+   weaken revocation silently.
+
+Next actual test: verify reviewed Mac LAN access and fixed saved port, pair an
+explicit phone, confirm authenticated primary lookup, attach Chrome to the
+explicit shared owner, execute one inert/read-only browser request, then test
+disconnect, timeout and approval rejection without effect replay. The actual
+Xcode app build and physical glasses/audio gates remain; a Foundation wire
+executable establishes neither device nor simulator app acceptance.
+
 ## October 4 integration additions
 
-The current Mac artifact is [9.36](NATIVE_9_36_ACCEPTANCE.md), which completes
+The historical Mac artifact was [9.36](NATIVE_9_36_ACCEPTANCE.md), which completes
 local chat, saved-context recall and normal restart with bounded evidence.
 It does not certify phone/audio/glasses behavior. The following extends the
 existing iOS tickets; older desktop checkpoints below are historical.

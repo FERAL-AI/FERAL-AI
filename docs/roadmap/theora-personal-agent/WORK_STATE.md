@@ -44,6 +44,15 @@ retained separately, not erased or reported as product acceptance.
 
 Next ready work:
 
+October 9 cross-repository review confirmed the existing Theora bridge and
+tested its actual Swift-encoded frames against registered ASGI routes with real
+disposable pairing state and inert orchestration. Success/failure reply parsing
+passed. The REST pairing-token gap in iOS documentation is stale. Silent primary
+session fallback, Chrome owner mismatch, timeout/late-reply handling, premature
+approval removal and native credential expiry remain concrete repair cards.
+The iOS agent owns its source; no iOS files or phone state were changed.
+[Current iOS handoff and executed limits](IOS_AGENT_HANDOFF.md#october-9-connection-and-browser-review).
+
 1. Reconcile the phone's configured endpoint/error with native saved LAN access
    and actual device pairing. No phone response is available for this gate yet.
 2. Add an explicit owner-controlled phone/canonical-session browser task handoff
