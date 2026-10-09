@@ -9,23 +9,31 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ### Active source wave after 9.47
 
-Published baseline documentation head is `ff85f5f84e66c380a2f942c62bdfe5d6fc5f98f5`.
+Provider/setup and WebUI corrections are published as `3da563c4d` in draft PR310.
 The immutable application below has not changed. Current local work is not yet
 packaged or accepted as a completed end-to-end product:
 
-- Native worker owns supported-provider selection/probe fidelity, followed by
-  an explicit reviewed switch to the canonical Theora conversation in Browser.
-  Provider/setup standalone fixtures pass 66/89 assertions; linked/native GUI
-  integration remains pending. Parent catalog/runtime alias activation, restart
+- Native provider selection/probe fidelity is published. An explicit reviewed
+  switch to the canonical Theora conversation in Browser is verified in source.
+  Provider/setup standalone fixtures pass 66/89 assertions. Shared-session source
+  passes 29 linked model groups, 118 browser checks and production typecheck;
+  actual packaged interaction remains pending. Parent catalog/runtime alias activation, restart
   and fallback parity plus API/registry regressions pass 89 tests, seven warnings,
-  using isolated data. This provider/test correction is ready for separate
-  coherent publication while the workflow and shared-session source remains local.
+  using isolated data. Shared-session source publication follows; workflow changes
+  remain local until independent review and frozen integration complete.
 - Runtime worker owns truthful natural-language TaskFlow outcomes and durable
   approval continuation through the existing orchestrator/executor. Actual-class
   isolated probing reproduced a two-step goal marked completed with a pending
   unbound approval and zero execution calls. Existing 225 focused regressions
   pass but do not cover that complete journey. Keep the working durable handoff,
   result ownership, recovery and cancellation; retain the shared effect lane.
+  Independent review then reproduced structured credential leakage, delegated
+  pending work labeled complete and lost fresh-process reviews. Repairs now
+  include redacted receipts, original known-surface preservation, unsupported
+  nested-delegation refusal and explicit review renewal without dispatch/replay.
+  Further independent checks found first-step global-constraint omission and
+  constructed task context admitted as personal user-memory evidence through two
+  paths. Narrow corrections and final frozen verification remain pending.
 - Web worker owns the stale seven-tile Playwright expectation after Home became
   the eighth dock tile. Exact published-head CI passed all ten geometry cases;
   its tile-count assertion failed. This is separate from the earlier local
@@ -33,6 +41,11 @@ packaged or accepted as a completed end-to-end product:
   20 dock checks and full official E2E: 108 passed, 63 opt-in real-backend skips,
   zero failures. 47 Home/navigation Vitest checks and the unchanged production
   JS/CSS build pass. Actual live-backend/model/device tests remain separate.
+
+The concurrent phone-intake source is now reviewed and locally committed as
+c8749b56a with its regression tests and evidence. Frozen verification passes 274
+tests, two skipped. It remains outside immutable 9.47; full combined source-wave
+and candidate acceptance remains separate. Details and ownership are below.
 
 Sources will freeze after worker release, then receive combined tests, coherent
 publication and an exact-source candidate. Planned 9.48 uses at most 2 GiB of new
@@ -46,6 +59,31 @@ The initial parent API-test invocation omitted isolated environment variables an
 failed during state initialization; the corrected disposable run then exposed an
 incorrect test-only provider ID. Both attempts are retained separately. The final
 isolated 89-test run passes. No live provider/account operation was performed.
+
+### Local iOS and phone intake integration, October 9
+
+The separate iOS checkout now presents one conversation timeline and combined
+available phone/glasses tools with the existing FERAL delegation. Shared-session
+lookup, exact request/late-reply ownership, errors, empty grants and authoritative
+approval handling are repaired locally. Foundation checks pass 184 assertions;
+the full unsigned device-target app build succeeds. Existing project/vendor
+changes are preserved and iOS has not been pushed or installed.
+
+The current backend adds bounded owned /v1/node chat scheduling so receive/control
+traffic remains responsive during Mac work. Reviewed three-file patch is applied;
+the frozen current-source integration passes 274 tests, two skipped, with CI-rule
+Ruff passing. A first shared-working-tree run passed but was invalidated by
+concurrent runtime edits; the frozen receipt is the accepted check. This source
+wave is separate from the immutable 9.47 application and unrelated active workers.
+[Implemented behavior, exact inputs and remaining acceptance](IOS_PHONE_INTEGRATION_20261009.md).
+
+Actual phone endpoint/error, canonical Chrome owner handoff, Wi-Fi/ATS,
+installation, audio/hardware and durable phone task/memory contracts remain open.
+Local implementation commits are iOS 8db007f and backend c8749b56a; neither
+was pushed by this task. The shared checkpoint/handoff is retained with the
+concurrent native source wave. Next integration must preserve other workers and
+build an exact-source candidate before device acceptance. Do not report source
+checks as the original device failure being fixed.
 
 ### Published 9.47 artifact
 
@@ -93,7 +131,8 @@ disposable pairing state and inert orchestration. Success/failure reply parsing
 passed. The REST pairing-token gap in iOS documentation is stale. Silent primary
 session fallback, Chrome owner mismatch, timeout/late-reply handling, premature
 approval removal and native credential expiry remain concrete repair cards.
-The iOS agent owns its source; no iOS files or phone state were changed.
+That review changed no iOS files or phone state. The local implementation above
+now supersedes its source-only repair list; physical phone state remains untouched.
 [Current iOS handoff and executed limits](IOS_AGENT_HANDOFF.md#october-9-connection-and-browser-review).
 
 1. Reconcile the phone's configured endpoint/error with native saved LAN access

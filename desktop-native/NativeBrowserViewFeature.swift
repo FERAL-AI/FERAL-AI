@@ -251,6 +251,7 @@ private final class BrowserViewRedirectGuard: NSObject, URLSessionTaskDelegate {
     var canConnect: Bool { !busy && stateConfirmed && ready && owner != nil && !connected && connectionID == nil }
     var canSelect: Bool { !busy && stateConfirmed && ready && connected && connectionID != nil && targets.contains(where: { $0.id == draft }) }
     var canDisconnect: Bool { !busy && owner != nil && connectionID != nil }
+    var canReviewSharedConversation: Bool { !busy && !connected && connectionID == nil && reviewedConnect == nil && reviewedSelect == nil }
     func configure(origin: URL?, owner: String?, ready: Bool) async {
         guard self.origin != origin || self.owner != owner || self.ready != ready else { return }
         generation = UUID(); stateConfirmed = false; reviewedConnect = nil; reviewedSelect = nil; self.origin = origin; self.owner = Self.validOwner(owner) ? owner : nil; self.ready = ready
@@ -354,10 +355,28 @@ private final class BrowserViewRedirectGuard: NSObject, URLSessionTaskDelegate {
     }
 }
 
+struct NativeSharedConversationReview: Identifiable {
+    let id = UUID()
+    let createdUptime = ProcessInfo.processInfo.systemUptime
+    let currentSessionID: String, primarySessionID: String
+    let origin: URL
+    let runtimeRevision: UUID, admissionRevision: UUID, conversationRevision: UUID
+    var explanation: String {
+        "Save and verify the current conversation " + currentSessionID + ", then select the canonical shared Theora conversation " + primarySessionID + " on " + origin.absoluteString + ". Existing messages stay in their own conversations; isolated history is not inserted into shared model context. Chrome remains owned by the chat that connected it. Disconnect Chrome in its current owning chat before switching, then explicitly connect and attach a tab in the shared chat. This switch does not transfer browser access, authorize tasks or change approvals."
+    }
+}
+
 struct NativeBrowserViewFeatureView: View {
     let baseURL: URL?
     var sessionID: String? = nil
     var taskReady = true
+    var sharedSessionID: String? = nil
+    var canPrepareShared = false
+    var sharedReview: NativeSharedConversationReview? = nil
+    var prepareShared: () -> Void = {}
+    var cancelShared: () -> Void = {}
+    var confirmShared: (NativeSharedConversationReview) async -> Void = { _ in }
+    var canConfirmShared: (NativeSharedConversationReview) -> Bool = { _ in false }
     @StateObject private var model = NativeBrowserViewModel()
     @StateObject private var chrome = NativeExistingChromeModel()
     @State private var review = false
@@ -367,6 +386,11 @@ struct NativeBrowserViewFeatureView: View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("Browser").font(.title2.bold()); Spacer(); Button("Refresh") { Task { await model.refresh() } }.disabled(model.busy || model.watching) }
             Text("Watch FERAL work in the attached browser tab.").foregroundStyle(.secondary)
+            if let sharedSessionID {
+                if sharedSessionID == sessionID { Text("Shared Theora conversation selected. Connect Chrome and attach its tab here to use this owner from the phone.").font(.caption).foregroundStyle(.secondary) }
+                else { Button("Use shared Theora conversation…", action: prepareShared).disabled(!canPrepareShared || !chrome.canReviewSharedConversation || model.busy || model.watching || chromeReview || tabReview || review)
+                    Text(chrome.connectionID != nil || chrome.connected ? "Disconnect Chrome here first, then review the shared conversation switch. Reconnect and attach the tab in the shared chat; browser access and approvals are not transferred." : "Disconnect Chrome in its owning chat before switching; reconnect and attach the tab in the shared conversation. Browser access and approvals are not transferred.").font(.caption).foregroundStyle(.secondary) }
+            } else { Text("The shared Theora session has not been verified. Reconnect the local agent before selecting it.").font(.caption).foregroundStyle(.secondary) }
             HStack {
                 Button("Use my Chrome…") { chromeReview = chrome.prepareConnect() }.disabled(!chrome.canConnect || model.watching)
                 Button("Refresh Chrome") { Task { await chrome.refresh() } }.disabled(chrome.busy || sessionID == nil)
@@ -411,7 +435,14 @@ struct NativeBrowserViewFeatureView: View {
             await model.stop(); await model.configure(baseURL: baseURL)
             await chrome.configure(origin: baseURL, owner: sessionID, ready: taskReady)
         }
-        .onDisappear { review = false; chromeReview = false; tabReview = false; Task { await model.stop() } }
+        .onDisappear { cancelShared(); review = false; chromeReview = false; tabReview = false; Task { await model.stop() } }
+        .sheet(item: Binding(get: { sharedReview }, set: { if $0 == nil { cancelShared() } })) { item in
+            VStack(alignment: .leading, spacing: 16) {
+                Text("Use the shared Theora conversation?").font(.headline)
+                NativeSelectableText(item.explanation)
+                HStack { Button("Cancel", action: cancelShared); Spacer(); Button("Confirm conversation switch") { Task { await confirmShared(item) } }.disabled(!canConfirmShared(item) || !chrome.canReviewSharedConversation || model.busy || model.watching || chromeReview || tabReview || review) }
+            }.padding(24).frame(width: 680)
+        }
         .alert("Connect your Chrome to this chat?", isPresented: $chromeReview) {
             Button("Cancel", role: .cancel) { chrome.cancelReview() }
             Button("Connect Chrome") { Task { await chrome.connect() } }

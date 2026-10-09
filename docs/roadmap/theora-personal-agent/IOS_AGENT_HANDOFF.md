@@ -2,6 +2,25 @@
 
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
+## October 9 local source integration
+
+The read-only review below is historical. Local iOS changes now combine the
+conversation timeline and available device tools and repair shared-session lookup,
+request/late-response handling, empty grants and approval receipts. Actual
+Foundation fixtures pass 184 assertions and the full unsigned device-target app
+build succeeds. The applied backend phone-intake patch passes a frozen
+current-source selection of 274 tests, two skipped, plus CI-rule Ruff.
+
+[Source integration, exact evidence and acceptance gates](IOS_PHONE_INTEGRATION_20261009.md)
+records the distinction between implemented, verified and installed behavior.
+Local source commits are iOS 8db007f and backend c8749b56a. Neither was pushed
+by this task. Mac 9.47 is unchanged; these changes require a new exact-source
+candidate.
+The original phone error, Chrome attachment to the shared owner, actual Wi-Fi/
+ATS/credential recovery and device audio remain unverified. No iOS push or
+physical phone/account operation occurred. The shared UI is not yet a unified
+durable memory/event ledger or durable simultaneous voice/task system.
+
 ## October 9 connection and browser review
 
 Current Mac artifact is [9.47](NATIVE_9_47_ACCEPTANCE.md). The Theora iOS checkout
@@ -55,6 +74,37 @@ No production files changed during this read-only gate; its output is retained
 in the worker tool receipt rather than a separate log file.
 
 ### Required iOS and shared-contract repairs
+
+Mac follow-up source adds an explicit Browser review to select the verified
+canonical Theora conversation. It rechecks primary identity, saves/readbacks the
+current separate thread and never imports isolated history into shared context.
+Chrome must be disconnected in its current owner before switching, then explicitly
+connected and attached in the shared conversation. Linked native fixtures pass;
+this is outside immutable 9.47 until a new package is accepted. Preserve the
+phone's authenticated primary lookup rather than silently using another session.
+
+This foreground shared conversation is distinct from a detached task's internal
+execution session, taskflow-<flow_id>. A TaskFlow action review currently belongs
+to that internal owner, so a phone's primary-session approval cannot answer it.
+The native global Oversight surface can inspect it. Completing the phone path
+requires an explicit server-owned projection/authorization bridge:
+
+- Validate the persisted tracked origin, handoff key, terms digest, current step
+  and exact pending request using the existing TaskFlow authority. Caller-supplied
+  origin/session fields cannot establish this binding.
+- Publish a versioned review to the verified originating conversation while
+  retaining the internal execution owner privately. Correlate resolution and
+  reconnect discovery through existing task receipts.
+- An authenticated paired-device response must match that origin and exact
+  current review. Translate internally to the existing dispatcher; preserve
+  resource, argument, expiry and context checks. Never authorize a session-wide
+  grant by replacing the action's execution session.
+- Browser access for a detached job needs a separately reviewed Mac-local
+  delegation bound to the job, connection, target, owner and revision. Do not
+  rewrite the actual Chrome owner or allow a phone to connect/select Chrome.
+
+These are proposed shared-contract changes, not fields to send to the current
+server. A local note/approval fixture does not accept a phone/browser job journey.
 
 1. **Expose readiness in stages.** Connected currently proves node_ack only.
    FeralConnectionManager.primarySessionId (around line 813) silently falls back

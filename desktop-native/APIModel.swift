@@ -13,6 +13,8 @@ import CoreFoundation
     @Published private(set) var profileArchiveError: String?
     private var profileArchiveStoppedOwner: NativeRuntimeOwnership?
     private var profileArchiveTask: Task<Void, Never>?
+    @Published private(set) var sharedConversationReview: NativeSharedConversationReview?
+    private var usedSharedConversationReviews = Set<UUID>()
     @Published private(set) var recoveryStatus = "Shared conversation recovery has not been verified."
     @Published var startupStatus = "Starting your local agent…"
     @Published var isSending = false
@@ -538,32 +540,87 @@ import CoreFoundation
         if let remembered, !deletedConversationIDs.contains(remembered) { selected = try await readExactConversation(remembered) }
         guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision else { throw NativeFailure("The conversation changed during selection recovery.") }
         if selected == nil {
-            selected = try await readExactConversation(primary)
-            guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision else { throw NativeFailure("The primary selection changed during recovery.") }
-            if selected == nil {
-                // Only exact Not found permits requesting atomic insert-if-missing.
-                // A concurrently created winning record is preserved by the backend.
-                guard !deletedConversationIDs.contains(primary),
-                      let receipt = try await request("/api/conversations/new", body: ["id": primary, "title": "Shared conversation", "create_if_missing": true]) as? [String: Any],
-                      NativeConversationWire.bool(receipt["ok"]) == true, receipt["id"] as? String == primary,
-                      NativeConversationWire.bool(receipt["create_if_missing"]) == true,
-                      NativeConversationWire.bool(receipt["created"]) != nil,
-                      let winning = receipt["conversation"] as? [String: Any], winning["id"] as? String == primary,
-                      let winningRows = winning["messages"] as? [[String: Any]], winningRows.count <= 5_000,
-                      JSONSerialization.isValidJSONObject(winningRows),
-                      let winningData = try? JSONSerialization.data(withJSONObject: winningRows), winningData.count <= 8_388_608 else {
-                    throw NativeFailure("Canonical shared conversation creation was not confirmed. Refresh before retrying.")
-                }
-                guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision else { throw NativeFailure("The primary selection changed after creation; refresh before continuing.") }
-                selected = try await readExactConversation(primary)
-                guard selected != nil else { throw NativeFailure("Canonical shared conversation creation was acknowledged but readback was unavailable.") }
-            }
+            selected = try await readOrCreateSharedConversation(primary, runtimeOwner: runtimeOwner, revision: revision)
         }
         guard let selected, ready, runtimeOwner == runtimeRevision, revision == conversationRevision else { throw NativeFailure("The recovered selection was unavailable or changed.") }
         try restoreThread(selected)
         try recovery.rememberSelection(conversationID)
         await recoverCurrentTranscript(revision: revision, runtimeOwner: runtimeOwner)
     }
+    private func readOrCreateSharedConversation(_ primary: String, runtimeOwner: UUID, revision: UUID, canProceed: (() -> Bool)? = nil) async throws -> [String: Any] {
+        if let stored = try await readExactConversation(primary) {
+            guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision, !Task.isCancelled, canProceed?() != false else { throw NativeFailure("The shared selection changed during readback.") }
+            return stored
+        }
+        guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision, !Task.isCancelled, canProceed?() != false,
+              !deletedConversationIDs.contains(primary),
+              let receipt = try await request("/api/conversations/new", body: ["id": primary, "title": "Shared conversation", "create_if_missing": true]) as? [String: Any],
+              NativeConversationWire.bool(receipt["ok"]) == true, receipt["id"] as? String == primary,
+              NativeConversationWire.bool(receipt["create_if_missing"]) == true,
+              NativeConversationWire.bool(receipt["created"]) != nil,
+              let winning = receipt["conversation"] as? [String: Any], winning["id"] as? String == primary,
+              let winningRows = winning["messages"] as? [[String: Any]], winningRows.count <= 5_000,
+              JSONSerialization.isValidJSONObject(winningRows),
+              let winningData = try? JSONSerialization.data(withJSONObject: winningRows), winningData.count <= 8_388_608 else {
+            throw NativeFailure("Canonical shared conversation creation was not confirmed. Refresh before retrying.")
+        }
+        guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision, !Task.isCancelled, canProceed?() != false else { throw NativeFailure("The primary selection changed after creation; refresh before continuing.") }
+        guard let stored = try await readExactConversation(primary) else { throw NativeFailure("Canonical shared conversation creation was acknowledged but readback was unavailable.") }
+        guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision, !Task.isCancelled, canProceed?() != false else { throw NativeFailure("The shared selection changed during readback.") }
+        return stored
+    }
+
+    var verifiedSharedConversationID: String? {
+        guard featureBaseURL != nil, let id = recovery.primarySessionID, NativeSessionRecoveryWire.validID(id) else { return nil }
+        return id
+    }
+    private var sharedConversationBusy: Bool {
+        chatMutationBusy || effectsPaused || contextSetupPending || chatRecoveryBlocked || checkingChatStatus || unresolvedChatRequest != nil || pendingContextCreationSID != nil
+    }
+    var canPrepareSharedConversation: Bool {
+        !preferencesUnavailable && ready && !sharedConversationBusy && contextState.canSaveDisplay && !conversationID.isEmpty && verifiedSharedConversationID.map { $0 != conversationID } == true && usedSharedConversationReviews.count < 1000
+    }
+    @discardableResult func prepareSharedConversation() -> NativeSharedConversationReview? {
+        guard canPrepareSharedConversation, let primary = verifiedSharedConversationID, let origin = featureBaseURL else {
+            sharedConversationReview = nil; error = "Verify the shared session and stop chat or voice, finish uploads and resolve pending recovery before switching."; return nil
+        }
+        let review = NativeSharedConversationReview(currentSessionID: conversationID, primarySessionID: primary, origin: origin,
+            runtimeRevision: runtimeRevision, admissionRevision: runtimeAdmissionRevision, conversationRevision: conversationRevision)
+        sharedConversationReview = review; return review
+    }
+    func cancelSharedConversationReview() { sharedConversationReview = nil }
+    private func sharedReviewCurrent(_ review: NativeSharedConversationReview, ownsSwitch: Bool = false) -> Bool {
+        let age = ProcessInfo.processInfo.systemUptime - review.createdUptime
+        return !preferencesUnavailable && ready && !effectsPaused && !runtimeAdmissionSuspended && !isSending && !uploadingAttachments && !contextSetupPending && !chatRecoveryBlocked && !checkingChatStatus && unresolvedChatRequest == nil && contextState.recoveryRequestID == nil && contextState.canSaveDisplay && pendingContextCreationSID == nil && ["off", "ended"].contains(voice.state) && (!switchingConversation || ownsSwitch) && !Task.isCancelled && review.origin == runtime.baseURL && review.runtimeRevision == runtimeRevision && review.admissionRevision == runtimeAdmissionRevision && review.conversationRevision == conversationRevision && review.currentSessionID == conversationID && review.primarySessionID != conversationID && !deletedConversationIDs.contains(review.currentSessionID) && !deletedConversationIDs.contains(review.primarySessionID) && age >= 0 && age <= 300
+    }
+    func canConfirmSharedConversation(_ review: NativeSharedConversationReview) -> Bool {
+        sharedConversationReview?.id == review.id && !usedSharedConversationReviews.contains(review.id) && sharedReviewCurrent(review) && verifiedSharedConversationID == review.primarySessionID
+    }
+    @discardableResult func confirmSharedConversation(_ review: NativeSharedConversationReview) async -> Bool {
+        guard canConfirmSharedConversation(review) else { error = "Shared conversation review changed or expired. No switch was made."; return false }
+        usedSharedConversationReviews.insert(review.id); sharedConversationReview = nil; switchingConversation = true; error = nil
+        defer { if review.conversationRevision == conversationRevision { switchingConversation = false } }
+        do {
+            let primary = try await recovery.resolvePrimary()
+            guard sharedReviewCurrent(review, ownsSwitch: true), primary == review.primarySessionID else { throw NativeFailure("The verified shared session changed. Review again; no conversation was saved or switched.") }
+            let currentRows = messages.map(\.savedRecord)
+            let savedData = try JSONSerialization.data(withJSONObject: currentRows, options: .sortedKeys)
+            guard await persistConversation(), sharedReviewCurrent(review, ownsSwitch: true),
+                  let stored = try await readExactConversation(review.currentSessionID),
+                  let storedRows = stored["messages"] as? [[String: Any]],
+                  try JSONSerialization.data(withJSONObject: storedRows, options: .sortedKeys) == savedData,
+                  try JSONSerialization.data(withJSONObject: messages.map(\.savedRecord), options: .sortedKeys) == savedData,
+                  sharedReviewCurrent(review, ownsSwitch: true) else { throw NativeFailure("The current conversation save or exact readback was not confirmed. It remains selected; refresh before switching.") }
+            _ = try await readOrCreateSharedConversation(primary, runtimeOwner: review.runtimeRevision, revision: review.conversationRevision, canProceed: { self.sharedReviewCurrent(review, ownsSwitch: true) })
+            guard sharedReviewCurrent(review, ownsSwitch: true), recovery.primarySessionID == primary else { throw NativeFailure("The connection or conversation changed. No shared selection was applied.") }
+            switchingConversation = false
+            return await openConversation(primary, expectedRuntimeOwner: review.runtimeRevision, expectedSelection: review.conversationRevision)
+        } catch {
+            if review.runtimeRevision == runtimeRevision, review.conversationRevision == conversationRevision { self.error = "Shared conversation switch was not confirmed: " + error.localizedDescription }
+            return false
+        }
+    }
+
     private func readExactConversation(_ id: String) async throws -> [String: Any]? {
         guard NativeSessionRecoveryWire.validID(id), !deletedConversationIDs.contains(id) else { throw NativeFailure("The selected conversation ID is unavailable.") }
         guard let body = try await request("/api/conversations/" + NativeSessionRecoveryWire.segment(id), allowMissingConversation: true) as? [String: Any] else { throw NativeFailure("The saved conversation was unreadable.") }
@@ -1163,29 +1220,25 @@ import CoreFoundation
         } catch { if conversationID == id, socketGeneration == connectionID { self.error = error.localizedDescription; contextStatus = "Saved-context setup needs checking. Reconnect this exact new chat; no task was sent." } }
     }
 
-    func openConversation(_ id: String) async {
-        guard ready, !shuttingDown, !isSending, !switchingConversation, !uploadingAttachments, !deletedConversationIDs.contains(id) else {
-            error = "Wait for attachment uploads or stop the current reply before switching conversations."; return
+    @discardableResult func openConversation(_ id: String, expectedRuntimeOwner: UUID? = nil, expectedSelection: UUID? = nil) async -> Bool {
+        guard ready, !shuttingDown, !isSending, !switchingConversation, !uploadingAttachments, !deletedConversationIDs.contains(id), expectedRuntimeOwner == nil || expectedRuntimeOwner == runtimeRevision, expectedSelection == nil || expectedSelection == conversationRevision else {
+            error = "Wait for attachment uploads or stop the current reply before switching conversations."; return false
         }
         switchingConversation = true; conversationRevision = UUID()
-        let revision = conversationRevision
+        let revision = conversationRevision, runtimeOwner = runtimeRevision
         defer { if conversationRevision == revision { switchingConversation = false } }
         _ = await conversationSaveTask?.value
-        guard ready, revision == conversationRevision else { return }
+        guard ready, !effectsPaused, !runtimeAdmissionSuspended, runtimeOwner == runtimeRevision, revision == conversationRevision, !Task.isCancelled else { return false }
         do {
-            let segment = NativeMemoryWire.segment(id)
-            guard let thread = try await request("/api/conversations/" + segment) as? [String: Any],
-                  thread["id"] as? String == id,
-                  let rows = thread["messages"] as? [[String: Any]] else {
-                throw NativeFailure("The agent did not return the selected conversation.")
-            }
-            guard revision == conversationRevision, !deletedConversationIDs.contains(id) else { return }
-            try restoreThread(["id": id, "messages": rows]); pendingAttachments = []; attachmentError = nil; chatError = nil; error = nil
+            guard let thread = try await readExactConversation(id) else { throw NativeFailure("The selected conversation was not found.") }
+            guard ready, !effectsPaused, !runtimeAdmissionSuspended, runtimeOwner == runtimeRevision, revision == conversationRevision, !deletedConversationIDs.contains(id), !Task.isCancelled, !isSending, !uploadingAttachments, contextState.recoveryRequestID == nil, ["off", "ended"].contains(voice.state) else { return false }
+            try restoreThread(thread); pendingAttachments = []; attachmentError = nil; chatError = nil; error = nil
             rememberCurrentSelection()
-            await recoverCurrentTranscript(revision: revision, runtimeOwner: runtimeRevision)
-            guard revision == conversationRevision, conversationID == id else { return }
+            await recoverCurrentTranscript(revision: revision, runtimeOwner: runtimeOwner)
+            guard ready, runtimeOwner == runtimeRevision, revision == conversationRevision, conversationID == id, !Task.isCancelled else { return false }
             await connectChat()
-        } catch { if revision == conversationRevision { self.error = error.localizedDescription } }
+            return ready && runtimeOwner == runtimeRevision && conversationID == id && revision == conversationRevision
+        } catch { if revision == conversationRevision { self.error = error.localizedDescription }; return false }
     }
 
     func conversationDeleted(_ id: String) {

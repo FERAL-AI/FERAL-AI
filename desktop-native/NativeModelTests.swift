@@ -47,6 +47,11 @@ private final class WireProtocol: URLProtocol {
     static func reset(_ responses: [String: [String: Any]] = [:]) {
         lock.lock(); defer { lock.unlock() }; captured = []; replies = responses; sequences = [:]; delayedPath = nil; readSavedRows = false; savedRows = []
     }
+    static func setReplies(_ values: [String: [String: Any]]) { lock.lock(); defer { lock.unlock() }; replies.merge(values) { _, new in new } }
+    static func setSequence(_ path: String, _ values: [[String: Any]]) { lock.lock(); defer { lock.unlock() }; sequences[path] = values }
+    static func clearCapture() { lock.lock(); defer { lock.unlock() }; captured = [] }
+    static func paths() -> [String] { lock.lock(); defer { lock.unlock() }; return captured.map { $0.0 } }
+    static func delay(_ path: String) { lock.lock(); defer { lock.unlock() }; delayedPath = path }
     static func bodies(_ path: String) -> [[String: Any]] {
         lock.lock(); defer { lock.unlock() }; return captured.filter { $0.0 == path }.map { $0.1 }
     }
@@ -697,6 +702,84 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         print("PASS single provider onboarding: \(assertions) linked assertions (local/cloud, exact readback, skip, restart, stale owner, failed completion and paused effects)")
     }
 
+    @MainActor private static func sharedConversationSwitchTests() async throws {
+        let primary = "shared-theora-fixture", isolated = "shared-isolated-fixture"
+        let rich: [[String: Any]] = [["id": "isolated-rich-row", "role": "assistant", "content": "Separate history", "reasoning": "Keep evidence", "tools": [["id": "preserved-tool"]]]]
+        let shared: [[String: Any]] = [["id": "primary-row", "role": "assistant", "content": "Shared history"]]
+        func replies() -> [String: [String: Any]] { ["/api/sessions/primary": ["session_id": primary], "/api/conversations/" + isolated: ["id": isolated, "messages": rich], "/api/conversations/" + primary: ["id": primary, "messages": shared], "/api/sessions/" + isolated + "/transcript": ["session_id": isolated, "messages": [], "count": 0], "/api/sessions/primary/transcript": ["session_id": primary, "primary_session_id": primary, "messages": [], "count": 0]] }
+        func make(voiceAudio: NativeVoiceAudioIO? = nil) async throws -> NativeModel {
+            WireProtocol.reset(replies())
+            let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [WireProtocol.self]
+            let suite = "feral.shared-switch-fixture." + UUID().uuidString
+            let preferences = UserDefaults(suiteName: suite)!; preferences.removePersistentDomain(forName: suite)
+            preferences.set(isolated, forKey: "feral.native.selectedConversation." + primary.utf8.map { String(format: "%02x", $0) }.joined())
+            let subject = NativeModel(session: URLSession(configuration: config), preferences: preferences, chatSender: { _ in }, voiceAudio: voiceAudio)
+            subject.ready = true; try subject.restoreThread(["id": "initial-fixture", "messages": []])
+            try await subject.resolveStartupConversation()
+            WireProtocol.setReplies(["/api/conversations/" + isolated: ["id": isolated, "messages": subject.messages.map(\.savedRecord)]])
+            WireProtocol.clearCapture()
+            return subject
+        }
+        let subject = try await make()
+        try expect(subject.verifiedSharedConversationID == primary && subject.canPrepareSharedConversation, "only verified primary identity exposes shared switch")
+        let review = subject.prepareSharedConversation()!
+        subject.cancelSharedConversationReview()
+        try expect(!subject.canConfirmSharedConversation(review) && WireProtocol.bodies("/api/conversations/save").isEmpty, "cancelled preparation grants no selection or write")
+        let accepted = subject.prepareSharedConversation()!
+        let didSwitch = await subject.confirmSharedConversation(accepted)
+        try expect(didSwitch && subject.activeConversationID == primary && subject.messages.first?.id == "primary-row", "explicit shared switch loads existing shared rich rows")
+        let save = WireProtocol.bodies("/api/conversations/save")
+        try expect(save.count == 1 && save[0]["id"] as? String == isolated && (save[0]["messages"] as? [[String: Any]])?.first?["reasoning"] as? String == "Keep evidence", "switch saves only current separate thread with full metadata")
+        let paths = WireProtocol.paths()
+        try expect(paths.firstIndex(of: "/api/conversations/save")! < paths.firstIndex(of: "/api/conversations/" + primary)! && WireProtocol.bodies("/api/conversations/new").isEmpty, "current save and readback precede shared transition without overwriting shared record")
+        let replaySwitch = await subject.confirmSharedConversation(accepted)
+        try expect(!replaySwitch && WireProtocol.bodies("/api/conversations/save").count == 1, "shared switch review cannot replay")
+        for field in ["chat", "upload", "selection"] {
+            let held = try await make(); let stale = held.prepareSharedConversation()!
+            if field == "chat" { held.isSending = true }; if field == "upload" { held.uploadingAttachments = true }; if field == "selection" { held.switchingConversation = true }
+            let heldSwitch = await held.confirmSharedConversation(stale)
+            try expect(!held.canPrepareSharedConversation && !heldSwitch && WireProtocol.bodies("/api/conversations/save").isEmpty, "busy " + field + " refuses review without a write")
+        }
+        let audio = ModelVoiceAudioFixture(), speaking = try await make(voiceAudio: audio)
+        let voiceReview = speaking.prepareSharedConversation()!
+        await speaking.reconnectVerifiedChat(); await negotiate(speaking)
+        await speaking.voice.start(mode: "chained", provider: "configured")
+        let voiceSwitch = await speaking.confirmSharedConversation(voiceReview)
+        try expect(speaking.voice.state == "starting" && !speaking.canPrepareSharedConversation && !voiceSwitch && WireProtocol.bodies("/api/conversations/save").isEmpty && audio.starts == 0, "actual voice-starting state blocks shared switching without physical mic/provider capture")
+        await speaking.voice.stop()
+        let drift = try await make(); let changedPrimary = drift.prepareSharedConversation()!
+        WireProtocol.setReplies(["/api/sessions/primary": ["session_id": "different-primary-fixture"]])
+        let driftSwitch = await drift.confirmSharedConversation(changedPrimary)
+        try expect(!driftSwitch && drift.activeConversationID == isolated && WireProtocol.bodies("/api/conversations/save").isEmpty, "changed canonical identity refuses before saving or switching")
+        let replaced = try await make(); let oldRuntime = replaced.prepareSharedConversation()!
+        try await replaced.resolveStartupConversation()
+        let replacedSwitch = await replaced.confirmSharedConversation(oldRuntime)
+        try expect(!replacedSwitch && WireProtocol.bodies("/api/conversations/save").isEmpty, "replacement runtime revision invalidates same-address review")
+        let missing = try await make(); let missingReview = missing.prepareSharedConversation()!
+        WireProtocol.setSequence("/api/conversations/" + primary, [["error": "Not found"], ["id": primary, "messages": shared]])
+        WireProtocol.setReplies(["/api/conversations/new": ["ok": true, "id": primary, "create_if_missing": true, "created": false, "conversation": ["id": primary, "messages": shared]]])
+        let createdSwitch = await missing.confirmSharedConversation(missingReview)
+        try expect(createdSwitch, "missing shared record uses verified atomic creation and preserves concurrent winner")
+        let create = WireProtocol.bodies("/api/conversations/new").first!
+        try expect(create["id"] as? String == primary && create["create_if_missing"] as? Bool == true && create["messages"] == nil && missing.messages.first?.id == "primary-row", "atomic creation never inserts isolated history into canonical thread")
+        let badSave = try await make(); let badSaveReview = badSave.prepareSharedConversation()!
+        WireProtocol.setReplies(["/api/conversations/save": ["id": "foreign", "message_count": 1]])
+        let failedSaveSwitch = await badSave.confirmSharedConversation(badSaveReview)
+        try expect(!failedSaveSwitch && badSave.activeConversationID == isolated && WireProtocol.bodies("/api/conversations/" + primary).isEmpty, "failed isolated save blocks shared read and transition")
+        let readback = try await make(); let badReadback = readback.prepareSharedConversation()!
+        WireProtocol.setReplies(["/api/conversations/" + isolated: ["id": isolated, "messages": []]])
+        let failedReadbackSwitch = await readback.confirmSharedConversation(badReadback)
+        try expect(!failedReadbackSwitch && readback.activeConversationID == isolated && WireProtocol.bodies("/api/conversations/new").isEmpty, "current save receipt cannot replace exact independent readback")
+        let raced = try await make(); let raceReview = raced.prepareSharedConversation()!
+        WireProtocol.delay("/api/sessions/primary")
+        let pending = Task { await raced.confirmSharedConversation(raceReview) }
+        while WireProtocol.bodies("/api/sessions/primary").isEmpty { await Task.yield() }
+        raced.uploadingAttachments = true
+        let racedSwitch = await pending.value
+        try expect(!racedSwitch && WireProtocol.bodies("/api/conversations/save").isEmpty && raced.activeConversationID == isolated, "upload beginning during primary refresh prevents later save or switch")
+        print("PASS reviewed shared Theora switch: exact save/readback, busy and runtime fences, primary drift and atomic creation; mocked HTTP only")
+    }
+
     @MainActor static func main() async {
         do {
             try await onboardingTransitions()
@@ -1069,12 +1152,13 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             dying.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: staleHealthOwner, phase: .limited, reason: "Memory unavailable; use Security.", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false, serviceReachable: true))
             try expect(!dying.ready && dying.serviceReachable && dying.securityBaseURL != nil && dying.featureBaseURL == nil, "limited memory readiness exposes Security only and never full agent features")
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
+            try await sharedConversationSwitchTests()
             try await managedVoiceRequestBarrierTests()
             try await passiveRuntimeSuspensionTests()
             try await trackedChatTests()
             try await contextCheckpointTests()
             try await contextRecoveryTests()
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 28 groups; mocked HTTP/wire only, no engine/model execution")
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 29 groups; mocked HTTP/wire only, no engine/model execution")
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)
             exit(1)

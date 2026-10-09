@@ -363,6 +363,7 @@ private final class BrowserViewHeldResponse {
         let model = NativeExistingChromeModel(session: session()), origin = URL(string: "http://127.0.0.1:49122")!
         await model.configure(origin: origin, owner: "chat-owner", ready: true)
         expect(model.prepareConnect(), "late connection review captured")
+        expect(!model.canReviewSharedConversation, "pending Chrome review prevents shared switch until explicitly cancelled")
         let pending = Task { await model.connect() }; await wait { held.ready }
         await model.configure(origin: origin, owner: "new-owner", ready: true)
         held.release(chromeState()); await pending.value
@@ -374,9 +375,12 @@ private final class BrowserViewHeldResponse {
         }
         let uncertain = NativeExistingChromeModel(session: session())
         await uncertain.configure(origin: origin, owner: "chat-owner", ready: true); await uncertain.disconnect()
+        expect(!uncertain.canReviewSharedConversation, "unknown disconnect keeps connection identity and blocks shared switch")
         expect(uncertain.connectionID == viewID && uncertain.error != nil && uncertain.error?.contains("private details") == false, "unconfirmed disconnect retains retry identity and redacts upstream")
     }
     @MainActor static func main() async throws {
+        let sharedReview = NativeSharedConversationReview(currentSessionID: "isolated-fixture", primarySessionID: "primary-fixture", origin: URL(string: "http://127.0.0.1:49122")!, runtimeRevision: UUID(), admissionRevision: UUID(), conversationRevision: UUID())
+        expect(sharedReview.explanation.contains("isolated history is not inserted") && sharedReview.explanation.contains("Disconnect Chrome") && sharedReview.explanation.contains("does not transfer browser access"), "shared selection review discloses history and browser-owner boundaries")
         try wireValidation(); await transportAndConsent(); await refusalAndExpiry(); await duplicateAndForeignFrames()
         await delayedFrameAndNonoverlap(); await cleanupAndOriginRace(); await staleGrantAndRuntimeFence(); await automaticPollingStopsCleanly()
         await expiryWhileFramePending(); await automaticPollingPace()

@@ -1,5 +1,14 @@
 # Theora / FERAL full-product release readiness
 
+**October 9 source wave after 9.47.** Provider/setup parity is published as
+`3da563c4d`; phone intake is locally committed as `c8749b56a` with frozen isolated
+verification. Native shared-conversation source passes 29 linked model groups,
+118 browser checks and production typecheck. Runtime TaskFlow review and combined
+source/candidate acceptance remain pending. The immutable 9.47 below contains
+none of this later source wave. [Shared-conversation behavior and gates](SHARED_THEORA_CONVERSATION_20261009.md),
+[phone integration evidence](IOS_PHONE_INTEGRATION_20261009.md),
+[active ownership and next action](WORK_STATE.md).
+
 **Current checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
 published exact runtime source `4bc4128cc74c85f6eaba08cf613b7730fc60ab76`:
 restored Home routing/navigation, stable native saved endpoint, truthful passive

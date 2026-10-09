@@ -212,7 +212,10 @@ struct NativeRootView: View {
                         case .providers:
                             NativeProvidersFeatureView(baseURL: model.featureBaseURL, onConfigurationChanged: { Task { await model.refreshProviderConfiguration() } })
                         case .coding: NativeCodingView(model: model)
-                        case .browser: NativeBrowserViewFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID, taskReady: selectedContextPolicy.taskReady).id(model.localRuntimeGeneration)
+                        case .browser: NativeBrowserViewFeatureView(baseURL: model.featureBaseURL, sessionID: model.activeConversationID.isEmpty ? nil : model.activeConversationID, taskReady: selectedContextPolicy.taskReady,
+                            sharedSessionID: model.verifiedSharedConversationID, canPrepareShared: model.canPrepareSharedConversation, sharedReview: model.sharedConversationReview,
+                            prepareShared: { _ = model.prepareSharedConversation() }, cancelShared: model.cancelSharedConversationReview,
+                            confirmShared: { item in _ = await model.confirmSharedConversation(item) }, canConfirmShared: model.canConfirmSharedConversation).id(model.localRuntimeGeneration)
                         case .health:
                             TabView {
                                 NativeHealthFeatureView(baseURL: model.featureBaseURL).tabItem { Label("Overview", systemImage: "heart") }
