@@ -5,6 +5,8 @@ struct NativeProviderChoice: Identifiable, Equatable {
     let id: String, name: String, defaultModel: String, defaultURL: String, note: String
     let needsKey: Bool, configured: Bool, chatReady: Bool
     let reachable: Bool?
+    let runtimeSupported: Bool?, setupSelectable: Bool?
+    var automaticChoice: Bool { runtimeSupported == true && setupSelectable == true }
 }
 struct NativeProviderKey: Identifiable, Equatable {
     let id: String, fingerprint: String
@@ -60,7 +62,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
         providers = []; models = []; keys = []; selected = ""; activeProvider = ""; activeModel = ""; runtimeState = "Not confirmed"
         model = ""; endpoint = ""; fallbacks = ""; cachedConfig = [:]; cachedVault = [:]; usedReviews = []; modelsSource = "Not loaded"; health = []; keysError = nil; error = nil; notice = nil; busy = false
     }
-    private func request(_ path: String, method: String = "GET", body: [String: Any]? = nil, query: [URLQueryItem] = []) async throws -> [String: Any] {
+    private func request(_ path: String, method: String = "GET", body: [String: Any]? = nil, query: [URLQueryItem] = [], probeProvider: String? = nil) async throws -> [String: Any] {
         try Task.checkCancellation(); let started = generation
         guard let baseURL, baseURL.user == nil, baseURL.password == nil, baseURL.query == nil, baseURL.fragment == nil, ["127.0.0.1", "localhost", "::1", "[::1]"].contains(baseURL.host ?? ""), baseURL.scheme == "http" || baseURL.scheme == "https" else { throw ProviderFeatureError(message: "Connect to the local agent to configure providers.") }
         var components = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
@@ -78,7 +80,13 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
         // echo submitted secrets in validation errors or upstream exceptions.
         guard (200..<300).contains(http.statusCode) else { throw ProviderFeatureError(message: "HTTP \(http.statusCode). Provider action is not confirmed. Refresh before retrying.") }
         guard let value = (try? JSONSerialization.jsonObject(with: data)) as? [String: Any] else { throw ProviderFeatureError(message: "Provider response is incomplete.") }
-        if let issue = value["error"] as? String, !issue.isEmpty { throw ProviderFeatureError(message: "Provider reported an error. Refresh to confirm state.") }
+        if let probeProvider {
+            guard providerBool(value["reachable"]) != nil, value["id"] != nil || value["provider_id"] != nil else { throw ProviderFeatureError(message: "Provider probe did not identify the reviewed provider.") }
+            for field in ["id", "provider_id"] { if let actual = value[field] { guard actual as? String == probeProvider else { throw ProviderFeatureError(message: "Provider probe did not identify the reviewed provider.") } } }
+            if let issue = value["error"], !(issue is NSNull) {
+                guard let detail = issue as? String, detail.utf8.count <= 4096, providerBool(value["reachable"]) == false || detail.isEmpty else { throw ProviderFeatureError(message: "Provider probe status is inconsistent. Private details are withheld.") }
+            }
+        } else if let issue = value["error"] as? String, !issue.isEmpty { throw ProviderFeatureError(message: "Provider reported an error. Refresh to confirm state.") }
         return value
     }
     private func safeID(_ value: String) throws -> String {
@@ -102,7 +110,10 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
         return try rows.map { row in
             guard let id = row["id"] as? String, seen.insert(id).inserted else { throw ProviderFeatureError(message: "Invalid provider catalog entry.") }; _ = try safeID(id)
             guard let needsKey = providerBool(row["requires_api_key"]), let configured = providerBool(row["configured"]), let ready = providerBool(row["chat_ready"]) else { throw ProviderFeatureError(message: "Provider catalog flags are unsupported.") }
-            return NativeProviderChoice(id: id, name: row["display_name"] as? String ?? id, defaultModel: row["default_model"] as? String ?? "", defaultURL: row["default_base_url"] as? String ?? "", note: row["stub_reason"] as? String ?? "", needsKey: needsKey, configured: configured, chatReady: ready, reachable: providerBool(row["reachable"]))
+            for field in ["runtime_supported", "setup_selectable"] {
+                if row[field] != nil && providerBool(row[field]) == nil { throw ProviderFeatureError(message: "Provider runtime selection flags are unsupported.") }
+            }
+            return NativeProviderChoice(id: id, name: row["display_name"] as? String ?? id, defaultModel: row["default_model"] as? String ?? "", defaultURL: row["default_base_url"] as? String ?? "", note: row["stub_reason"] as? String ?? "", needsKey: needsKey, configured: configured, chatReady: ready, reachable: providerBool(row["reachable"]), runtimeSupported: providerBool(row["runtime_supported"]), setupSelectable: providerBool(row["setup_selectable"]))
         }
     }
     private func keySnapshot(_ raw: [String: Any]) throws -> [NativeProviderKey] {
@@ -140,7 +151,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
             runtimeState = providerBool(status["available"]).map { $0 ? "Runtime reports available" : "Runtime reports unavailable" } ?? "Not confirmed"
             if providerBool(status["supported"]) == false { runtimeState = "No runtime adapter reported" }
             try await loadHealth()
-            if selected.isEmpty { selected = providers.contains(where: { $0.id == activeProvider }) ? activeProvider : providers.first?.id ?? ""; applySelection() }
+            if selected.isEmpty { selected = providers.contains(where: { $0.id == activeProvider }) ? activeProvider : providers.first(where: { $0.automaticChoice })?.id ?? ""; applySelection() }
             if !selected.isEmpty { try await loadDetails(selected) }
         } catch { if started == generation { self.error = error.localizedDescription; runtimeState = "Not confirmed" } }
     }
@@ -175,7 +186,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
     }
     private func loadDetails(_ id: String) async throws {
         let started = generation
-        let value = try await request("/api/llm/providers/\(try safeID(id))/models", query: [URLQueryItem(name: "live", value: "false")])
+        let value = try await request("/api/llm/providers/\(try safeID(id))/models", query: [URLQueryItem(name: "live", value: "false"), URLQueryItem(name: "recommended", value: "true"), URLQueryItem(name: "model_class", value: "chat")])
         let parsed = try modelCatalog(value, provider: id)
         models = parsed.ids
         modelsSource = parsed.source
@@ -228,6 +239,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
                 guard let url = URLComponents(string: review.endpoint), ["http", "https"].contains(url.scheme ?? ""), url.host != nil, url.user == nil, url.password == nil, url.query == nil, url.fragment == nil else { throw ProviderFeatureError(message: "Use an HTTP(S) endpoint without embedded credentials, query or fragment.") }
             }
             if case .activate = review.operation {
+                guard descriptor.automaticChoice || !review.endpoint.isEmpty else { throw ProviderFeatureError(message: "This provider has no confirmed runtime adapter. Enter an explicit compatible gateway endpoint before activation; catalogue defaults do not establish support.") }
                 guard !review.model.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ProviderFeatureError(message: "Choose or enter a model first.") }
                 guard review.fallbacks.allSatisfy({ fallback in providers.contains(where: { $0.id == fallback }) }) else { throw ProviderFeatureError(message: "Unknown fallback provider.") }
             }
@@ -268,13 +280,12 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
                 notice = providerBool(runtime["ok"]) == true && providerBool(runtime["available"]) == true ? "Configuration saved; runtime reports available." : "Configuration saved, but runtime activation or availability is not confirmed. Refresh status before chatting."
                 if let persisted = value["persisted"] as? [String: Any], providerBool(persisted["ok"]) == false { notice! += " Credential persistence failed." }
             case .refreshModels:
-                sent = true; let value = try await request(prefix + "/models", query: [URLQueryItem(name: "live", value: "true"), URLQueryItem(name: "force", value: "true")])
-                guard let rows = value["models"] as? [[String: Any]] else { throw ProviderFeatureError(message: "Live model response is incomplete.") }
-                var modelIDs = Set<String>()
-                models = rows.compactMap { $0["id"] as? String }.filter { modelIDs.insert($0).inserted }; modelsSource = value["source"] as? String ?? "Unknown source"
+                sent = true; let value = try await request(prefix + "/models", query: [URLQueryItem(name: "live", value: "true"), URLQueryItem(name: "force", value: "true"), URLQueryItem(name: "recommended", value: "true"), URLQueryItem(name: "model_class", value: "chat")])
+                let parsed = try modelCatalog(value, provider: id)
+                models = parsed.ids; modelsSource = parsed.source
                 notice = "Model list returned from \(modelsSource)."; if !(value["warning"] as? String ?? "").isEmpty { notice! += " Discovery failed; this may be cached or fallback data." }
             case .probe:
-                sent = true; let value = try await request(prefix + "/probe", method: "POST", body: [:])
+                sent = true; let value = try await request(prefix + "/probe", method: "POST", body: [:], probeProvider: id)
                 notice = providerBool(value["reachable"]).map { $0 ? "Provider probe reports reachable. This is not proof every model supports chat." : "Provider probe reports unreachable." } ?? "Probe did not report reachability."
             case .addKey:
                 _ = try safeID(review.label); guard !review.secret.isEmpty else { throw ProviderFeatureError(message: "Enter a key to save.") }
@@ -337,10 +348,12 @@ struct NativeProvidersFeatureView: View {
                 if let error = model.error { NativeSelectableText(error).foregroundStyle(.red) }
                 if let notice = model.notice { NativeSelectableText(notice) }
                 Picker("Provider", selection: Binding(get: { model.selected }, set: { id in secret = ""; label = ""; Task { await model.select(id) } })) {
-                    Text("Choose provider").tag(""); ForEach(model.providers) { Text($0.name).tag($0.id) }
+                    Text("Choose provider").tag(""); ForEach(model.providers) { Text($0.name + ($0.automaticChoice ? "" : " · manual gateway required")).tag($0.id) }
                 }.disabled(model.busy)
                 if let provider = model.providers.first(where: { $0.id == model.selected }) {
                     Text(provider.configured ? "Credential/configuration present; reachability is \(provider.reachable.map { $0 ? "reported reachable" : "reported unreachable" } ?? "not probed")." : "Provider needs configuration.").font(.callout)
+                    if !provider.automaticChoice { Text("A runtime adapter is not confirmed for this catalogue entry. Activating it requires an explicit compatible gateway endpoint; the catalogue endpoint is informational.").foregroundStyle(.orange) }
+                    Text("Successful inference, FERAL tool execution and voice are separately verified capabilities.").font(.caption).foregroundStyle(.secondary)
                     if !provider.chatReady { Text("Catalog marks this provider as not chat-ready. \(provider.note)").foregroundStyle(.orange) }
                     TextField("Model identifier", text: $model.model).textFieldStyle(.roundedBorder).disabled(model.busy)
                     Picker("Cached models (\(model.modelsSource))", selection: $model.model) {

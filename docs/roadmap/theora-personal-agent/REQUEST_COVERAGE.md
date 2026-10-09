@@ -1,14 +1,16 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 5).** Immutable 9.45 contains exact approval
-transfer and selected vision routing, with separate fresh native compilation,
-source/signature/import audits, actual bundled-method and backend lifecycle
-acceptance. Source integration passes 2,724 checks; exact build head has 18
-successful remote checks/four skips. Actual new GUI, physical voice, real model/
-account and distribution gates remain. Task results in the originating chat and
-trusted desktop resources are next.
-[Current state](WORK_STATE.md), [behavior](TASK_APPROVAL_AND_SELECTED_VISION_EVIDENCE.md),
-[artifact and limits](NATIVE_9_45_ACCEPTANCE.md).
+**Current checkpoint (October 9).** Immutable 9.47 contains restored Home,
+stable saved native endpoints, passive setup discovery and disabled signed
+messaging admission. Exact-source packaging and actual isolated native
+avatar/setup/Home/Quit/relaunch pass. Theora's actual Swift wire schemas pass
+registered backend-route fixtures, without a physical-phone task claim.
+Active local work covers provider eligibility/probe parity, explicit shared
+Theora conversation selection and truthful model-driven background-task approval
+continuation. These edits are not yet packaged. Full workflows, real inference,
+continuous voice, messaging transport, commerce and distribution remain open.
+[Current state](WORK_STATE.md), [repair evidence](END_TO_END_REPAIR_20261009.md),
+[artifact and limits](NATIVE_9_47_ACCEPTANCE.md).
 
 Reconciled October 4, 2026 against product requirements, existing source inventories and dated acceptance records. This tracks the full product. A source implementation, isolated fixture, actual task outcome and production release are separate evidence classes.
 
@@ -22,7 +24,7 @@ outcome, Stop/disconnect and normal Quit. Earlier 9.36 local chat/recall and 9.3
 markers remain separate historical evidence. Whole-desktop control source already
 exists; its complete packaged/model-driven acceptance is not established.
 [Historical GUI acceptance](NATIVE_9_40_ACCEPTANCE.md),
-[current artifact](NATIVE_9_45_ACCEPTANCE.md), [runtime review](RUNTIME_REVIEW_20261004.md)
+[current artifact](NATIVE_9_47_ACCEPTANCE.md), [runtime review](RUNTIME_REVIEW_20261004.md)
 and [WORK_STATE](WORK_STATE.md) distinguish the evidence and remaining gates.
 
 ## October4 additions and integration coverage

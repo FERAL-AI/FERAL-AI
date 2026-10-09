@@ -7,6 +7,48 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 9
 
+### Active source wave after 9.47
+
+Published baseline documentation head is `ff85f5f84e66c380a2f942c62bdfe5d6fc5f98f5`.
+The immutable application below has not changed. Current local work is not yet
+packaged or accepted as a completed end-to-end product:
+
+- Native worker owns supported-provider selection/probe fidelity, followed by
+  an explicit reviewed switch to the canonical Theora conversation in Browser.
+  Provider/setup standalone fixtures pass 66/89 assertions; linked/native GUI
+  integration remains pending. Parent catalog/runtime alias activation, restart
+  and fallback parity plus API/registry regressions pass 89 tests, seven warnings,
+  using isolated data. This provider/test correction is ready for separate
+  coherent publication while the workflow and shared-session source remains local.
+- Runtime worker owns truthful natural-language TaskFlow outcomes and durable
+  approval continuation through the existing orchestrator/executor. Actual-class
+  isolated probing reproduced a two-step goal marked completed with a pending
+  unbound approval and zero execution calls. Existing 225 focused regressions
+  pass but do not cover that complete journey. Keep the working durable handoff,
+  result ownership, recovery and cancellation; retain the shared effect lane.
+- Web worker owns the stale seven-tile Playwright expectation after Home became
+  the eighth dock tile. Exact published-head CI passed all ten geometry cases;
+  its tile-count assertion failed. This is separate from the earlier local
+  missing-browser launch failures. Corrected installed-Chrome acceptance passes
+  20 dock checks and full official E2E: 108 passed, 63 opt-in real-backend skips,
+  zero failures. 47 Home/navigation Vitest checks and the unchanged production
+  JS/CSS build pass. Actual live-backend/model/device tests remain separate.
+
+Sources will freeze after worker release, then receive combined tests, coherent
+publication and an exact-source candidate. Planned 9.48 uses at most 2 GiB of new
+artifacts, cached offline dependencies, canonical 9.48 plus sole rollback 9.47.
+Inspected obsolete generated 9.46 may retire only after identity/process/signature
+checks. Latest free-space observation is 17,760,000 KiB. Personal data/model caches
+and unrelated AUDIT-FIXES.md remain preserved. Ollama is reachable but its actual
+inventory is empty; no real local inference is accepted by these fixtures.
+
+The initial parent API-test invocation omitted isolated environment variables and
+failed during state initialization; the corrected disposable run then exposed an
+incorrect test-only provider ID. Both attempts are retained separately. The final
+isolated 89-test run passes. No live provider/account operation was performed.
+
+### Published 9.47 artifact
+
 **Current checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
 published exact runtime source `4bc4128cc74c85f6eaba08cf613b7730fc60ab76`:
 restored Home routing/navigation, stable native saved endpoint, truthful passive
@@ -23,7 +65,8 @@ Coding expansion, Linux expansion and Gen-UI remain deferred.
 Branch: `feat/native-product-release-foundation-20261001`, draft PR310.
 Runtime source `4bc4128cc` is published. Acceptance documentation is committed
 separately from that immutable runtime source. Pre-existing AUDIT-FIXES.md stays
-unstaged. All worker ownership is released and test hosts are stopped.
+unstaged. The preceding wave's ownership was released and its test hosts stopped;
+new active ownership is listed above.
 
 9.47 native SHA256:
 `92801661ed3c926a607ed368c69d34fa37bfc8ce682c5dfe7eb7aa98dc425428`.

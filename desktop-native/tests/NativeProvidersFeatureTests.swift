@@ -30,6 +30,10 @@ private final class ProviderWire: URLProtocol {
     static func body(_ path: String) -> [String: Any] { lock.lock(); defer { lock.unlock() }; return calls.last(where: { $0.0.path == path && $0.1 != "GET" })?.2 ?? [:] }
     static func mutations() -> Int { lock.lock(); defer { lock.unlock() }; return calls.filter { $0.1 != "GET" }.count }
     static func passiveOnly() -> Bool { lock.lock(); defer { lock.unlock() }; return calls.allSatisfy { $0.1 == "GET" && !$0.0.path.contains("probe") && (!($0.0.path.hasSuffix("/models")) || URLComponents(url: $0.0, resolvingAgainstBaseURL: false)?.queryItems?.contains(where: { $0.name == "live" && $0.value == "false" }) == true) } }
+    static func chatModelQueries() -> Bool { lock.lock(); defer { lock.unlock() }; return calls.filter { $0.0.path.hasSuffix("/models") }.allSatisfy { call in
+        let query = URLComponents(url: call.0, resolvingAgainstBaseURL: false)?.queryItems ?? []
+        return query.first(where: { $0.name == "recommended" })?.value == "true" && query.first(where: { $0.name == "model_class" })?.value == "chat"
+    } }
     static func hold(_ path: String) { lock.lock(); defer { lock.unlock() }; heldPaths.insert(path) }
     static func release() { lock.lock(); let values = callbacks; callbacks = []; heldPaths = []; lock.unlock(); values.forEach { $0() } }
 }
@@ -40,7 +44,7 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) thro
 @main struct NativeProvidersFeatureTests {
     static let base = URL(string: "http://127.0.0.1:9465")!
     static var fixtures: [String: (Int, [String: Any])] {
-        ["/api/llm/providers": (200, ["providers": [["id": "ollama", "display_name": "Ollama", "requires_api_key": false, "configured": true, "chat_ready": true], ["id": "openai", "display_name": "OpenAI", "requires_api_key": true, "configured": true, "chat_ready": true]]]),
+        ["/api/llm/providers": (200, ["providers": [["id": "ollama", "display_name": "Ollama", "requires_api_key": false, "configured": true, "chat_ready": true, "runtime_supported": true, "setup_selectable": true], ["id": "openai", "display_name": "OpenAI", "requires_api_key": true, "configured": true, "chat_ready": true, "runtime_supported": true, "setup_selectable": true]]]),
          "/api/llm/config": (200, ["provider": "ollama", "model": "local-test", "base_url": "http://127.0.0.1:11435/v1", "fallback_providers": []]),
          "/api/llm/status": (200, ["available": false, "supported": true]),
          "/api/llm/health": (200, ["candidates": [["provider": "ollama", "model": "local-test", "in_cooldown": true, "cooldown_remaining": 45, "probe_ok": false]]]),
@@ -54,11 +58,42 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) thro
     @MainActor static func waitFor(_ path: String) async throws { for _ in 0..<100 { if ProviderWire.count(path) > 0 { return }; try await Task.sleep(nanoseconds: 10_000_000) }; throw ProviderAssertion(message: "Held request missing") }
     @MainActor static func main() async {
         do {
+            let gateway: [String: Any] = ["id": "catalog-only", "display_name": "Gateway catalogue entry", "requires_api_key": false, "configured": true, "chat_ready": true, "default_base_url": "https://catalog.example/v1", "runtime_supported": false, "setup_selectable": false]
+            ProviderWire.reset(fixtures)
+            ProviderWire.set("/api/llm/providers", ["providers": [gateway]])
+            ProviderWire.set("/api/llm/config", ["provider": "catalog-only", "model": "saved-gateway-model", "base_url": "https://user.example/v1", "fallback_providers": []])
+            ProviderWire.set("/api/llm/providers/catalog-only/models", ["models": [], "source": "fallback"])
+            let savedGateway = make(); await savedGateway.refresh()
+            try check(savedGateway.selected == "catalog-only" && savedGateway.endpoint == "https://user.example/v1" && !savedGateway.providers[0].automaticChoice, "saved unsupported provider retains reviewed explicit gateway without adapter promotion")
+            savedGateway.endpoint = ""
+            _ = await savedGateway.execute(savedGateway.review(.activate))
+            try check(ProviderWire.mutations() == 0 && savedGateway.error?.contains("explicit compatible gateway") == true, "catalogue readiness and default URL cannot activate unsupported provider")
+            savedGateway.endpoint = "https://user.example/v1"
+            ProviderWire.setMutation("/api/llm/config", ["success": true, "provider": "catalog-only", "model": "saved-gateway-model", "reconfigured": ["ok": true, "available": false]])
+            ProviderWire.set("/api/llm/status", ["available": false, "supported": false])
+            let gatewaySaved = await savedGateway.execute(savedGateway.review(.activate))
+            try check(gatewaySaved && ProviderWire.body("/api/llm/config")["base_url"] as? String == "https://user.example/v1" && savedGateway.runtimeState == "No runtime adapter reported" && savedGateway.notice?.contains("not confirmed") == true, "manual gateway activation preserves exact terms without claiming a usable adapter or inference")
+            for flag in ["runtime_supported", "setup_selectable"] {
+                for malformed: Any in [NSNull(), 1, "true"] {
+                    var row = gateway; row[flag] = malformed
+                    ProviderWire.reset(fixtures); ProviderWire.set("/api/llm/providers", ["providers": [row]])
+                    let badFlag = make(); await badFlag.refresh()
+                    try check(badFlag.error != nil && ProviderWire.mutations() == 0, "non-boolean selection flags refuse catalogue authority")
+                }
+            }
+            var oldGateway = gateway; oldGateway.removeValue(forKey: "runtime_supported"); oldGateway.removeValue(forKey: "setup_selectable")
+            ProviderWire.reset(fixtures); ProviderWire.set("/api/llm/providers", ["providers": [oldGateway]])
+            let unknownSupport = make(); await unknownSupport.refresh()
+            try check(unknownSupport.selected.isEmpty && !unknownSupport.providers[0].automaticChoice, "legacy missing flags remain unknown and cannot choose a catalogue default automatically")
             ProviderWire.reset(fixtures)
             ProviderWire.set("/api/llm/providers/ollama/models", ["provider_id": "ollama", "models": ["fixture-local:latest", "fixture-local:latest"], "source": "cache", "warning": ""])
             let actualShape = make(); await actualShape.refresh()
             try check(actualShape.models == ["fixture-local:latest"] && actualShape.modelsSource == "cache" && actualShape.error == nil, "actual string model IDs load and deduplicate")
             try check(actualShape.model == "local-test" && ProviderWire.mutations() == 0, "discovery cannot replace the manually saved active model or write settings")
+            ProviderWire.set("/api/llm/providers/ollama/models", ["provider_id": "ollama", "models": ["live-string-model", "live-string-model"], "source": "live", "warning": ""])
+            _ = await actualShape.execute(actualShape.review(.refreshModels))
+            try check(actualShape.models == ["live-string-model"] && actualShape.modelsSource == "live" && actualShape.error == nil, "explicit live discovery decodes registered backend string IDs without replacing active model")
+            try check(ProviderWire.chatModelQueries(), "settings passive and explicit discovery use the same recommended chat filters as onboarding")
             for source in ["live", "cache", "fallback"] {
                 ProviderWire.reset(fixtures)
                 ProviderWire.set("/api/llm/providers/ollama/models", ["models": [], "source": source])
@@ -225,9 +260,15 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) thro
             print("PASS labeled key save never grants automatic activation/probe")
 
             ProviderWire.reset(fixtures); let probe = make(); await probe.refresh()
-            ProviderWire.set("/api/llm/providers/ollama/probe", ["reachable": false, "error": ""])
+            ProviderWire.set("/api/llm/providers/ollama/probe", ["id": "ollama", "reachable": false, "error": "private-provider-canary"])
             _ = await probe.execute(probe.review(.probe))
-            try check(probe.notice?.contains("unreachable") == true, "failed reachability probe must remain failure")
+            try check(probe.notice?.contains("unreachable") == true && !(probe.notice ?? "").contains("private-provider-canary") && probe.error == nil, "failed reachability probe must remain failure")
+            for payload: [String: Any] in [["id": "openai", "reachable": true, "error": ""], ["id": "ollama", "reachable": true, "error": "private-provider-canary"], ["id": "ollama", "reachable": 1, "error": ""], ["reachable": false, "error": ""]] {
+                ProviderWire.reset(fixtures); let invalidProbe = make(); await invalidProbe.refresh()
+                ProviderWire.set("/api/llm/providers/ollama/probe", payload)
+                _ = await invalidProbe.execute(invalidProbe.review(.probe))
+                try check(invalidProbe.notice == nil && invalidProbe.error != nil && !(invalidProbe.error ?? "").contains("private-provider-canary"), "malformed or mismatched provider probe cannot claim successful reachability")
+            }
             print("PASS explicit failed provider probe truthfulness")
 
             ProviderWire.reset(fixtures); let operations = make(); await operations.refresh(); await operations.select("openai")

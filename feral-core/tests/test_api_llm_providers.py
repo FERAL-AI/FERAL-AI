@@ -73,6 +73,18 @@ def test_provider_descriptor_includes_alias_list(client):
     assert entries["bedrock"]["setup_selectable"] is False
 
 
+def test_catalog_alias_retains_runtime_selection_without_promoting_gateways(client):
+    c, _, _, _, _ = client
+    response = c.get("/api/llm/providers")
+    assert response.status_code == 200
+    entries = {p["id"]: p for p in response.json()["providers"]}
+    # The catalog calls Kimi "moonshot"; the runtime dispatches it as "kimi".
+    assert entries["moonshot"]["runtime_supported"] is True
+    assert entries["moonshot"]["setup_selectable"] is True
+    assert entries["bedrock"]["runtime_supported"] is False
+    assert entries["bedrock"]["setup_selectable"] is False
+
+
 def test_get_provider_unknown_404(client):
     c, _, _, _, _ = client
     r = c.get("/api/llm/providers/not-real")
@@ -590,6 +602,28 @@ def test_llm_switch_accepts_known_provider(orchestrated):
     assert body["supported"] is True
     assert llm.provider == "anthropic"
     assert "anthropic.com" in llm.base_url
+
+
+def test_catalog_moonshot_switch_uses_kimi_runtime_without_gateway(orchestrated):
+    c, _catalog, llm, _store = orchestrated
+    response = c.post("/api/llm/switch", json={
+        "provider": "moonshot", "model": "fixture-model", "api_key": "fixture-provider-key",
+    })
+    assert response.status_code == 200
+    assert response.json()["supported"] is True
+    assert llm.provider == "kimi"
+    assert llm.base_url == "https://api.moonshot.ai/v1"
+
+
+def test_catalog_moonshot_save_preserves_catalog_identity_and_activates_runtime(orchestrated):
+    c, _catalog, llm, store = orchestrated
+    response = c.post("/api/llm/config", json={"provider": "moonshot", "model": "fixture-model"})
+    assert response.status_code == 200
+    assert store["llm"]["provider"] == "moonshot"
+    assert response.json()["provider"] == "moonshot"
+    assert response.json()["reconfigured"]["provider"] == "kimi"
+    assert llm.provider == "kimi"
+    assert llm.base_url == "https://api.moonshot.ai/v1"
 
 
 def test_set_llm_config_rejects_catalog_only_runtime_unsupported(client):

@@ -431,6 +431,11 @@ _RUNTIME_PROVIDER_MAP: dict[str, str] = {
 }
 
 
+def runtime_provider_id(provider_id: str) -> str:
+    """Resolve a catalog identity without inventing a runtime for unknown IDs."""
+    return _RUNTIME_PROVIDER_MAP.get(provider_id, provider_id)
+
+
 def is_supported_catalog_provider(catalog_id: str) -> bool:
     """``is_supported_runtime_provider`` keyed by a *catalog* provider id.
 
@@ -440,9 +445,7 @@ def is_supported_catalog_provider(catalog_id: str) -> bool:
     returns False for a provider that works perfectly, which made the setup
     wizard hide Kimi from the picker entirely. Resolve through the map first.
     """
-    return is_supported_runtime_provider(
-        _RUNTIME_PROVIDER_MAP.get(catalog_id, catalog_id)
-    )
+    return is_supported_runtime_provider(runtime_provider_id(catalog_id))
 
 
 # Canonical set of provider ids the runtime can actually execute chat
@@ -683,7 +686,7 @@ class LLMProvider:
     """
 
     def __init__(self):
-        self.provider = os.getenv("FERAL_LLM_PROVIDER", "openai")
+        self.provider = runtime_provider_id(os.getenv("FERAL_LLM_PROVIDER", "openai"))
         # Resolve the default model lazily from the shared
         # ``ProviderCatalog`` rather than burning a literal here. The
         # catalog reads ``model_catalog.json`` + each adapter's bundled
@@ -3788,6 +3791,7 @@ class LLMProvider:
         TypeError -> every Save-&-switch 500'd). The regression test
         lives in ``tests/test_switch_provider_base_url.py``.
         """
+        provider = runtime_provider_id(provider)
         client = getattr(self, "client", None)
         if client is not None:
             await client.aclose()
@@ -5180,6 +5184,7 @@ class LLMProvider:
         exact footgun this method used to hide behind its two-arg
         ``dict.get`` fallback.
         """
+        provider_name = runtime_provider_id(provider_name)
         # For local providers we honour the operator-configured base
         # URL (``self.base_url`` when the primary IS the local
         # provider, otherwise ``FERAL_LLM_BASE_URL`` /
@@ -5267,9 +5272,12 @@ class LLMProvider:
                 "supported": is_supported_runtime_provider(self.provider),
             }),
         ]
+        seen = {self.provider}
         for fb in self._config.get("fallback_providers", []):
-            if fb != self.provider:
+            fb = runtime_provider_id(fb)
+            if fb not in seen:
                 candidates.append((fb, self._get_provider_config(fb)))
+                seen.add(fb)
         return candidates
 
     def _candidates_for_route(
@@ -5286,6 +5294,7 @@ class LLMProvider:
         fallback so a missing key on the routed provider degrades cleanly
         back to the operator's model instead of failing the turn.
         """
+        route_provider = runtime_provider_id(route_provider)
         candidates: list[tuple[str, dict]] = []
         seen: set[str] = set()
         if route_provider == self.provider:
@@ -5309,6 +5318,7 @@ class LLMProvider:
             }))
             seen.add(self.provider)
         for fb in self._config.get("fallback_providers", []):
+            fb = runtime_provider_id(fb)
             if fb not in seen:
                 candidates.append((fb, self._get_provider_config(fb)))
                 seen.add(fb)
@@ -5512,6 +5522,7 @@ class LLMProvider:
         ``RETRY_DELAYS`` budget on a known-bad provider before routing.
         Defaults preserve historical behaviour for direct callers.
         """
+        provider_name = runtime_provider_id(provider_name)
         retry_max = kwargs.pop("_retry_max", None)
         retry_delays = kwargs.pop("_retry_delays", None)
         force_tool = kwargs.pop("force_tool", None)

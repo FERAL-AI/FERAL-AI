@@ -8,6 +8,8 @@ struct NativeSetupProvider:Identifiable {
     let endpointTemplate:String?
     let local:Bool,needsKey:Bool,configured:Bool,chatReady:Bool
     let reachable:Bool?
+    let runtimeSupported:Bool?,setupSelectable:Bool?
+    var automaticChoice:Bool{runtimeSupported==true && setupSelectable==true}
     let raw:[String:Any]
 }
 enum NativeSetupOperation {case saveCredential,activate,probe,complete}
@@ -58,10 +60,12 @@ enum NativeSetupWire {
         guard let rows=raw["providers"] as? [[String:Any]],rows.count<=100 else{throw NativeSetupFailure("Provider catalogue is unavailable or unsupported.")};var seen:Set<String>=[]
         return try rows.map{row in guard let id=id(row["id"]),seen.insert(id).inserted,let name=text(row["display_name"],limit:160),let local=bool(row["supports_local"]),let key=bool(row["requires_api_key"]),let configured=bool(row["configured"]),let chat=bool(row["chat_ready"]),let model=text(row["default_model"],limit:256,empty:true),let endpoint=text(row["default_base_url"],limit:2048,empty:true) else{throw NativeSetupFailure("Provider catalogue metadata is unsupported.")};if let reachable=row["reachable"],!(reachable is NSNull),bool(reachable)==nil{throw NativeSetupFailure("Provider reachability status is unsupported.")};// The actual Qwen descriptor is informational until its workspace is resolved.
             // `configured` means credential presence, not a resolved adapter endpoint.
+            for field in ["runtime_supported","setup_selectable"]{if row[field] != nil && bool(row[field])==nil{throw NativeSetupFailure("Provider runtime selection flags are unsupported.")}}
+            let supported=bool(row["runtime_supported"]),selectable=bool(row["setup_selectable"])
             let template=endpoint.contains("{WorkspaceId}") ? endpoint : nil
             if template != nil {_ = try Self.endpoint(endpoint.replacingOccurrences(of:"[{WorkspaceId}]",with:"workspace-example").replacingOccurrences(of:"{WorkspaceId}",with:"workspace-example"))}
-            var usableDefault="";if template==nil{usableDefault=try Self.endpoint(endpoint)}
-            return NativeSetupProvider(id:id,name:name,defaultModel:model,defaultEndpoint:usableDefault,endpointTemplate:template,local:local,needsKey:key,configured:configured,chatReady:chat,reachable:bool(row["reachable"]),raw:row)}
+            var usableDefault="";if template==nil,supported==true,selectable==true{usableDefault=try Self.endpoint(endpoint)}
+            return NativeSetupProvider(id:id,name:name,defaultModel:model,defaultEndpoint:usableDefault,endpointTemplate:template,local:local,needsKey:key,configured:configured,chatReady:chat,reachable:bool(row["reachable"]),runtimeSupported:supported,setupSelectable:selectable,raw:row)}
     }
     static func config(_ raw:[String:Any])throws->[String:Any]{guard id(raw["provider"]) != nil,text(raw["model"],limit:256,empty:true) != nil,let endpoint=text(raw["base_url"],limit:2048,empty:true),let fallbacks=raw["fallback_providers"] as? [String],fallbacks.count<=20,fallbacks.allSatisfy({id($0) != nil}),bool(raw["configured"]) != nil else{throw NativeSetupFailure("Saved provider settings are unsupported.")};_ = try Self.endpoint(endpoint);return raw}
 }
@@ -117,7 +121,7 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
         let cleanModel=model.trimmingCharacters(in:.whitespacesAndNewlines),cleanEndpoint=try NativeSetupWire.endpoint(endpoint)
         guard NativeSetupWire.text(cleanModel,limit:256) != nil else{throw NativeSetupFailure("Choose or enter a model name. Cached suggestions do not prove model availability.")}
         if case .saveCredential=action{guard choice.endpointTemplate==nil || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("Enter a valid resolved workspace endpoint before saving this provider credential.")};guard vaultReady,choice.needsKey,!secret.isEmpty,secret.utf8.count<=16384 else{throw NativeSetupFailure("Set up or unlock encrypted credential storage before reviewing a provider key save.")}}
-        if case .activate=action{guard choice.endpointTemplate==nil || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("This provider has an unresolved workspace endpoint template. Enter a valid resolved endpoint before activation; configured credentials alone do not prove endpoint readiness.")};guard !choice.needsKey || choice.configured else{throw NativeSetupFailure("Save the required provider key first, or choose a local provider.")};guard choice.chatReady || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("This provider lacks a chat adapter. An explicit supported gateway endpoint is required.")}}
+        if case .activate=action{guard choice.endpointTemplate==nil || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("This provider has an unresolved workspace endpoint template. Enter a valid resolved endpoint before activation; configured credentials alone do not prove endpoint readiness.")};guard !choice.needsKey || choice.configured else{throw NativeSetupFailure("Save the required provider key first, or choose a local provider.")};guard choice.automaticChoice || !cleanEndpoint.isEmpty else{throw NativeSetupFailure("This provider lacks a chat adapter. An explicit supported gateway endpoint is required.")}}
         if case .complete=action{guard saved["provider"] as? String==selected,saved["model"] as? String==cleanModel,saved["base_url"] as? String==cleanEndpoint else{throw NativeSetupFailure("Activate and read back this exact provider/model/endpoint before completing setup.")}}
         return NativeSetupReview(generation:generation,origin:base,operation:action,provider:selected,model:cleanModel,endpoint:cleanEndpoint,secret:secret,config:saved,descriptor:choice.raw,setupComplete:setupComplete)
     }
@@ -168,8 +172,10 @@ struct NativeOnboardingSetupFeatureView:View {
             if let error=localError ?? model.error{NativeSelectableText(error).foregroundStyle(.orange)}
             if let notice=model.notice{NativeSelectableText(notice).font(.callout)}
             if model.providers.isEmpty{Text("Waiting for your providers to load. If FERAL needs unlocking, open Security & Cost.").font(.caption).foregroundStyle(.secondary)}
-            Picker("Chat provider",selection:Binding(get:{model.selected},set:{id in secret="";Task{await model.select(id)}})){Text("Choose provider").tag("");ForEach(model.providers){provider in Text(provider.name+(provider.local ? " · local" : " · cloud")).tag(provider.id)}}.disabled(model.busy)
+            Picker("Chat provider",selection:Binding(get:{model.selected},set:{id in secret="";Task{await model.select(id)}})){Text("Choose provider").tag("");ForEach(model.providers.filter{$0.automaticChoice || $0.id==model.selected}){provider in Text(provider.name+(provider.local ? " · local" : " · cloud")+(provider.automaticChoice ? "" : " · manual gateway")).tag(provider.id)}}.disabled(model.busy)
+            if model.providers.contains(where:{!$0.automaticChoice}){Menu("Configure a custom gateway…"){ForEach(model.providers.filter{!$0.automaticChoice}){provider in Button(provider.name){secret="";Task{await model.select(provider.id)}}}}.disabled(model.busy)}
             if let provider=model.providers.first(where:{$0.id==model.selected}){
+                if !provider.automaticChoice{Text("This catalogue entry has no confirmed runtime adapter. Enter your compatible gateway endpoint explicitly; saved credentials and catalogue defaults do not establish support.").font(.caption).foregroundStyle(.orange)}
                 Text(provider.reachable.map{$0 ? "Cached status: reachable" : "Cached status: unreachable"} ?? "Provider has not been probed.").font(.caption).foregroundStyle(.secondary)
                 TextField("Model name",text:$model.model).textFieldStyle(.roundedBorder)
                 if !model.models.isEmpty{Menu("Chat suggestions (\(model.modelsSource))"){ForEach(model.models,id:\.self){id in Button(id){model.model=id}}}}
@@ -183,7 +189,7 @@ struct NativeOnboardingSetupFeatureView:View {
                 }
                 HStack{Button("Review connection…"){prepare(.activate)};Button("Check saved connection…"){prepare(.probe)}}.disabled(model.busy)
             }
-            Text("You can connect voice and glasses later.").font(.caption).foregroundStyle(.secondary)
+            Text("Successful inference, FERAL tool execution and voice are separate from saved configuration. You can connect voice and glasses later.").font(.caption).foregroundStyle(.secondary)
             HStack{Button("Refresh"){Task{await model.refresh()}}.disabled(model.busy);Spacer();Button("Finish setup…"){prepare(.complete)}.disabled(model.busy || model.selected.isEmpty);if model.busy{ProgressView().controlSize(.small)}}
         }.padding(24).task(id:baseURL){secret="";review=nil;model.configure(baseURL:baseURL);await model.refresh()}
         .sheet(item:$review){item in VStack(alignment:.leading,spacing:16){ScrollView{NativeReviewSummaryView(review:summary(item))};HStack{Button("Cancel"){review=nil;secret=""};Spacer();Button("Confirm reviewed step"){review=nil;secret="";Task{if await model.perform(item),case .complete=item.operation{onCompleted()}}}.disabled(!model.canUse(item))}}.padding(24).frame(width:680,height:520)}

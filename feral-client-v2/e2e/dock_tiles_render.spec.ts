@@ -1,8 +1,8 @@
 /**
  * Every dock tile must actually show its icon.
  *
- * This exists because the dock shipped with all eight tiles rendering as
- * empty squares and I did not catch it. The unit tests were green: they
+ * This covers a regression where dock tiles rendered as empty squares.
+ * The unit tests were green: they
  * asserted the data-state attribute, the count badge and the CSS
  * keyframes, none of which say anything about whether a user can see
  * the icon.
@@ -60,7 +60,9 @@ test('every dock tile paints a visible icon inside itself', async ({ page }) => 
 
 test('persistent labels sit below visible icons inside their tiles', async ({ page }) => {
   await page.goto('/console');
-  await expect(page.locator('.v2-dock-label')).toHaveCount(7);
+  await expect(page.locator('.v2-dock-label')).toHaveText([
+    'Home', 'Chat', 'Coding', 'Memory', 'Devices', 'Needs you', 'Settings', 'More',
+  ]);
   const bad = await page.locator('.v2-dock-btn').evaluateAll((tiles) => tiles.flatMap((tile) => {
     const label = tile.querySelector('.v2-dock-label') as HTMLElement;
     const icon = tile.querySelector('svg')!;

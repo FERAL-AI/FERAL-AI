@@ -101,10 +101,9 @@ async def llm_switch(body: dict):
                 detail=f"unknown provider {provider!r}; resolve via /api/llm/providers",
             )
 
-    from agents.llm_provider import is_supported_runtime_provider
+    from agents.llm_provider import is_supported_runtime_provider, is_supported_catalog_provider
     if (
-        not is_supported_runtime_provider(resolved)
-        and resolved not in ("local", "hybrid")
+        not is_supported_catalog_provider(resolved)
         and not base_url
     ):
         raise HTTPException(
@@ -186,11 +185,11 @@ async def list_llm_providers():
     """
     catalog = _require_catalog()
     descriptors = catalog.list_providers()
-    from agents.llm_provider import is_supported_runtime_provider
+    from agents.llm_provider import is_supported_catalog_provider
     payload = []
     for desc in descriptors:
         status = catalog.status_for(desc.provider_id)
-        runtime_supported = is_supported_runtime_provider(desc.provider_id) or desc.provider_id in ("local", "hybrid")
+        runtime_supported = is_supported_catalog_provider(desc.provider_id)
         payload.append({
             **status.to_dict(),
             "runtime_supported": runtime_supported,
@@ -841,10 +840,9 @@ async def set_llm_config(req: LLMConfigRequest):
     # explicit ``base_url`` override — that's the escape hatch for
     # custom OpenAI-compatible gateways. Otherwise we 400 so the UI
     # never lands on a provider the runtime can't actually call.
-    from agents.llm_provider import is_supported_runtime_provider
+    from agents.llm_provider import is_supported_catalog_provider
     if (
-        not is_supported_runtime_provider(resolved)
-        and resolved not in ("local", "hybrid")
+        not is_supported_catalog_provider(resolved)
         and not effective_base_url
     ):
         raise HTTPException(

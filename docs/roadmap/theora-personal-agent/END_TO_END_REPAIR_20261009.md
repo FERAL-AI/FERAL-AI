@@ -51,7 +51,15 @@ accepted by these tests. Startup reports the transport unavailable.
 | Native production typecheck and linked runtime-port checks | Passed: 28 model groups, 39 desktop, five error assertions | No physical phone or microphone |
 | Actual BrainRuntime/launcher ownership fixture | 30 assertions passed, including identical saved endpoint across stop/relaunch without environment port override | Actual processes with a synthetic health-only backend, not the full installed GUI |
 | Channel, phone authorization and existing-Chrome contracts, ten suites | 244 passed, one skipped, 119 warnings; 16.32 seconds | Inert boundary effects, isolated data |
-| Playwright dock geometry | Not executed: required Chromium headless shell missing | Ten launch failures preceded test bodies; not product assertion failures |
+| Published-head CI dock geometry | All ten cases passed | Separate tile-render assertion expected seven destinations instead of eight; correction is outside immutable 9.47 |
+| Corrected local Playwright dock suites | 20 passed using installed Chrome and a disposable profile | Official fixture runner with private browser-channel config; not live backend/inference or phone acceptance |
+
+The earlier local Playwright attempt could not launch the missing bundled
+Chromium headless shell; ten failures preceded the test bodies. Installed Chrome
+then exercised the official dock suites successfully. Production JS/CSS output
+is unchanged by this test-only correction. Full official installed-Chrome E2E
+passes 108 tests with 63 opt-in real-backend skips and zero failures in 4.5 minutes.
+This runner uses page/API fixtures; the skipped live-backend tests are not accepted.
 
 The initial native setup command failed at the sandboxed compiler-plugin
 boundary. Its unsandboxed focused runner passed 77 assertions, but its linked
