@@ -1326,9 +1326,9 @@ class Orchestrator:
                     result_data = {"success": False, "error": "Workflow dispatch was cancelled or paused before execution"}
                 else:
                     binding = taskflow_pending["taskflow"]
-                    tool_call["id"] = f"taskflow:{binding['flow_id']}:{binding['step_id']}"
+                    tool_call["id"] = binding.get("model_call_id") or f"taskflow:{binding['flow_id']}:{binding['step_id']}"
                     result_data = await self.tool_runner.execute_tool_call_for_llm(
-                        session_id, tool_call, [], surface="taskflow", approval=exact_approval
+                        session_id, tool_call, [], surface=taskflows.approved_dispatch_surface(taskflow_pending), approval=exact_approval
                     )
                 await taskflows.finish_approved_dispatch(taskflow_pending, result_data)
             else:
@@ -1799,6 +1799,10 @@ class Orchestrator:
         """Notify the UI a tool call has finished (clears the chip)."""
         from agents.chat_turns import observe_tool_result
         observe_tool_result(session_id, result_data)
+        from agents.taskflow import model_step_for
+        model_scope = model_step_for(session_id, self)
+        if model_scope is not None:
+            model_scope.observe_result(tool_call, result_data)
         try:
             success = bool(
                 (isinstance(result_data, dict) and (result_data.get("success") or result_data.get("status") == "command_sent_to_hardware_daemon"))
@@ -2418,7 +2422,10 @@ class Orchestrator:
         # candidate for the eviction its own completion triggered.
         self._touch_session(session_id)
         self._evict_stale_sessions()
-        if self.learner:
+        from agents.taskflow import model_step_for
+        # Durable job prompts include generated checkpoint/receipt context.
+        # Their originating committed turn owns user-memory extraction.
+        if self.learner and model_step_for(session_id, self) is None:
             # AUDIT-FIXES F-06: referenced so the self-learning write cannot
             # be collected mid-flight and drop the turn.
             self._track_background_task(
@@ -2828,6 +2835,10 @@ class Orchestrator:
         audit = turn_audit(session_id)
         if audit is not None:
             audit.budget_exceeded = True
+        from agents.taskflow import model_step_for
+        model_scope = model_step_for(session_id, self)
+        if model_scope is not None:
+            model_scope.error = True
         try:
             from models.protocol import BudgetExceededPayload
         except Exception:
@@ -3375,6 +3386,8 @@ class Orchestrator:
         logger.info(f"[{session_id[:8]}] Command: {text}")
         self._session_finalized.discard(session_id)
         self._stamp_session_surface(session_id, context)
+        from agents.taskflow import model_step_for
+        task_model_scope = model_step_for(session_id, self)
 
         # Explicit plan-mode entry/exit, before routing. `/plan` would
         # otherwise be read as the `/skill` prefix form in `_route_prompt`.
@@ -3406,22 +3419,25 @@ class Orchestrator:
 
         # WS1 — episode_save is fire-and-forget. Hot path returns
         # before SQLite WAL commit / AboutMe extraction completes.
-        self._save_episode_async(
-            session_id=session_id,
-            event_type="user_command",
-            summary=text[:200],
-            # The full text, not just the 200-char preview. ``summary``
-            # is capped because it is what previews and list views
-            # render, and that cap used to be the ONLY durable record
-            # of what the operator said: everything past character 200
-            # existed solely in ``conversation_history``, which
-            # ``compact_session`` replaces wholesale. On any surface
-            # without the web client's autosave (voice, CLI, a paired
-            # phone) the rest of a long message was unrecoverable once
-            # compaction fired. ``episodes_fts`` indexes ``detail``
-            # alongside ``summary``, so this is searchable on arrival.
-            detail=json.dumps({"text": text, "context": durable_chat_context(context)}),
-        )
+        # Generated task context is retained in its checkpoint/transcript,
+        # never admitted as operator speech for personal-memory extraction.
+        if task_model_scope is None:
+            self._save_episode_async(
+                session_id=session_id,
+                event_type="user_command",
+                summary=text[:200],
+                # The full text, not just the 200-char preview. ``summary``
+                # is capped because it is what previews and list views
+                # render, and that cap used to be the ONLY durable record
+                # of what the operator said: everything past character 200
+                # existed solely in ``conversation_history``, which
+                # ``compact_session`` replaces wholesale. On any surface
+                # without the web client's autosave (voice, CLI, a paired
+                # phone) the rest of a long message was unrecoverable once
+                # compaction fired. ``episodes_fts`` indexes ``detail``
+                # alongside ``summary``, so this is searchable on arrival.
+                detail=json.dumps({"text": text, "context": durable_chat_context(context)}),
+            )
 
         # S1 live-path closure (non-stream parity). The forced-tool
         # path (v2026.5.48 grounded-memory closure) is the primary —
@@ -3446,6 +3462,7 @@ class Orchestrator:
         # Multi-agent path
         if (
             not vision_fast_path
+            and task_model_scope is None
             and not context_data.get("_attachment_model_data")
             and self._multi_agent_enabled
             and self._multi_agent
@@ -3545,6 +3562,10 @@ class Orchestrator:
             logger.info(f"  Matched: {[s.brand.name for s in relevant_skills]}")
 
         if not self.llm.available:
+            from agents.taskflow import model_step_for
+            if model_step_for(session_id, self) is not None:
+                await self._send_error(session_id, "Background model processing is unavailable.", code="task_model_unavailable")
+                return
             await self._direct_execute(session_id, text, relevant_skills)
             return
 
@@ -3905,6 +3926,10 @@ class Orchestrator:
                 return
             except Exception as e:
                 logger.error(f"LLM failed: {e}")
+                from agents.taskflow import model_step_for
+                if model_step_for(session_id, self) is not None:
+                    await self._send_error(session_id, "Background model processing failed.", code="task_model_processing_failed")
+                    return
                 await self._direct_execute(session_id, text, relevant_skills)
                 return
 
@@ -4037,6 +4062,10 @@ class Orchestrator:
                         tc["name"], tc.get("args", {}), tool_success, result_data
                     )
                     if guard_level == GUARD_STOP:
+                        from agents.taskflow import model_step_for
+                        model_scope = model_step_for(session_id, self)
+                        if model_scope is not None:
+                            model_scope.error = True
                         final_answer_only = True
                     elif guard_level == GUARD_WARN and not no_progress_warned:
                         # Warn once, keep every other tool available. The
@@ -6392,6 +6421,10 @@ class Orchestrator:
         # Record first: every path that sends text must record what it
         # sent, including the ones that return before the tool loop.
         self._note_outbound_text(session_id, text)
+        from agents.taskflow import model_step_for
+        model_scope = model_step_for(session_id, self)
+        if model_scope is not None:
+            model_scope.text = text
         from agents.chat_turns import turn_audit
         audit = turn_audit(session_id)
         if audit is not None:
@@ -6418,6 +6451,10 @@ class Orchestrator:
         or ``_finalize_turn`` commits the failure to the transcript as
         an assistant row and the next turn feeds it back to the model.
         """
+        from agents.taskflow import model_step_for
+        model_scope = model_step_for(session_id, self)
+        if model_scope is not None:
+            model_scope.error = True
         from agents.chat_turns import turn_audit
         audit = turn_audit(session_id)
         if audit is not None:

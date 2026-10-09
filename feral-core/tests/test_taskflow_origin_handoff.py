@@ -393,7 +393,11 @@ async def test_surface_is_preserved_at_existing_orchestrator_entry(rig):
     flow = runtime.get_flow(result["data"]["flow_id"])
     step_result = await runtime._execute_step(flow, flow["steps"][0])
     assert step_result["status"] == "completed"
-    runtime._orchestrator.handle_command.assert_awaited_once_with(f"taskflow-{flow['id']}", "inert research", context={"surface": "http_api"})
+    runtime._orchestrator.handle_command.assert_awaited_once()
+    call = runtime._orchestrator.handle_command.await_args
+    assert call.args[0] == f"taskflow-{flow['id']}" and call.kwargs == {"context": {"surface": "http_api"}}
+    assert '"evidence_kind": "accepted_task_goal"' in call.args[1] and '"text": "inert research"' in call.args[1]
+    assert call.args[1].endswith("Current requested step:\ninert research")
 
 
 async def test_background_handoff_keeps_actual_http_surface_hard_deny(rig):
@@ -467,7 +471,11 @@ async def test_untracked_agent_preserves_known_surface_or_refuses(rig, surface):
         return "inert denied action"
     runtime._orchestrator = SimpleNamespace(handle_command=AsyncMock(side_effect=actual_policy))
     await runtime._execute_step(flow, flow["steps"][0])
-    runtime._orchestrator.handle_command.assert_awaited_once_with(f"taskflow-{flow['id']}", "headless fixture", context={"surface": surface})
+    runtime._orchestrator.handle_command.assert_awaited_once()
+    call = runtime._orchestrator.handle_command.await_args
+    assert call.args[0] == f"taskflow-{flow['id']}" and call.kwargs == {"context": {"surface": surface}}
+    assert '"evidence_kind": "accepted_task_goal"' in call.args[1] and '"text": "headless fixture"' in call.args[1]
+    assert call.args[1].endswith("Current requested step:\nheadless fixture")
     assert verdicts[0]["status"] == "PermissionOutcome::Deny"
 
 

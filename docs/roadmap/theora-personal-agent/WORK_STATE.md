@@ -33,7 +33,9 @@ packaged or accepted as a completed end-to-end product:
   nested-delegation refusal and explicit review renewal without dispatch/replay.
   Further independent checks found first-step global-constraint omission and
   constructed task context admitted as personal user-memory evidence through two
-  paths. Narrow corrections and final frozen verification remain pending.
+  paths. Both are corrected; final frozen runtime selection passes 289 tests,
+  seven warnings, and independent postfix probes pass five checks. Combined
+  source-wave acceptance remains pending. [Behavior and limits](TASK_MODEL_APPROVAL_EVIDENCE_20261009.md).
 - Web worker owns the stale seven-tile Playwright expectation after Home became
   the eighth dock tile. Exact published-head CI passed all ten geometry cases;
   its tile-count assertion failed. This is separate from the earlier local
@@ -45,7 +47,11 @@ packaged or accepted as a completed end-to-end product:
 The concurrent phone-intake source is now reviewed and locally committed as
 c8749b56a with its regression tests and evidence. Frozen verification passes 274
 tests, two skipped. It remains outside immutable 9.47; full combined source-wave
-and candidate acceptance remains separate. Details and ownership are below.
+and candidate acceptance remains separate. A further actual-class review found
+that stale reply fencing did not stop new tool dispatch when a collaborator
+suppressed task cancellation. A task-local phone dispatch ownership correction
+and regressions are active; unrelated sessions must retain their authority.
+Details of the preceding phone integration and ownership are below.
 
 Sources will freeze after worker release, then receive combined tests, coherent
 publication and an exact-source candidate. Planned 9.48 uses at most 2 GiB of new

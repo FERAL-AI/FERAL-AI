@@ -7,6 +7,8 @@ Persistent multi-step background flows with restart-safe state.
 from __future__ import annotations
 
 import asyncio
+import copy
+from contextvars import ContextVar
 import hashlib
 import json
 import logging
@@ -45,6 +47,244 @@ class TaskFlowReceiptError(ValueError):
     """A persisted origin or bounded read could not be verified."""
 
 
+_model_step: ContextVar["TaskFlowModelStep | None"] = ContextVar(
+    "feral_taskflow_model_step", default=None
+)
+
+
+def model_step_for(session_id, orchestrator):
+    scope = _model_step.get()
+    return (
+        scope
+        if scope is not None
+        and scope.session_id == session_id
+        and scope.runtime._orchestrator is orchestrator
+        else None
+    )
+
+
+def redact_model_task_result(value, depth=0):
+    """Exclude recognized credentials from model and durable result projections."""
+    from observability.log_redaction import redact
+    if depth > 32:
+        return {"_truncated": True, "reason": "result_depth_limit"}
+    if isinstance(value, dict):
+        sensitive = {"token", "access_token", "refresh_token", "id_token", "api_key", "apikey",
+                     "authorization", "password", "secret", "client_secret", "card_number",
+                     "cvc", "cvv", "cookie", "cookies", "set_cookie", "session_cookie"}
+        return {key: "<redacted>" if str(key).lower().replace("-", "_") in sensitive
+                else redact_model_task_result(item, depth + 1) for key, item in value.items()}
+    if isinstance(value, list):
+        return [redact_model_task_result(item, depth + 1) for item in value]
+    return redact(value) if isinstance(value, str) else value
+
+
+def _model_receipt_result(tool_name, result, registry):
+    """Bound durable evidence without altering the original live model result."""
+    result = redact_model_task_result(result)
+    if len(json.dumps(result, allow_nan=False).encode()) <= 32768:
+        return copy.deepcopy(result)
+    from dataclasses import replace
+    from skills.result_budget import budget_for_tool, serialize_tool_result_with_images
+    budget = replace(budget_for_tool(tool_name, registry), max_result_chars=32768)
+    blob, _ = serialize_tool_result_with_images(tool_name, result, registry=registry,
+                                               budget=budget, allow_images=False)
+    projection = json.loads(blob)
+    if not isinstance(projection, dict):
+        projection = {"data": projection}
+    for key in ("success", "tool_outcome_verified"):
+        if type(result.get(key)) is bool:
+            projection[key] = result[key]
+    projection["_receipt_projection"] = True
+    return projection
+
+
+class TaskFlowModelStep:
+    """Typed observation of the existing runner; this grants no permission."""
+
+    def __init__(self, runtime, flow, step, session_id):
+        self.runtime, self.flow, self.step, self.session_id = (
+            runtime,
+            flow,
+            step,
+            session_id,
+        )
+        prior = step.get("result") or {}
+        self.actions = copy.deepcopy(prior.get("model_actions", {}))
+        self.calls = {}
+        self.pending = None
+        self.review_issued = False
+        self.error = False
+        self.unknown = False
+        self.text = ""
+
+    def _guard(self):
+        flow = self.runtime.get_flow(self.flow["id"])
+        step = (
+            next((s for s in flow["steps"] if s["id"] == self.step["id"]), None)
+            if flow
+            else None
+        )
+        if (
+            not flow
+            or flow["status"] == "cancelled"
+            or not step
+            or step["status"] not in {"running", "waiting"}
+            or self.runtime._stop_event.is_set()
+        ):
+            raise RuntimeError("Task model-step authority is no longer active")
+
+    def admit_call(self, runner, call, surface):
+        self._guard()
+        from security.dangerous_tools import known_surfaces
+        if surface not in known_surfaces() or (self.runtime.origin_surface_for_flow(self.flow["id"]) not in (None, surface)):
+            raise ValueError("Model action surface is unavailable or changed")
+        call_id = call.get("id")
+        if not isinstance(call_id, str) or not call_id or len(call_id) > 256:
+            raise ValueError("A stable model action identity is required")
+        if call.get("name", "").startswith("subagent__") or call.get("name") == "background_task__start":
+            raise ValueError("Durable child model action ownership is unavailable")
+        resource = (
+            runner._capture_browser_resource(call["name"], self.session_id)
+            if runner._browser_tool(call["name"])
+            else None
+        )
+        terms = {
+            "call_id": call_id,
+            "session_id": self.session_id,
+            "flow_id": self.flow["id"],
+            "step_id": self.step["id"],
+            "tool_name": call["name"],
+            "args": call.get("args", {}),
+            "resource": resource,
+            "surface": surface,
+        }
+        encoded = json.dumps(
+            terms, sort_keys=True, separators=(",", ":"), allow_nan=False
+        )
+        if len(encoded.encode()) > 65536:
+            raise ValueError("Model action terms exceed the checkpoint budget")
+        digest = hashlib.sha256(encoded.encode()).hexdigest()
+        existing = self.actions.get(call_id)
+        if existing is not None:
+            if existing.get("terms_digest") != digest or not isinstance(
+                existing.get("result"), dict
+            ):
+                raise ValueError("Recorded model action identity changed")
+            return copy.deepcopy(existing["result"])
+        if self.pending is not None:
+            return {
+                "success": False,
+                "error_code": "task_waiting_approval",
+                "status": "pending_approval",
+                "request_id": self.pending["request_id"],
+                "tool_name": self.pending["tool_name"],
+                "session_id": self.session_id,
+                "args": self.pending["args"],
+            }
+        if call_id in self.calls or len(self.actions) + len(self.calls) >= 32:
+            raise ValueError("Model action identity is duplicated or at capacity")
+        self.calls[call_id] = {"terms_digest": digest, "terms": terms}
+        with self.runtime._lock:
+            row = self.runtime._conn.execute(
+                "SELECT result_json FROM taskflow_steps WHERE id=?", (self.step["id"],)
+            ).fetchone()
+            prior = json.loads(row[0]) if row and row[0] else {}
+            prior["model_intents"] = self.calls
+            self.runtime._conn.execute(
+                "UPDATE taskflow_steps SET result_json=? WHERE id=? AND status='running'",
+                (json.dumps(prior, allow_nan=False), self.step["id"]),
+            )
+            self.runtime._conn.commit()
+        return None
+
+    def bind_approval(self, runner, pending):
+        self._guard()
+        from skills.call_context import current_context
+
+        call_id = current_context().call_id
+        if call_id not in self.calls or self.pending is not None:
+            raise RuntimeError("Model review is not bound to an admitted action")
+        binding = {
+            "flow_id": self.flow["id"],
+            "step_id": self.step["id"],
+            "model_call_id": call_id,
+        }
+        if pending.get("taskflow") not in (None, binding):
+            raise RuntimeError("Model review belongs to another task")
+        exact = copy.deepcopy(
+            {
+                key: pending[key]
+                for key in ("request_id", "session_id", "tool_name", "args")
+            }
+        )
+        review = {
+            "status": "waiting",
+            "reason": "approval_required",
+            "approval": exact,
+            "model_action": self.calls[call_id],
+            "model_actions": self.actions,
+        }
+        encoded = json.dumps(review, allow_nan=False)
+        with self.runtime._lock:
+            changed = self.runtime._conn.execute(
+                "UPDATE taskflow_steps SET status='waiting',result_json=?,finished_at=NULL WHERE id=? AND status='running' AND EXISTS(SELECT 1 FROM taskflows WHERE id=? AND status='running')",
+                (encoded, self.step["id"], self.flow["id"]),
+            ).rowcount
+            if changed != 1:
+                raise RuntimeError("Model review checkpoint was superseded")
+            self.runtime._conn.execute(
+                "UPDATE taskflows SET status='waiting',wait_until=NULL,updated_at=? WHERE id=? AND status!='cancelled'",
+                (time.time(), self.flow["id"]),
+            )
+            self.runtime._conn.commit()
+        pending["taskflow"] = binding
+        self.pending, self.review_issued = exact, True
+
+    def observe_result(self, call, result):
+        if not isinstance(result, dict):
+            self.error = True
+            return
+        if result.get("status") == "pending_approval":
+            if (
+                self.pending is None
+                or result.get("request_id") != self.pending["request_id"]
+            ):
+                self.error = True
+            return
+        if result.get("error_code") == "task_waiting_approval":
+            return
+        if (
+            result.get("status") == "outcome_unknown"
+            or result.get("outcome") == "unknown"
+        ):
+            self.unknown = True
+        elif result.get("success") is not True:
+            self.error = True
+        call_id = call.get("id")
+        if call_id not in self.calls:
+            return  # An exact cached receipt, not another dispatch.
+        record = {**self.calls[call_id], "result": _model_receipt_result(call["name"], result, self.runtime._skill_registry)}
+        if len(json.dumps(record, allow_nan=False).encode()) > 65536:
+            self.unknown = True
+            return
+        self.actions[call_id] = record
+        self.calls.pop(call_id)
+        # Keep verified returns before any further model computation. A crash
+        # while the step is running still requires reconciliation, never replay.
+        with self.runtime._lock:
+            row = self.runtime._conn.execute(
+                "SELECT result_json FROM taskflow_steps WHERE id=?", (self.step["id"],)
+            ).fetchone()
+            prior = json.loads(row[0]) if row and row[0] else {}
+            prior["model_actions"] = self.actions
+            self.runtime._conn.execute(
+                "UPDATE taskflow_steps SET result_json=? WHERE id=?",
+                (json.dumps(prior, allow_nan=False), self.step["id"]),
+            )
+            self.runtime._conn.commit()
+
+
 class TaskFlowRuntime:
     """SQLite-backed taskflow runner with resumable state."""
 
@@ -72,6 +312,7 @@ class TaskFlowRuntime:
         self._lane_changed.set()
         self._approved_lane_owners: dict[str, tuple[str, int]] = {}
         self._approved_tasks: dict[str, asyncio.Task] = {}
+        self._review_publications: set[asyncio.Task] = set()
         self._stop_event = asyncio.Event()
         self._http = httpx.AsyncClient(timeout=20.0)
         self._init_db()
@@ -151,7 +392,7 @@ class TaskFlowRuntime:
                 pass
             self._runner_task = None
         active = [task for task in {*self._flow_tasks.values(), *self._step_tasks.values(),
-                                    *self._approved_tasks.values()}
+                                    *self._approved_tasks.values(), *self._review_publications}
                   if task is not asyncio.current_task() and not task.done()]
         for task in active:
             task.cancel()
@@ -564,6 +805,10 @@ class TaskFlowRuntime:
         if flow["status"] in (TaskFlowStatus.COMPLETED.value, TaskFlowStatus.CANCELLED.value,
                               TaskFlowStatus.RUNNING.value):
             return flow
+        if flow["status"] == "waiting" and 0 <= flow["current_step"] < len(flow["steps"]):
+            step = flow["steps"][flow["current_step"]]
+            if step["step_type"] == "llm.chat" and step["status"] == "waiting" and (step.get("result") or {}).get("reason") == "approval_required":
+                return self._renew_model_review(flow, step)
         if any(s["status"] == "outcome_unknown" or
                (s.get("result") or {}).get("reason") == "approval_required"
                for s in flow["steps"]):
@@ -592,6 +837,68 @@ class TaskFlowRuntime:
             conn.commit()
         self._wake_event.set()
         return self.get_flow(flow_id)
+
+    def _renew_model_review(self, flow, step):
+        """Explicit Resume renews a lost review, never an action or model goal."""
+        runner = getattr(self._orchestrator, "tool_runner", None)
+        prior = step.get("result") or {}
+        exact = prior.get("approval") or {}
+        action = prior.get("model_action") or {}
+        terms = action.get("terms") or {}
+        binding = {"flow_id": flow["id"], "step_id": step["id"], "model_call_id": terms.get("call_id")}
+        candidate = {**exact, "taskflow": binding, "browser_resource": terms.get("resource")}
+        def refused(code):
+            current = self.get_flow(flow["id"])
+            return {**(current or flow), "review_renewal": {"status": "refused", "error_code": code}}
+        if runner is None or runner._orch is not self._orchestrator or self._stop_event.is_set() or len(self._review_publications) >= 32:
+            return refused("task_review_runtime_unavailable")
+        if self._approval_step(candidate)[1] is None or any(s["status"] in {"running", "outcome_unknown"} for s in flow["steps"]):
+            return refused("task_review_checkpoint_invalid")
+        current = runner.get_pending(exact.get("request_id", ""))
+        if current is not None and runner.approval_scope_for(current) is not None:
+            return flow
+        from security.dangerous_tools import known_surfaces
+        if terms.get("surface") not in known_surfaces():
+            return refused("task_review_surface_unavailable")
+        pending = None
+        committed = False
+        try:
+            loop = asyncio.get_running_loop()
+            with self._lock:
+                raw = self._conn.execute("SELECT result_json FROM taskflow_steps WHERE id=?", (step["id"],)).fetchone()[0]
+            resource = runner._capture_browser_resource(exact["tool_name"], exact["session_id"]) if runner._browser_tool(exact["tool_name"]) else None
+            if resource != terms.get("resource"):
+                return refused("task_review_resource_changed")
+            if runner.enforce_plan_mode(exact["tool_name"], exact["session_id"]):
+                return refused("task_review_policy_denied")
+            runner.deny_pending(exact["request_id"], session_id=exact["session_id"])
+            with bind_context(session_id=exact["session_id"], surface=terms["surface"], tool_name=exact["tool_name"], call_id=terms["call_id"]):
+                pending = runner.enforce_safety(exact["tool_name"], exact["args"], session_id=exact["session_id"], surface=terms["surface"], _require_review=True)
+            if not pending or pending.get("status") != "pending_approval" or pending["request_id"] == exact["request_id"]:
+                return refused("task_review_policy_denied")
+            pending["taskflow"] = binding
+            new_review = {**prior, "approval": {k: copy.deepcopy(pending[k]) for k in ("request_id", "session_id", "tool_name", "args")}}
+            with self._lock:
+                changed = self._conn.execute("UPDATE taskflow_steps SET result_json=? WHERE id=? AND status='waiting' AND result_json=? AND EXISTS(SELECT 1 FROM taskflows WHERE id=? AND status='waiting')",
+                    (json.dumps(new_review, allow_nan=False), step["id"], raw, flow["id"])).rowcount
+                self._conn.commit()
+            if not changed:
+                return refused("task_review_superseded")
+            committed = True
+            publication = loop.create_task(runner._notify_user_of_pending_approval(pending["session_id"], pending["tool_name"], pending))
+            self._review_publications.add(publication)
+            def settled(task):
+                self._review_publications.discard(task)
+                if not task.cancelled() and task.exception() is not None:
+                    logger.warning("Renewed task review publication failed")
+            publication.add_done_callback(settled)
+            return {**self.get_flow(flow["id"]), "review_renewal": {"status": "waiting", "request_id": pending["request_id"]}}
+        except Exception:
+            logger.warning("Task review renewal refused; no action dispatched")
+            return refused("task_review_unavailable")
+        finally:
+            if not committed and isinstance(pending, dict) and pending.get("status") == "pending_approval":
+                runner.deny_pending(pending["request_id"], session_id=pending["session_id"])
 
     def cancel_flow(self, flow_id: str) -> Optional[dict]:
         now = time.time()
@@ -679,6 +986,11 @@ class TaskFlowRuntime:
         outcome = {"status": "outcome_unknown", "error": reason,
                    "tool_outcome_verified": False, "replay_safe": False}
         with self._lock:
+            row = self._conn.execute("SELECT result_json FROM taskflow_steps WHERE id=?", (step["id"],)).fetchone()
+            prior = json.loads(row[0]) if row and row[0] else {}
+            for key in ("model_actions", "model_intents", "model_action"):
+                if key in prior:
+                    outcome[key] = prior[key]
             self._conn.execute("UPDATE taskflow_steps SET status = 'outcome_unknown', error = ?, result_json = ?, finished_at = ? WHERE id = ?",
                                (reason, json.dumps(outcome), time.time(), step["id"]))
             self._conn.execute("UPDATE taskflows SET status = CASE WHEN status = 'cancelled' THEN status ELSE 'waiting' END, error = ?, wait_until = NULL, updated_at = ? WHERE id = ?",
@@ -695,7 +1007,30 @@ class TaskFlowRuntime:
         exact = {key: pending.get(key) for key in ("request_id", "session_id", "tool_name", "args")}
         if not approval or approval != exact:
             return None, None
+        if step["step_type"] == "llm.chat":
+            action = (step.get("result") or {}).get("model_action") or {}
+            terms = action.get("terms") or {}
+            try:
+                digest = hashlib.sha256(json.dumps(terms, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+            except (TypeError, ValueError):
+                return None, None
+            if (terms.get("flow_id") != flow["id"] or terms.get("step_id") != step["id"]
+                    or terms.get("call_id") != binding.get("model_call_id")
+                    or terms.get("session_id") != pending.get("session_id")
+                    or terms.get("tool_name") != pending.get("tool_name") or terms.get("args") != pending.get("args")
+                    or terms.get("resource") != pending.get("browser_resource")
+                    or action.get("terms_digest") != digest):
+                return None, None
+            from security.dangerous_tools import known_surfaces
+            if terms.get("surface") not in known_surfaces() or self.origin_surface_for_flow(flow["id"]) not in (None, terms["surface"]):
+                return None, None
         return flow, step
+
+    def approved_dispatch_surface(self, pending):
+        flow, step = self._approval_step(pending)
+        if not flow or not step:
+            raise RuntimeError("Workflow action surface is unavailable")
+        return step["result"]["model_action"]["terms"]["surface"] if step["step_type"] == "llm.chat" else "taskflow"
 
     def prepare_approved_dispatch(self, pending: dict) -> bool:
         """Claim the existing review once, before its central execution."""
@@ -770,6 +1105,26 @@ class TaskFlowRuntime:
         result = result or {}
         success = not rejected and result.get("success") is True
         error = None if success else ("Approval rejected" if rejected else str(result.get("error") or result.get("note") or "Dispatcher refused the workflow action"))
+        if step["step_type"] == "llm.chat" and success:
+            prior = step.get("result") or {}
+            action = prior.get("model_action")
+            call_id = binding.get("model_call_id")
+            if not isinstance(action, dict) or action.get("terms", {}).get("call_id") != call_id:
+                self._mark_unknown(flow, step, "Approved model action checkpoint is unavailable")
+                return True
+            actions = dict(prior.get("model_actions") or {})
+            record = {**action, "result": _model_receipt_result(pending["tool_name"], result, self._skill_registry)}
+            if len(json.dumps(record, allow_nan=False).encode()) > 65536:
+                self._mark_unknown(flow, step, "Approved model action result exceeds checkpoint budget")
+                return True
+            actions[call_id] = record
+            continuation = {"status": "pending", "reason": "model_continuation", "model_actions": actions}
+            with self._lock:
+                changed = self._conn.execute("UPDATE taskflow_steps SET status='pending',result_json=?,error=NULL,finished_at=NULL WHERE id=? AND status='running'", (json.dumps(continuation, allow_nan=False), step["id"])).rowcount
+                if changed:
+                    self._conn.execute("UPDATE taskflows SET status='queued',error=NULL,wait_until=NULL,updated_at=? WHERE id=? AND status!='cancelled'", (time.time(), flow["id"]))
+                    self._conn.commit()
+            return bool(changed)
         outcome = {"status": "completed" if success else "failed", "result": result,
                    "error": error, "dispatch_started": not rejected,
                    "tool_outcome_verified": result.get("tool_outcome_verified", False)}
@@ -1010,6 +1365,12 @@ class TaskFlowRuntime:
                     conn.commit()
                 return
 
+            if status == "outcome_unknown":
+                self._mark_unknown(flow, step, "Model task outcome requires reconciliation")
+                return
+            if status not in {"completed", "failed"}:
+                outcome = {"status": "failed", "error": "Workflow returned an unsupported processing outcome", "dispatch_started": False}
+                status = "failed"
             if status == "failed":
                 err = outcome.get("error", "step failed")
                 with self._lock:
@@ -1230,6 +1591,7 @@ class TaskFlowRuntime:
             if not self._orchestrator:
                 return {"status": "failed", "error": "No orchestrator available"}
             session_id = flow.get("session_id") or f"taskflow-{flow['id']}"
+            scope = None
             try:
                 origin = flow.get("context", {}).get("task_origin", {})
                 command_context = None
@@ -1255,13 +1617,57 @@ class TaskFlowRuntime:
                     command_context = {"surface": origin["surface"]}
                 # L4 — capture the reply text so downstream steps can consume
                 # it via {{ previous_output }} / {{ step_N }}.
-                if command_context is None:
-                    reply = await self._orchestrator.handle_command(session_id, prompt)
-                else:
-                    reply = await self._orchestrator.handle_command(session_id, prompt, context=command_context)
-                reply_text = "" if reply is None else str(reply)
-                return {"status": "completed", "prompt": prompt, "output": reply_text, "reply": reply_text}
+                scope = TaskFlowModelStep(self, flow, step, session_id)
+                if isinstance(flow.get("context", {}).get("goal"), str):
+                    from observability.log_redaction import redact
+                    earlier = []
+                    for previous in flow["steps"][:step["step_index"]]:
+                        if previous["status"] != "completed":
+                            return {"status": "failed", "error": "Prior task step is not durably completed", "dispatch_started": False}
+                        result = previous.get("result") or {}
+                        output = self._step_output_text(result)
+                        earlier.append({"step_index": previous["step_index"], "role": "assistant",
+                                        "evidence_kind": "persisted_processing_result", "action_outcome": "not_asserted",
+                                        "output": redact(output) if isinstance(output, str) else output})
+                    checkpoint = {"goal": {"role": "user", "evidence_kind": "accepted_task_goal", "text": flow["context"]["goal"]},
+                                  "completed_steps": earlier}
+                    prefix = json.dumps(checkpoint, ensure_ascii=False)
+                    if len(prefix.encode()) > 65536:
+                        return {"status": "failed", "error": "Persisted task context exceeds its continuation budget", "dispatch_started": False}
+                    prompt = "Use this persisted task context; assistant processing output is not proof an external action succeeded.\n" + prefix + "\nCurrent requested step:\n" + prompt
+                prior = step.get("result") or {}
+                if prior.get("reason") == "model_continuation":
+                    from skills.result_budget import serialize_tool_result
+                    from observability.log_redaction import redact
+                    receipts = [{"call_id": key, "tool_name": record["terms"]["tool_name"],
+                                 "result": redact(serialize_tool_result(record["terms"]["tool_name"], record["result"], registry=self._skill_registry))}
+                                for key, record in scope.actions.items()]
+                    if len(json.dumps(receipts, ensure_ascii=False).encode()) > 65536:
+                        return {"status": "failed", "error": "Model continuation exceeds its context budget", "model_actions": scope.actions}
+                    prompt = ("Continue the unfinished background task from these recorded action receipts. "
+                              "The actions already executed; do not dispatch them again. Their success is only what their envelopes report. "
+                              "Original task context: " + prompt + "\nRecorded actions: " + json.dumps(receipts, ensure_ascii=False))
+                token = _model_step.set(scope)
+                try:
+                    if command_context is None:
+                        reply = await self._orchestrator.handle_command(session_id, prompt)
+                    else:
+                        reply = await self._orchestrator.handle_command(session_id, prompt, context=command_context)
+                finally:
+                    _model_step.reset(token)
+                if scope.review_issued:
+                    return {"status": "deferred"}
+                if scope.unknown or scope.calls:
+                    return {"status": "outcome_unknown"}
+                reply_text = reply if isinstance(reply, str) else scope.text
+                if scope.error or not isinstance(reply_text, str) or not reply_text.strip():
+                    return {"status": "failed", "error": "Model task did not produce a completed processing result", "model_actions": scope.actions, "dispatch_started": bool(scope.actions)}
+                return {"status": "completed", "prompt": prompt, "output": reply_text, "reply": reply_text, "model_actions": scope.actions}
             except Exception as exc:
+                if scope is not None and scope.review_issued:
+                    return {"status": "deferred"}
+                if scope is not None and scope.calls:
+                    return {"status": "outcome_unknown"}
                 return {"status": "failed", "error": str(exc)}
 
         if step_type == "condition":

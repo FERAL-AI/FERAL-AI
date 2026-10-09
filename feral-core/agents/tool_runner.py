@@ -557,6 +557,10 @@ class ToolRunner:
 
     def _guard_agent_lease(self):
         guard_agent_dispatch(getattr(self, "_native_agent_dispatch_lease", None))
+        from agents.taskflow import model_step_for
+        model_scope = model_step_for(current_context().session_id, getattr(self, "_orch", None))
+        if model_scope is not None:
+            model_scope._guard()
         from agents.chat_turns import _audit
         tracked = _audit.get()
         if tracked is not None and tracked.cancel_requested:
@@ -653,7 +657,7 @@ class ToolRunner:
         return self.enforce_safety(tool_name, args, session_id, surface, _admission=admission)
 
     def enforce_safety(self, tool_name: str, args: dict, session_id: str = "", surface: str = "websocket",
-                       *, _admission=None) -> Optional[dict]:
+                       *, _admission=None, _require_review=False) -> Optional[dict]:
         """
         Returns a denial dict if the action should be blocked, a pending-approval
         dict if the user must confirm, or None if the action is allowed.
@@ -730,6 +734,7 @@ class ToolRunner:
         # asked to be consulted, and a track record is not consent.
         if (
             needs_approval
+            and not _require_review
             and self._autonomy_mode == "hybrid"
             and level == SafetyLevel.CONFIRM
             and self._trust.is_trusted(tool_name)
@@ -740,6 +745,8 @@ class ToolRunner:
                 tool_name, self._trust.state(tool_name)["clean_runs"],
             )
 
+        if _require_review:
+            needs_approval = True
         if not needs_approval:
             exact = _exact_approval.get()
             if (exact is not None and exact.task_origin is not None and exact.issuer is self
@@ -755,13 +762,13 @@ class ToolRunner:
         exact = _exact_approval.get()
         admitted = (isinstance(_admission, _ExecutorAdmission) and _admission is _executor_admission.get()
                     and _admission.used and _admission.matches(self, exact, session_id, tool_name, args))
-        if (exact is not None and exact.issuer is self and exact.used and (not exact.safety_used or admitted)
+        if (not _require_review and exact is not None and exact.issuer is self and exact.used and (not exact.safety_used or admitted)
                 and exact.session_id == session_id and exact.tool_name == tool_name and exact.args == args):
             exact.safety_used = True
             return None
 
         approved, reason = self._approval_mgr.check_approval(tool_name, session_id)
-        if approved and browser_resource is None:
+        if not _require_review and approved and browser_resource is None:
             logger.info(f"Standing approval for {tool_name}: {reason}")
             return None
 
@@ -797,6 +804,10 @@ class ToolRunner:
                         continue
                 elif captured is not None or pending.get("task_origin_required"):
                     continue
+                from agents.taskflow import model_step_for
+                model_scope = model_step_for(session_id, self._orch)
+                if model_scope is not None:
+                    model_scope.bind_approval(self, pending)
                 return pending
 
         pending = {
@@ -816,6 +827,9 @@ class ToolRunner:
             # the resolver and without leaking internal types.
             "policy_sources": dict(decision.sources),
         }
+        from agents.taskflow import model_step_for
+        if _require_review or model_step_for(session_id, self._orch) is not None:
+            pending["taskflow_binding_required"] = True
         if browser_resource is not None:
             pending["browser_resource"] = copy.deepcopy(browser_resource)
         from agents.runtime_context_checkpoint import runtime_coordinator
@@ -827,6 +841,15 @@ class ToolRunner:
         if task_origin is not None:
             pending["task_origin_required"] = True
             self._pending_task_origins[request_id] = task_origin
+        from agents.taskflow import model_step_for
+        model_scope = model_step_for(session_id, self._orch)
+        if model_scope is not None:
+            try:
+                model_scope.bind_approval(self, pending)
+            except BaseException:
+                self._pending_approvals.pop(request_id, None)
+                self._pending_scope_kinds.pop(request_id, None)
+                raise
         logger.info(f"Approval required ({self._autonomy_mode}): {tool_name} → request_id={request_id}")
         return pending
 
@@ -874,6 +897,8 @@ class ToolRunner:
     def approval_scope_for(self, pending: dict) -> Optional[dict]:
         """Project server-owned scope; invalid exact metadata never becomes session permission."""
         try:
+            if pending.get("taskflow_binding_required") and not pending.get("taskflow"):
+                return None
             if self._expired(pending) or not self.pending_context_valid(pending):
                 return None
             origin = self._pending_task_origins.get(pending.get("request_id", ""))
@@ -1726,6 +1751,17 @@ class ToolRunner:
             str(tool_call.get("name") or ""), session_id, effective_surface,
         )
         try:
+            from agents.taskflow import model_step_for
+            model_scope = model_step_for(session_id, self._orch)
+            if model_scope is not None and approval is None:
+                try:
+                    cached = model_scope.admit_call(self, tool_call, effective_surface)
+                except (ValueError, RuntimeError):
+                    model_scope.error = True
+                    return make_tool_error_envelope(error_code="task_action_identity_invalid", reason="Model action identity is unavailable or changed", tool_call_id=tool_call.get("id", ""))
+                if cached is not None:
+                    self._record_grounding_sources(session_id, cached)
+                    return cached
             with self.browser_resource_scope(str(tool_call.get("name") or ""), session_id), _bind_exact_approval(approval), bind_context(
                 session_id=session_id,
                 surface=effective_surface,
@@ -1737,6 +1773,10 @@ class ToolRunner:
                     session_id, tool_call, available_skills,
                     effective_surface=effective_surface,
                 )
+                if model_scope is not None:
+                    from agents.taskflow import redact_model_task_result
+                    result = redact_model_task_result(result)
+                    model_scope.observe_result(tool_call, result)
                 self._record_grounding_sources(session_id, result)
                 return result
         except _BrowserResourceError:
@@ -2198,6 +2238,12 @@ class ToolRunner:
     async def spawn_subagents(self, session_id: str, args: dict) -> dict:
         """Run multiple sub-tasks in parallel with isolated subagent contexts."""
         self._guard_agent_lease()
+        from agents.taskflow import model_step_for
+        model_scope = model_step_for(session_id, self._orch)
+        if model_scope is not None:
+            model_scope.error = True
+            return make_tool_error_envelope(error_code="task_child_ownership_unavailable",
+                reason="Durable child model action ownership is unavailable; create separately tracked tasks.", tool_call_id=current_context().call_id)
         # Defence in depth. `_execute_tool_call_for_llm_inner` already
         # refuses `subagent__spawn_subagent` in plan mode, but this method
         # is public and is also reachable via
