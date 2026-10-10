@@ -7,7 +7,38 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Integrated phone voice and control repair
+### Active live browser and vision acceptance repair
+
+New physical evidence supersedes the unlaunched-device statement below: the
+installed phone was exercised, but repeated VoiceProcessingIO render failures
+persist. Desktop realtime reached execution without an approval wait, while its
+selected local vision model was unavailable and its capped tool catalog omitted
+browser inspection and editing endpoints. Screenshot bytes were also removed
+from realtime tool receipts without an image input reaching the model.
+
+The parent is integrating browser catalog, bounded realtime image delivery and
+explicit selected-cloud scene routing repairs. A live browser acceptance harness
+is being prepared with synthetic local data, isolated runtime storage and the
+existing configured OpenAI provider explicitly selected for that test. Saved
+personal provider settings remain unchanged. Live observation will verify FERAL's
+actions and final website state; unit fixtures alone do not close this gate.
+Phone duplex repair remains under review. Canonical 9.56 does not yet include
+these uncommitted changes; no new bundle or live completion is claimed.
+
+### Concurrent iOS and executor handoff
+
+The iOS owner has 586 passing contract assertions for strict tool-success parsing
+and visible bounded failure notices; its next signed build/install is separate.
+The already-selected local moondream model was absent and is now installed without
+changing saved provider settings. An independent executor receipt repair has 210
+passing tests and is frozen TEMP-only for this Mac integrator. No competing ASOS
+source edits are made. Read the bounded cross-session handoff at
+`/private/tmp/feral-phone-computer-20261010/CROSS_SESSION_HANDOFF.md` before freezing:
+it records exact patch evidence, screenshot-owner/receipt guard counterexamples
+and a separate AX snapshot budget failure. The current Mac parent retains original
+source, live acceptance, checkpoint and publication ownership.
+
+### Historical integrated phone voice and control repair
 
 The repaired iOS development app is installed in place on the connected iPhone
 17 Pro Max from local commit `5749babc52087698de21aec96e0926650a823f37`.

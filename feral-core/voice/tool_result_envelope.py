@@ -7,6 +7,8 @@ it cannot identify every secret in arbitrary prose. No payload is logged here.
 from __future__ import annotations
 
 from dataclasses import replace
+import base64
+import io
 from itertools import islice
 import json
 import math
@@ -23,7 +25,7 @@ _RECEIPT_KEYS = (
     "outcome_unknown", "verified", "pending_approval", "approval_request_id",
     "_truncated", "_truncation_note", "_pagination_hint",
     "_upstream_truncation_note",
-    "request_id", "tool_name", "session_id", "_image_omitted",
+    "request_id", "tool_name", "session_id", "_image_omitted", "_image_delivery",
 )
 _SECRET_KEYS = frozenset({
     "key", "apikey", "password", "passphrase", "secret", "token",
@@ -34,6 +36,99 @@ _SECRET_KEYS = frozenset({
 _IMAGE_KEYS = frozenset({"image_base64", "image_b64", "screenshot_base64", "screenshot_b64"})
 _CARD = re.compile(r"(?<!\d)(?:\d[ -]?){12,18}\d(?!\d)")
 _API_SECRET = re.compile(r"\b(?:sk-[A-Za-z0-9_-]{16,}|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,})\b")
+MAX_REALTIME_IMAGE_CHARS = 2_000_000
+_SCREENSHOT_TOOLS = frozenset({"screen_capture__capture", "screen_capture__capture_screen",
+                              "gui_computer_use__screenshot", "browser__screenshot"})
+_UNSEEN_IMAGE = (
+    "You have NOT seen this screenshot. Image bytes were withheld from realtime input. "
+    "Use returned analysis or registered browser DOM/Accessibility tools for evidence; "
+    "do not guess screen contents or claim a task completed without verifying its outcome."
+)
+
+
+class RealtimeToolResult(str):
+    """Text receipt plus one ephemeral image; never stored or replayed."""
+
+    image_url: str
+
+    def __new__(cls, text: str, image_url: str):
+        value = super().__new__(cls, text)
+        value.image_url = image_url
+        return value
+
+
+def prepare_realtime_screenshot_result(tool_name: str, result: Any, *, registry=None,
+                                      allow_images: bool = False) -> str:
+    """Lift one validated built-in screenshot without widening text budgets.
+
+    Only the direct capture payload is inspected. Arbitrary result branches,
+    remote URLs, failed receipts and unsupported image formats never upload.
+    """
+    if tool_name == "desktop_control__screenshot" and isinstance(result, dict):
+        result = {**result, "_image_delivery": (
+            "You have NOT seen the screen. This desktop screenshot tool returns command output/path, "
+            "not pixels. Use screen_capture__capture, gui_computer_use__screenshot or browser__screenshot "
+            "for image input, or use browser DOM/Accessibility readback."
+        )}
+    if (not allow_images or tool_name not in _SCREENSHOT_TOOLS or not isinstance(result, dict)
+            or result.get("success") is not True or not isinstance(result.get("data"), dict)
+            or len(result["data"]) > 50):
+        return serialize_realtime_tool_result(tool_name, result, registry=registry)
+    data = result["data"]
+    candidates = {key: data[key] for key in sorted(_IMAGE_KEYS) if isinstance(data.get(key), str)}
+    if not candidates:
+        return serialize_realtime_tool_result(tool_name, result, registry=registry)
+    # Keep the generic extractor bounded independently of the producer's env.
+    from agents.multimodal_blocks import extract_tool_result_images
+    candidates.update({key: data[key] for key in ("format", "encoding", "mime_type", "media_type")
+                       if isinstance(data.get(key), str)})
+    hint = str(data.get("encoding") or data.get("format") or "png").lower()
+    hint = "jpeg" if hint == "jpg" else hint
+    for key in _IMAGE_KEYS:
+        value = candidates.get(key)
+        if isinstance(value, str) and not value.startswith("data:"):
+            candidates[key] = f"data:image/{hint};base64,{value}"
+    _, images, _ = extract_tool_result_images({"data": candidates}, tool_name=tool_name,
+                                             max_images=1, max_b64_chars=MAX_REALTIME_IMAGE_CHARS,
+                                             max_depth=2)
+    if not images:
+        return serialize_realtime_tool_result(tool_name, result, registry=registry)
+    image = images[0]
+    try:
+        if image.media_type not in {"image/jpeg", "image/png"}:
+            raise ValueError("unsupported_format")
+        prefix = f"data:{image.media_type};base64,"
+        if not image.data_url.startswith(prefix):
+            raise ValueError("inline_image_required")
+        encoded = image.data_url[len(prefix):]
+        raw = base64.b64decode(encoded, validate=True)
+        from PIL import Image
+        with Image.open(io.BytesIO(raw)) as decoded:
+            if decoded.format not in {"JPEG", "PNG"} or decoded.width * decoded.height > 16_000_000:
+                raise ValueError("invalid_image_dimensions")
+            if (decoded.format == "JPEG") != (image.media_type == "image/jpeg"):
+                raise ValueError("mismatched_format")
+            decoded.verify()
+    except Exception:
+        return serialize_realtime_tool_result(tool_name, result, registry=registry)
+    projected = {**result, "data": {**data}}
+    for key in candidates:
+        if key in _IMAGE_KEYS:
+            projected["data"][key] = "[image bytes withheld from JSON; separate image input follows]"
+    projected["_image_omitted"] = True
+    projected["_image_delivery"] = (
+        "A separate image input follows this capture receipt before the next response. "
+        "Only that image input or returned analysis is evidence of screenshot contents."
+    )
+    return RealtimeToolResult(serialize_realtime_tool_result(tool_name, projected, registry=registry),
+                              image.data_url)
+
+
+def withhold_realtime_image(result: str) -> str:
+    """Policy changed after capture; keep the receipt and explain no image."""
+    payload = json.loads(result)
+    payload["_image_delivery"] = _UNSEEN_IMAGE
+    return json.dumps(payload)
 
 
 def _redact_text(text: str) -> str:
@@ -102,7 +197,7 @@ def serialize_realtime_tool_result(tool_name: str, result: Any, *, registry=None
                 normalized = re.sub(r"[^a-z0-9]", "", key.lower())
                 if normalized in _SECRET_KEYS or normalized.endswith(("password", "secret", "accesstoken", "refreshtoken")):
                     output[key] = REDACTED
-                elif key in _IMAGE_KEYS and isinstance(item, str) and len(item) > 512:
+                elif key in _IMAGE_KEYS and isinstance(item, str) and item and not item.startswith("["):
                     output[key] = "[image omitted from realtime tool output]"
                     image_omitted = True
                 else:
@@ -136,6 +231,7 @@ def serialize_realtime_tool_result(tool_name: str, result: Any, *, registry=None
         payload["_truncation_note"] = "Result fields were bounded or withheld; this is not the complete result."
     if image_omitted:
         payload["_image_omitted"] = True
+        payload["_image_delivery"] = _UNSEEN_IMAGE
     encoded = serialize_tool_result(tool_name, payload, registry=registry, budget=budget)
     decoded = json.loads(encoded)
     if len(encoded) <= MAX_REALTIME_RESULT_CHARS and isinstance(decoded, dict) and all(

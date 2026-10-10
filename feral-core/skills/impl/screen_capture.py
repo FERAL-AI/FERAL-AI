@@ -96,6 +96,11 @@ class ScreenCaptureSkill(BaseSkill):
                             f"Vision provider {health.get('provider', '?')} is "
                             f"unreachable: {health.get('detail', 'no connection')}"
                         )
+                    else:
+                        data["analysis_error"] = (
+                            "Screenshot captured, but the selected vision provider produced no analysis. "
+                            "The screen has not been interpreted."
+                        )
                 if query and analysis:
                     answer = analysis.get("answer") or analysis.get("scene_description")
                     if answer:
@@ -166,6 +171,13 @@ class ScreenCaptureSkill(BaseSkill):
         if self._scene is not None:
             return self._scene
         try:
+            # Reuse the initialized runtime's selection, budget and health.
+            # Creating a second chat provider here performs unrelated discovery
+            # and can use a different endpoint from the active vision runtime.
+            from api.state import state
+
+            if state.scene is not None:
+                return state.scene
             from agents.llm_provider import LLMProvider
             from perception.scene import SceneAnalyzer
 

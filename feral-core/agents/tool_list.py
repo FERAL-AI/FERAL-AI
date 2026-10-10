@@ -48,6 +48,20 @@ PINNED_OPENAI_TOOL_NAMES: tuple[str, ...] = (
     "desktop_control__shell_command",
     "desktop_control__open_app",
     "desktop_control__screenshot",
+    # Keep a complete text-based web workflow, not just navigation. A
+    # late-registered browser otherwise gets only its first endpoint from
+    # the coverage pass, leaving voice unable to inspect or fill a page.
+    # These are existing central-policy tools for the selected CDP browser;
+    # catalogue visibility does not grant access to another Chrome profile.
+    "browser__navigate",
+    "browser__get_page_info",
+    "browser__get_page_text",
+    "browser__snapshot",
+    "browser__find",
+    "browser__click",
+    "browser__type_text",
+    "browser__fill_form",
+    "browser__press_key",
     # Reading and writing their files.
     "coding_tools__read_file",
     "coding_tools__edit_file",
