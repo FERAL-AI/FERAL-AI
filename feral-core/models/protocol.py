@@ -403,6 +403,15 @@ class ChatRequestPayload(BaseModel):
     """
     session_id: str = Field(..., min_length=1, max_length=MAX_SESSION_ID_LEN)
     text: str
+    turn_contract_version: Optional[Literal[1]] = None
+
+    @field_validator("turn_contract_version", mode="before")
+    @classmethod
+    def exact_turn_contract(cls, value):
+        if value is not None and (type(value) is not int or value != 1):
+            raise ValueError("Unsupported tracked turn contract")
+        return value
+
     reply_mode: Literal["stream", "final"] = "final"
     channel: Literal["chat", "vision_ask"] = "chat"
     reply_to: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)

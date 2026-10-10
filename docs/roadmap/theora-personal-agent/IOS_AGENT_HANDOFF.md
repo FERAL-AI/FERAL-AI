@@ -1,5 +1,30 @@
 # Theora iOS personal-agent research and handoff
 
+## October 9: negotiated paired input source wave
+
+New source above Mac 9.49 adds optional integer turn_contract_version 1 on
+chat_request and preserves the existing text_command opt-in. Send and persist
+one explicit canonical lowercase top-level msg_id UUID for each committed input.
+Resend exact semantic terms to reconcile its accepted/terminal receipt. The
+server stores private verified device identity; supplied context, node aliases,
+reply_to and session membership are not credentials.
+
+First chat_request delivery remains one chat_response plus tracked receipts.
+An exact duplicate returns receipts only, with historical terminal.final_text;
+reconcile one bubble by request/session/server-turn ID. Do not regenerate old
+source cards or treat completed processing as action success. Foreign devices
+and materially changed terms cannot reuse the receipt. Legacy shared keys cannot
+negotiate this authority. Expired/revoked tracked admission returns an explicit
+unavailable error and closes the owned connection; reconnect/renew through
+existing pairing rather than replacing it with a profile operator token.
+
+Device-owned tool approvals remain unavailable in this wave. Exact TaskFlow/
+review device provenance, private publication and scoped resolution follow this
+input contract. Existing global review broadcasts are not claimed private.
+The separate iOS agent owns client changes and actual installation. No iOS code
+is edited or published here. [Wire contract and verification](PHONE_TRACKED_INPUT_20261009.md).
+Current exact-source package state is in [WORK_STATE](WORK_STATE.md).
+
 ## October 9: current Mac 9.49 authority boundary
 
 Mac 9.49/build2026100903 packages published runtime 58ad0a025. Native receipt status

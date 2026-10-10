@@ -19,6 +19,9 @@ from uuid import UUID, uuid4
 from security.agent_turn_lease import spawn_agent_turn
 from agents.runtime_context_checkpoint import RuntimeContextScopeReceipt
 from memory.runtime_session_checkpoint import CheckpointFence
+from security.approval_ingress import (
+    PairedDevicePrincipal, current_node_principal, device_approval_authority_unavailable,
+)
 
 if TYPE_CHECKING:
     from models.protocol import FeralMessage
@@ -28,6 +31,20 @@ class ChatTurnError(Exception):
     def __init__(self, code: str):
         self.code = code
         super().__init__(code)
+
+
+def _admitted_source(source: PairedDevicePrincipal | None) -> PairedDevicePrincipal | None:
+    """Use server admission only; node membership or a supplied SID is insufficient."""
+    admitted = current_node_principal()
+    if device_approval_authority_unavailable():
+        if admitted is None or (source is not None and source is not admitted):
+            raise ChatTurnError("chat_turn_device_authority_unavailable")
+        source = admitted
+    if source is not None:
+        if type(source) is not PairedDevicePrincipal:
+            raise ChatTurnError("chat_turn_device_authority_unavailable")
+        source.require_current()
+    return source
 
 
 def exact_uuid(value) -> str:
@@ -56,6 +73,7 @@ class TurnAudit:
     approval_request_ids: list[str] = field(default_factory=list)
     context_receipt: RuntimeContextScopeReceipt | None = None
     context_checkpoint: dict | None = None
+    source_principal: PairedDevicePrincipal | None = field(default=None, repr=False)
 
 
 @dataclass(frozen=True)
@@ -149,16 +167,21 @@ class PendingTaskOrigin:
     coordinator: Any
     generation: str | None
     agent_generation: int
+    source_principal: PairedDevicePrincipal | None = field(default=None, repr=False)
 
     def guard(self) -> None:
         state = self.state
         coordinator = getattr(self.runner._orch, "_context_checkpoints", None)
+        source = self.source_principal
+        if source is not None:
+            source.require_current()
         if (state.chat_turns is not self.manager or self.manager._store is not self.store
                 or self.manager.state is not state
                 or state.memory is not self.store or state.taskflows is not self.runtime
                 or getattr(state.orchestrator, "tool_runner", None) is not self.runner
-                or state.sessions.get(self.session_id) is not self.owner
+                or (source is None and state.sessions.get(self.session_id) is not self.owner)
                 or self.audit.cancel_requested or self.original_task.cancelled()
+                or self.audit.source_principal is not source
                 or (self.audit.session_id, self.audit.request_id, self.audit.turn_id)
                     != (self.session_id, self.request_id, self.turn_id)
                 or self.original_task.cancelling()
@@ -183,6 +206,7 @@ class PendingTaskOrigin:
         """Historical display/revocation evidence, never current execution permission."""
         try:
             return (self.args_digest == _review_digest(self.args)
+                    and self.audit.source_principal is self.source_principal
                     and (self.audit.session_id, self.audit.request_id, self.audit.turn_id)
                         == (self.session_id, self.request_id, self.turn_id)
                     and pending.get("request_id") == self.approval_id
@@ -282,10 +306,13 @@ class ChatTurnManager:
     def capture_task_approval_origin(self, runner, approval_id: str, args: dict, ctx) -> PendingTaskOrigin:
         audit = turn_audit(ctx.session_id)
         live = self._live.get((ctx.session_id, audit.turn_id)) if audit is not None else None
+        source = audit.source_principal if audit is not None else None
+        if source is not None:
+            source.require_current()
         from security.dangerous_tools import known_surfaces
         if (audit is None or live is None or live.audit is not audit or live.request_id != audit.request_id
                 or live.task is None or live.task.done() or live.task.cancelling()
-                or audit.cancel_requested or self.state.sessions.get(ctx.session_id) is not live.owner
+                or audit.cancel_requested or (source is None and self.state.sessions.get(ctx.session_id) is not live.owner)
                 or self._store is not self.state.memory or ctx.surface not in known_surfaces()
                 or ctx.tool_name != "background_task__start" or not ctx.call_id or len(ctx.call_id) > 256
                 or any(ord(c) < 32 for c in ctx.call_id)):
@@ -297,7 +324,7 @@ class ChatTurnManager:
             live.owner, audit, live.task, approval_id, ctx.session_id, audit.request_id, audit.turn_id,
             ctx.call_id, ctx.surface, copy.deepcopy(args), _review_digest(args), coordinator,
             coordinator.review_generation(ctx.session_id) if coordinator is not None else None,
-            getattr(self.state, "_native_agent_turn_generation", 0))
+            getattr(self.state, "_native_agent_turn_generation", 0), source_principal=source)
         origin.guard()
         return origin
 
@@ -305,7 +332,8 @@ class ChatTurnManager:
         origin.guard()
         try:
             receipt = await self._store.chat_turn_get(session_id=origin.session_id,
-                request_id=origin.request_id, turn_id=origin.turn_id)
+                request_id=origin.request_id, turn_id=origin.turn_id,
+                source_principal=origin.source_principal.storage_binding() if origin.source_principal is not None else None)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -336,7 +364,10 @@ class ChatTurnManager:
                 self._store = store
 
     async def submit(self, *, owner, session_id: str, request_id: str, terms: dict,
-                     run: Callable, emit: Callable) -> dict:
+                     run: Callable, emit: Callable,
+                     source_principal: PairedDevicePrincipal | None = None) -> dict:
+        source_principal = _admitted_source(source_principal)
+        source_binding = source_principal.storage_binding() if source_principal is not None else None
         request_id = exact_uuid(request_id)
         if (not isinstance(session_id, str) or not session_id or len(session_id) > 1024
                 or session_id.strip() != session_id or any(ord(c) < 32 or ord(c) == 127 for c in session_id)):
@@ -357,21 +388,37 @@ class ChatTurnManager:
             raise ChatTurnError("chat_turn_receipt_unavailable") from None
         await self.start()
         async with self._submit_lock:
+            if source_principal is not None:
+                source_principal.require_current()
+            if sum(live.owner is owner and not live.audit.closed for live in self._live.values()) >= 16:
+                # Existing requests may reconnect at capacity. A new request
+                # cannot bypass the bounded ingress queue using another SID.
+                existing = await self._store.chat_turn_get(session_id=session_id, request_id=request_id,
+                                                            source_principal=source_binding)
+                if source_principal is not None:
+                    source_principal.require_current()
+                if existing is None:
+                    raise ChatTurnError("chat_turn_quota")
             turn_id = str(uuid4())
             accepted = dict(contract_version=1, request_id=request_id, turn_id=turn_id,
                             session_id=session_id, status="accepted", durable=True, replayed=False)
             result = await self._store.chat_turn_claim(session_id=session_id, request_id=request_id,
-                                                       turn_id=turn_id, input_digest=digest, receipt=accepted, receipt_limit=receipt_limit)
+                                                       turn_id=turn_id, input_digest=digest, receipt=accepted, receipt_limit=receipt_limit,
+                                                       source_principal=source_binding)
             if result.get("conflict"):
                 raise ChatTurnError("chat_turn_request_conflict")
             if result.get("quota"):
                 raise ChatTurnError("chat_turn_quota")
             receipt = dict(result["receipt"])
             if not result["created"]:
+                if source_principal is not None:
+                    source_principal.require_current()
                 receipt["replayed"] = True
                 ack = {k: receipt[k] for k in ("contract_version", "request_id", "turn_id", "session_id", "durable")}
                 ack.update(status="accepted", replayed=True)
                 await emit("chat_turn_accepted", ack)
+                if source_principal is not None:
+                    source_principal.require_current()
                 active = self._live.get((session_id, receipt["turn_id"]))
                 if active is not None:
                     if len(active.subscribers) >= 8 and id(owner) not in active.subscribers:
@@ -379,19 +426,26 @@ class ChatTurnManager:
                     active.subscribers[id(owner)] = (owner, emit)
                 # Read again after publishing acceptance, because completion
                 # can race a duplicate reconnect during its first await.
-                latest = await self._store.chat_turn_get(session_id=session_id, turn_id=receipt["turn_id"])
+                latest = await self._store.chat_turn_get(session_id=session_id, turn_id=receipt["turn_id"],
+                                                          source_principal=source_binding)
+                if source_principal is not None:
+                    source_principal.require_current()
                 if latest and "processing_outcome" in latest and (active is None or active.audit.closed):
                     if active is None or id(owner) not in active.terminal_notified:
                         if active is not None:
                             active.terminal_notified.add(id(owner))
                         await emit("chat_turn_terminal", {**latest, "replayed": True})
                 return ack
-            audit = TurnAudit(session_id, turn_id, request_id=request_id)
+            audit = TurnAudit(session_id, turn_id, request_id=request_id, source_principal=source_principal)
             live = LiveTurn(owner, audit, request_id)
             live.subscribers[id(owner)] = (owner, emit)
             self._live[(session_id, turn_id)] = live
             try:
+                if source_principal is not None:
+                    source_principal.require_current()
                 await emit("chat_turn_accepted", accepted)
+                if source_principal is not None:
+                    source_principal.require_current()
             except BaseException:
                 self._live.pop((session_id, turn_id), None)
                 terminal = self._terminal(accepted, "cancelled", audit)
@@ -427,11 +481,15 @@ class ChatTurnManager:
         token = _audit.set(audit)
         outcome = "unavailable"
         try:
+            if audit.source_principal is not None:
+                audit.source_principal.require_current()
             running = {**accepted, "status": "running"}
             updated = await self._store.chat_turn_update(session_id=audit.session_id, turn_id=audit.turn_id,
                                                          status="running", receipt=running)
             if not updated:
                 return
+            if audit.source_principal is not None:
+                audit.source_principal.require_current()
             value = await run()
             if isinstance(value, CommittedChatResult):
                 audit.context_checkpoint = value.checkpoint(audit.session_id)
@@ -489,7 +547,9 @@ class ChatTurnManager:
                     live.terminal_notified.add(id(_owner))
                     try:
                         await subscriber("chat_turn_terminal", terminal)
-                    except Exception:
+                    except (Exception, asyncio.CancelledError):
+                        # A disconnected/revoked subscriber cannot prevent a
+                        # current subscriber from reconciling committed results.
                         pass
         except Exception:
             # Never certify a terminal receipt that did not commit.
@@ -501,12 +561,16 @@ class ChatTurnManager:
         finally:
             self._live.pop((audit.session_id, audit.turn_id), None)
 
-    async def abort(self, *, owner, session_id: str, turn_id: str, request_id: str) -> dict:
+    async def abort(self, *, owner, session_id: str, turn_id: str, request_id: str,
+                    source_principal: PairedDevicePrincipal | None = None) -> dict:
+        source_principal = _admitted_source(source_principal)
         turn_id, request_id = exact_uuid(turn_id), exact_uuid(request_id)
         live = self._live.get((session_id, turn_id))
         # All three identities were bound after durable acceptance. Avoid an
         # await here so cancellation can fence an as-yet-unscheduled runner.
-        if live is None or live.owner is not owner or live.request_id != request_id or live.task is None or live.task.done():
+        if (live is None or live.owner is not owner or live.request_id != request_id or live.task is None or live.task.done()
+                or (source_principal is not None and (live.audit.source_principal is None
+                    or live.audit.source_principal.storage_binding() != source_principal.storage_binding()))):
             return {"status": "not_active", "cancel_requested": False, "turn_id": turn_id, "request_id": request_id}
         if not live.audit.cancel_requested:
             live.audit.cancel_requested = True
@@ -517,7 +581,9 @@ class ChatTurnManager:
         """Include accepted/queued work until terminal settlement removes it."""
         return any(sid == session_id for sid, _turn in self._live)
 
-    async def status(self, *, session_id: str, turn_id: str = "", request_id: str = ""):
+    async def status(self, *, session_id: str, turn_id: str = "", request_id: str = "",
+                     source_principal: PairedDevicePrincipal | None = None):
+        source_principal = _admitted_source(source_principal)
         if not (turn_id or request_id):
             raise ChatTurnError("chat_turn_invalid_request")
         if turn_id:
@@ -525,7 +591,13 @@ class ChatTurnManager:
         if request_id:
             request_id = exact_uuid(request_id)
         await self.start()
-        return await self._store.chat_turn_get(session_id=session_id, turn_id=turn_id, request_id=request_id)
+        if source_principal is not None:
+            source_principal.require_current()
+        receipt = await self._store.chat_turn_get(session_id=session_id, turn_id=turn_id, request_id=request_id,
+            source_principal=source_principal.storage_binding() if source_principal is not None else None)
+        if source_principal is not None:
+            source_principal.require_current()
+        return receipt
 
     async def detach(self, owner) -> bool:
         for live in self._live.values():

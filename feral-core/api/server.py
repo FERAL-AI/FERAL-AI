@@ -3424,12 +3424,40 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
     phone_chats = PhoneChatIntake(phone_state, ws, lambda: state)
     setattr(ws, "_feral_phone_chat_intake", phone_chats)
 
-    async def run_phone_chat(payload_dict, target_sid, source_node, orchestrator, memory):
+    from security.approval_ingress import PairedDevicePrincipal
+
+    def paired_peer_current():
+        if (not phone_chats.current() or state is not phone_state
+                or phone_state.device_pairing_store is not store):
+            return False
+        if isinstance(store, DevicePairingStore):
+            # Authentication happened at ingress. Rechecking a retained grant
+            # reads indexed identity/expiry without hashing or extending TTL.
+            return store.admitted_credential_current(device_id=paired_device_id,
+                credential=credential, bearer_kind=bearer_kind)
+        return _verify_credential(store, credential) == (paired_device_id, bearer_kind)
+
+    phone_principal = None
+    if paired_device_id and bearer_kind in {"pair_token", "phone_bearer"}:
+        try:
+            phone_principal = PairedDevicePrincipal(paired_device_id, paired_peer_current)
+        except ValueError:
+            # Old/invalid identity records remain legacy node ingress; they
+            # cannot acquire private tracked ownership from a message field.
+            pass
+
+    async def run_phone_chat(payload_dict, target_sid, source_node, orchestrator, memory,
+                             *, tracked=False):
         state = phone_state
         node_id = source_node
 
         def guard_phone_chat():
             phone_chats.guard()
+            if tracked:
+                if phone_principal is None:
+                    raise asyncio.CancelledError("Phone tracked authority unavailable")
+            if phone_principal is not None:
+                phone_principal.require_current()
             if state.orchestrator is not orchestrator or state.memory is not memory:
                 raise asyncio.CancelledError("Phone runtime changed")
 
@@ -3476,7 +3504,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         response_text = ""
         orch_error: str | None = None
         try:
-            async with prepared_scope(state, target_sid):
+            async with prepared_scope(state, target_sid,
+                    current_owner=paired_peer_current if tracked else None) as scope_receipt:
                 guard_phone_chat()
                 if state.memory:
                     state.memory.working_push(
@@ -3556,8 +3585,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     "channel": channel,
                     "reply_mode": reply_mode,
                     "source_node": node_id or "",
-                    "paired_device_id": paired_device_id or "",
                 }
+                if not tracked:
+                    context["paired_device_id"] = paired_device_id or ""
                 if device_target in ("brain", "phone", "glasses"):
                     context["device_target"] = device_target
                 elif (
@@ -3615,7 +3645,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         response_text = str(
                             result.get("text") or result.get("message") or ""
                         )
-                    if not response_text and state.memory:
+                    if not response_text and state.memory and not tracked:
                         history = state.memory.working_get(target_sid) or []
                         for item in reversed(history):
                             if item.get("role") == "assistant" and item.get("text"):
@@ -3697,9 +3727,96 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             chat_payload["sources"] = _sources_turn
         guard_phone_chat()
         await ws.send_json(hup_frame("chat_response", chat_payload))
+        if tracked:
+            from agents.chat_turns import CommittedChatResult, turn_audit
+            audit = turn_audit(target_sid)
+            if orch_error:
+                if audit is not None:
+                    audit.error = True
+                raise RuntimeError("Phone tracked processing failed")
+            return (CommittedChatResult(response_text, scope_receipt)
+                    if scope_receipt is not None else response_text)
+
+    async def submit_phone_tracked(payload_dict, target_sid, request_id, source_node,
+                                   *, entry_kind="chat_request"):
+        from agents.chat_turns import ChatTurnError, exact_uuid, get_chat_turn_manager
+        orchestrator, memory = phone_state.orchestrator, phone_state.memory
+        try:
+            request_id = exact_uuid(request_id)
+            if phone_principal is None:
+                raise ChatTurnError("chat_turn_device_authority_unavailable")
+            phone_principal.require_current()
+
+            async def text_run():
+                from agents.chat_turns import CommittedChatResult
+                phone_principal.require_current()
+                if phone_state.orchestrator is not orchestrator or phone_state.memory is not memory:
+                    raise asyncio.CancelledError("Phone runtime changed")
+                async with prepared_scope(phone_state, target_sid,
+                        current_owner=paired_peer_current) as scope_receipt:
+                    context = dict(payload_dict.get("context") or {})
+                    context.pop("paired_device_id", None)
+                    refined_text, ctx, _ = await _prepare_chat_turn_context(
+                        session_id=target_sid, text=payload_dict.get("text", ""),
+                        raw_context=context, attachments=payload_dict.get("attachments") or [],
+                        source_node=source_node, scope_receipt=scope_receipt,
+                    )
+                    phone_principal.require_current()
+                    result = await _build_chat_turn_runner(ws=ws, session_id=target_sid,
+                        refined_text=refined_text, ctx=ctx, tracked=True, scope_receipt=scope_receipt)
+                return CommittedChatResult(result, scope_receipt) if scope_receipt is not None else result
+
+            async def run():
+                operation = (text_run if entry_kind == "text_command" else partial(
+                    run_phone_chat, payload_dict, target_sid, source_node,
+                    orchestrator, memory, tracked=True))
+                return await phone_chats.run_tracked(target_sid, operation, phone_principal)
+
+            async def emit(kind, receipt):
+                phone_principal.require_current()
+                phone_chats.guard()
+                if phone_state.orchestrator is not orchestrator or phone_state.memory is not memory:
+                    raise asyncio.CancelledError("Phone runtime changed")
+                await ws.send_json(hup_frame(kind, receipt))
+
+            # Delivery hints/node aliases are not semantic task terms. They
+            # may change on reconnect without authorizing another execution.
+            terms = {"entry_kind": entry_kind, "text": payload_dict.get("text", "")}
+            if entry_kind == "text_command":
+                terms.update(context=payload_dict.get("context"), attachments=payload_dict.get("attachments") or [])
+            else:
+                terms.update(channel=payload_dict.get("channel", "chat"),
+                             device_target=payload_dict.get("device_target"))
+            await get_chat_turn_manager(phone_state).submit(
+                owner=ws, session_id=target_sid, request_id=request_id,
+                terms=terms,
+                run=run, emit=emit, source_principal=phone_principal,
+            )
+        except asyncio.CancelledError:
+            task = asyncio.current_task()
+            owned = (task is not None and task.cancelling() == 0
+                     and phone_chats.current() and state is phone_state
+                     and phone_state.device_pairing_store is store
+                     and phone_state.orchestrator is orchestrator and phone_state.memory is memory)
+            if owned and phone_principal is not None:
+                try:
+                    current = paired_peer_current() is True
+                except Exception:
+                    current = False
+                if not current:
+                    await _send_protocol_error(ws, 4003, "chat_turn_device_authority_unavailable",
+                                               name="chat_turn_device_authority_unavailable")
+                    await ws.close(code=4003, reason="Paired device authority expired or revoked")
+                    raise WebSocketDisconnect(code=4003) from None
+            raise
+        except ChatTurnError as exc:
+            await _send_protocol_error(ws, 4001, exc.code, name=exc.code)
+        except Exception:
+            await _send_protocol_error(ws, 4001, "chat_turn_receipt_unavailable",
+                                       name="chat_turn_receipt_unavailable")
 
     from security.approval_ingress import begin_node_approval_ingress, end_node_approval_ingress
-    approval_ingress_token = begin_node_approval_ingress()
+    approval_ingress_token = begin_node_approval_ingress(phone_principal)
     try:
         while True:
             try:
@@ -4221,9 +4338,14 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     continue
 
                 phone_chats.guard()
-                if not phone_chats.submit(target_sid, partial(
+                if payload_dict.get("turn_contract_version") == 1:
+                    # Raw presence matters: the parser supplies a UUID for old
+                    # envelopes, which is not a reconnect-safe client identity.
+                    await submit_phone_tracked(payload_dict, target_sid, raw.get("msg_id"), node_id)
+                elif not phone_chats.submit(target_sid, partial(
                         run_phone_chat, payload_dict, target_sid, node_id,
-                        phone_state.orchestrator, phone_state.memory)):
+                        phone_state.orchestrator, phone_state.memory),
+                        admission_current=paired_peer_current if phone_principal is not None else None):
                     await ws.send_json(hup_frame("chat_response", {
                         "session_id": target_sid, "text": "", "reply_mode": reply_mode,
                         "channel": channel, "reply_to": reply_to,
@@ -4947,6 +5069,18 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 payload_dict = raw.get("payload", {})
                 text = payload_dict.get("text", "")
                 context = payload_dict.get("context", {})
+                if payload_dict.get("turn_contract_version") == 1:
+                    try:
+                        target_sid, _, _ = session_query(
+                            {"session_id": raw["session_id"]} if "session_id" in raw else {},
+                            getattr(phone_state, "primary_session_id", "") or f"daemon-{node_id}",
+                        )
+                    except RuntimeContextError as exc:
+                        await _send_protocol_error(ws, 4001, exc.code, name=exc.code)
+                        continue
+                    await submit_phone_tracked(payload_dict, target_sid, raw.get("msg_id"),
+                                               node_id, entry_kind="text_command")
+                    continue
                 if text and state.orchestrator and node_id:
                     sessions = state.get_sessions_for_daemon(node_id)
                     target_sid = next(iter(sessions), "")
@@ -4965,12 +5099,19 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     # saw raw text without device_target resolution.
                     # Preparation is part of the same task-owned context fence
                     # as execution, including legacy clients of a managed SID.
-                    state.register_background_task(
-                        asyncio.create_task(_run_prepared_chat_turn(
+                    operation = partial(_run_prepared_chat_turn,
                             ws=ws, session_id=target_sid, text=text,
                             raw_context=context, source_node=node_id,
-                        ))
-                    )
+                        )
+                    if phone_principal is None:
+                        # Preserve the legacy-key dispatch contract. Only a
+                        # verified paired connection has a revocable device
+                        # identity for the retained phone ingress lease.
+                        state.register_background_task(asyncio.create_task(operation()))
+                    elif not phone_chats.submit(target_sid, operation,
+                                                admission_current=paired_peer_current):
+                        await _send_protocol_error(ws, 4001, "phone_chat_busy; request was not started",
+                                                   name="phone_chat_busy")
                     logger.info(f"Text command from daemon {node_id}: {text[:80]}")
 
             elif msg.type == "frame":
@@ -5178,6 +5319,10 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         phone_chats.stop()
 
         async def settle_phone():
+            manager = getattr(phone_state, "chat_turns", None)
+            from agents.chat_turns import ChatTurnManager
+            if isinstance(manager, ChatTurnManager):
+                await manager.detach(ws)
             await phone_chats.drain()
             # Remove only this socket's routing entries. Shared working memory,
             # native/web owners and a replacement's routes remain untouched.

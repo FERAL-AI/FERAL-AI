@@ -49,6 +49,7 @@ class PhoneChatIntake:
         self.node_id: str | None = None
         self.closed = False
         self.tasks: set[asyncio.Task] = set()
+        self.tracked_tasks: set[asyncio.Task] = set()
 
     def current(self) -> bool:
         return (not self.closed and self.current_state() is self.state
@@ -58,7 +59,37 @@ class PhoneChatIntake:
         if not self.current():
             raise asyncio.CancelledError("Phone connection ownership changed")
 
-    def submit(self, session_id: str, operation: Callable[[], Awaitable[None]]) -> bool:
+    async def run_tracked(self, session_id: str, operation, principal):
+        """Hold the existing session lane for the actual CTM-owned runner.
+
+        Admission returns before the tracked runner finishes. Its copied lease
+        must therefore retain the session lock and live peer checks itself.
+        """
+        orchestrator, memory = self.state.orchestrator, self.state.memory
+
+        def owner_current():
+            return (self.current() and self.state.orchestrator is orchestrator
+                    and self.state.memory is memory and principal.is_current() is True)
+
+        principal.require_current()
+        task = asyncio.current_task()
+        if task is None:
+            raise asyncio.CancelledError("Tracked phone runner unavailable")
+        self.tracked_tasks.add(task)
+        try:
+            async with phone_scope_lock(self.state, "session", session_id):
+                self.guard()
+                principal.require_current()
+                with bind_agent_dispatch_owner(owner_current):
+                    result = await operation()
+                    principal.require_current()
+                    self.guard()
+                    return result
+        finally:
+            self.tracked_tasks.discard(task)
+
+    def submit(self, session_id: str, operation: Callable[[], Awaitable[object]], *,
+               admission_current: Callable[[], bool] | None = None) -> bool:
         self.guard()
         if len(self.tasks) >= MAX_PHONE_CHAT_TASKS:
             return False
@@ -71,6 +102,7 @@ class PhoneChatIntake:
                 self.current()
                 and self.state.orchestrator is orchestrator
                 and self.state.memory is memory
+                and (admission_current is None or admission_current() is True)
             )
 
         async def run():
@@ -95,13 +127,13 @@ class PhoneChatIntake:
 
     def stop(self) -> None:
         self.closed = True
-        for task in tuple(self.tasks):
+        for task in tuple(self.tasks | self.tracked_tasks):
             if not task.done():
                 task.cancel()
 
     async def drain(self) -> None:
         self.stop()
-        remaining = {task for task in self.tasks if not task.done()}
+        remaining = {task for task in self.tasks | self.tracked_tasks if not task.done()}
         if remaining:
             _, pending = await asyncio.wait(remaining, timeout=2)
             if pending:

@@ -1470,6 +1470,11 @@ class MemoryStore:
                 UNIQUE(session_id, request_id)
             )""")
             conn.execute("CREATE INDEX IF NOT EXISTS idx_chat_turn_session ON chat_turn_receipts(session_id, updated_at)")
+            # Private admission metadata is not part of public receipt JSON or
+            # federated memory. Old rows retain NULL (no device provenance).
+            receipt_columns = {row[1] for row in conn.execute("PRAGMA table_info(chat_turn_receipts)")}
+            if "source_principal_json" not in receipt_columns:
+                conn.execute("ALTER TABLE chat_turn_receipts ADD COLUMN source_principal_json TEXT")
             # Runtime-only data. Deliberately absent from federated sync/import
             # allowlists and unrelated to display-only conversations/snapshots.
             conn.execute("""CREATE TABLE IF NOT EXISTS runtime_session_checkpoints (
@@ -2033,18 +2038,21 @@ class MemoryStore:
             await self._release(conn)
 
     async def chat_turn_claim(self, *, session_id: str, request_id: str,
-                              turn_id: str, input_digest: str, receipt: dict, receipt_limit: int = 100000) -> dict:
+                              turn_id: str, input_digest: str, receipt: dict, receipt_limit: int = 100000,
+                              source_principal: dict | None = None) -> dict:
         """Atomic receipt acceptance and exact-term deduplication, never execution."""
         conn = await self._conn()
         try:
             await conn.execute("BEGIN IMMEDIATE")
-            async with conn.execute("SELECT input_digest, receipt_json FROM chat_turn_receipts WHERE session_id = ? AND request_id = ?",
+            source_json = json.dumps(source_principal, sort_keys=True, separators=(",", ":"), allow_nan=False) if source_principal is not None else None
+            async with conn.execute("SELECT input_digest, receipt_json, source_principal_json FROM chat_turn_receipts WHERE session_id = ? AND request_id = ?",
                                     (session_id, request_id)) as cursor:
                 existing = await cursor.fetchone()
             if existing:
                 await conn.commit()
-                return {"created": False, "conflict": existing[0] != input_digest,
-                        "receipt": json.loads(existing[1])}
+                if existing[0] != input_digest or existing[2] != source_json:
+                    return {"created": False, "conflict": True}
+                return {"created": False, "receipt": json.loads(existing[1])}
             async with conn.execute("SELECT COUNT(*), SUM(CASE WHEN status != 'terminal' THEN 1 ELSE 0 END), SUM(CASE WHEN session_id = ? AND status != 'terminal' THEN 1 ELSE 0 END) FROM chat_turn_receipts",
                                     (session_id,)) as cursor:
                 counts = await cursor.fetchone()
@@ -2054,8 +2062,8 @@ class MemoryStore:
                 await conn.rollback()
                 return {"created": False, "quota": True}
             now = time.time()
-            await conn.execute("INSERT INTO chat_turn_receipts VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?)",
-                               (turn_id, session_id, request_id, input_digest, json.dumps(receipt), now, now))
+            await conn.execute("INSERT INTO chat_turn_receipts (turn_id, session_id, request_id, input_digest, status, receipt_json, created_at, updated_at, source_principal_json) VALUES (?, ?, ?, ?, 'accepted', ?, ?, ?, ?)",
+                               (turn_id, session_id, request_id, input_digest, json.dumps(receipt), now, now, source_json))
             await conn.commit()
             return {"created": True, "receipt": receipt}
         except BaseException:
@@ -2082,14 +2090,16 @@ class MemoryStore:
         finally:
             await self._release(conn)
 
-    async def chat_turn_get(self, *, session_id: str, request_id: str = "", turn_id: str = "") -> Optional[dict]:
+    async def chat_turn_get(self, *, session_id: str, request_id: str = "", turn_id: str = "",
+                            source_principal: dict | None = None) -> Optional[dict]:
         """Read only the exact bound session's receipt, with no cross-session fallback."""
         if not session_id or not (request_id or turn_id):
             return None
         conn = await self._conn()
         try:
-            async with conn.execute("SELECT receipt_json FROM chat_turn_receipts WHERE session_id = ? AND (? = '' OR request_id = ?) AND (? = '' OR turn_id = ?)",
-                                    (session_id, request_id, request_id, turn_id, turn_id)) as cursor:
+            source_json = json.dumps(source_principal, sort_keys=True, separators=(",", ":"), allow_nan=False) if source_principal is not None else None
+            async with conn.execute("SELECT receipt_json FROM chat_turn_receipts WHERE session_id = ? AND (? = '' OR request_id = ?) AND (? = '' OR turn_id = ?) AND (? IS NULL OR source_principal_json = ?)",
+                                    (session_id, request_id, request_id, turn_id, turn_id, source_json, source_json)) as cursor:
                 row = await cursor.fetchone()
             return json.loads(row[0]) if row else None
         finally:
