@@ -1,24 +1,31 @@
 # Theora iOS personal-agent research and handoff
 
-## October 10: verified client adoption and scoped Chrome source
+## October 10: Mac 9.55 packaged; iOS adoption independently verified
 
-Local unpushed iOS commits f513f8d, ab516b5, adaaf69 and aa77855 adopt persisted
-request IDs, exact receipts/cards, bounded atomic storage and read-only recovery.
-Final production Foundation fixtures pass 539 assertions; unsigned device build
-and compiled Swift/registered ASGI/real pairing/SQLite recovery pass. One task,
-one inert call and zero prompt resend are verified. No physical acceptance ran.
+Mac 9.55/build2026101004, runtime 3717ad646, packages the durable phone recovery
+and Chrome contract below. Actual expanded Browser controls and normal Quit/
+listener closure pass after bounded layout and native selectable-text corrections.
+Package source/signature checks pass; known-good rollback is 9.52.
 
-Backend source negotiates durable phone_turn_contract version 1 and read-only
-phone_turn_status. Chrome permission is reviewed on the Mac for one exact step;
-first use saves the next call and waits. Explicit Workflows Resume and action
-approval remain separate. Reconnect refreshes current private waiting ownership
-without granting permission or dispatching. Integration passes 1,147 tests/four
-skips; typing adds zero diagnostics. Mac 9.53 packages these additions, but its expanded Browser layout fails GUI
-acceptance. A separate 9.54 layout correction is being packaged; 9.52 remains
-the known-good rollback. Phone target/live configuration remain
-pending. See WORK_STATE for source/publication/artifact identity.
+Independent read-only review confirms iOS local aa77855 and its predecessors
+f513f8d, ab516b5 and adaaf69 implement persisted canonical input IDs, exact cards,
+separate renewal and read-only reconnect queries without prompt resend. Retained
+539 Foundation assertions, unsigned device build and compiled Swift/registered
+ASGI/pairing/SQLite round trip pass. That fixture has one stored task, one inert
+model call and zero prompt resends. Review uncertainty is in memory; durable
+inputs/receipts survive restart and cards are fetched again from the inbox.
 
-[Current source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
+The iOS remote branch is still at 7d51197 during this review and the updated app
+is uninstalled. Its agent owns publication and actual installation. Next: identify
+the installed build and selected model/network, then verify phone task intake,
+Mac Chrome scope, explicit Workflows Resume, exact action review, one observed
+result and reconnect recovery. No physical phone/account/inference/audio/Chrome
+acceptance is inferred from source or the registered fixture. No iOS files are
+edited here. Provider/network details remain pending; do not request credentials
+in chat or resend an unresolved task automatically.
+
+[Current contract](PHONE_TASK_CHROME_CONTRACT_20261010.md),
+[9.55 acceptance](NATIVE_9_55_ACCEPTANCE.md), [ownership](WORK_STATE.md).
 
 ## October 10: Mac 9.52 exact device reviews
 

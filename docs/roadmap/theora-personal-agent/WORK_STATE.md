@@ -7,41 +7,49 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Phone recovery published; Browser layout correction packaging
+### Completed 9.55 recovery and Chrome-controls batch
 
-Runtime source fd64e38f8893025c5f2c51550f4882139c34e3ca is published on the
-PR310 feature branch. Mac 9.53/build2026101002 contains that exact source: fresh
-54-input optimized Swift compilation, 504 Python/70 WebUI comparisons, contained
-runtime dependencies and strict ad-hoc signing pass. The retained 1,147-test/
-four-skip/64-suite source gate has zero drift; core Ruff passes and Mac typing
-retains 788 baseline diagnostics with zero additions/removals.
+Immutable Mac 9.55/build2026101004 contains exact runtime
+3717ad646a676301879933bba9d042dc8a1f2c41. The fd64e38f8 recovery/Chrome source
+is already published; the parent is publishing the subsequent native corrections
+and this checkpoint to PR310. Verify actual remote HEAD before resuming.
 
-Actual isolated native avatar/setup/Chat/Home and collapsed Browser work. Expanding
-Chrome task permissions reproducibly moves controls/sidebar offscreen. Normal
-Quit exits0. This candidate fails expanded-layout acceptance; known-good 9.52 is
-the rollback. A bounded scroll/preview correction passes native typecheck and
-164 checks. Intermediate 9.54 package checks pass. Remote native-contracts then
-identifies three unsafe SwiftUI selectable metadata rows; the same failure is
-reproduced locally and corrected using NativeSelectableText. Selector safety,
-164 Browser checks and full native typecheck pass on that correction. Parent
-owns final 9.55 packaging and actual expansion/scroll/sidebar acceptance.
-All worker source files are released. Backend/model/wire
-inputs are unchanged by this correction; retain their matching source evidence.
+Negotiated phone recovery is read-only and never resends the goal. Exact-step
+Chrome permission dispatches nothing; explicit Workflows Resume continues its
+saved call, with separate mutation approval. Fresh 54-input native compilation,
+504 Python/70 WebUI source equality and strict ad-hoc signatures pass. Actual
+isolated setup/Chat/Home and visible expanded Chrome controls, expiration picker,
+repeat navigation/collapse and normal Quit/listener closure pass. The native hash
+is unchanged. Full native typecheck, 164 checks and selector safety pass; unchanged
+backend inputs retain 1,147 tests/four skips/64 suites, CI Ruff and 788 baseline
+Mac typing diagnostics with zero additions/removals. Physical operation is separate.
 
-Independent review confirms iOS local HEAD aa77855 contains persisted task IDs,
-read-only reconnect recovery, exact cards and separate renewal. Retained 539
-Foundation assertions and compiled Swift/registered ASGI/pairing/SQLite round
-trip pass: one task, one inert model call, zero prompt resends. Remote still
-points to 7d51197 and the updated app remains uninstalled. iOS publication and
-installation belong to its agent; this checkout makes no iOS edits. Physical
-phone/provider/Chrome/audio acceptance remains open. Selected live configuration
-is pending; no real model/account/message/payment is tested by these fixtures.
+Retain failed53 expanded-layout/selector evidence and intermediate54 receipts.
+Known-good 9.52 is the sole generated rollback; inspected 53/54 apps are retired.
+Final offline build takes 172.91s, free space 12,970,913,792 before and
+12,893,335,552 after (net 77,578,240 bytes, within 2 GiB). No personal data, models,
+caches or useful Git history are removed. AUDIT-FIXES.md remains unstaged.
+The public-doc checker passes on 135 tracked targets; its unfiltered local run
+finds three preexisting ignored notes that are not published. Remote native CI
+failure was independently reproduced/corrected locally; new remote CI is pending.
 
-Preserve unrelated AUDIT-FIXES.md edits. Keep one canonical candidate and the
-known-good 9.52 rollback; retain small failed53 receipts instead of another app
-copy. Verify actual source/candidate/remote before resuming interrupted work.
+Independent iOS review confirms local aa77855: persisted task IDs/receipts,
+read-only recovery, exact cards and separate renewal. Retained 539 assertions and
+compiled Swift/registered ASGI/pairing/SQLite fixture pass: one task, one inert
+model call, zero prompt resends. The iOS remote remains 7d51197 and the updated
+app is uninstalled during review. Its agent owns publication/installation.
+No iOS source edits or live accounts/provider/audio/Chrome/device tests here.
 
-[9.53 checks and layout failure](NATIVE_9_53_ACCEPTANCE.md),
+This batch deliberately pauses after publication; all workers released files,
+no further background implementation is implied. Next: coordinate the installed
+phone build and chosen model/network, verify authenticated phone task intake,
+actual Chrome scope/Resume/action review/result, then disconnect/reconnect receipt
+recovery without replay. Positive native grant GUI, real audio/glasses,
+provisioning, messaging/checkout, shared collaboration and distribution remain
+in the complete requirements. Coding expansion, Linux and Gen-UI stay deferred.
+
+[Exact acceptance](NATIVE_9_55_ACCEPTANCE.md),
+[retained failure history](NATIVE_9_53_ACCEPTANCE.md),
 [source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
 
 ### Historical 9.52 completed review batch

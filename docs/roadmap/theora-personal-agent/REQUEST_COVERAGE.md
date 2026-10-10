@@ -1,11 +1,23 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 10).** Published fd64e38f8 and packaged 9.53 add
-phone receipt recovery and exact-step Chrome consent. Package checks pass; actual
-expanded Browser layout fails. A verified bounded layout correction is being
-packaged as 9.54. iOS adoption is locally verified but unpushed/uninstalled.
-Physical phone/provider/browser/audio and broader product gates remain open.
-[9.53 evidence](NATIVE_9_53_ACCEPTANCE.md), [current ownership](WORK_STATE.md).
+**Current checkpoint (October 10; completed Mac batch).**
+
+Immutable Mac 9.55/build2026101004 contains runtime
+`3717ad646a676301879933bba9d042dc8a1f2c41`: durable phone receipt recovery,
+exact-step Chrome consent/explicit saved-call Resume, and bounded native controls.
+Fresh native compilation, 504 Python/70 WebUI comparisons and strict signatures
+pass. Actual avatar/setup/Chat/Home, visible expanded Browser controls, expiration
+picker, sidebar navigation and normal Quit/listener closure pass in an isolated
+profile. Native typecheck/164 checks/selector safety pass. Unchanged backend inputs
+retain the verified 1,147-test/four-skip gate and zero-added Mac typing.
+
+iOS adoption is independently verified at local aa77855: 539 assertions and one
+registered fixture round trip with zero prompt resends. Its commits are unpushed
+and the build is uninstalled. Next is actual installed-phone/provider/Chrome
+acceptance, followed by the remaining product gates. Known-good rollback is 9.52.
+This is a deliberate checkpoint; no background implementation is implied.
+
+[Exact acceptance](NATIVE_9_55_ACCEPTANCE.md), [ownership](WORK_STATE.md).
 
 **Historical checkpoint (October 10).** Immutable Mac 9.52/build2026101001 contains
 exact runtime source `0138f3d24751adb00b1728adc5dfc7b086663c3e`.
@@ -83,7 +95,7 @@ and [WORK_STATE](WORK_STATE.md) distinguish the evidence and remaining gates.
 |---|---|
 | Conversation while agents work on several tasks | TaskFlow/turns/multi-agent; TASK-01 durable job ownership and bounded scheduling, VOICE-02 delegation |
 | Subscription/API/local choice | Shared catalog/config and existing adapters; AUTH-01 supported ChatGPT plan registration; Claude SDK eligibility separate |
-| Fast reliable browser/computer/screen sharing | Existing CDP/Playwright/AX/GUI; [native operator browser view](BROWSER_VIEW_EVIDENCE.md); RESOURCE-01 independent task targets/foreground ownership and desktop preview remain |
+| Fast reliable browser/computer/screen sharing | Existing CDP/Playwright/AX/GUI and native browser view; 9.55 adds reviewed exact-step Chrome access and saved-call waiting/Resume with visible bounded controls. Positive native grant and installed-phone/real Chrome operation remain open; independent task targets/foreground ownership and desktop preview remain in RESOURCE-01. |
 | Clean local text/vision/audio model install | Ollama/vision/STT/TTS adapters; INSTALL-01 reviewed compatible runtime/download/capability/first-response verification |
 | Three product images/options in iMessage | Existing channels and preview commerce; MSG-01 receive/dedup/offer fallback, BUY-01 exact quote/Link/merchant verification |
 | CLI/web/native settings parity and two–three steps | Same catalog/config, deliberately separate default profiles; SETUP-01 string model DTO and endpoint/fallback repair |
@@ -225,7 +237,7 @@ not describe this new source wave.
 | Full personal agent inside existing FERAL | **Partial.** Runtime, orchestration, memory, policy, headless contracts and multiple clients exist. Native replacement remains a preview with partial capability coverage. | Complete supported journeys and declare enabled capabilities only after their gates pass. Preserve existing clients and data during migration. |
 | Solid native Mac app, clean intuitive UI, feature preservation | **Partial.** SwiftUI/AppKit, avatar-first setup, bounded actual startup, selected real task checks; chat diagnostics and bounded error details implemented. All native inventory rows remain uncertified. | Verify populated old transcripts, composer/navigation, accessibility, permissions, errors, cancellation, recovery and all retained actions. Resolve each inventory omission before replacing the full installed app. |
 | Installable Linux app with equivalent supported power | **Unverified release.** Existing Linux/backend/web/Tauri foundations; SwiftUI candidate is Mac-only. | Choose and test supported distributions/architectures, package install/update/rollback, X11/Wayland audio/tray/shortcuts and the declared Linux feature matrix. |
-| Native iOS app using the same agent | **Partial; iOS agent owns implementation.** Existing Theora SwiftUI app and FERAL relay/outbox bridges. Two conversation paths and incomplete protocol handling remain. | Execute IOS-01 onward: clean iOS build, owner lifecycle, one durable event record, exact voice/camera correlation, background/device acceptance and shared action reviews. |
+| Native iOS app using the same agent | **Implemented client handoff, physical acceptance open; iOS agent owns installation/publication.** Local aa77855 unifies the timeline/tools and persists canonical task IDs, exact receipts/cards and read-only reconnect recovery; 539 assertions and a registered round trip pass. | Install/publish that build, verify authenticated phone-to-Mac inference and Chrome tasks, then physical voice/camera correlation, background/device behavior and durable same-owner memory. |
 | FERAL logo and user-selected avatar at first launch | **Bounded Mac verified.** Supplied logo retained, icons packaged; bundled companion, orb and imported-photo choice exist; actual avatar onboarding observed. | Persistent choice through upgrades and supported same-owner sync; catalog rights, import limits, state-driven animation, static/reduced-motion/accessibility and iOS rendering. Logo and avatar remain distinct. |
 | Text like two people: sent/delivered/read/seen and rich conversation | **Requested, not established.** Text/history and rich event handling exist; no verified read/seen contract. | Define durable acceptance, presentation/read evidence, typing/thinking and task progress separately. Never call a queued task completed or claim human-like seeing without a corresponding event. Test duplicate/reordered/reconnected messages. |
 | Calls and natural interruptible voice while tasks run | **Partial source.** Voice adapters, microphone/playback/transcripts and review configuration exist. Real latest-native audio and multitasking acceptance remain open. | One audio coordinator, exact turn/stream ownership, barge-in, call controls, task progress during conversation, model fallback, cancellation, budgets and real latency/audio tests. |

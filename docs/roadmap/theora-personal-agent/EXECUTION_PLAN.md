@@ -1,20 +1,25 @@
 # FERAL app completion: executable plan
 
-**Current checkpoint (October 10; layout correction pending).**
+**Current checkpoint (October 10; completed Mac batch).**
 
-Published fd64e38f8 is packaged in 9.53 with 504 Python/70 WebUI comparisons and
-fresh native compilation. Frozen integration passes 1,147 tests/four skips;
-Mac typing adds zero diagnostics. Actual expanded Browser permission layout
-fails, while avatar/setup/Chat/Home/collapsed Browser and normal Quit work.
-A bounded scroll/preview correction passes native typecheck/164 checks; parent
-owns fresh 9.54 packaging and actual GUI verification. iOS adoption is verified
-locally at aa77855, but publication, installation and physical acceptance remain
-open. Known-good rollback is 9.52. See WORK_STATE for exact ownership and evidence.
+Immutable Mac 9.55/build2026101004 contains runtime
+`3717ad646a676301879933bba9d042dc8a1f2c41`: durable phone receipt recovery,
+exact-step Chrome consent/explicit saved-call Resume, and bounded native controls.
+Fresh native compilation, 504 Python/70 WebUI comparisons and strict signatures
+pass. Actual avatar/setup/Chat/Home, visible expanded Browser controls, expiration
+picker, sidebar navigation and normal Quit/listener closure pass in an isolated
+profile. Native typecheck/164 checks/selector safety pass. Unchanged backend inputs
+retain the verified 1,147-test/four-skip gate and zero-added Mac typing.
 
-[9.53 evidence](NATIVE_9_53_ACCEPTANCE.md),
-[source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
+iOS adoption is independently verified at local aa77855: 539 assertions and one
+registered fixture round trip with zero prompt resends. Its commits are unpushed
+and the build is uninstalled. Next is actual installed-phone/provider/Chrome
+acceptance, followed by the remaining product gates. Known-good rollback is 9.52.
+This is a deliberate checkpoint; no background implementation is implied.
 
-**Preceding canonical artifact (October 10).** Immutable Mac 9.52/build2026101001 contains
+[Exact acceptance](NATIVE_9_55_ACCEPTANCE.md), [ownership](WORK_STATE.md).
+
+**Historical artifact (October 10).** Immutable Mac 9.52/build2026101001 contains
 exact runtime source `0138f3d24751adb00b1728adc5dfc7b086663c3e`.
 Private phone task reviews now have exact-device publication and guarded REST
 discovery/decisions. Stored waiting model reviews support explicit same-device

@@ -58,9 +58,9 @@ same failure is reproduced locally; the correction uses the established native
 selectable-text component. Intermediate 9.54 packages the layout-only correction
 at fee9e31bf, with fresh compilation and matching package checks, but is not GUI
 accepted. The final 9.55 batch includes both corrections and repeats GUI checks.
-The full local public-doc checker separately reports three preexisting W300
-references in untouched HANDOFF.md, HANDOVER.md and ROADMAP_NEXT.md. It is not a
-passing full-doc gate; this batch does not rewrite those unrelated documents.
+The full local public-doc checker separately reports three preexisting model-number references in ignored local notes. It is not a
+passing unfiltered local gate; those notes are not changed or published. The
+tracked-publication check and final artifact are recorded in the 9.55 ledger.
 
 Private evidence includes feral-oct10-root-integration/combined-evidence,
 feral-oct10-root-browser-tests, feral-native-9-53-build-20261010,
