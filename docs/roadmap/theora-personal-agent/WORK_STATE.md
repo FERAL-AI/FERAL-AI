@@ -7,36 +7,42 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Active phone review integration batch
+### Current 9.52 completed review batch
 
-Published predecessor HEAD 5995116f2 and immutable 9.51 remain available.
-The completed follow-on source batch binds private exact task reviews, delivers
-cards only to the current originating device, enables guarded REST decisions and
-renews persisted waiting model reviews with freshly authenticated same-device
-credentials. Both workers released their files; parent owns integration,
-documentation, packaging and publication. No iOS/UI, Chrome delegation, physical
-model/audio/account or release operation is part of this batch.
+Immutable 9.52/build2026101001 contains exact runtime source
+`0138f3d24751adb00b1728adc5dfc7b086663c3e`. Private phone task reviews now
+bind before publication, queue only to the originating current device and
+resolve through guarded exact-card REST decisions. Persisted waiting model
+reviews can be explicitly renewed after reopen with fresh same-device credentials;
+old cards cannot dispatch. Operator approvals and central execution remain intact.
+Both workers released their files. Parent completed integration and packaging;
+this checkpoint deliberately pauses after documentation and branch publication.
+Verify actual remote HEAD when resuming. No background implementation is implied.
 
-Final frozen integration passes 917 tests, one skip and 325 warnings across 53
-suites in 62.67 seconds, zero input drift. Configured Mac mypy retains 788 existing
-diagnostics, zero additions/removals and zero drift. Full-core CI Ruff and authored
-whitespace pass. Four nullable-route typing defects were corrected before final
-acceptance. Earlier 917-pass/792-diagnostic runs and two legacy constructor-bypass
-fixture failures are retained separately. The two fixture maps now match the
-actual constructor; production permissions were not loosened.
+Final frozen checks pass 917 tests/one skip/325 warnings across 53 suites in
+62.67 seconds, with zero drift. Mac mypy retains 788 existing diagnostics, zero
+added/removed and zero drift; full-core CI Ruff and whitespace pass. Earlier
+792-diagnostic typing and constructor-bypass fixture failures are retained; they
+were corrected before the final gate. This is selected integration, not the whole
+backend or physical phone/provider acceptance.
 
-Packaging target: 9.52/build2026101001, one cached offline assembly; net generated
-payload budget 2 GiB. Disk headroom is approximately 14 GiB; actual before/after
-resource receipts are mandatory. All Swift/WebUI inputs remain unchanged and
-verified native reuse is eligible. Keep canonical 9.51 until identity/staging
-checks pass, then retain sole rollback 9.51 and retire inspected generated 9.50.
-[Phone review contract](PHONE_REVIEW_AUTHORITY_20261010.md) includes the iOS
-negotiation and exact-card requirements; no physical client operation is claimed.
-Remote predecessor checks report 17 successes, four skips and one failure in the
-Ubuntu PR backend fast lane. That failure is not a passing local or remote gate;
-its cause remains unclassified here. No merge or production release is implied.
+All 501 packaged Python and 70 WebUI files match committed source. All 54 Swift
+inputs/flags are unchanged; verified native reuse and strict signatures pass.
+Actual bundled private review/SQLite reopen/credential rotation/renewal/one inert
+effect/continuation checks pass. Bundled backend health in 2.14 seconds, lifeline
+shutdown and listener closure pass, artifact unchanged. No new GUI, live model,
+account, audio, message, payment or physical device is exercised.
 
-### Current 9.51 artifact and completed batch
+Offline assembly takes 37.52 seconds; free space is 16,750,440,448 before and
+16,504,766,464 after, net 245,673,984 bytes within 2 GiB. Canonical 9.52 and sole
+rollback 9.51 remain; inspected generated 9.50 is retired. Personal data, models,
+caches, useful Git history and unstaged AUDIT-FIXES.md remain untouched. Remote
+predecessor CI has 17 successes/four skips/one unclassified Ubuntu backend fast-lane
+failure. New remote CI is separate; no merge or production release is performed.
+[Exact acceptance](NATIVE_9_52_ACCEPTANCE.md),
+[review/client contract](PHONE_REVIEW_AUTHORITY_20261010.md).
+
+### Historical 9.51 artifact and completed batch
 
 Immutable Mac 9.51/build2026100905 contains exact runtime source
 `901c72f1075eab7ca59550e35142be6cecb524ff`. Private phone origin survives
@@ -148,29 +154,27 @@ model/cache/Git cleanup. AUDIT-FIXES.md remains unstaged. No docs-only rebuild.
 
 ### Next ready cards and ownership
 
-The phone creation/discovery and active cloud binding cards are complete in 9.51.
-No worker is assigned an implementation file at this deliberate pause. Parent
-owns integration, checkpoint and publication. Reconcile actual Git, candidate
-identity and worker status before resuming. The separate iOS agent owns that
-repository; no iOS code is edited here.
+Private phone flow creation, review publication/decisions and waiting model-review
+renewal are complete in 9.52. No worker owns implementation files at this pause.
+Parent owns checkpoint/publication; reconcile actual worker and Git state before
+resuming. The separate iOS agent owns client adoption; no iOS source is edited.
 
-1. Complete private phone review publication, discovery, resolution and exact
-   model-step renewal using the persisted origin. Paired REST/node approvals
-   remain unavailable; the Mac operator inbox remains usable. Stored TaskFlow
-   provenance alone grants no review authority. Do not widen global broadcasts.
-2. Implement explicit job-scoped Chrome permission across ToolRunner, selected
-   CDP and review projection while retaining physical resource ownership. Shared
-   conversation selection alone does not authorize a detached browser task.
-3. Perform configured model and installed-phone browser/task acceptance with
-   the actual endpoint/error, provider/model and any spend/download limits.
-   Those details have not arrived. Fixture success is not physical acceptance.
-4. Retain continuous voice/local provisioning, messaging, commerce, proactive
+1. Implement explicit job-scoped Chrome permission across ToolRunner, selected
+   CDP and review projection, retaining physical ownership and exact step/action
+   proof. Shared conversation membership is not browser permission. The existing
+   private job-Chrome design card is a starting point, not an accepted implementation.
+2. Adopt the version-1 exact-card and separate-renewal contract in iOS, then test
+   the installed phone and configured model through a real Mac browser/task flow.
+   Actual endpoint/error, provider/model and any spend/download limits are still
+   needed for physical/provider acceptance; fixtures do not establish it.
+3. Keep continuous voice/local provisioning, messaging, commerce, proactive
    multitasking, shared memory/social collaboration and distribution in the full
-   coverage plan. Native contrast/runtime wording and the historical Welcome
-   Continue accessibility observation remain UX follow-ups. Coding expansion,
-   Linux expansion and Gen-UI remain deferred.
+   coverage plan. Initial pre-creation review recovery is not established by
+   model-step renewal. Native contrast/runtime wording and historical Welcome
+   Continue accessibility behavior remain UX follow-ups. Coding, Linux expansion
+   and Gen-UI remain deferred.
 
-Detailed next-card handoff: feral-phone-review-origin-next-card-20261009.json
+Detailed next-card handoff: feral-job-chrome-next-card-20261009-reconciled.json
 (private). [Current device boundary](DEVICE_APPROVAL_AUTHORITY_EVIDENCE_20261009.md)
 and [native readiness scope](NATIVE_READINESS_PRESENTATION_20261009.md). The full
 product backlog remains in REQUEST_COVERAGE and EXECUTION_PLAN; no feature is

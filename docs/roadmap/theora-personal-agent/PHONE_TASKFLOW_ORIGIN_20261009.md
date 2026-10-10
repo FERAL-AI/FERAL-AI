@@ -23,9 +23,10 @@ its stored flow after reopen. Stored identity is provenance, not an approval or
 a restored live socket. Re-pairing with a different device ID gives no automatic
 claim on prior work. Local operator reviews remain usable.
 
-Device-owned approval resolution, origin-private review notifications, later
-model-step review renewal, job-scoped Chrome permission and physical iPhone
-acceptance remain separate work. The current paired approval refusals remain.
+Mac 9.51 kept paired approval resolution unavailable. Mac 9.52 adds private exact
+review publication, guarded REST decisions and explicit waiting model-review
+renewal; [current contract](PHONE_REVIEW_AUTHORITY_20261010.md). Job-scoped Chrome
+permission and physical iPhone acceptance remain separate work.
 Creating a task or returning its processing receipt does not prove its external
 goal was achieved.
 

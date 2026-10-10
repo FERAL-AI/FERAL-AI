@@ -1,5 +1,11 @@
 # Device approval authority boundary
 
+Current follow-on: Mac 9.52 adds narrowly owned tracked-task/model-review REST
+resolution and explicit waiting model-review renewal. Legacy/unowned/free-text
+reviews retain the restrictions below. This October 9 record is historical;
+[current contract](PHONE_REVIEW_AUTHORITY_20261010.md),
+[9.52 acceptance](NATIVE_9_52_ACCEPTANCE.md).
+
 October 9, 2026. Paired-device authentication establishes a device identity;
 it does not establish ownership of every pending tool review. The current store
 has no durable authenticated originating-device principal for these requests.

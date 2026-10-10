@@ -1,5 +1,31 @@
 # Theora iOS personal-agent research and handoff
 
+## October 10: Mac 9.52 exact device reviews
+
+Mac 9.52/build2026101001 packages runtime 0138f3d24. The backend now supplies
+private approval_request/resolved task_review cards and guarded paired REST
+inbox/approve/reject/renew. Existing untracked/free-text acknowledgments remain
+unavailable. Keep negotiated tracked turn_contract_version 1 input below.
+
+Client work: retain each full exact task_review object, fetch the originating
+inbox with task_review_version=1, and send exactly {session_id,task_review} to
+the request-specific approve/reject endpoints. Use originating session identity,
+not an internal execution SID or operator credential. Unknown fields/types must
+not be reconstructed into an approval. Match request IDs and reconcile one card.
+
+Show renewal_required separately from approval. POST the old exact model-action
+card to its /renew endpoint, then display the new request/card for a new explicit
+decision. Renewal spends/dispatches nothing. Old cards are not reusable. Handle
+403 post-decision responses carrying outcome_unknown/effects_may_have_occurred and
+retry_safe false by inspecting receipts, never automatically repeating approval.
+Queue acceptance is not delivered/seen. Initial pre-creation proposals cannot be
+reconstructed after restart by this model-action renewal.
+
+[Complete contract](PHONE_REVIEW_AUTHORITY_20261010.md) and
+[actual source/package acceptance](NATIVE_9_52_ACCEPTANCE.md). Physical iPhone,
+configured inference and job-scoped Chrome remain open; no iOS source, installation
+or publication is performed here.
+
 ## October 9: Mac 9.51 private task origin
 
 Mac 9.51/build2026100905, exact runtime 901c72f10, retains the negotiated
