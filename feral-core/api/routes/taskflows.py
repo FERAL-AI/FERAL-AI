@@ -28,6 +28,7 @@ async def create_taskflow(body: dict):
             title=title,
             steps=steps,
             context=context,
+            origin_surface="http_api",
         )
         return flow
     except Exception as e:

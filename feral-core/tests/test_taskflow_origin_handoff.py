@@ -493,7 +493,7 @@ async def test_legacy_flow_execution_signature_preserved(rig):
     runtime._orchestrator = SimpleNamespace(handle_command=AsyncMock(return_value="inert"))
     flow = runtime.create_flow(session_id="legacy", title="fixture", steps=[{"type": "llm.chat", "prompt": "read"}])
     assert (await runtime._execute_step(flow, flow["steps"][0]))["status"] == "completed"
-    runtime._orchestrator.handle_command.assert_awaited_once_with("legacy", "read")
+    runtime._orchestrator.handle_command.assert_awaited_once_with("legacy", "read", context={"surface": "cron"})
 
 
 async def test_public_executor_uses_registered_adapter_and_retains_policy_gate(rig):

@@ -137,7 +137,7 @@ class TaskFlowModelStep:
     def admit_call(self, runner, call, surface):
         self._guard()
         from security.dangerous_tools import known_surfaces
-        if surface not in known_surfaces() or (self.runtime.origin_surface_for_flow(self.flow["id"]) not in (None, surface)):
+        if surface not in known_surfaces() or surface != self.runtime.execution_surface_for_flow(self.flow["id"]):
             raise ValueError("Model action surface is unavailable or changed")
         call_id = call.get("id")
         if not isinstance(call_id, str) or not call_id or len(call_id) > 256:
@@ -577,6 +577,21 @@ class TaskFlowRuntime:
             row = self._conn.execute("SELECT origin_surface FROM taskflows WHERE id = ?", (flow_id,)).fetchone()
         return row[0] if row is not None else None
 
+    def execution_surface_for_flow(self, flow_id: str) -> str:
+        """Use creation-owned scope; historical unowned work has a cron floor.
+
+        Context/body claims and remembered session permissions cannot upgrade
+        a persisted workflow. Legacy safe reads remain available; interactive
+        effects require a newly admitted known originating surface.
+        """
+        from security.dangerous_tools import known_surfaces
+        surface = self.origin_surface_for_flow(flow_id)
+        if surface is None:
+            return "cron"
+        if surface not in known_surfaces():
+            raise RuntimeError("Workflow execution surface is unavailable")
+        return surface
+
     def list_origin_flows(self, origin_session_id: str, *, limit: int = 50) -> list[dict]:
         from security.session_identity import validate_session_id
         validate_session_id(origin_session_id)
@@ -1005,7 +1020,7 @@ class TaskFlowRuntime:
         step = next((s for s in flow["steps"] if s["id"] == binding.get("step_id")), None)
         approval = (step.get("result") or {}).get("approval") if step else None
         exact = {key: pending.get(key) for key in ("request_id", "session_id", "tool_name", "args")}
-        if not approval or approval != exact:
+        if step is None or not approval or approval != exact:
             return None, None
         if step["step_type"] == "llm.chat":
             action = (step.get("result") or {}).get("model_action") or {}
@@ -1022,7 +1037,16 @@ class TaskFlowRuntime:
                     or action.get("terms_digest") != digest):
                 return None, None
             from security.dangerous_tools import known_surfaces
-            if terms.get("surface") not in known_surfaces() or self.origin_surface_for_flow(flow["id"]) not in (None, terms["surface"]):
+            try:
+                if terms.get("surface") not in known_surfaces() or terms["surface"] != self.execution_surface_for_flow(flow["id"]):
+                    return None, None
+            except RuntimeError:
+                return None, None
+        elif step["step_type"] == "skill.invoke":
+            try:
+                if step["result"].get("dispatch_surface") != self.execution_surface_for_flow(flow["id"]):
+                    return None, None
+            except RuntimeError:
                 return None, None
         return flow, step
 
@@ -1030,7 +1054,7 @@ class TaskFlowRuntime:
         flow, step = self._approval_step(pending)
         if not flow or not step:
             raise RuntimeError("Workflow action surface is unavailable")
-        return step["result"]["model_action"]["terms"]["surface"] if step["step_type"] == "llm.chat" else "taskflow"
+        return step["result"]["model_action"]["terms"]["surface"] if step["step_type"] == "llm.chat" else self.execution_surface_for_flow(flow["id"])
 
     def prepare_approved_dispatch(self, pending: dict) -> bool:
         """Claim the existing review once, before its central execution."""
@@ -1538,11 +1562,15 @@ class TaskFlowRuntime:
                 return {"status": "failed", "error": "skill.invoke args must be an object", "dispatch_started": False}
             runner = getattr(self._orchestrator, "tool_runner", None)
             tool_name = f"{skill_id}__{endpoint}"
+            try:
+                surface = self.execution_surface_for_flow(flow["id"])
+            except RuntimeError:
+                return {"status": "failed", "error": "Workflow execution surface is unavailable", "dispatch_started": False}
             if runner is None:
                 # Explain an explicit deny for legacy headless callers, but
                 # never substitute direct skill execution for full authority.
                 from security.safety_resolver import resolve_policy, LEVEL_DENY
-                policy = resolve_policy(tool_name, args, surface="taskflow", registry=self._skill_registry)
+                policy = resolve_policy(tool_name, args, surface=surface, registry=self._skill_registry)
                 error = (f"denied by safety policy: {policy.deny_reason}" if policy.level == LEVEL_DENY
                          else "Full policy dispatcher unavailable; no skill executed")
                 return {"status": "failed", "error": error, "dispatch_started": False}
@@ -1550,10 +1578,10 @@ class TaskFlowRuntime:
                 return {"status": "failed", "error": "Agent supervisor is paused", "dispatch_started": False}
             session_id = flow.get("session_id") or f"taskflow-{flow['id']}"
             call_id = f"taskflow:{flow['id']}:{step['id']}"
-            with bind_context(session_id=session_id, surface="taskflow", call_id=call_id):
+            with bind_context(session_id=session_id, surface=surface, call_id=call_id):
                 refusal = runner.enforce_plan_mode(tool_name, session_id)
                 if refusal is None:
-                    refusal = runner.enforce_safety(tool_name, args, session_id=session_id, surface="taskflow")
+                    refusal = runner.enforce_safety(tool_name, args, session_id=session_id, surface=surface)
                 if refusal is not None:
                     if refusal.get("status") != "pending_approval":
                         return {"status": "failed", "error": str(refusal.get("note") or refusal.get("reason") or refusal.get("error") or "Policy refused workflow action"),
@@ -1564,7 +1592,7 @@ class TaskFlowRuntime:
                     refusal["taskflow"] = binding
                     approval = json.loads(json.dumps({key: refusal[key] for key in
                                                       ("request_id", "session_id", "tool_name", "args")}))
-                    review = {"status": "waiting", "reason": "approval_required", "approval": approval}
+                    review = {"status": "waiting", "reason": "approval_required", "approval": approval, "dispatch_surface": surface}
                     with self._lock:
                         self._conn.execute("UPDATE taskflow_steps SET status = 'waiting', result_json = ?, finished_at = NULL WHERE id = ?", (json.dumps(review), step["id"]))
                         self._conn.execute("UPDATE taskflows SET status = 'waiting', wait_until = NULL, updated_at = ? WHERE id = ? AND status != 'cancelled'", (time.time(), flow["id"]))
@@ -1574,7 +1602,7 @@ class TaskFlowRuntime:
                     await runner._notify_user_of_pending_approval(session_id, tool_name, refusal)
                     return {"status": "deferred"}
                 result = await runner.execute_tool_call_for_llm(
-                    session_id, {"id": call_id, "name": tool_name, "args": args}, [], surface="taskflow"
+                    session_id, {"id": call_id, "name": tool_name, "args": args}, [], surface=surface
                 )
             ok = result.get("success", False)
             return {
@@ -1594,7 +1622,7 @@ class TaskFlowRuntime:
             scope = None
             try:
                 origin = flow.get("context", {}).get("task_origin", {})
-                command_context = None
+                command_context = {"surface": self.execution_surface_for_flow(flow["id"])}
                 if isinstance(origin, dict) and origin.get("source") in {"tracked_chat_turn", "legacy_agent_context"}:
                     from security.dangerous_tools import known_surfaces
                     with self._lock:

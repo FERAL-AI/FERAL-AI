@@ -30,7 +30,9 @@ class _DispatchOwnerFence:
     current: Callable[[], bool] = field(repr=False)
 
 
-_dispatch_owners = ContextVar("feral_agent_dispatch_owners", default=())
+_dispatch_owners: ContextVar[tuple[_DispatchOwnerFence, ...]] = ContextVar(
+    "feral_agent_dispatch_owners", default=()
+)
 
 
 @contextmanager

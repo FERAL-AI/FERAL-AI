@@ -53,9 +53,10 @@ Remaining contracts and limits:
   explicitly refused until causal child ownership exists. Immediate foreground
   delegation remains available. This is a capability gap, not completed
   simultaneous background agent support.
-- The legacy explicit skill.invoke path still uses the existing unknown
-  taskflow surface. Its unattended policy gap remains a separate release blocker;
-  preserving known origin surfaces in model steps does not repair that path.
+- The independent review also found a legacy explicit skill.invoke unknown-
+  surface bypass. The subsequent [creation-owned scope correction](TASKFLOW_ORIGIN_POLICY_EVIDENCE_20261009.md)
+  addresses REST, scheduled and historical model/tool dispatch; its own evidence
+  and migration boundaries remain separate from the initial tests above.
 - The shared model-effect lane still serializes these jobs. Full independent
   concurrent goal jobs and supervised work surviving app Quit remain open.
 - A completed processing step is not proof of checkout, delivery or successful

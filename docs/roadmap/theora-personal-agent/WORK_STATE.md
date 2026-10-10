@@ -53,7 +53,25 @@ suppressed task cancellation. The task-local phone dispatch ownership correction
 and queued pre-effect checks pass 47 targeted tests and nine independent probes;
 unrelated sessions retain their authority and earlier unknown outcomes remain
 unknown. Combined acceptance remains pending. A separate reproduced routine/REST
-workflow surface bypass is under repair before unattended effects are accepted.
+workflow surface bypass is corrected in frozen source: 376 focused tests and
+11 independent checks pass, plus zero inert denied effects through the original
+public creation paths. [Scope, migration and evidence](TASKFLOW_ORIGIN_POLICY_EVIDENCE_20261009.md).
+The first parent combined gate passed 4,703 tests, 22 skips across 230 suites,
+with no source drift. A full pre-wave Mac typing comparison then identified nine
+added diagnostics. Narrow corrections and phone sensor-identity regressions are
+verified by the final 231-suite rerun. Final configured Mac typing comparison
+reports 797 versus 799 diagnostics, zero normalized additions and two removals;
+the Linux baseline remains untouched. Full CI-rule Ruff passes. Final combined
+verification passes 4,726 tests, 22 skips, 573 warnings across 231 suites in
+130.81 seconds, with no source drift. Private receipt:
+feral-oct9-source-wave-q045d52p/receipt.json. The preceding failed typing
+comparison remains retained separately.
+
+A subsequent actual BrainState sender probe found dictionary approval frames
+passed into an object-only serializer, resulting in zero node sends. The runtime
+worker owns only api/state.py and a focused real-class transport regression to
+correct this boundary before packaging. Origin-specific background approval and
+job browser delegation remain separate implementation cards.
 Details of the preceding phone integration and ownership are below.
 
 Sources will freeze after worker release, then receive combined tests, coherent

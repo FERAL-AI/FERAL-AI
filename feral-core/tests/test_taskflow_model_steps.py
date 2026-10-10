@@ -972,3 +972,19 @@ async def test_nested_background_launch_is_not_completed_child_work(wired):
         and len(rt.list_flows()) == 1
         and calls == []
     )
+
+
+async def test_historical_model_review_cannot_keep_broader_missing_origin_scope(wired):
+    rt, orch, calls = wired
+    flow_id = goal(rt)
+    _, pending = await ask(rt, orch, flow_id)
+    rt._conn.execute("UPDATE taskflows SET origin_surface=NULL WHERE id=?", (flow_id,))
+    rt._conn.commit()
+    assert rt.execution_surface_for_flow(flow_id) == "cron"
+    assert rt._approval_step(pending) == (None, None)
+    renewed = rt.resume_flow(flow_id)
+    assert renewed["review_renewal"]["status"] == "refused"
+    result = await orch.resolve_tool_approval_request(
+        pending["request_id"], approved=True, session_id=pending["session_id"]
+    )
+    assert result["status"] == "not_found" and calls == []

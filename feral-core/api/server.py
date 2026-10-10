@@ -16,6 +16,7 @@ import secrets
 import time
 from collections.abc import Awaitable, Callable, Coroutine  # noqa: F401 — quoted coroutine annotations
 from contextvars import Context
+from functools import partial
 from pathlib import Path
 from uuid import uuid4
 
@@ -1480,6 +1481,7 @@ def execute_routine_job(job):
                 flow = instantiate_pack(
                     workflow_id,
                     session_id=job.session_id or f"routine-{job.id}",
+                    origin_surface="cron",
                     context={
                         "instantiated_from": "routine",
                         "routine_id": job.id,
@@ -1510,6 +1512,7 @@ def execute_routine_job(job):
                 title=payload.get("title") or job.description or f"routine-{job.id}",
                 steps=flow_steps,
                 context={"instantiated_from": "routine", "routine_id": job.id},
+                origin_surface="cron",
             )
             state.cron_service.record_run_finish(
                 run_id,
@@ -3213,7 +3216,7 @@ _FRAME_TIER_BY_EVENT_TYPE: dict = {
 }
 
 
-def _frame_tier_refused(node_id: str, msg_type: str, raw: dict) -> str:
+def _frame_tier_refused(node_id: str | None, msg_type: str, raw: dict) -> str:
     """The tier this frame needs, when the operator has disabled it.
 
     Empty string means ingest it. Returns the tier name so the caller can
@@ -3228,6 +3231,8 @@ def _frame_tier_refused(node_id: str, msg_type: str, raw: dict) -> str:
         tier = _FRAME_TIER_BY_EVENT_TYPE.get(event_type)
     if tier is None:
         return ""
+    if not node_id:
+        return tier
     if frame_tier_enabled(node_id, tier):
         return ""
     return tier
@@ -4214,10 +4219,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     continue
 
                 phone_chats.guard()
-                if not phone_chats.submit(target_sid,
-                        lambda request=payload_dict, sid=target_sid, source=node_id,
-                        orchestrator=phone_state.orchestrator, memory=phone_state.memory:
-                        run_phone_chat(request, sid, source, orchestrator, memory)):
+                if not phone_chats.submit(target_sid, partial(
+                        run_phone_chat, payload_dict, target_sid, node_id,
+                        phone_state.orchestrator, phone_state.memory)):
                     await ws.send_json(hup_frame("chat_response", {
                         "session_id": target_sid, "text": "", "reply_mode": reply_mode,
                         "channel": channel, "reply_to": reply_to,

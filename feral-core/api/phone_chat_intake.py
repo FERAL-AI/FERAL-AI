@@ -52,7 +52,7 @@ class PhoneChatIntake:
 
     def current(self) -> bool:
         return (not self.closed and self.current_state() is self.state
-                and (self.node_id is None or self.state.daemons.get(self.node_id) is self.ws))
+                and (self.node_id is None or getattr(self.state, "daemons", {}).get(self.node_id) is self.ws))
 
     def guard(self) -> None:
         if not self.current():

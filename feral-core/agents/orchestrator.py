@@ -3402,11 +3402,18 @@ class Orchestrator:
             if isinstance(taskflow_spec, dict):
                 steps = taskflow_spec.get("steps", [])
                 if isinstance(steps, list) and steps:
+                    from security.dangerous_tools import known_surfaces
+                    flow_surface = self._session_surfaces.get(session_id)
+                    if flow_surface not in known_surfaces():
+                        await self._send_error(session_id, "Workflow origin surface is unavailable.", code="task_origin_unavailable")
+                        return
                     flow = self.taskflows.create_flow(
                         session_id=session_id,
                         title=taskflow_spec.get("title", text[:80] or "Background TaskFlow"),
                         steps=steps,
                         context=taskflow_spec.get("context", {"prompt": text}),
+                        origin_session_id=session_id,
+                        origin_surface=flow_surface,
                     )
                     ack = f"Started TaskFlow {flow['id']} with {len(steps)} step(s)."
                     await self._send_text(session_id, ack)

@@ -240,7 +240,7 @@ def skill_flow(rt, endpoint, *, following=False):
               "args": {"value": "exact input"}}]
     if following:
         steps.append({"type": "noop"})
-    return flow(rt, endpoint, steps=steps)
+    return rt.create_flow(session_id="owner", title=endpoint, steps=steps, origin_surface="local_cli")
 
 
 async def test_registered_read_dispatch_progresses_through_actual_toolrunner(wired):

@@ -75,7 +75,7 @@ def create(runtime, endpoint="save_note", *, session="owner", args=None, followi
               "endpoint": endpoint, "args": {"value": "exact terms"} if args is None else args}]
     if following:
         steps.append({"type": "noop"})
-    return runtime.create_flow(session_id=session, title="isolated policy fixture", steps=steps)
+    return runtime.create_flow(session_id=session, title="isolated policy fixture", steps=steps, origin_surface="local_cli")
 
 
 async def review(wired):
@@ -97,7 +97,7 @@ async def test_safe_invocation_uses_full_dispatcher_identity_and_validation(wire
     assert runtime.get_flow(flow["id"])["status"] == "completed"
     assert len(seen) == 1
     context, call = seen[0]
-    assert context.session_id == "owner" and context.surface == "taskflow"
+    assert context.session_id == "owner" and context.surface == "local_cli"
     assert context.call_id == f"taskflow:{flow['id']}:{flow['steps'][0]['id']}"
     assert call["args"] == {"value": "exact terms"}
     bad = create(runtime, "search_notes", args={})
@@ -115,7 +115,7 @@ async def test_confirm_executes_once_via_real_approval_and_continues(wired):
     result = await orch.resolve_tool_approval_request(pending["request_id"], approved=True, session_id="owner")
     assert result["status"] == "approved"
     assert len(seen) == 1
-    assert seen[0][0].surface == "taskflow"
+    assert seen[0][0].surface == "local_cli"
     row = runtime.get_flow(flow["id"])
     assert row["steps"][0]["status"] == "completed"
     assert row["current_step"] == 1
