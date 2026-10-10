@@ -470,6 +470,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
         try expect(!model.chatReceiptReady,"boolean/floating capability cannot enable native submission")
         await negotiate(model)
         try expect(model.chatCanSend,"valid capability enables idle native Chat")
+        try expect(model.chatTurnStatus == "Chat receipt channel connected. Model availability is not verified by this connection." && transport.commands.isEmpty && WireProtocol.captured.allSatisfy { !$0.0.hasPrefix("/api/llm") }, "receipt negotiation does not infer provider health or send a hidden model probe; valid admission remains usable")
         model.pendingAttachments = [NativeAttachmentRef(id:"tracked-upload",filename:"fixture.txt",contentType:"text/plain",sizeBytes:7,sha256:String(repeating:"a",count:64))]
         let unreviewed = await model.sendChat("Read the file")
         try expect(!unreviewed && transport.commands.isEmpty && model.messages.isEmpty,"tracked attachment content still requires exact review")

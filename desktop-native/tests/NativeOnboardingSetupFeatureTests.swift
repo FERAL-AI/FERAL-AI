@@ -8,6 +8,7 @@ private final class SetupFixture:URLProtocol {
     static var modelRows:[Any]=["cached-model"]
     static var modelSource="cache"
     static var probeReply:[String:Any]?
+    static var probeEffect:(()->Void)?
     static var customProviders:[[String:Any]]?
     static var activationError:Any?
     static let template="https://[{WorkspaceId}].ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
@@ -39,7 +40,7 @@ private final class SetupFixture:URLProtocol {
         else if path.hasSuffix("/models"){let id=path.contains("ollama") ? "ollama" : path.contains("qwen") ? "qwen" : "openai";value=["provider_id":id,"models":Self.modelRows,"source":Self.modelSource];code=200}
         else if path=="/api/llm/config",post{Self.config["provider"]=body["provider"];Self.config["model"]=body["model"];Self.config["base_url"]=body["base_url"];Self.config["fallback_providers"]=body["fallback_providers"];var receipt:[String:Any]=["success":true,"provider":body["provider"]!,"model":body["model"]!,"reconfigured":["ok":true,"available":false]];if let error=Self.activationError{receipt["error"]=error};value=receipt;code=200}
         else if path.hasSuffix("/configure"){Self.cloudConfigured=true;value=["success":true,"status":["id":"openai"],"persisted":["ok":!Self.partialPersistence,"warnings":["private-provider-secret-canary"]]];code=200}
-        else if path.hasSuffix("/probe"){value=Self.probeReply ?? ["id":path.contains("ollama") ? "ollama" : "openai","reachable":false];code=200}
+        else if path.hasSuffix("/probe"){value=Self.probeReply ?? ["id":path.contains("ollama") ? "ollama" : "openai","reachable":false];Self.probeEffect?();code=200}
         else if path=="/api/setup/complete"{Self.completed=true;value=["ok":true,"setup_complete":true];code=200}
         else{value=["detail":"private-provider-secret-canary"];code=404}
         let data=try! JSONSerialization.data(withJSONObject:value),response=HTTPURLResponse(url:Self.foreignResponse ? URL(string:"http://127.0.0.1:9465"+path)! : request.url!,statusCode:code,httpVersion:nil,headerFields:nil)!
@@ -100,14 +101,34 @@ private final class SetupFixture:URLProtocol {
         await model.refresh();let probe=try model.review(.probe)
         check(probe.explanation.contains("BACKEND-SAVED") && probe.explanation.contains("not sent"),"probe does not pretend draft endpoint/model are sent")
         check(await model.perform(probe) && model.notice?.contains("unreachable")==true,"exact provider probe receipt reports failed reachability without fake model success")
+        check(model.lastProbeReachable==false && model.providers.first(where:{$0.id=="ollama"})?.reachable==nil && model.probeStatusText.contains("Last explicit probe: unreachable"),"explicit negative probe remains visible despite actual passive null readback")
+        let passivePosts=SetupFixture.posts.count;await model.refresh()
+        check(model.lastProbeReachable==false && SetupFixture.posts.count==passivePosts,"unchanged passive refresh keeps historical result without another provider call")
+        model.endpoint += "/changed"
+        check(model.lastProbeReachable==nil && model.probeStatusText=="No probe result available in this view.","endpoint draft edit invalidates historical probe without overwriting catalogue")
+        model.endpoint=SetupFixture.config["base_url"] as! String
         for statusError:Any? in ["", NSNull(), nil] {
             SetupFixture.probeReply=SetupFixture.providerStatus(reachable:true,error:statusError)
             let requestCount=SetupFixture.posts.count
             check(await model.perform(try model.review(.probe)) && model.error==nil && model.notice?.contains("saved provider reachable")==true && model.notice?.contains("still unverified")==true,"actual ProviderStatus positive accepts empty/null/omitted error without claiming inference")
+            check(model.lastProbeReachable==true && model.probeStatusText.contains("Model inference is not verified"),"positive historical probe never certifies inference")
             check(SetupFixture.posts.count==requestCount+1 && SetupFixture.posts.last?.url?.path=="/api/llm/providers/ollama/probe" && SetupFixture.body(SetupFixture.posts.last!).isEmpty,"probe only submits explicit saved-provider request with empty body")
         }
         SetupFixture.probeReply=SetupFixture.providerStatus(reachable:false,error:"private-provider-secret-canary")
         check(await model.perform(try model.review(.probe)) && model.notice?.contains("unreachable")==true && model.error==nil && model.notice?.contains("private-provider-secret-canary")==false,"actual negative ProviderStatus is an acknowledged unreachable outcome with private details withheld")
+        let exactConfig=SetupFixture.config
+        SetupFixture.probeEffect={SetupFixture.config["base_url"]="http://127.0.0.1:1/v1"}
+        check(!(await model.perform(try model.review(.probe))) && model.lastProbeReachable==nil && model.notice==nil,"configuration replacement during an acknowledged probe never publishes stale historical result")
+        SetupFixture.probeEffect=nil;SetupFixture.config=exactConfig;await model.refresh()
+        let originalRows=SetupFixture.providers()
+        SetupFixture.probeEffect={SetupFixture.customProviders=originalRows.map{row in var value=row;if value["id"] as? String=="ollama"{value["runtime_supported"]=false};return value}}
+        check(!(await model.perform(try model.review(.probe))) && model.lastProbeReachable==nil,"runtime capability replacement during probe invalidates scope")
+        SetupFixture.probeEffect=nil;SetupFixture.customProviders=nil;await model.refresh()
+        SetupFixture.probeEffect={SetupFixture.customProviders=originalRows.map{row in var value=row;if value["id"] as? String=="ollama"{value["last_refresh"]=123.0;value["default_model"]="new-discovered-suggestion"};return value}}
+        check(await model.perform(try model.review(.probe)) && model.lastProbeReachable==false,"probe-produced discovery timestamp/suggestion updates do not invalidate their own historical receipt")
+        SetupFixture.probeEffect=nil;SetupFixture.customProviders=nil;await model.refresh()
+        check(model.lastProbeReachable==false,"passive suggestion changes preserve historical evidence")
+        model.model += "-draft";check(model.lastProbeReachable==nil,"model draft edit invalidates historical status");model.model=exactConfig["model"] as! String
         var invalidProbes:[[String:Any]]=[]
         for badError:Any in [1,["private-provider-secret-canary"],["detail":"private-provider-secret-canary"],String(repeating:"x",count:4097)] {
             invalidProbes.append(SetupFixture.providerStatus(reachable:false,error:badError))
@@ -119,7 +140,7 @@ private final class SetupFixture:URLProtocol {
         var missingIdentity=SetupFixture.providerStatus(reachable:true);missingIdentity.removeValue(forKey:"id");invalidProbes.append(missingIdentity)
         for reply in invalidProbes {
             SetupFixture.probeReply=reply
-            check(!(await model.perform(try model.review(.probe))) && model.error != nil && model.notice==nil && model.error?.contains("private-provider-secret-canary")==false,"malformed or contradictory probe cannot establish reachability or expose details")
+            check(!(await model.perform(try model.review(.probe))) && model.lastProbeReachable==nil && model.error != nil && model.notice==nil && model.error?.contains("private-provider-secret-canary")==false,"malformed or contradictory probe cannot establish reachability or expose details")
         }
         SetupFixture.probeReply=nil
         for unrelatedError:Any in ["",NSNull(),"private-provider-secret-canary"] {

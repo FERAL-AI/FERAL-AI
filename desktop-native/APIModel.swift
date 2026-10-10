@@ -927,7 +927,7 @@ import CoreFoundation
         case .ready:
             capabilityDeadline?.cancel()
             if frame["id"] as? String == chatTurns.capabilityID { taskResults.negotiate(payload, connectionID: connection) }
-            chatTurnStatus = chatRecoveryBlocked ? "Earlier request outcome needs checking" : "Verified chat ready"
+            chatTurnStatus = chatRecoveryBlocked ? "Earlier request outcome needs checking" : "Chat receipt channel connected. Model availability is not verified by this connection."
             updateVoiceReadiness()
             if contextSetupPending { await finishContextCreation(connectionID: connection) }
             if unresolvedChatRequest != nil { await checkChatStatus() };return

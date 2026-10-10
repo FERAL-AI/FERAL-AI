@@ -46,19 +46,34 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
     @Published private(set) var error: String?
     @Published private(set) var notice: String?
     @Published private(set) var busy = false
-    @Published var model = ""
-    @Published var endpoint = ""
-    @Published var fallbacks = ""
+    @Published var model = "" { didSet { if model != oldValue { clearProbe() } } }
+    @Published var endpoint = "" { didSet { if endpoint != oldValue { clearProbe() } } }
+    @Published var fallbacks = "" { didSet { if fallbacks != oldValue { clearProbe() } } }
+    @Published private(set) var lastProbeReachable: Bool?
     private var baseURL: URL?
     private var generation = UUID()
     private var cachedConfig: [String: Any] = [:]
     private var cachedVault: [String: Any] = [:]
     private var usedReviews = Set<UUID>()
+    private var probeConfig: [String: Any] = [:]
+    private var probeDescriptor: NativeProviderChoice?
+    var probeStatusText: String {
+        if let verdict = lastProbeReachable { return "Last explicit probe: \(verdict ? "reachable" : "unreachable"). Model inference is not verified by this probe." }
+        return providers.first(where: { $0.id == selected })?.reachable.map { $0 ? "Backend cached status: reachable" : "Backend cached status: unreachable" } ?? "No probe result available in this view."
+    }
+    private func clearProbe() { lastProbeReachable = nil; probeConfig = [:]; probeDescriptor = nil }
+    private func sameProbeDescriptor(_ a: NativeProviderChoice, _ b: NativeProviderChoice) -> Bool {
+        a.id == b.id && a.name == b.name && a.defaultURL == b.defaultURL && a.note == b.note && a.needsKey == b.needsKey && a.configured == b.configured && a.chatReady == b.chatReady && a.runtimeSupported == b.runtimeSupported && a.setupSelectable == b.setupSelectable
+    }
+    private func reconcileProbe() {
+        guard lastProbeReachable != nil else { return }
+        guard let descriptor = probeDescriptor, descriptor.id == selected, sameJSON(cachedConfig, probeConfig), let current = providers.first(where: { $0.id == selected }), sameProbeDescriptor(current, descriptor) else { clearProbe(); return }
+    }
     private let uptime: () -> TimeInterval
     private let session: URLSession
     init(baseURL: URL?, session: URLSession? = nil, uptime: @escaping () -> TimeInterval = { ProcessInfo.processInfo.systemUptime }) { self.baseURL = baseURL; self.session = session ?? NativeProviderRedirectGuard.session(); self.uptime = uptime }
     func configure(baseURL: URL?) {
-        guard self.baseURL != baseURL else { return }; self.baseURL = baseURL; generation = UUID()
+        guard self.baseURL != baseURL else { return }; clearProbe(); self.baseURL = baseURL; generation = UUID()
         providers = []; models = []; keys = []; selected = ""; activeProvider = ""; activeModel = ""; runtimeState = "Not confirmed"
         model = ""; endpoint = ""; fallbacks = ""; cachedConfig = [:]; cachedVault = [:]; usedReviews = []; modelsSource = "Not loaded"; health = []; keysError = nil; error = nil; notice = nil; busy = false
     }
@@ -136,6 +151,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
         guard !busy else { return }
         generation = UUID(); usedReviews = []
         if resetSelection {
+            clearProbe()
             generation = UUID(); selected = ""; model = ""; endpoint = ""; fallbacks = ""; cachedConfig = [:]; cachedVault = [:]; usedReviews = []
             activeProvider = ""; activeModel = ""; runtimeState = "Not confirmed"; notice = nil
             models = []; keys = []; keysError = nil; modelsSource = "Not loaded"; health = []
@@ -146,6 +162,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
             let list = try await request("/api/llm/providers")
             providers = try decodeProviders(list)
             cachedConfig = try configSnapshot(await request("/api/llm/config"))
+            reconcileProbe()
             activeProvider = cachedConfig["provider"] as? String ?? ""; activeModel = cachedConfig["model"] as? String ?? ""
             let status = try await request("/api/llm/status")
             runtimeState = providerBool(status["available"]).map { $0 ? "Runtime reports available" : "Runtime reports unavailable" } ?? "Not confirmed"
@@ -153,7 +170,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
             try await loadHealth()
             if selected.isEmpty { selected = providers.contains(where: { $0.id == activeProvider }) ? activeProvider : providers.first(where: { $0.automaticChoice })?.id ?? ""; applySelection() }
             if !selected.isEmpty { try await loadDetails(selected) }
-        } catch { if started == generation { self.error = error.localizedDescription; runtimeState = "Not confirmed" } }
+        } catch { if started == generation { clearProbe(); self.error = error.localizedDescription; runtimeState = "Not confirmed" } }
     }
     private func applySelection() {
         model = selected == activeProvider ? cachedConfig["model"] as? String ?? "" : providers.first(where: { $0.id == selected })?.defaultModel ?? ""
@@ -179,6 +196,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
     }
     func select(_ id: String) async {
         guard !busy, providers.contains(where: { $0.id == id }) else { return }
+        clearProbe()
         generation = UUID(); usedReviews = []
         selected = id; applySelection(); let started = generation; busy = true; error = nil
         defer { if started == generation { busy = false } }
@@ -227,12 +245,14 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
         NativeProviderReview(createdUptime: uptime(), origin: baseURL, connection: generation, provider: selected, model: model, endpoint: endpoint, fallbacks: fallbacks.split(separator: ",").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }.filter { !$0.isEmpty }, label: label, secret: secret, operation: operation, config: cachedConfig, descriptor: providers.first { $0.id == selected }, keys: keys, vault: cachedVault)
     }
     func execute(_ review: NativeProviderReview) async -> Bool {
-        guard canUse(review), let descriptor = review.descriptor else { error = "Provider review changed, expired or was already used. Refresh and review the action again. No action was sent."; return false }
+        guard canUse(review), let descriptor = review.descriptor else { clearProbe(); error = "Provider review changed, expired or was already used. Refresh and review the action again. No action was sent."; return false }
+        clearProbe()
         usedReviews.insert(review.id)
         let started = generation; busy = true; error = nil; notice = nil
         defer { if started == generation { busy = false } }
         var changed = false
         var sent = false
+        var probeResult: Bool?
         do {
             let id = try safeID(review.provider); let prefix = "/api/llm/providers/" + id
             if !review.endpoint.isEmpty {
@@ -286,6 +306,7 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
                 notice = "Model list returned from \(modelsSource)."; if !(value["warning"] as? String ?? "").isEmpty { notice! += " Discovery failed; this may be cached or fallback data." }
             case .probe:
                 sent = true; let value = try await request(prefix + "/probe", method: "POST", body: [:], probeProvider: id)
+                probeResult = providerBool(value["reachable"])
                 notice = providerBool(value["reachable"]).map { $0 ? "Provider probe reports reachable. This is not proof every model supports chat." : "Provider probe reports unreachable." } ?? "Probe did not report reachability."
             case .addKey:
                 _ = try safeID(review.label); guard !review.secret.isEmpty else { throw ProviderFeatureError(message: "Enter a key to save.") }
@@ -322,6 +343,13 @@ private final class NativeProviderRedirectGuard: NSObject, URLSessionTaskDelegat
                 try await loadHealth()
             }
             if started == generation { try await loadDetails(id) }
+            if let result = probeResult {
+                let readback = try configSnapshot(await request("/api/llm/config"))
+                let providerReadback = try decodeProviders(await request("/api/llm/providers"))
+                guard sameDraft(review), sameJSON(readback, review.config), let current = providerReadback.first(where: { $0.id == id }), sameProbeDescriptor(current, descriptor) else { throw ProviderFeatureError(message: "Provider settings changed during the probe. Its result cannot certify this selection.") }
+                cachedConfig = readback; providers = providerReadback
+                probeConfig = readback; probeDescriptor = descriptor; lastProbeReachable = result
+            }
         } catch { changed = false; if started == generation { notice = nil; self.error = clean(error.localizedDescription, secret: review.secret) + (sent ? " The action may already have taken effect. Refresh saved state before preparing a new review; this review cannot be retried." : "") } }
         return started == generation && changed
     }
@@ -351,7 +379,8 @@ struct NativeProvidersFeatureView: View {
                     Text("Choose provider").tag(""); ForEach(model.providers) { Text($0.name + ($0.automaticChoice ? "" : " · manual gateway required")).tag($0.id) }
                 }.disabled(model.busy)
                 if let provider = model.providers.first(where: { $0.id == model.selected }) {
-                    Text(provider.configured ? "Credential/configuration present; reachability is \(provider.reachable.map { $0 ? "reported reachable" : "reported unreachable" } ?? "not probed")." : "Provider needs configuration.").font(.callout)
+                    Text(provider.configured ? "Credential/configuration present." : "Provider needs configuration.").font(.callout)
+                    Text(model.probeStatusText).font(.caption).foregroundStyle(model.lastProbeReachable == false ? .orange : .secondary)
                     if !provider.automaticChoice { Text("A runtime adapter is not confirmed for this catalogue entry. Activating it requires an explicit compatible gateway endpoint; the catalogue endpoint is informational.").foregroundStyle(.orange) }
                     Text("Successful inference, FERAL tool execution and voice are separately verified capabilities.").font(.caption).foregroundStyle(.secondary)
                     if !provider.chatReady { Text("Catalog marks this provider as not chat-ready. \(provider.note)").foregroundStyle(.orange) }

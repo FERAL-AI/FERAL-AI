@@ -78,8 +78,9 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
     @Published private(set) var models:[String]=[]
     @Published private(set) var selected=""
     @Published private(set) var modelsSource="Not loaded"
-    @Published var model=""
-    @Published var endpoint=""
+    @Published var model="" {didSet{if model != oldValue{clearProbe()}}}
+    @Published var endpoint="" {didSet{if endpoint != oldValue{clearProbe()}}}
+    @Published private(set) var lastProbeReachable:Bool?
     @Published private(set) var busy=false
     @Published private(set) var vaultReady=false
     @Published private(set) var setupComplete=false
@@ -88,9 +89,14 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
     @Published private(set) var notice:String?
     private var baseURL:URL?,generation=UUID(),operation:UUID?
     private var saved:[String:Any]=[:],used:Set<UUID>=[]
+    private var probeConfig:[String:Any]=[:],probeDescriptor:[String:Any]=[:],probeProvider=""
+    var probeStatusText:String{if let verdict=lastProbeReachable{return "Last explicit probe: \(verdict ? "reachable" : "unreachable"). Model inference is not verified by this probe."};return providers.first(where:{$0.id==selected})?.reachable.map{$0 ? "Backend cached status: reachable" : "Backend cached status: unreachable"} ?? "No probe result available in this view."}
+    private func clearProbe(){lastProbeReachable=nil;probeConfig=[:];probeDescriptor=[:];probeProvider=""}
+    private func sameProbeDescriptor(_ a:[String:Any],_ b:[String:Any])->Bool{let observations:Set<String>=["reachable","last_refresh","default_model","error"];return NativeSetupWire.equal(a.filter{!observations.contains($0.key)},b.filter{!observations.contains($0.key)})}
+    private func reconcileProbe(){guard lastProbeReachable != nil else{return};guard selected==probeProvider,NativeSetupWire.equal(saved,probeConfig),let descriptor=providers.first(where:{$0.id==probeProvider})?.raw,sameProbeDescriptor(descriptor,probeDescriptor) else{clearProbe();return}}
     private let session:URLSession
     init(session:URLSession?=nil){self.session=session ?? NativeSetupRedirectGuard.session()}
-    func configure(baseURL:URL?){guard self.baseURL != baseURL else{return};generation=UUID();self.baseURL=baseURL;providers=[];models=[];selected="";saved=[:];model="";endpoint="";runtimeAvailable=nil;vaultReady=false;setupComplete=false;error=nil;notice=nil;used=[];busy=operation != nil}
+    func configure(baseURL:URL?){guard self.baseURL != baseURL else{return};clearProbe();generation=UUID();self.baseURL=baseURL;providers=[];models=[];selected="";saved=[:];model="";endpoint="";runtimeAvailable=nil;vaultReady=false;setupComplete=false;error=nil;notice=nil;used=[];busy=operation != nil}
     private func request(_ base:URL,path:String,body:[String:Any]?=nil,query:[URLQueryItem]=[],probeProvider:String?=nil)async throws->[String:Any]{
         guard base.scheme=="http",["127.0.0.1","::1","[::1]"].contains(base.host ?? ""),base.user==nil,base.password==nil,var parts=URLComponents(url:base,resolvingAgainstBaseURL:false) else{throw NativeSetupFailure("Provider setup requires the local service.")};parts.path=path;parts.queryItems=query.isEmpty ? nil : query;parts.fragment=nil;guard let url=parts.url else{throw NativeSetupFailure("Invalid setup URL.")};var req=URLRequest(url:url);req.httpMethod=body==nil ? "GET" : "POST"
         if let body=body{guard JSONSerialization.isValidJSONObject(body) else{throw NativeSetupFailure("Invalid setup request.")};req.httpBody=try JSONSerialization.data(withJSONObject:body);req.setValue("application/json",forHTTPHeaderField:"Content-Type")}
@@ -102,11 +108,11 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
         do{
             let list=try NativeSetupWire.providers(try await request(base,path:"/api/llm/providers")),cfg=try NativeSetupWire.config(try await request(base,path:"/api/llm/config")),setup=try await request(base,path:"/api/setup/status"),runtime=try await request(base,path:"/api/llm/status")
             guard generation==started,!Task.isCancelled else{return};guard let complete=NativeSetupWire.bool(setup["setup_complete"]) else{throw NativeSetupFailure("Setup completion status is unsupported.")}
-            providers=list;saved=cfg;setupComplete=complete;runtimeAvailable=NativeSetupWire.bool(runtime["available"])
+            providers=list;saved=cfg;reconcileProbe();setupComplete=complete;runtimeAvailable=NativeSetupWire.bool(runtime["available"])
             if selected.isEmpty,let active=cfg["provider"] as? String,list.contains(where:{$0.id==active}){selected=active;model=cfg["model"] as? String ?? "";endpoint=cfg["base_url"] as? String ?? ""}
             do{let vault=try await request(base,path:"/api/security/vault/status");guard generation==started else{return};vaultReady=vault["state"] as? String=="ready" && NativeSetupWire.bool(vault["credentials_available"])==true && NativeSetupWire.bool(vault["in_flight"])==false}catch{guard generation==started else{return};vaultReady=false}
             if !selected.isEmpty{try await loadModels(base,provider:selected,started:started)}
-        }catch{guard generation==started else{return};self.error=(error as? NativeSetupFailure)?.message ?? "Provider setup is unavailable. Encrypted-memory installs may require explicit vault unlock and separately reviewed bootstrap continuation."}
+        }catch{guard generation==started else{return};clearProbe();self.error=(error as? NativeSetupFailure)?.message ?? "Provider setup is unavailable. Encrypted-memory installs may require explicit vault unlock and separately reviewed bootstrap continuation."}
     }
     private func loadModels(_ base:URL,provider:String,started:UUID)async throws{
         // Ambient refresh and selection read existing suggestions only. Provider
@@ -115,7 +121,7 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
         let parsed=try NativeSetupWire.models(raw,provider:provider);models=parsed.ids
         switch parsed.source{case "live":modelsSource="Previously discovered; no live request";case "cache":modelsSource="Cached; no live request";default:modelsSource="Bundled fallback; no live request"}
     }
-    func select(_ id:String)async {guard !busy,let choice=providers.first(where:{$0.id==id}),let base=baseURL else{return};generation=UUID();let started=generation,op=UUID();operation=op;busy=true;selected=id;models=[];modelsSource="Not loaded";model=(saved["provider"] as? String)==id ? saved["model"] as? String ?? "" : choice.defaultModel;endpoint=(saved["provider"] as? String)==id ? saved["base_url"] as? String ?? "" : choice.defaultEndpoint;defer{if operation==op{operation=nil;busy=false}};do{try await loadModels(base,provider:id,started:started)}catch{guard generation==started else{return};self.error="Cached models could not be read. No live discovery was requested; enter a model explicitly."}}
+    func select(_ id:String)async {guard !busy,let choice=providers.first(where:{$0.id==id}),let base=baseURL else{return};clearProbe();generation=UUID();let started=generation,op=UUID();operation=op;busy=true;selected=id;models=[];modelsSource="Not loaded";model=(saved["provider"] as? String)==id ? saved["model"] as? String ?? "" : choice.defaultModel;endpoint=(saved["provider"] as? String)==id ? saved["base_url"] as? String ?? "" : choice.defaultEndpoint;defer{if operation==op{operation=nil;busy=false}};do{try await loadModels(base,provider:id,started:started)}catch{guard generation==started else{return};self.error="Cached models could not be read. No live discovery was requested; enter a model explicitly."}}
     func review(_ action:NativeSetupOperation,secret:String="")throws->NativeSetupReview {
         guard !busy,let base=baseURL,let choice=providers.first(where:{$0.id==selected}),!saved.isEmpty else{throw NativeSetupFailure("Wait for the saved provider catalogue and settings.")}
         let cleanModel=model.trimmingCharacters(in:.whitespacesAndNewlines),cleanEndpoint=try NativeSetupWire.endpoint(endpoint)
@@ -127,7 +133,7 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
     }
     func canUse(_ item:NativeSetupReview)->Bool{!busy && generation==item.generation && baseURL==item.origin && !used.contains(item.id) && selected==item.provider && model.trimmingCharacters(in:.whitespacesAndNewlines)==item.model && (try? NativeSetupWire.endpoint(endpoint))==item.endpoint && ProcessInfo.processInfo.systemUptime-item.createdUptime<=300}
     @discardableResult func perform(_ item:NativeSetupReview)async->Bool {
-        guard canUse(item) else{error="This setup review changed or was already used. No action was sent.";return false};used.insert(item.id);let started=generation,op=UUID();operation=op;busy=true;error=nil;notice=nil;var sent=false
+        guard canUse(item) else{clearProbe();error="This setup review changed or was already used. No action was sent.";return false};clearProbe();used.insert(item.id);let started=generation,op=UUID();operation=op;busy=true;error=nil;notice=nil;var sent=false;var probeResult:Bool?
         defer{if operation==op{operation=nil;busy=false}}
         do{
             let fresh=try NativeSetupWire.config(try await request(item.origin,path:"/api/llm/config")),list=try NativeSetupWire.providers(try await request(item.origin,path:"/api/llm/providers"))
@@ -143,7 +149,7 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
                 guard NativeSetupWire.bool(raw["success"])==true,raw["provider"] as? String==item.provider,raw["model"] as? String==item.model else{throw NativeSetupFailure("Provider activation receipt did not match the review.")}
                 notice="Provider settings were acknowledged. Runtime activation and working model inference require separate verification."
             case .probe:
-                sent=true;raw=try await request(item.origin,path:"/api/llm/providers/"+item.provider+"/probe",body:[:],probeProvider:item.provider);let reachable=try NativeSetupWire.probe(raw,provider:item.provider);notice=reachable ? "Backend reports the saved provider reachable. A successful model response is still unverified." : "Backend reports the saved provider unreachable. Setup remains saved; no successful model response is claimed."
+                sent=true;raw=try await request(item.origin,path:"/api/llm/providers/"+item.provider+"/probe",body:[:],probeProvider:item.provider);let reachable=try NativeSetupWire.probe(raw,provider:item.provider);probeResult=reachable;notice=reachable ? "Backend reports the saved provider reachable. A successful model response is still unverified." : "Backend reports the saved provider unreachable. Setup remains saved; no successful model response is claimed."
             case .complete:
                 let setup=try await request(item.origin,path:"/api/setup/status");guard generation==started,!Task.isCancelled else{return false};guard NativeSetupWire.bool(setup["setup_complete"])==item.setupComplete else{throw NativeSetupFailure("Setup completion state changed. Review again.")};sent=true;raw=try await request(item.origin,path:"/api/setup/complete",body:[:]);guard NativeSetupWire.bool(raw["ok"])==true,NativeSetupWire.bool(raw["setup_complete"])==true else{throw NativeSetupFailure("Setup completion was not acknowledged.")};notice="Setup completion was acknowledged. Voice, access, pairing and sync remain deferred; provider inference is unverified."
             }
@@ -153,8 +159,9 @@ private final class NativeSetupRedirectGuard:NSObject,URLSessionTaskDelegate {
             let providerReadback=try NativeSetupWire.providers(try await request(item.origin,path:"/api/llm/providers")),setup=try await request(item.origin,path:"/api/setup/status")
             guard generation==started,!Task.isCancelled else{return false};guard let complete=NativeSetupWire.bool(setup["setup_complete"]) else{throw NativeSetupFailure("Setup completion readback is unsupported.")}
             if case .complete=item.operation{guard complete else{throw NativeSetupFailure("Setup completion readback did not confirm completion.")}}
+            if let result=probeResult{guard selected==item.provider,model.trimmingCharacters(in:.whitespacesAndNewlines)==item.model,(try? NativeSetupWire.endpoint(endpoint))==item.endpoint,NativeSetupWire.equal(readback,item.config),let descriptor=providerReadback.first(where:{$0.id==item.provider})?.raw,sameProbeDescriptor(descriptor,item.descriptor) else{throw NativeSetupFailure("Provider settings changed during the probe. Its result cannot certify this selection.")};probeProvider=item.provider;probeConfig=readback;probeDescriptor=descriptor;lastProbeReachable=result}
             saved=readback;providers=providerReadback;setupComplete=complete;return true
-        }catch{guard generation==started else{return false};self.error=((error as? NativeSetupFailure)?.message ?? "Setup action could not be verified. Private provider details are withheld.")+(sent ? " The action may already have taken effect; refresh before preparing a new review." : "");return false}
+        }catch{guard generation==started else{return false};clearProbe();notice=nil;self.error=((error as? NativeSetupFailure)?.message ?? "Setup action could not be verified. Private provider details are withheld.")+(sent ? " The action may already have taken effect; refresh before preparing a new review." : "");return false}
     }
 }
 struct NativeOnboardingSetupFeatureView:View {
@@ -176,7 +183,7 @@ struct NativeOnboardingSetupFeatureView:View {
             if model.providers.contains(where:{!$0.automaticChoice}){Menu("Configure a custom gateway…"){ForEach(model.providers.filter{!$0.automaticChoice}){provider in Button(provider.name){secret="";Task{await model.select(provider.id)}}}}.disabled(model.busy)}
             if let provider=model.providers.first(where:{$0.id==model.selected}){
                 if !provider.automaticChoice{Text("This catalogue entry has no confirmed runtime adapter. Enter your compatible gateway endpoint explicitly; saved credentials and catalogue defaults do not establish support.").font(.caption).foregroundStyle(.orange)}
-                Text(provider.reachable.map{$0 ? "Cached status: reachable" : "Cached status: unreachable"} ?? "Provider has not been probed.").font(.caption).foregroundStyle(.secondary)
+                Text(model.probeStatusText).font(.caption).foregroundStyle(model.lastProbeReachable==false ? .orange : .secondary)
                 TextField("Model name",text:$model.model).textFieldStyle(.roundedBorder)
                 if !model.models.isEmpty{Menu("Chat suggestions (\(model.modelsSource))"){ForEach(model.models,id:\.self){id in Button(id){model.model=id}}}}
                 TextField("Provider endpoint (empty selects runtime default)",text:$model.endpoint).textFieldStyle(.roundedBorder)

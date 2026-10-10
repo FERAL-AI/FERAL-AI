@@ -9,6 +9,7 @@ private final class ProviderWire: URLProtocol {
     static var heldPaths = Set<String>()
     static var callbacks: [() -> Void] = []
     static var applyActivation = true
+    static var onProbe: (() -> Void)?
     override class func canInit(with request: URLRequest) -> Bool { true }
     override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
     override func startLoading() {
@@ -20,10 +21,10 @@ private final class ProviderWire: URLProtocol {
             Self.responses[path] = (200, ["provider": body["provider"]!, "model": body["model"]!, "base_url": body["base_url"] ?? "", "fallback_providers": body["fallback_providers"] ?? []])
         }
         let respond = { [self] in client?.urlProtocol(self, didReceive: HTTPURLResponse(url: request.url!, statusCode: reply.0, httpVersion: nil, headerFields: ["Content-Type": "application/json"])!, cacheStoragePolicy: .notAllowed); client?.urlProtocol(self, didLoad: try! JSONSerialization.data(withJSONObject: reply.1)); client?.urlProtocolDidFinishLoading(self) }
-        let held = Self.heldPaths.contains(path); if held { Self.callbacks.append(respond) }; Self.lock.unlock(); if !held { respond() }
+        let held = Self.heldPaths.contains(path); if held { Self.callbacks.append(respond) }; let probeEffect = method == "POST" && path.hasSuffix("/probe") ? Self.onProbe : nil; Self.lock.unlock(); probeEffect?(); if !held { respond() }
     }
     override func stopLoading() {}
-    static func reset(_ values: [String: (Int, [String: Any])]) { lock.lock(); defer { lock.unlock() }; responses = values; mutationResponses = [:]; calls = []; heldPaths = []; callbacks = []; applyActivation = true }
+    static func reset(_ values: [String: (Int, [String: Any])]) { lock.lock(); defer { lock.unlock() }; responses = values; mutationResponses = [:]; calls = []; heldPaths = []; callbacks = []; applyActivation = true; onProbe = nil }
     static func set(_ path: String, _ value: [String: Any], status: Int = 200) { lock.lock(); defer { lock.unlock() }; responses[path] = (status, value) }
     static func setMutation(_ path: String, _ value: [String: Any], status: Int = 200) { lock.lock(); defer { lock.unlock() }; mutationResponses[path] = (status, value) }
     static func count(_ path: String? = nil) -> Int { lock.lock(); defer { lock.unlock() }; return calls.filter { path == nil || $0.0.path == path }.count }
@@ -263,11 +264,52 @@ private func check(_ condition: @autoclosure () -> Bool, _ message: String) thro
             ProviderWire.set("/api/llm/providers/ollama/probe", ["id": "ollama", "reachable": false, "error": "private-provider-canary"])
             _ = await probe.execute(probe.review(.probe))
             try check(probe.notice?.contains("unreachable") == true && !(probe.notice ?? "").contains("private-provider-canary") && probe.error == nil, "failed reachability probe must remain failure")
+            try check(probe.lastProbeReachable == false && probe.providers.first(where: { $0.id == "ollama" })?.reachable == nil && probe.probeStatusText.contains("Last explicit probe: unreachable"), "view-local negative history survives null catalogue without mutating its descriptor")
+            let historicalProbeCount = ProviderWire.count("/api/llm/providers/ollama/probe")
+            await probe.refresh()
+            try check(probe.lastProbeReachable == false && ProviderWire.count("/api/llm/providers/ollama/probe") == historicalProbeCount, "passive refresh preserves exact historical result without live probe")
+            probe.endpoint += "/draft"
+            try check(probe.lastProbeReachable == nil && probe.probeStatusText == "No probe result available in this view.", "endpoint edit revokes historical scope")
+            probe.endpoint = "http://127.0.0.1:11435/v1"
+            ProviderWire.set("/api/llm/providers/ollama/probe", ["id": "ollama", "reachable": true, "error": ""])
+            _ = await probe.execute(probe.review(.probe))
+            try check(probe.lastProbeReachable == true && probe.probeStatusText.contains("Model inference is not verified"), "positive probe remains historical rather than inference readiness")
+            ProviderWire.onProbe = { ProviderWire.set("/api/llm/config", ["provider": "ollama", "model": "replaced-model", "base_url": "http://127.0.0.1:1/v1", "fallback_providers": []]) }
+            _ = await probe.execute(probe.review(.probe))
+            try check(probe.lastProbeReachable == nil && probe.notice == nil && probe.error != nil, "saved configuration replacement during probe refuses historical badge")
+            ProviderWire.reset(fixtures); await probe.refresh()
+            ProviderWire.set("/api/llm/providers/ollama/probe", ["id": "ollama", "reachable": true, "error": ""])
+            ProviderWire.onProbe = {
+                var rows = fixtures["/api/llm/providers"]!.1["providers"] as! [[String: Any]]
+                rows[0]["runtime_supported"] = false
+                ProviderWire.set("/api/llm/providers", ["providers": rows])
+            }
+            _ = await probe.execute(probe.review(.probe))
+            try check(probe.lastProbeReachable == nil && probe.notice == nil, "runtime capability drift invalidates probe result")
+            ProviderWire.reset(fixtures); await probe.refresh()
+            ProviderWire.set("/api/llm/providers/ollama/probe", ["id": "ollama", "reachable": true, "error": ""])
+            ProviderWire.onProbe = {
+                var rows = fixtures["/api/llm/providers"]!.1["providers"] as! [[String: Any]]
+                rows[0]["default_model"] = "new-discovered-suggestion"
+                ProviderWire.set("/api/llm/providers", ["providers": rows])
+            }
+            _ = await probe.execute(probe.review(.probe))
+            try check(probe.lastProbeReachable == true && probe.model == "local-test", "probe catalogue discovery changes neither invalidate history nor overwrite chosen model")
+            probe.model += "-draft"; try check(probe.lastProbeReachable == nil, "model edit clears historical result")
+            ProviderWire.reset(fixtures); let retiringProbe = make(); await retiringProbe.refresh()
+            ProviderWire.set("/api/llm/providers/ollama/probe", ["id": "ollama", "reachable": true, "error": ""])
+            ProviderWire.hold("/api/llm/providers/ollama/probe")
+            let retiringReview = retiringProbe.review(.probe)
+            let retiringTask = Task { await retiringProbe.execute(retiringReview) }
+            try await waitFor("/api/llm/providers/ollama/probe")
+            retiringProbe.configure(baseURL: URL(string: "http://127.0.0.1:9466")!)
+            ProviderWire.release(); _ = await retiringTask.value
+            try check(retiringProbe.lastProbeReachable == nil && retiringProbe.notice == nil, "retired connection never publishes old probe history")
             for payload: [String: Any] in [["id": "openai", "reachable": true, "error": ""], ["id": "ollama", "reachable": true, "error": "private-provider-canary"], ["id": "ollama", "reachable": 1, "error": ""], ["reachable": false, "error": ""]] {
                 ProviderWire.reset(fixtures); let invalidProbe = make(); await invalidProbe.refresh()
                 ProviderWire.set("/api/llm/providers/ollama/probe", payload)
                 _ = await invalidProbe.execute(invalidProbe.review(.probe))
-                try check(invalidProbe.notice == nil && invalidProbe.error != nil && !(invalidProbe.error ?? "").contains("private-provider-canary"), "malformed or mismatched provider probe cannot claim successful reachability")
+                try check(invalidProbe.lastProbeReachable == nil && invalidProbe.notice == nil && invalidProbe.error != nil && !(invalidProbe.error ?? "").contains("private-provider-canary"), "malformed or mismatched provider probe cannot claim successful reachability")
             }
             print("PASS explicit failed provider probe truthfulness")
 
