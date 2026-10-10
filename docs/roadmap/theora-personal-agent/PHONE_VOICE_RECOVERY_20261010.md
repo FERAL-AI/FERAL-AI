@@ -20,10 +20,13 @@ Mac typing diagnostics were corrected with equivalent dynamic attribute stores;
 the final focused gate passes 217 tests, full-core CI Ruff and retains 788 baseline
 Mac diagnostics with zero additions/removals and zero source drift.
 
-Mac 9.56/build2026101005 assembly is next, using verified unchanged 54-input
-native output from 9.55. The existing 9.55 bundle does not contain this later
-backend wave. Known-good 9.52 remains the sole generated rollback. Actual live
-provider, microphone/HFP and browser/result/reconnect acceptance remains open.
+Immutable Mac 9.56/build2026101005 contains exact runtime
+`82a6c269e0926b1b808a1274cb5cafe28cdf0b9e`. All 504 packaged Python and 70 WebUI
+files match source; verified unchanged 54-input native reuse and strict signatures
+pass. Actual bundled backend health in 2.31 seconds, fresh setup status, lifeline
+shutdown and listener closure pass in a disposable profile. No new GUI or live
+provider/audio/browser check is claimed. Known-good 9.52 is the sole rollback.
+Physical microphone/HFP and browser/result/reconnect acceptance remains open.
 The prior page-control receipt is cancelled with unknown action outcome; reconcile
 it without replay. Code 9 still has no established termination cause.
 

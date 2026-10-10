@@ -1,6 +1,23 @@
 # FERAL Native Preview: feature parity inventory
 
-**Current checkpoint (October 10; completed Mac batch).**
+**Current checkpoint (October 10; phone recovery candidate).**
+
+Mac 9.56/build2026101005 contains exact runtime
+`82a6c269e0926b1b808a1274cb5cafe28cdf0b9e`, including responsive node voice
+startup and real task-model Chrome ownership/trace repair. Frozen integration
+passes 1,237 tests/four skips; the final 217-test gate and CI Ruff pass with zero
+new Mac typing diagnostics. Exact 504 Python/70 WebUI source comparisons,
+verified reuse of the unchanged 54 native inputs, strict signatures and actual
+bundled startup/setup/lifeline/listener closure pass. Native GUI evidence remains
+historical 9.55 evidence, not a newly run 9.56 GUI test.
+
+The repaired iOS app at local `5749babc` is signed and installed; 568 Foundation
+assertions and device builds pass. Physical voice/browser/reconnect acceptance
+remains open. Known-good 9.52 is the sole rollback.
+[Exact acceptance](../docs/roadmap/theora-personal-agent/NATIVE_9_56_ACCEPTANCE.md),
+[ownership](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
+
+**Historical completed 9.55 Mac batch.**
 
 Immutable Mac 9.55/build2026101004 contains runtime
 `3717ad646a676301879933bba9d042dc8a1f2c41`: durable phone receipt recovery,

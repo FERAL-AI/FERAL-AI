@@ -27,20 +27,30 @@ Mac typing diagnostics were corrected with equivalent dynamic attribute stores;
 the final focused gate passes 217 tests, full-core CI Ruff and retains 788 baseline
 Mac diagnostics with zero additions/removals and zero source drift.
 
-Mac 9.56/build2026101005 assembly is next, using verified unchanged 54-input
-native output from 9.55. The existing 9.55 bundle does not contain this later
-backend wave. Known-good 9.52 remains the sole generated rollback. Actual live
-provider, microphone/HFP and browser/result/reconnect acceptance remains open.
+Immutable Mac 9.56/build2026101005 contains exact runtime
+`82a6c269e0926b1b808a1274cb5cafe28cdf0b9e`. All 504 packaged Python and 70 WebUI
+files match source; verified unchanged 54-input native reuse and strict signatures
+pass. Actual bundled backend health in 2.31 seconds, fresh setup status, lifeline
+shutdown and listener closure pass in a disposable profile. No new GUI or live
+provider/audio/browser check is claimed. Known-good 9.52 is the sole rollback.
+Physical microphone/HFP and browser/result/reconnect acceptance remains open.
 The prior page-control receipt is cancelled with unknown action outcome; reconcile
 it without replay. Code 9 still has no established termination cause.
 
 The parent owns this integrated source and packaging wave; workers have released
 files. AUDIT-FIXES.md and preexisting iOS project/vendor edits remain untouched.
 No personal runtime, provider choice, account or autonomy setting is changed.
-Next: assemble and verify the exact Mac candidate, update this checkpoint, then
-publish the reviewable PR310 branch. Physical acceptance is a separate gate.
+The repair and exact candidate evidence are complete locally. Parent is publishing
+the existing PR310 branch; verify remote HEAD and CI when resuming. Offline assembly
+took 32.81 seconds; free space was 13,054,025,728 before and 12,990,926,848 after,
+net growth 63,098,880 bytes within the 2 GiB budget. Only inspected generated 9.55
+was replaced; 9.52 and small preceding receipts remain. No personal runtime is
+started or restarted. Next: select the intended Mac runtime and perform the explicit
+benign physical browser/result/audio/reconnect check without replaying the prior
+unknown task. No further background implementation is implied after publication.
 
-[Repair evidence](PHONE_VOICE_RECOVERY_20261010.md),
+[Exact candidate acceptance](NATIVE_9_56_ACCEPTANCE.md),
+[repair evidence](PHONE_VOICE_RECOVERY_20261010.md),
 [original incident](PHONE_BROWSER_AUDIO_INCIDENT_20261010.md).
 
 ### Historical completed 9.55 recovery and Chrome-controls batch
