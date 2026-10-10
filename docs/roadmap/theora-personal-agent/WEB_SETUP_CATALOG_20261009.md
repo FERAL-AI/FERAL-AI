@@ -1,0 +1,54 @@
+# Web setup catalogue and probe parity
+
+The setup wizard now uses passive cached model inventory, respects runtime
+support flags and preserves a validated explicit reachability probe through
+passive refresh. Unknown reachability is shown as unknown. It no longer sends
+a live model discovery request merely because the selected provider changes.
+
+Providers with runtime_supported and setup_selectable both true are selectable.
+Legacy entries with both flags absent remain unconfirmed compatibility entries.
+False, partial or malformed flags are read-only. A saved unsupported selection
+stays visible instead of being silently replaced; this change adds no gateway
+configuration or model installer.
+
+Explicit probe history is tied to a captured draft revision, saved configuration
+and catalogue descriptor. Provider/model/key edits retire it, even after restoring
+the old value. Changed saved settings, capability flags, failures and late
+responses cannot publish earlier results. The API client can raise ApiError for
+a legitimate negative probe returned at HTTP 200; only an exact successful-HTTP,
+provider-matched, boolean-false receipt is accepted from that error wrapper.
+Private diagnostics are not displayed as public readiness text.
+
+Save advances only after an exact persistence receipt and readback matching the
+provider/model, expected endpoint/fallback semantics and supported capability.
+Changes during the write/readback or navigation retire its publication authority.
+A failed verification reports that settings may already be saved and requires
+refresh before retry. Settings persistence is distinct from runtime activation
+or a successful model inference.
+
+Probe measures the provider catalogue connection. It does not verify the active
+model endpoint, unsaved credentials, inference, FERAL tool use or voice. The
+existing backend explicitly binds saved local endpoints, but generic custom
+cloud endpoints can remain different from catalogue defaults after restart.
+That binding parity is a separate backend card: ProviderCatalog construction,
+BrainState initialization and set_llm_config must agree before claiming a probe
+verified the active custom cloud endpoint.
+
+The existing CLI can provision Ollama and consented local speech assets; this
+wizard and the native app do not yet expose a complete reviewed installer.
+The Mac bundle supplies its declared runtime dependencies, not Ollama, speech
+engines or model weights. Installing, configuring, reaching and successfully
+running a selected model remain separate acceptance states.
+
+Focused final verification passes 48 tests across existing setup, pairing-step
+and new provider-parity suites. Full WebUI Vitest passes 1,409 tests across 174
+files (186.13 seconds); all 367 inventoried source/configuration and backend/
+desktop sibling inputs remain unchanged. Cases exercise HTTP negative receipts, invalid
+schema/support flags, unknown status, draft/config drift, delayed inventory,
+probe/save/readback/navigation, duplicate probe dispatch and saved unsupported
+selection. The WebUI rebuild and checked-in model-picker contract also pass.
+Exact generated-bundle acceptance is pending. No provider, model download, private account or physical-device test
+is performed by these fixtures.
+
+This source is not in the immutable preceding Mac 9.49. Build identity and
+current integrated acceptance are recorded in [WORK_STATE](WORK_STATE.md).

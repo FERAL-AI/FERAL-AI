@@ -48,9 +48,33 @@ model/cache/Git cleanup. AUDIT-FIXES.md remains unstaged. No docs-only rebuild.
 
 ### Next ready cards and ownership
 
-All three workers released their implementation/review files. Parent owns shared
-contracts, publication, checkpoint and candidate integration. No new production
-ownership is active; reconcile exact source/dirty files/workers before assignment.
+The next source wave is verified above published 50caf149e; it is not in 9.49.
+All three workers released their source/review files. Parent owns integration,
+documentation, publication and exact-source packaging. No iOS source is owned
+or changed by this wave. Preserve the current bundle and rollback until new
+exact-source packaging passes. Reconcile all worker/source claims before reuse.
+
+Implementation adds negotiated paired-phone receipt identity and private source
+storage through the existing ChatTurnManager. Device approval resolution remains
+unavailable pending exact review provenance; no session membership grants it.
+Final frozen backend checks pass 4,967 tests, 22 skips across 251 suites, with
+zero source drift. Full Mac mypy remains 796 diagnostics with zero added/removed;
+the first callback annotation discrepancy is corrected and its failure retained.
+Full-core CI Ruff, HUP naming and version coherence pass. Legacy paired phone
+chat/text also retain credential revocation in the existing dispatch lease;
+orphan/rotated/expired bearer authentication is refused. Read-only currentness
+avoids repeated hashing/TTL updates. Real pairing/store/public dispatch fixtures
+pass; installed phone/inference acceptance remains separate.
+The Chrome review identifies ToolRunner, selected CDP and review projection owner
+checks that require one coordinated resource grant. WebUI setup parity is being
+corrected against shared catalogue flags and explicit probe responses. Full
+WebUI passes 1,409 tests across 174 files with 367 unchanged inputs; focused setup
+passes 48 tests. Final WebUI is rebuilt and its model-picker contract passes.
+New source prepares 9.50/build2026100904, with 54 unchanged Swift inputs eligible
+for verified 9.49 binary reuse. Packaging budget remains 2 GiB; measured available
+space is about 15 GiB. Assembly, package identity and lifecycle are pending.
+[Phone input contract](PHONE_TRACKED_INPUT_20261009.md),
+[setup behavior](WEB_SETUP_CATALOG_20261009.md).
 
 1. Add trusted tracked phone ingress identity and receipts through existing
    ChatTurnManager. Persist private paired-device principal and current peer;
@@ -75,8 +99,8 @@ product backlog remains in REQUEST_COVERAGE and EXECUTION_PLAN; no feature is
 removed or counted complete from a fixture alone.
 
 At runtime 58ad, remote native, Linux bundle, browser E2E, WebUI, SDK, lint/docs/
-version and typing pass: 17 checks successful, four skipped, broad backend PR test
-pending. Older source 24a's broad run was cancelled by superseding publication,
+version, typing and broad backend PR tests pass: 18 checks successful, four skipped.
+Older source 24a's broad run was cancelled by superseding publication,
 not recorded as a passed run. CI does not block independent local cards.
 
 ### Local iOS and phone intake integration, October 9
