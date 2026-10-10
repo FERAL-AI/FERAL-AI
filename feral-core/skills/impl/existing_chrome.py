@@ -346,11 +346,24 @@ class _SelectedCDP(CDPConnection):
         return self.connected
 
     def require_owner(self):
-        _require_owner(self._binding["owner_session_id"])
+        if current_context().session_id != self._binding["owner_session_id"]:
+            from api.job_chrome_grants import JobChromeError, require_selected_job
+            try:
+                require_selected_job(self._binding)
+            except JobChromeError:
+                raise ExistingChromeError("existing_chrome_owner_required", 403) from None
+        else:
+            _require_owner(self._binding["owner_session_id"])
         if not self.connected:
             raise ExistingChromeError("existing_chrome_connection_changed")
 
     def require_action(self):
+        from api.job_chrome_grants import JobChromeError, has_task_scope, require_selected_job
+        if has_task_scope():
+            try:
+                require_selected_job(self._binding)
+            except JobChromeError:
+                raise ExistingChromeError("existing_chrome_owner_required", 403) from None
         self.require_owner()
         from agents.tool_runner import current_browser_resource_binding
 

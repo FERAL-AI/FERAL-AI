@@ -62,6 +62,8 @@ def review_terms_digest(pending: dict, surface: str) -> str:
     terms = {key: pending.get(key) for key in ("request_id", "session_id", "tool_name", "args",
                                                "browser_resource", "created_at", "expires_at", "taskflow")}
     terms["surface"] = surface
+    if pending.get("browser_job_grant") is not None:
+        terms["browser_job_grant"] = pending["browser_job_grant"]
     return hashlib.sha256(json.dumps(terms, sort_keys=True, separators=(",", ":"),
                                     ensure_ascii=False, allow_nan=False).encode()).hexdigest()
 

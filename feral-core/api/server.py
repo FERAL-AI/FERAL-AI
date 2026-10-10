@@ -4061,6 +4061,29 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     if not phone_chats.current():
                         await ws.close(code=4003, reason="Node connection superseded")
                         return
+                    from api.phone_turn_status import PhoneTurnReader, PHONE_TURN_CONTRACT
+                    from api.job_chrome_grants import JobChromeError
+                    try:
+                        reader = await PhoneTurnReader.ready(phone_chats, phone_principal)
+                        phone_chats.guard()
+                        if phone_principal is not None:
+                            phone_principal.require_current()
+                            if payload.node_type == "phone":
+                                from agents.taskflow_browser_consent import refresh_waiting_task_sources
+                                await asyncio.to_thread(
+                                    refresh_waiting_task_sources,
+                                    getattr(phone_state.orchestrator, "taskflows", None),
+                                    phone_principal,
+                                )
+                                phone_chats.guard()
+                                phone_principal.require_current()
+                    except (asyncio.CancelledError, JobChromeError):
+                        task = asyncio.current_task()
+                        if task is not None and task.cancelling():
+                            raise
+                        await ws.close(code=4003, reason="Phone receipt authority changed")
+                        raise WebSocketDisconnect(code=4003) from None
+                    turn_contract = {"phone_turn_contract": dict(PHONE_TURN_CONTRACT)} if reader is not None else {}
                     await ws.send_json(
                         hup_frame(
                             "node_ack",
@@ -4073,9 +4096,40 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                                 "capabilities": list(payload.capabilities),
                                 "granted_capabilities": _granted_caps,
                                 "denied_capabilities": _denied_caps,
+                                **turn_contract,
                             },
                         )
                     )
+
+            elif msg.type == "phone_turn_status_request":
+                from api.phone_turn_status import PhoneTurnReader
+                from models.protocol import PhoneTurnStatusRequestPayload, PhoneTurnStatusPayload
+                if not isinstance(payload, PhoneTurnStatusRequestPayload):
+                    await _send_protocol_error(ws, 1002, "Invalid phone receipt status request")
+                    continue
+                response = {"contract_version": 1, "request_id": payload.request_id,
+                    "session_id": payload.session_id, "status": "unavailable"}
+                try:
+                    reader = await PhoneTurnReader.ready(phone_chats, phone_principal)
+                    if reader is not None:
+                        response = await reader.status(payload)
+                        reader.guard()
+                    phone_chats.guard()
+                    if phone_principal is not None:
+                        phone_principal.require_current()
+                    # Corrupt/mismatched receipt identity remains unavailable, never disclosed.
+                    try:
+                        response = PhoneTurnStatusPayload.model_validate(response).model_dump(exclude_none=True)
+                    except ValueError:
+                        response = {"contract_version": 1, "request_id": payload.request_id,
+                            "session_id": payload.session_id, "status": "unavailable"}
+                    await ws.send_json(hup_frame("phone_turn_status", response))
+                except asyncio.CancelledError:
+                    task = asyncio.current_task()
+                    if task is not None and task.cancelling():
+                        raise
+                    await ws.close(code=4003, reason="Phone receipt authority changed")
+                    raise WebSocketDisconnect(code=4003) from None
 
             elif msg.type == "execute_result":
                 logger.info(f"Daemon result from {node_id}")

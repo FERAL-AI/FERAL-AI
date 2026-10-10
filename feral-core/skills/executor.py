@@ -905,17 +905,20 @@ class SkillExecutor:
             runner = getattr(getattr(_brain_state, "orchestrator", None), "tool_runner", None)
             transfer = runner.approved_backing_transfer(tool_name, args) if runner is not None and callable(
                 getattr(type(runner), "approved_backing_transfer", None)) else None
+            from api.job_chrome_grants import bind_backing_transfer, capture_backing_transfer
+            browser_job_transfer = capture_backing_transfer() if tool_name.startswith(("browser__", "web_actions__")) else None
 
             async def invoke_backing():
                 # wait_for schedules a child task after admission. Revalidate
                 # inherited ingress ownership immediately before new effects.
                 from security.agent_turn_lease import guard_agent_dispatch
                 guard_agent_dispatch()
-                if transfer is None:
-                    return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
-                from agents.chat_turns import bind_task_origin_transfer
-                with bind_task_origin_transfer(transfer):
-                    return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
+                with bind_backing_transfer(browser_job_transfer):
+                    if transfer is None:
+                        return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
+                    from agents.chat_turns import bind_task_origin_transfer
+                    with bind_task_origin_transfer(transfer):
+                        return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
             try:
                 # Bounded. ``wait_for`` cancels the coroutine when the
                 # budget expires and the caller gets a 504 envelope

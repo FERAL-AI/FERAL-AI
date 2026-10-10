@@ -63,6 +63,7 @@ class _ExactApproval:
         self.tool_name = pending["tool_name"]
         self.args = copy.deepcopy(pending["args"])
         self.browser_resource = copy.deepcopy(pending.get("browser_resource"))
+        self.browser_job_grant = copy.deepcopy(pending.get("browser_job_grant"))
         self.pending = copy.deepcopy(pending) if pending.get("taskflow") else None
         self.used = False
         self.safety_used = False
@@ -83,6 +84,8 @@ class _BrowserResourceDispatch:
         self.tool_name = tool_name
         self.session_id = session_id
         self.binding = copy.deepcopy(binding)
+        from api.job_chrome_grants import job_binding
+        self.job_grant = job_binding(issuer._orch, tool_name, session_id, binding)
         self.active = True
 
 
@@ -597,7 +600,9 @@ class ToolRunner:
                 raise ValueError("Invalid binding")
             from memory.runtime_session_checkpoint import validate_session_id
             validate_session_id(binding["owner_session_id"])
-            if binding["owner_session_id"] != session_id:
+            from api.job_chrome_grants import job_binding
+            delegated = job_binding(self._orch, tool_name, session_id, binding)
+            if binding["owner_session_id"] != session_id and delegated is None:
                 raise ValueError("Foreign binding")
             return copy.deepcopy(binding)
         except Exception:
@@ -615,6 +620,14 @@ class ToolRunner:
         exact = _exact_approval.get()
         if exact is not None and exact.issuer is self and exact.browser_resource != resource:
             raise _BrowserResourceError("Browser resource changed after approval")
+        from api.job_chrome_grants import job_binding
+        try:
+            delegated = job_binding(self._orch, tool_name, session_id, resource)
+        except Exception:
+            raise _BrowserResourceError("Task browser delegation changed") from None
+        if ((dispatch is not None and dispatch.job_grant != delegated)
+                or (exact is not None and exact.issuer is self and exact.browser_job_grant != delegated)):
+            raise _BrowserResourceError("Task browser delegation changed after approval or admission")
         return resource
 
     @contextmanager
@@ -634,9 +647,15 @@ class ToolRunner:
         tool = pending.get("tool_name", "")
         if self._browser_tool(tool):
             try:
-                if self._capture_browser_resource(tool, pending.get("session_id", "")) != pending.get("browser_resource"):
+                if pending.get("browser_job_grant") is not None:
+                    from api.job_chrome_grants import manager_for
+                    manager = manager_for(self._orch)
+                    if manager is None:
+                        return False
+                    manager.pending(pending)
+                elif self._capture_browser_resource(tool, pending.get("session_id", "")) != pending.get("browser_resource"):
                     return False
-            except _BrowserResourceError:
+            except Exception:
                 return False
         from agents.runtime_context_checkpoint import runtime_coordinator
         coordinator = runtime_coordinator(self._orch)
@@ -834,6 +853,10 @@ class ToolRunner:
             pending["taskflow_binding_required"] = True
         if browser_resource is not None:
             pending["browser_resource"] = copy.deepcopy(browser_resource)
+            from api.job_chrome_grants import job_binding
+            delegated = job_binding(self._orch, tool_name, session_id, browser_resource)
+            if delegated is not None:
+                pending["browser_job_grant"] = delegated
         from agents.runtime_context_checkpoint import runtime_coordinator
         coordinator = runtime_coordinator(self._orch)
         if coordinator is not None and coordinator.known_managed(session_id):
@@ -1767,6 +1790,20 @@ class ToolRunner:
             owned = denial.get("phone_review_required") or denial.get("request_id") in self._pending_phone_reviews
             if owned and descriptor is None:
                 return
+            if descriptor is not None:
+                # Recipient ownership does not prove this issuer still belongs
+                # to the current brain. Never publish an old runtime's review.
+                issuer = self._orch
+                if (issuer is None or getattr(_state, "orchestrator", None) is not issuer
+                        or getattr(issuer, "tool_runner", None) is not self):
+                    return
+                issuer_runtime = getattr(issuer, "taskflows", None)
+                if denial.get("taskflow") and (
+                    issuer_runtime is None
+                    or getattr(_state, "taskflows", None) is not issuer_runtime
+                    or getattr(issuer_runtime, "_orchestrator", None) is not issuer
+                ):
+                    return
             push = getattr(_state, "push_to_review_device" if descriptor else "push_to_session_nodes", None)
             if not callable(push):
                 return
@@ -1815,6 +1852,20 @@ class ToolRunner:
             logger.debug("approval_request push failed: %s", exc)
 
     async def execute_tool_call_for_llm(
+        self, session_id: str, tool_call: dict, available_skills, *,
+        surface: Optional[str] = None, approval: Optional[_ExactApproval] = None,
+    ) -> dict:
+        from api.job_chrome_grants import JobChromeError, approval_browser_scope
+        try:
+            with approval_browser_scope(self, approval):
+                return await self._execute_tool_call_with_browser_scope(session_id, tool_call, available_skills,
+                    surface=surface, approval=approval)
+        except JobChromeError:
+            return make_tool_error_envelope(error_code="browser_resource_changed",
+                reason="The exact task browser grant is no longer current. Review earlier action receipts before continuing.",
+                tool_call_id=tool_call.get("id", ""))
+
+    async def _execute_tool_call_with_browser_scope(
         self,
         session_id: str,
         tool_call: dict,

@@ -1903,8 +1903,75 @@ class HandoffRequestPayload(BaseModel):
 # Message Type Registry — Maps type strings to payload models
 # ─────────────────────────────────────────────
 
+class PhoneTurnContractPayload(BaseModel):
+    """Paired phone server capability; every field is required and exact."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    durable_receipts: Literal[True]
+    reconnect_reconciliation: Literal[True]
+    readonly_status: Literal[True]
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported phone turn contract")
+        return value
+
+    @field_validator("durable_receipts", "reconnect_reconciliation", "readonly_status", mode="before")
+    @classmethod
+    def exact_capability(cls, value):
+        if value is not True:
+            raise ValueError("Unsupported phone turn capability")
+        return value
+
+
+class PhoneTurnStatusRequestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contract_version: Literal[1]
+    request_id: StrictStr = Field(min_length=36, max_length=36)
+    session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported phone turn contract")
+        return value
+
+    @field_validator("request_id")
+    @classmethod
+    def exact_request(cls, value):
+        if str(UUID(value)) != value:
+            raise ValueError("A canonical request UUID is required")
+        return value
+
+    @field_validator("session_id")
+    @classmethod
+    def exact_session(cls, value):
+        if (value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("Invalid phone origin session")
+        return value
+
+
+class PhoneTurnStatusPayload(PhoneTurnStatusRequestPayload):
+    status: Literal["found", "not_found", "unavailable"]
+    receipt: dict | None = None
+
+    @model_validator(mode="after")
+    def receipt_identity(self):
+        if self.status == "found":
+            if (not isinstance(self.receipt, dict) or self.receipt.get("request_id") != self.request_id
+                    or self.receipt.get("session_id") != self.session_id):
+                raise ValueError("Receipt identity was not confirmed")
+        elif self.receipt is not None:
+            raise ValueError("Unavailable receipt must not be disclosed")
+        return self
+
+
 class NodeAckPayload(BaseModel):
     """Brain acknowledges a node_register (HUP_SPEC §5.2)."""
+    phone_turn_contract: PhoneTurnContractPayload | None = None
     node_id: str = Field(default="", max_length=MAX_ID_LEN)
     session_token: str = Field(default="", max_length=MAX_TOKEN_LEN)
     hup_version: str = Field(default=HUP_VERSION, max_length=32)
@@ -2194,6 +2261,8 @@ MESSAGE_TYPES = {
     "register": NodeRegisterPayload,
     "node_register": NodeRegisterPayload,
     "node_ack": NodeAckPayload,
+    "phone_turn_status_request": PhoneTurnStatusRequestPayload,
+    "phone_turn_status": PhoneTurnStatusPayload,
     "node_heartbeat": NodeHeartbeatPayload,
     "hup_action_request": HUPActionRequestPayload,
     "hup_action_response": HUPActionResponsePayload,

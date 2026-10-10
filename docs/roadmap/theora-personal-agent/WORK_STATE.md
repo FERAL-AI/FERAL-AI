@@ -7,6 +7,37 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
+### Verified phone recovery and Chrome source; candidate pending
+
+The source batch implements negotiated durable phone receipt recovery, explicit
+one-step Chrome permission and an initial exact-call consent waiting checkpoint.
+Grant confirmation does not resume or approve work. Explicit Workflows Resume
+uses the saved call; mutations require a separate exact review. Authenticated
+reconnect refreshes matching private waiting sources without task DB writes or
+dispatch. Approval publisher identity and atomic renewal repairs are integrated.
+
+Frozen integration passes 1,147 tests/four skips across 64 selected suites. Full
+core CI Ruff passes. Configured Mac typing retains 788 baseline diagnostics with
+zero additions/removals; 1,506 test inputs have zero drift. Earlier snapshot SDK
+omissions and a nullable publisher typing diagnostic are retained in evidence;
+the final source fixes both. Native typechecking and 164 browser checks pass.
+
+Local unpushed iOS commits f513f8d, ab516b5, adaaf69 and aa77855 adopt persisted
+task IDs, exact receipts/cards, address-alias recovery and bounded atomic storage.
+The final source passes 539 Foundation assertions and an unsigned device build.
+Actual compiled Swift/registered ASGI/real disposable pairing and SQLite recovery
+passes with one stored turn, one inert model call and zero prompt resend. This is
+separate from physical network/audio/provider/account/Chrome acceptance.
+
+Canonical Mac 9.52 remains unchanged until the 9.53 build and actual GUI acceptance
+complete. No new app has been installed on a phone. Source publication and exact
+candidate acceptance are separate gates. Preserve unrelated local edits and the
+existing canonical/rollback artifacts. The selected phone and live Mac/provider
+configuration remain pending. All worker assignments are complete; the parent
+owns source integration, publication and one offline candidate build.
+
+[Source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
+
 ### Current 9.52 completed review batch
 
 Immutable 9.52/build2026101001 contains exact runtime source

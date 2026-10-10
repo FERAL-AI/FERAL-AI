@@ -131,11 +131,15 @@ class TaskFlowModelStep:
         self.calls = {}
         self.pending = None
         self.review_issued = False
+        self.browser_consent_wait = False
         self.error = False
         self.unknown = False
         self.text = ""
 
     def _guard(self):
+        if self.browser_consent_wait:
+            from agents.taskflow_browser_consent import BrowserConsentWait
+            raise BrowserConsentWait()
         flow = self.runtime.get_flow(self.flow["id"])
         step = (
             next((s for s in flow["steps"] if s["id"] == self.step["id"]), None)
@@ -161,6 +165,9 @@ class TaskFlowModelStep:
             raise ValueError("A stable model action identity is required")
         if call.get("name", "").startswith("subagent__") or call.get("name") == "background_task__start":
             raise ValueError("Durable child model action ownership is unavailable")
+        from agents.taskflow_browser_consent import pause_if_missing
+        pause_if_missing(self.runtime, self.flow, self.step, runner, call, surface,
+                         actions=self.actions, model_scope=self)
         resource = (
             runner._capture_browser_resource(call["name"], self.session_id)
             if runner._browser_tool(call["name"])
@@ -176,6 +183,11 @@ class TaskFlowModelStep:
             "resource": resource,
             "surface": surface,
         }
+        if resource is not None:
+            from api.job_chrome_grants import job_binding
+            delegated = job_binding(runner._orch, call["name"], self.session_id, resource)
+            if delegated is not None:
+                terms["browser_job_grant"] = delegated
         encoded = json.dumps(
             terms, sort_keys=True, separators=(",", ":"), allow_nan=False
         )
@@ -317,7 +329,9 @@ class TaskFlowRuntime:
         self._supervisor = None
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
-        self._lock = threading.Lock()
+        # Renewal holds one transaction while existing checkpoint helpers
+        # re-enter this same runtime lock; other threads never observe its gap.
+        self._lock = threading.RLock()
         self._runner_task: Optional[asyncio.Task] = None
         self._flow_tasks: dict[str, asyncio.Task] = {}
         self._step_tasks: dict[str, asyncio.Task] = {}
@@ -428,6 +442,19 @@ class TaskFlowRuntime:
             if not full:
                 continue
             for step in full["steps"]:
+                from agents.taskflow_browser_consent import REASON, structural_checkpoint
+                prior = step.get("result") or {}
+                if (full["status"] in {"queued", "running", "waiting"}
+                        and full["current_step"] == step["step_index"]
+                        and step["status"] in {"pending", "running", "waiting"}
+                        and prior.get("reason") == REASON and structural_checkpoint(prior) is not None):
+                    prior.pop("resume_grant", None)
+                    with self._lock:
+                        self._conn.execute("UPDATE taskflow_steps SET status='waiting',result_json=? WHERE id=?",
+                                           (json.dumps(prior, allow_nan=False), step["id"]))
+                        self._conn.execute("UPDATE taskflows SET status='waiting',wait_until=NULL WHERE id=?", (flow_id,))
+                        self._conn.commit()
+                    continue
                 if step["status"] == "running":
                     if self._restart_safe(step):
                         with self._lock:
@@ -576,6 +603,9 @@ class TaskFlowRuntime:
             raise RuntimeError("TaskFlow creation readback unavailable")
         if handoff_key is not None:
             flow["handoff_replayed"] = replayed
+        if source_principal is not None:
+            from api.job_chrome_grants import remember_task_principal
+            remember_task_principal(self, flow_id, source_principal)
         if replayed:
             return flow
         # Consciousness-layer write: record the flow as an in-flight
@@ -663,7 +693,7 @@ class TaskFlowRuntime:
             result["action_id"] = pending["taskflow"]["model_call_id"]
         return result
 
-    def _bind_phone_review_checkpoint(self, runner, pending, *, source_principal=None):
+    def _bind_phone_review_checkpoint(self, runner, pending, *, source_principal=None, commit=True):
         """Keep a public renewal card only after the existing exact binding."""
         origin = self.private_review_origin_for(pending)
         if origin is None:
@@ -694,7 +724,8 @@ class TaskFlowRuntime:
                     raise ValueError("Private task review checkpoint changed")
                 if source_principal is not None:
                     source_principal.require_current()
-                self._conn.commit()
+                if commit:
+                    self._conn.commit()
             except BaseException:
                 self._conn.rollback()
                 raise
@@ -726,6 +757,8 @@ class TaskFlowRuntime:
         pending = {**exact, "taskflow": {"flow_id": flow["id"], "step_id": step["id"],
                                        "model_call_id": terms.get("call_id")},
                    "browser_resource": terms.get("resource")}
+        if "browser_job_grant" in terms:
+            pending["browser_job_grant"] = terms["browser_job_grant"]
         if self._approval_step(pending)[1] is None:
             return None
         source_principal.require_current()
@@ -770,7 +803,11 @@ class TaskFlowRuntime:
             return unavailable
         step = flow["steps"][flow["current_step"]]
         source_principal.require_current()
-        renewed = self._renew_model_review(flow, step, source_principal=source_principal)
+        from api.job_chrome_grants import remember_task_principal
+        remember_task_principal(self, flow_id, source_principal)
+        from api.job_chrome_grants import task_browser_scope
+        with task_browser_scope(self, flow, step):
+            renewed = self._renew_model_review(flow, step, source_principal=source_principal)
         source_principal.require_current()
         if (renewed.get("review_renewal") or {}).get("status") == "waiting":
             fresh_step = renewed["steps"][renewed["current_step"]]
@@ -1003,6 +1040,10 @@ class TaskFlowRuntime:
         flow = self.get_flow(flow_id)
         if not flow:
             return None
+        from agents.taskflow_browser_consent import resume_waiting_call
+        resource_resume = resume_waiting_call(self, flow)
+        if resource_resume is not None:
+            return resource_resume
         # Review completion belongs to the existing approval dispatcher.
         # Manual resume is never a reconciliation of an uncertain effect.
         if flow["status"] in (TaskFlowStatus.COMPLETED.value, TaskFlowStatus.CANCELLED.value,
@@ -1050,6 +1091,8 @@ class TaskFlowRuntime:
         terms = action.get("terms") or {}
         binding = {"flow_id": flow["id"], "step_id": step["id"], "model_call_id": terms.get("call_id")}
         candidate = {**exact, "taskflow": binding, "browser_resource": terms.get("resource")}
+        if "browser_job_grant" in terms:
+            candidate["browser_job_grant"] = terms["browser_job_grant"]
         def refused(code):
             current = self.get_flow(flow["id"])
             return {**(current or flow), "review_renewal": {"status": "refused", "error_code": code}}
@@ -1070,8 +1113,20 @@ class TaskFlowRuntime:
             with self._lock:
                 raw = self._conn.execute("SELECT result_json FROM taskflow_steps WHERE id=?", (step["id"],)).fetchone()[0]
             resource = runner._capture_browser_resource(exact["tool_name"], exact["session_id"]) if runner._browser_tool(exact["tool_name"]) else None
-            if resource != terms.get("resource"):
+            previous_grant = terms.get("browser_job_grant")
+            if ((previous_grant is not None and previous_grant.get("browser_resource") != terms.get("resource"))
+                    or (resource != terms.get("resource") and (source_principal is None or previous_grant is None))):
                 return refused("task_review_resource_changed")
+            from api.job_chrome_grants import renewal_binding
+            delegated = renewal_binding(runner._orch, exact["tool_name"], exact["session_id"], resource, terms.get("browser_job_grant"))
+            renewed_action = copy.deepcopy(action)
+            if delegated is not None:
+                renewed_action["terms"]["resource"] = resource
+                renewed_action["terms"]["browser_job_grant"] = delegated
+            encoded = json.dumps(renewed_action["terms"], sort_keys=True, separators=(",", ":"), allow_nan=False)
+            if len(encoded.encode()) > 65536:
+                return refused("task_review_terms_unavailable")
+            renewed_action["terms_digest"] = hashlib.sha256(encoded.encode()).hexdigest()
             if runner.enforce_plan_mode(exact["tool_name"], exact["session_id"]):
                 return refused("task_review_policy_denied")
             runner.deny_pending(exact["request_id"], session_id=exact["session_id"])
@@ -1080,22 +1135,35 @@ class TaskFlowRuntime:
             if not pending or pending.get("status") != "pending_approval" or pending["request_id"] == exact["request_id"]:
                 return refused("task_review_policy_denied")
             pending["taskflow"] = binding
-            new_review = {**prior, "approval": {k: copy.deepcopy(pending[k]) for k in ("request_id", "session_id", "tool_name", "args")}}
+            if pending.get("browser_job_grant") != delegated:
+                return refused("task_review_resource_changed")
+            new_review = {**prior, "model_action": renewed_action,
+                          "approval": {k: copy.deepcopy(pending[k]) for k in ("request_id", "session_id", "tool_name", "args")}}
             with self._lock:
                 try:
                     if source_principal is not None:
                         source_principal.require_current()
+                    if renewal_binding(runner._orch, exact["tool_name"], exact["session_id"], resource,
+                                       terms.get("browser_job_grant")) != delegated:
+                        raise ValueError("Task browser grant changed during renewal")
                     changed = self._conn.execute("UPDATE taskflow_steps SET result_json=? WHERE id=? AND status='waiting' AND result_json=? AND EXISTS(SELECT 1 FROM taskflows WHERE id=? AND status='waiting')",
                         (json.dumps(new_review, allow_nan=False), step["id"], raw, flow["id"])).rowcount
+                    if not changed:
+                        self._conn.rollback()
+                        return refused("task_review_superseded")
+                    # Bind the exact public card before committing the replaced
+                    # approval. Revocation/failure rolls back both together.
+                    self._bind_phone_review_checkpoint(runner, pending,
+                        source_principal=source_principal, commit=False)
                     if source_principal is not None:
                         source_principal.require_current()
+                    if renewal_binding(runner._orch, exact["tool_name"], exact["session_id"], resource,
+                                       terms.get("browser_job_grant")) != delegated:
+                        raise ValueError("Task browser grant changed during renewal")
                     self._conn.commit()
                 except BaseException:
                     self._conn.rollback()
                     raise
-            if not changed:
-                return refused("task_review_superseded")
-            self._bind_phone_review_checkpoint(runner, pending, source_principal=source_principal)
             committed = True
             publication = loop.create_task(runner._notify_user_of_pending_approval(pending["session_id"], pending["tool_name"], pending))
             self._review_publications.add(publication)
@@ -1231,6 +1299,7 @@ class TaskFlowRuntime:
                     or terms.get("session_id") != pending.get("session_id")
                     or terms.get("tool_name") != pending.get("tool_name") or terms.get("args") != pending.get("args")
                     or terms.get("resource") != pending.get("browser_resource")
+                    or terms.get("browser_job_grant") != pending.get("browser_job_grant")
                     or action.get("terms_digest") != digest):
                 return None, None
             from security.dangerous_tools import known_surfaces
@@ -1671,6 +1740,27 @@ class TaskFlowRuntime:
                 return
 
     async def _execute_step(self, flow: dict, step: dict) -> dict:
+        from api.job_chrome_grants import task_browser_scope
+        from agents.taskflow_browser_consent import (
+            BrowserConsentWait, REASON, dispatch_saved_call, structural_checkpoint,
+        )
+        with task_browser_scope(self, flow, step):
+            try:
+                saved = await dispatch_saved_call(self, flow, step)
+                if saved is not None:
+                    return saved
+                return await self._execute_step_impl(flow, step)
+            except BrowserConsentWait:
+                current = self.get_flow(flow["id"])
+                active = next((s for s in current["steps"] if s["id"] == step["id"]), None) if current else None
+                if (current and current["status"] == "waiting" and current["current_step"] == step["step_index"]
+                        and active and active["status"] == "waiting"
+                        and (active.get("result") or {}).get("reason") == REASON
+                        and structural_checkpoint(active["result"]) is not None):
+                    return {"status": "deferred"}
+                raise
+
+    async def _execute_step_impl(self, flow: dict, step: dict) -> dict:
         step_type = step.get("step_type", "")
         raw_payload = step.get("payload", {})
         payload = raw_payload.get("config", raw_payload) if isinstance(raw_payload.get("config"), dict) else raw_payload
@@ -1775,6 +1865,9 @@ class TaskFlowRuntime:
                 return {"status": "failed", "error": "Agent supervisor is paused", "dispatch_started": False}
             session_id = flow.get("session_id") or f"taskflow-{flow['id']}"
             call_id = f"taskflow:{flow['id']}:{step['id']}"
+            from agents.taskflow_browser_consent import pause_if_missing
+            pause_if_missing(self, flow, step, runner,
+                             {"id": call_id, "name": tool_name, "args": args}, surface)
             with bind_context(session_id=session_id, surface=surface, call_id=call_id):
                 refusal = runner.enforce_plan_mode(tool_name, session_id)
                 if refusal is None:
@@ -1881,6 +1974,9 @@ class TaskFlowRuntime:
                         reply = await self._orchestrator.handle_command(session_id, prompt, context=command_context)
                 finally:
                     _model_step.reset(token)
+                if scope.browser_consent_wait:
+                    from agents.taskflow_browser_consent import BrowserConsentWait
+                    raise BrowserConsentWait()
                 if scope.review_issued:
                     return {"status": "deferred"}
                 if scope.unknown or scope.calls:

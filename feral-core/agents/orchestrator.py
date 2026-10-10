@@ -1366,6 +1366,7 @@ class Orchestrator:
     async def _push_approval_resolved(
         self, session_id: str, request_id: str, outcome: str,
         tool_name: str, actor: str, *, phone_review: dict | None = None, private_review: bool = False,
+        phone_review_runtime=None, phone_review_runner=None,
     ) -> None:
         """Publish resolution using the audience captured before consumption.
 
@@ -1377,6 +1378,16 @@ class Orchestrator:
             from api.state import state as _state
             if private_review and phone_review is None:
                 return
+            if phone_review is not None:
+                if (getattr(_state, "orchestrator", None) is not self
+                        or phone_review_runner is None or self.tool_runner is not phone_review_runner):
+                    return
+                if phone_review["task_review"].get("kind") == "taskflow_action" and (
+                    phone_review_runtime is None or self.taskflows is not phone_review_runtime
+                    or getattr(_state, "taskflows", None) is not phone_review_runtime
+                    or getattr(phone_review_runtime, "_orchestrator", None) is not self
+                ):
+                    return
             push = getattr(_state, "push_to_review_device" if phone_review else "push_to_session_nodes", None)
             if not callable(push):
                 return
@@ -1496,7 +1507,9 @@ class Orchestrator:
         pending = self.tool_runner.get_pending(request_id)
         if not pending:
             return {"status": "not_found", "request_id": request_id}
-        phone_review = self.tool_runner.phone_review_descriptor(pending)
+        phone_review_runner = self.tool_runner
+        phone_review = phone_review_runner.phone_review_descriptor(pending)
+        phone_review_runtime = self.taskflows if pending.get("taskflow") else None
         private_review = bool(pending.get("phone_review_required"))
         if phone_decision is not None:
             source, expected = phone_decision
@@ -1544,6 +1557,7 @@ class Orchestrator:
             await self._push_approval_resolved(
                 effective_session, request_id, "rejected", tool_name, actor,
                 phone_review=phone_review, private_review=private_review,
+                phone_review_runtime=phone_review_runtime, phone_review_runner=phone_review_runner,
             )
             return {
                 "status": "rejected",
@@ -1593,6 +1607,7 @@ class Orchestrator:
             await self._push_approval_resolved(
                 effective_session, request_id, "approved", tool_name, actor,
                 phone_review=phone_review, private_review=private_review,
+                phone_review_runtime=phone_review_runtime, phone_review_runner=phone_review_runner,
             )
             outcome = await self._execute_approved_pending_tool(
                 effective_session,

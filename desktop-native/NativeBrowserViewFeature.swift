@@ -244,10 +244,11 @@ private final class BrowserViewRedirectGuard: NSObject, URLSessionTaskDelegate {
     init(session: URLSession? = nil) {
         self.session = session ?? URLSession(configuration: .ephemeral, delegate: BrowserViewRedirectGuard(), delegateQueue: nil)
     }
-    static func validOwner(_ text: String?) -> Bool {
+    nonisolated static func validOwner(_ text: String?) -> Bool {
         guard let text, !text.isEmpty, text.count <= 1024, text.trimmingCharacters(in: .whitespacesAndNewlines) == text else { return false }
         return !text.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) })
     }
+    var canGrantJobs: Bool { stateConfirmed && ready && connected && connectionID != nil && selected != nil && !busy }
     var canConnect: Bool { !busy && stateConfirmed && ready && owner != nil && !connected && connectionID == nil }
     var canSelect: Bool { !busy && stateConfirmed && ready && connected && connectionID != nil && targets.contains(where: { $0.id == draft }) }
     var canDisconnect: Bool { !busy && owner != nil && connectionID != nil }
@@ -355,6 +356,205 @@ private final class BrowserViewRedirectGuard: NSObject, URLSessionTaskDelegate {
     }
 }
 
+struct NativeChromeJobResource: Equatable {
+    let owner: String, connection: String, target: String
+}
+struct NativeChromeJobTask: Identifiable, Equatable {
+    let id: String, step: Int64, digest: String, title: String, flowStatus: String, stepStatus: String, stepType: String, executionOwner: String
+}
+struct NativeChromeJobScope: Equatable {
+    let id: String, resource: NativeChromeJobResource, flow: String, step: Int64, digest: String, executionOwner: String
+    let tools: [String], expires: Date
+    let status: String
+    func matches(_ other: Self) -> Bool {
+        id == other.id && resource == other.resource && flow == other.flow && step == other.step && digest == other.digest && executionOwner == other.executionOwner && tools == other.tools && expires == other.expires
+    }
+}
+struct NativeChromeJobReview: Identifiable {
+    let id: String, token: String, scope: NativeChromeJobScope, title: String, generation: UUID, draftRevision: UUID
+    let admission: NativeLocalActionGate.Lease?
+}
+enum NativeChromeJobWire {
+    static func uuid(_ value: Any?) -> String? {
+        guard let id = value as? String, UUID(uuidString: id)?.uuidString.lowercased() == id else { return nil }; return id
+    }
+    static func digest(_ value: Any?) -> String? {
+        guard let text = value as? String, text.count == 64, text.allSatisfy({ "0123456789abcdef".contains($0) }) else { return nil }; return text
+    }
+    static func tools(_ value: Any?) throws -> [String] {
+        guard let names = value as? [String], !names.isEmpty, names.count <= 128,
+              names.allSatisfy({ $0.hasPrefix("browser__") && NativeBrowserViewWire.identifier($0, limit: 128) != nil }), Set(names).count == names.count else { throw NativeBrowserViewFailure(message: "The available browser tools could not be verified.") }
+        return names.sorted()
+    }
+    static func resource(_ value: Any?, expected: NativeChromeJobResource) throws {
+        guard let raw = value as? [String: Any], Set(raw.keys) == ["owner_session_id", "connection_id", "target_id"],
+              raw["owner_session_id"] as? String == expected.owner, raw["connection_id"] as? String == expected.connection, raw["target_id"] as? String == expected.target else { throw NativeBrowserViewFailure(message: "The Chrome owner, connection or tab changed. Review again.") }
+    }
+    static func inventory(_ value: [String: Any], expected: NativeChromeJobResource) throws -> ([NativeChromeJobTask], [String]) {
+        guard NativeBrowserViewWire.bool(value["success"]) == true, NativeBrowserViewWire.integer(value["contract_version"]) == 1,
+              let rows = value["tasks"] as? [[String: Any]], rows.count <= 200 else { throw NativeBrowserViewFailure(message: "The eligible task inventory could not be verified.") }
+        try resource(value["browser_resource"], expected: expected)
+        let available = try tools(value["allowed_tools"])
+        let tasks = try rows.map { row -> NativeChromeJobTask in
+            guard let id = NativeBrowserViewWire.identifier(row["flow_id"]), let step = NativeBrowserViewWire.integer(row["step_id"]), step > 0,
+                  let digest = digest(row["flow_terms_digest"]), let title = row["title"] as? String, !title.isEmpty, title.utf8.count <= 1024,
+                  !title.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+                  let executionOwner = row["execution_session_id"] as? String, NativeExistingChromeModel.validOwner(executionOwner),
+                  let flowStatus = row["flow_status"] as? String, ["queued", "running", "waiting"].contains(flowStatus),
+                  let stepStatus = row["step_status"] as? String, ["queued", "pending", "running", "waiting"].contains(stepStatus),
+                  let stepType = row["step_type"] as? String, ["llm.chat", "skill.invoke"].contains(stepType) else { throw NativeBrowserViewFailure(message: "A current task or step could not be verified.") }
+            return .init(id: id, step: step, digest: digest, title: title, flowStatus: flowStatus, stepStatus: stepStatus, stepType: stepType, executionOwner: executionOwner)
+        }
+        guard Set(tasks.map(\.id)).count == tasks.count else { throw NativeBrowserViewFailure(message: "The task inventory contains duplicate identities.") }
+        return (tasks, available)
+    }
+    static func scope(_ value: [String: Any], expected: NativeChromeJobResource, now: Date, statuses: Set<String>, allowExpired: Bool = false) throws -> NativeChromeJobScope {
+        guard NativeBrowserViewWire.integer(value["contract_version"]) == 1, let id = uuid(value["grant_id"]),
+              let status = value["status"] as? String, statuses.contains(status), let flow = NativeBrowserViewWire.identifier(value["flow_id"]),
+              let step = NativeBrowserViewWire.integer(value["step_id"]), step > 0, let digest = digest(value["flow_terms_digest"]),
+              let executionOwner = value["execution_session_id"] as? String, NativeExistingChromeModel.validOwner(executionOwner),
+              NativeBrowserViewWire.integer(value["grant_revision"]) == 1, value["action_permission"] as? String == "separate_review_required",
+              let expiry = NativeBrowserViewWire.number(value["expires_at"]), allowExpired || expiry > now.timeIntervalSince1970,
+              expiry <= now.timeIntervalSince1970 + 300 else { throw NativeBrowserViewFailure(message: "The exact task permission receipt could not be verified.") }
+        try resource(value["browser_resource"], expected: expected)
+        return .init(id: id, resource: expected, flow: flow, step: step, digest: digest, executionOwner: executionOwner, tools: try tools(value["allowed_tools"]), expires: Date(timeIntervalSince1970: expiry), status: status)
+    }
+    static func detail(_ value: [String: Any], task: NativeChromeJobTask) throws {
+        guard value["id"] as? String == task.id, let session = value["session_id"] as? String,
+              (session.isEmpty ? "taskflow-" + task.id : session) == task.executionOwner,
+              value["title"] as? String == task.title, value["status"] as? String == task.flowStatus,
+              let index = NativeBrowserViewWire.integer(value["current_step"], maximum: 199),
+              let steps = value["steps"] as? [[String: Any]], steps.count <= 200, index < steps.count else { throw NativeBrowserViewFailure(message: "The selected task changed. Refresh its current step.") }
+        let step = steps[Int(index)]
+        guard NativeBrowserViewWire.integer(step["id"]) == task.step, step["flow_id"] as? String == task.id,
+              NativeBrowserViewWire.integer(step["step_index"]) == index, step["step_type"] as? String == task.stepType, step["status"] as? String == task.stepStatus else { throw NativeBrowserViewFailure(message: "The selected task step changed. Review again.") }
+    }
+}
+@MainActor final class NativeChromeJobModel: ObservableObject {
+    @Published private(set) var tasks: [NativeChromeJobTask] = []
+    @Published private(set) var availableTools: [String] = []
+    @Published var selectedFlow = "" { didSet { if selectedFlow != oldValue { invalidateReview() } } }
+    @Published var selectedTools: Set<String> = [] { didSet { if selectedTools != oldValue { invalidateReview() } } }
+    @Published var ttl = 300 { didSet { if ttl != oldValue { invalidateReview() } } }
+    @Published private(set) var review: NativeChromeJobReview?
+    @Published private(set) var grant: NativeChromeJobScope?
+    @Published private(set) var busy = false
+    @Published private(set) var error: String?
+    @Published private(set) var receipt: String?
+    private var origin: URL?, resource: NativeChromeJobResource?
+    private var ready = false, inventoryConfirmed = false
+    private var generation = UUID(), draftRevision = UUID()
+    private var grantOrigin: URL?
+    private let session: URLSession
+    private let now: () -> Date
+    init(session: URLSession? = nil, now: @escaping () -> Date = Date.init) {
+        self.session = session ?? URLSession(configuration: .ephemeral, delegate: BrowserViewRedirectGuard(), delegateQueue: nil); self.now = now
+    }
+    private func invalidateReview() { draftRevision = UUID(); review = nil }
+    var currentTask: NativeChromeJobTask? { tasks.first { $0.id == selectedFlow } }
+    var canReview: Bool { !busy && ready && inventoryConfirmed && resource != nil && currentTask != nil && !selectedTools.isEmpty && selectedTools.isSubset(of: Set(availableTools)) && (1...300).contains(ttl) && (grant == nil || ["revoked", "unavailable"].contains(grant!.status) || grant!.expires <= now()) }
+    var canConfirm: Bool {
+        guard let review else { return false }
+        do { try NativeLocalActionGate.shared.validate(review.admission) } catch { return false }
+        return !busy && ready && inventoryConfirmed && generation == review.generation && draftRevision == review.draftRevision && resource == review.scope.resource && review.scope.expires > now()
+    }
+    var canInspectGrant: Bool { !busy && grant != nil && grantOrigin != nil }
+    func configure(origin: URL?, owner: String?, connection: String?, target: String?, ready: Bool) async {
+        let next: NativeChromeJobResource?
+        if let owner, NativeExistingChromeModel.validOwner(owner), let connection, NativeChromeJobWire.uuid(connection) != nil, let target, NativeBrowserViewWire.identifier(target, limit: 128) != nil { next = .init(owner: owner, connection: connection, target: target) } else { next = nil }
+        guard self.origin != origin || resource != next || self.ready != ready else { return }
+        generation = UUID(); invalidateReview(); self.origin = origin; resource = next; self.ready = ready; busy = false; inventoryConfirmed = false
+        tasks = []; availableTools = []; selectedFlow = ""; selectedTools = []; error = nil
+        if grant != nil && (grant!.resource != next || grantOrigin != origin || !ready) { receipt = "Chrome or chat context changed. Inspect or revoke the captured permission; it cannot be confirmed again." }
+        await refresh()
+    }
+    private func request(_ path: String, origin: URL, body: [String: Any]? = nil) async throws -> [String: Any] {
+        guard ["127.0.0.1", "::1", "[::1]"].contains(origin.host ?? ""), ["http", "https"].contains(origin.scheme ?? ""), origin.user == nil, origin.password == nil,
+              var parts = URLComponents(url: origin, resolvingAgainstBaseURL: false) else { throw NativeBrowserViewFailure(message: "Task permissions require the app-owned local agent.") }
+        parts.percentEncodedPath = path; parts.queryItems = nil; parts.fragment = nil
+        guard let url = parts.url else { throw NativeBrowserViewFailure(message: "The task permission address is invalid.") }
+        var request = URLRequest(url: url); request.timeoutInterval = 15; request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("native-v1", forHTTPHeaderField: "X-FERAL-Browser-View")
+        if let body { request.httpMethod = "POST"; request.httpBody = try JSONSerialization.data(withJSONObject: body); request.setValue("application/json", forHTTPHeaderField: "Content-Type") }
+        let (data, response) = try await session.feralLocalData(for: request)
+        guard data.count <= 1_000_000, let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode),
+              let value = try JSONSerialization.jsonObject(with: data) as? [String: Any], NativeBrowserViewWire.bool(value["success"]) != false, value["error"] == nil || value["error"] is NSNull else { throw NativeBrowserViewFailure(message: "Task permission was not confirmed. Refresh or inspect its captured status before trying again.") }
+        return value
+    }
+    private func inventory(origin: URL, resource: NativeChromeJobResource) async throws -> ([NativeChromeJobTask], [String]) {
+        let raw = try await request("/api/browser/existing/job-grants/tasks", origin: origin, body: ["session_id": resource.owner, "connection_id": resource.connection])
+        return try NativeChromeJobWire.inventory(raw, expected: resource)
+    }
+    func cancelReview() { invalidateReview() }
+    func refresh() async {
+        guard !busy, ready, let origin, let resource else { return }
+        invalidateReview(); let current = generation; busy = true; inventoryConfirmed = false
+        defer { if generation == current { busy = false } }
+        do {
+            let inventory = try await inventory(origin: origin, resource: resource)
+            guard generation == current else { return }
+            tasks = inventory.0; availableTools = inventory.1; selectedTools.formIntersection(Set(availableTools))
+            if currentTask == nil { selectedFlow = tasks.first?.id ?? "" }
+            inventoryConfirmed = true; error = nil
+        } catch { if generation == current { tasks = []; availableTools = []; self.error = error.localizedDescription } }
+    }
+    func prepareReview() async {
+        guard canReview, let origin, let resource, let task = currentTask else { return }
+        let current = generation, draft = draftRevision, tools = selectedTools.sorted(), ttl = ttl; busy = true; error = nil
+        defer { if generation == current { busy = false } }
+        do {
+            let admission = try NativeLocalActionGate.shared.capture(session: session, url: origin)
+            let detail = try await request("/api/taskflows/" + task.id, origin: origin)
+            try NativeChromeJobWire.detail(detail, task: task)
+            guard generation == current, draftRevision == draft else { return }
+            let raw = try await request("/api/browser/existing/job-grants/review", origin: origin, body: ["session_id": resource.owner, "connection_id": resource.connection, "target_id": resource.target, "flow_id": task.id, "step_id": task.step, "flow_terms_digest": task.digest, "allowed_tools": tools, "expires_in_seconds": ttl])
+            guard NativeBrowserViewWire.bool(raw["success"]) == true, NativeBrowserViewWire.integer(raw["contract_version"]) == 1,
+                  let id = NativeChromeJobWire.uuid(raw["review_id"]), let token = NativeBrowserViewWire.identifier(raw["review_token"], limit: 43), token.count == 43, !token.contains("."), raw["task_title"] as? String == task.title, let scopeRaw = raw["scope"] as? [String: Any] else { throw NativeBrowserViewFailure(message: "The permission review could not be verified.") }
+            let scope = try NativeChromeJobWire.scope(scopeRaw, expected: resource, now: now(), statuses: ["review"])
+            guard scope.flow == task.id, scope.step == task.step, scope.digest == task.digest, scope.executionOwner == task.executionOwner, scope.tools == tools,
+                  scope.expires.timeIntervalSince(now()) <= Double(ttl) else { throw NativeBrowserViewFailure(message: "The permission scope differs from the selected task or tools.") }
+            guard generation == current, draftRevision == draft else { return }
+            try NativeLocalActionGate.shared.validate(admission)
+            review = .init(id: id, token: token, scope: scope, title: task.title, generation: current, draftRevision: draft, admission: admission)
+        } catch { if generation == current { invalidateReview(); inventoryConfirmed = false; self.error = error.localizedDescription } }
+    }
+    func confirm() async {
+        guard canConfirm, let reviewed = review, let origin, let task = currentTask else { cancelReview(); error = "This permission review changed or expired. Refresh and review again."; return }
+        review = nil; let current = generation, draft = draftRevision; busy = true; error = nil
+        defer { if generation == current { busy = false } }
+        do {
+            // Re-read real current step and authoritative eligibility before consuming the one-use review.
+            let fresh = try await inventory(origin: origin, resource: reviewed.scope.resource)
+            guard fresh.0.contains(task), reviewed.scope.tools.allSatisfy({ fresh.1.contains($0) }) else { throw NativeBrowserViewFailure(message: "The task or available tools changed. Review again.") }
+            let detail = try await request("/api/taskflows/" + task.id, origin: origin)
+            try NativeChromeJobWire.detail(detail, task: task)
+            try NativeLocalActionGate.shared.validate(reviewed.admission)
+            guard generation == current, draftRevision == draft, ready, resource == reviewed.scope.resource, now() < reviewed.scope.expires else { return }
+            // Retain the reviewed grant ID for status/revoke if confirmation has an uncertain response.
+            grant = reviewed.scope; grantOrigin = origin
+            let raw = try await request("/api/browser/existing/job-grants/" + reviewed.id + "/confirm", origin: origin, body: ["session_id": reviewed.scope.resource.owner, "review_token": reviewed.token])
+            guard NativeBrowserViewWire.bool(raw["success"]) == true else { throw NativeBrowserViewFailure(message: "The task permission was not confirmed.") }
+            let confirmed = try NativeChromeJobWire.scope(raw, expected: reviewed.scope.resource, now: now(), statuses: ["active"])
+            guard confirmed.matches(reviewed.scope) else { throw NativeBrowserViewFailure(message: "The confirmed permission differs from its review. Inspect or revoke the captured grant.") }
+            guard generation == current, draftRevision == draft, ready, resource == reviewed.scope.resource else {
+                _ = try? await request("/api/browser/existing/job-grants/" + confirmed.id + "/revoke", origin: origin, body: ["session_id": confirmed.resource.owner, "connection_id": confirmed.resource.connection]); return
+            }
+            grant = confirmed; receipt = "Permission confirmed for this task step. Task resume and action approval remain separate."
+        } catch { if generation == current { inventoryConfirmed = false; self.error = error.localizedDescription } }
+    }
+    func inspectGrant(revoke: Bool = false) async {
+        guard canInspectGrant, let captured = grant, let origin = grantOrigin else { return }
+        let current = generation; busy = true; error = nil; defer { if generation == current { busy = false } }
+        do {
+            let raw = try await request("/api/browser/existing/job-grants/" + captured.id + (revoke ? "/revoke" : "/status"), origin: origin, body: ["session_id": captured.resource.owner, "connection_id": captured.resource.connection])
+            guard NativeBrowserViewWire.bool(raw["success"]) == true else { throw NativeBrowserViewFailure(message: "The task permission status was not confirmed.") }
+            let checked = try NativeChromeJobWire.scope(raw, expected: captured.resource, now: now(), statuses: revoke ? ["revoked"] : ["active", "unavailable", "revoked"], allowExpired: true)
+            guard checked.matches(captured) else { throw NativeBrowserViewFailure(message: "The task permission status differs from the captured scope.") }
+            guard generation == current else { return }; grant = checked; receipt = "Task permission: " + checked.status + ". Task execution and action approvals are unchanged."
+        } catch { if generation == current { self.error = error.localizedDescription } }
+    }
+}
+
 struct NativeSharedConversationReview: Identifiable {
     let id = UUID()
     let createdUptime = ProcessInfo.processInfo.systemUptime
@@ -379,30 +579,79 @@ struct NativeBrowserViewFeatureView: View {
     var canConfirmShared: (NativeSharedConversationReview) -> Bool = { _ in false }
     @StateObject private var model = NativeBrowserViewModel()
     @StateObject private var chrome = NativeExistingChromeModel()
+    @StateObject private var jobs = NativeChromeJobModel()
     @State private var review = false
     @State private var chromeReview = false
     @State private var tabReview = false
+    private var jobPermissions: some View {
+        DisclosureGroup("Chrome access for one task step") {
+            VStack(alignment: .leading, spacing: 8) {
+                Text("Choose a real current task step and its browser tools. Permission lasts at most five minutes and keeps Chrome with its connecting chat. After granting permission, use Workflows > Resume to continue a waiting task. Action approval remains separate.").font(.caption).foregroundStyle(.secondary)
+                HStack {
+                    Picker("Task", selection: $jobs.selectedFlow) {
+                        Text("Choose a task").tag("")
+                        ForEach(jobs.tasks) { task in Text("\(task.title) · step \(task.step)").tag(task.id) }
+                    }.disabled(jobs.busy || !chrome.canGrantJobs)
+                    Button("Refresh tasks") { Task { await jobs.refresh() } }.disabled(jobs.busy || !chrome.canGrantJobs)
+                }
+                if let task = jobs.currentTask {
+                    Text("Task \(task.id) · current step \(task.step) · \(task.flowStatus)/\(task.stepStatus) · execution conversation \(task.executionOwner)").font(.caption).textSelection(.enabled)
+                }
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 4) {
+                        ForEach(jobs.availableTools, id: \.self) { tool in
+                            Toggle(tool, isOn: Binding(get: { jobs.selectedTools.contains(tool) }, set: { chosen in if chosen { jobs.selectedTools.insert(tool) } else { jobs.selectedTools.remove(tool) } })).toggleStyle(.checkbox).disabled(jobs.busy || !chrome.canGrantJobs)
+                        }
+                    }.frame(maxWidth: .infinity, alignment: .leading)
+                }.frame(maxHeight: 100)
+                HStack {
+                    Picker("Expires after", selection: $jobs.ttl) { Text("1 minute").tag(60); Text("3 minutes").tag(180); Text("5 minutes").tag(300) }.disabled(jobs.busy)
+                    Button("Review task permission…") { Task { await jobs.prepareReview() } }.disabled(!jobs.canReview)
+                }
+                if let grant = jobs.grant {
+                    Text("Captured permission \(grant.id): \(grant.status) · expires \(grant.expires.formatted(date: .omitted, time: .standard))").font(.caption).textSelection(.enabled)
+                    Text("Task \(grant.flow) · step \(grant.step) · execution conversation \(grant.executionOwner)\nChrome owner \(grant.resource.owner) · tab \(grant.resource.target) · connection \(grant.resource.connection)\nTools: \(grant.tools.joined(separator: ", "))").font(.caption).textSelection(.enabled)
+                    HStack { Button("Inspect permission") { Task { await jobs.inspectGrant() } }; Button("Revoke permission") { Task { await jobs.inspectGrant(revoke: true) } } }.disabled(!jobs.canInspectGrant)
+                }
+                if let receipt = jobs.receipt { Text(receipt).font(.caption) }
+                if let error = jobs.error { NativeSelectableText(error).foregroundStyle(.red) }
+                if !chrome.canGrantJobs { Text("Attach and verify a Chrome tab in this chat before reviewing task access.").font(.caption).foregroundStyle(.secondary) }
+                else if jobs.tasks.isEmpty { Text("No eligible current task steps were returned. Refresh after creating the task through the existing task controls.").font(.caption).foregroundStyle(.secondary) }
+            }.padding(.top, 8)
+        }
+    }
+    private func jobReview(_ item: NativeChromeJobReview) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Text("Allow this task step to use your Chrome tab?").font(.headline)
+            NativeSelectableText("Task: \(item.title)\nFlow: \(item.scope.flow)\nCurrent step: \(item.scope.step)\nTask execution conversation: \(item.scope.executionOwner)\nChrome owner conversation: \(item.scope.resource.owner)\nConnection: \(item.scope.resource.connection)\nTab: \(chrome.targets.first { $0.id == item.scope.resource.target }?.label ?? item.scope.resource.target) (\(item.scope.resource.target))\nTools: \(item.scope.tools.joined(separator: ", "))\nExpires: \(item.scope.expires.formatted(date: .complete, time: .standard))")
+            Text("This grants browser access only to the exact task step and tools above. Chrome stays with its connecting chat. Confirming does not resume the task or approve any browser action; action review remains required.").font(.callout)
+            TimelineView(.periodic(from: .now, by: 1)) { _ in
+                HStack { Button("Cancel") { jobs.cancelReview() }; Spacer(); Button("Confirm task permission") { Task { await jobs.confirm() } }.disabled(!jobs.canConfirm) }
+            }
+        }.padding(24).frame(width: 680)
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("Browser").font(.title2.bold()); Spacer(); Button("Refresh") { Task { await model.refresh() } }.disabled(model.busy || model.watching) }
             Text("Watch FERAL work in the attached browser tab.").foregroundStyle(.secondary)
             if let sharedSessionID {
                 if sharedSessionID == sessionID { Text("Shared Theora conversation selected. Connect Chrome and attach its tab here to use this owner from the phone.").font(.caption).foregroundStyle(.secondary) }
-                else { Button("Use shared Theora conversation…", action: prepareShared).disabled(!canPrepareShared || !chrome.canReviewSharedConversation || model.busy || model.watching || chromeReview || tabReview || review)
+                else { Button("Use shared Theora conversation…", action: prepareShared).disabled(!canPrepareShared || !chrome.canReviewSharedConversation || jobs.busy || jobs.review != nil || model.busy || model.watching || chromeReview || tabReview || review)
                     Text(chrome.connectionID != nil || chrome.connected ? "Disconnect Chrome here first, then review the shared conversation switch. Reconnect and attach the tab in the shared chat; browser access and approvals are not transferred." : "Disconnect Chrome in its owning chat before switching; reconnect and attach the tab in the shared conversation. Browser access and approvals are not transferred.").font(.caption).foregroundStyle(.secondary) }
             } else { Text("The shared Theora session has not been verified. Reconnect the local agent before selecting it.").font(.caption).foregroundStyle(.secondary) }
             HStack {
-                Button("Use my Chrome…") { chromeReview = chrome.prepareConnect() }.disabled(!chrome.canConnect || model.watching)
-                Button("Refresh Chrome") { Task { await chrome.refresh() } }.disabled(chrome.busy || sessionID == nil)
-                if chrome.connectionID != nil { Button("Disconnect Chrome") { Task { await model.stop(); await chrome.disconnect(); await model.refresh() } }.disabled(!chrome.canDisconnect) }
+                Button("Use my Chrome…") { chromeReview = chrome.prepareConnect() }.disabled(!chrome.canConnect || model.watching || jobs.busy || jobs.review != nil)
+                Button("Refresh Chrome") { Task { await chrome.refresh() } }.disabled(chrome.busy || sessionID == nil || jobs.busy || jobs.review != nil)
+                if chrome.connectionID != nil { Button("Disconnect Chrome") { Task { await model.stop(); await chrome.disconnect(); await model.refresh() } }.disabled(!chrome.canDisconnect || jobs.busy) }
             }
             if chrome.connected {
                 HStack {
-                    Picker("Chrome tab", selection: $chrome.draft) { ForEach(chrome.targets) { Text($0.label).tag($0.id) } }.disabled(chrome.busy || model.watching)
-                    Button("Attach selected tab…") { tabReview = chrome.prepareSelect() }.disabled(!chrome.canSelect || model.watching)
+                    Picker("Chrome tab", selection: $chrome.draft) { ForEach(chrome.targets) { Text($0.label).tag($0.id) } }.disabled(chrome.busy || model.watching || jobs.busy || jobs.review != nil)
+                    Button("Attach selected tab…") { tabReview = chrome.prepareSelect() }.disabled(!chrome.canSelect || model.watching || jobs.busy || jobs.review != nil)
                 }
                 Text("This Chrome connection belongs to the selected chat. Task approvals remain separate.").font(.caption).foregroundStyle(.secondary)
             }
+            jobPermissions
             if sessionID == nil { Text("Choose a chat before connecting your Chrome.").font(.caption).foregroundStyle(.secondary) }
             if let error = chrome.error { NativeSelectableText(text: error, font: .systemFont(ofSize: 12), color: .systemRed) }
             HStack {
@@ -435,12 +684,16 @@ struct NativeBrowserViewFeatureView: View {
             await model.stop(); await model.configure(baseURL: baseURL)
             await chrome.configure(origin: baseURL, owner: sessionID, ready: taskReady)
         }
-        .onDisappear { cancelShared(); review = false; chromeReview = false; tabReview = false; Task { await model.stop() } }
+        .task(id: "\(baseURL?.absoluteString ?? "")|\(sessionID ?? "")|\(chrome.connectionID ?? "")|\(chrome.selected ?? "")|\(chrome.canGrantJobs)") {
+            await jobs.configure(origin: baseURL, owner: sessionID, connection: chrome.connectionID, target: chrome.selected, ready: chrome.canGrantJobs)
+        }
+        .sheet(item: Binding(get: { jobs.review }, set: { if $0 == nil { jobs.cancelReview() } })) { item in jobReview(item) }
+        .onDisappear { jobs.cancelReview(); cancelShared(); review = false; chromeReview = false; tabReview = false; Task { await model.stop() } }
         .sheet(item: Binding(get: { sharedReview }, set: { if $0 == nil { cancelShared() } })) { item in
             VStack(alignment: .leading, spacing: 16) {
                 Text("Use the shared Theora conversation?").font(.headline)
                 NativeSelectableText(item.explanation)
-                HStack { Button("Cancel", action: cancelShared); Spacer(); Button("Confirm conversation switch") { Task { await confirmShared(item) } }.disabled(!canConfirmShared(item) || !chrome.canReviewSharedConversation || model.busy || model.watching || chromeReview || tabReview || review) }
+                HStack { Button("Cancel", action: cancelShared); Spacer(); Button("Confirm conversation switch") { Task { await confirmShared(item) } }.disabled(!canConfirmShared(item) || !chrome.canReviewSharedConversation || jobs.busy || jobs.review != nil || model.busy || model.watching || chromeReview || tabReview || review) }
             }.padding(24).frame(width: 680)
         }
         .alert("Connect your Chrome to this chat?", isPresented: $chromeReview) {

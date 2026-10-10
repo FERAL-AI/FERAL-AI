@@ -378,6 +378,174 @@ private final class BrowserViewHeldResponse {
         expect(!uncertain.canReviewSharedConversation, "unknown disconnect keeps connection identity and blocks shared switch")
         expect(uncertain.connectionID == viewID && uncertain.error != nil && uncertain.error?.contains("private details") == false, "unconfirmed disconnect retains retry identity and redacts upstream")
     }
+    private static let jobGrantID = "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa"
+    private static let jobReviewID = "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb"
+    private static let jobDigest = String(repeating: "a", count: 64)
+    private static func jobResource() -> [String: Any] { ["owner_session_id": "chat-owner", "connection_id": viewID, "target_id": "tab-A"] }
+    private static func jobTask() -> [String: Any] {
+        ["flow_id": "flow-1", "step_id": 7, "flow_terms_digest": jobDigest, "title": "Test task", "flow_status": "waiting", "step_status": "waiting", "step_type": "llm.chat", "execution_session_id": "task-execution-owner"]
+    }
+    private static func jobInventory() -> [String: Any] {
+        ["success": true, "contract_version": 1, "browser_resource": jobResource(), "tasks": [jobTask()], "allowed_tools": ["browser__snapshot", "browser__click"]]
+    }
+    private static func jobDetail() -> [String: Any] {
+        ["id": "flow-1", "session_id": "task-execution-owner", "title": "Test task", "status": "waiting", "current_step": 0, "error": NSNull(), "steps": [["id": 7, "flow_id": "flow-1", "step_index": 0, "step_type": "llm.chat", "status": "waiting"]]]
+    }
+    private static func jobScope(_ status: String = "review") -> [String: Any] {
+        ["success": true, "contract_version": 1, "grant_id": jobGrantID, "status": status, "browser_resource": jobResource(), "flow_id": "flow-1", "step_id": 7, "flow_terms_digest": jobDigest, "execution_session_id": "task-execution-owner", "grant_revision": 1, "allowed_tools": ["browser__snapshot"], "expires_at": instant.timeIntervalSince1970 + 300, "action_permission": "separate_review_required"]
+    }
+    private static func jobReviewReply() -> [String: Any] {
+        ["success": true, "contract_version": 1, "review_id": jobReviewID, "review_token": token, "task_title": "Test task", "scope": jobScope()]
+    }
+    private static func jobOrdinary(_ instance: BrowserViewTestProtocol, _ request: URLRequest) {
+        switch request.url!.path {
+        case "/api/browser/existing/job-grants/tasks": instance.reply(jobInventory())
+        case "/api/taskflows/flow-1": instance.reply(jobDetail())
+        case "/api/browser/existing/job-grants/review": instance.reply(jobReviewReply())
+        case "/api/browser/existing/job-grants/" + jobReviewID + "/confirm": instance.reply(jobScope("active"))
+        case "/api/browser/existing/job-grants/" + jobGrantID + "/status": instance.reply(jobScope("active"))
+        case "/api/browser/existing/job-grants/" + jobGrantID + "/revoke": instance.reply(jobScope("revoked"))
+        default: fatalError("Unexpected job permission route: " + request.url!.path)
+        }
+    }
+    @MainActor private static func configuredJob(port: Int = 49130, now: @escaping () -> Date = { instant }) async -> NativeChromeJobModel {
+        let model = NativeChromeJobModel(session: session(), now: now)
+        await model.configure(origin: URL(string: "http://127.0.0.1:\(port)")!, owner: "chat-owner", connection: viewID, target: "tab-A", ready: true)
+        return model
+    }
+    @MainActor private static func jobPermissionConsent() async {
+        BrowserViewTestProtocol.reset(jobOrdinary)
+        let model = await configuredJob()
+        expect(model.tasks.count == 1 && model.currentTask?.step == 7 && !model.canReview && model.selectedTools.isEmpty, "eligibility inventory chooses real task but never implies tool consent")
+        expect(model.currentTask?.executionOwner == "task-execution-owner", "delegated task keeps a distinct execution owner")
+        await model.confirm()
+        expect(BrowserViewTestProtocol.requests.count == 1 && model.grant == nil, "no confirmation without explicit exact review")
+        model.selectedTools = ["browser__snapshot"]; await model.prepareReview()
+        expect(model.canConfirm && model.review?.scope.resource.owner == "chat-owner", "review retains physical Chrome owner")
+        let sent = body(BrowserViewTestProtocol.requests.last!)
+        expect(Set(sent.keys) == ["session_id", "connection_id", "target_id", "flow_id", "step_id", "flow_terms_digest", "allowed_tools", "expires_in_seconds"] && sent["session_id"] as? String == "chat-owner" && sent["step_id"] as? Int == 7 && sent["allowed_tools"] as? [String] == ["browser__snapshot"], "review exact task and explicit tools body")
+        expect(BrowserViewTestProtocol.requests.contains { $0.httpMethod == "GET" && $0.url!.path == "/api/taskflows/flow-1" }, "review reuses real task detail endpoint")
+        model.cancelReview(); await model.confirm()
+        expect(!BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/confirm") }, "cancel does not consume or grant review")
+        await model.prepareReview(); await model.confirm()
+        expect(model.grant?.status == "active" && model.review == nil, "exact confirmed receipt publishes task permission")
+        let confirm = BrowserViewTestProtocol.requests.last!
+        expect(Set(body(confirm).keys) == ["session_id", "review_token"] && body(confirm)["session_id"] as? String == "chat-owner", "confirm uses one-use token and exact physical owner")
+        expect(confirm.value(forHTTPHeaderField: "X-FERAL-Browser-View") == "native-v1", "job operator header preserved")
+        let count = BrowserViewTestProtocol.requests.count; await model.confirm()
+        expect(BrowserViewTestProtocol.requests.count == count, "confirmed review cannot replay")
+        await model.inspectGrant(); await model.inspectGrant(revoke: true)
+        expect(model.grant?.status == "revoked" && body(BrowserViewTestProtocol.requests.last!)["connection_id"] as? String == viewID, "status and revoke preserve original connection")
+        expect(!BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/resume") || $0.url!.path.contains("approvals") || $0.url!.path.hasSuffix("/select") }, "grant does not resume, approve or change physical Chrome attachment")
+    }
+    @MainActor private static func jobPermissionWireFailures() async {
+        for (key, value) in [("step_id", true as Any), ("flow_terms_digest", jobDigest.uppercased()), ("execution_session_id", " bad"), ("flow_status", "completed")] {
+            BrowserViewTestProtocol.reset { instance, _ in var inventory = jobInventory(), task = jobTask(); task[key] = value; inventory["tasks"] = [task]; instance.reply(inventory) }
+            let model = await configuredJob()
+            expect(model.tasks.isEmpty && !model.canReview && model.error != nil, "malformed current task rejected")
+        }
+        for key in ["owner_session_id", "connection_id", "target_id"] {
+            BrowserViewTestProtocol.reset { instance, _ in var inventory = jobInventory(), resource = jobResource(); resource[key] = "foreign"; inventory["browser_resource"] = resource; instance.reply(inventory) }
+            let model = await configuredJob()
+            expect(model.tasks.isEmpty && model.error != nil, "foreign inventory resource rejected")
+        }
+        for (key, value) in [("expires_at", instant.timeIntervalSince1970 as Any), ("step_id", 9), ("allowed_tools", ["browser__click"]), ("grant_revision", true), ("action_permission", "allowed")] {
+            BrowserViewTestProtocol.reset { instance, request in
+                if request.url!.lastPathComponent == "review" { var review = jobReviewReply(), scope = jobScope(); scope[key] = value; review["scope"] = scope; instance.reply(review) } else { jobOrdinary(instance, request) }
+            }
+            let model = await configuredJob(); model.selectedTools = ["browser__snapshot"]; await model.prepareReview()
+            expect(model.review == nil && !model.canConfirm && model.error != nil, "changed or malformed review scope rejected")
+        }
+        BrowserViewTestProtocol.reset(jobOrdinary)
+        let model = NativeChromeJobModel(session: session(), now: { instant })
+        await model.configure(origin: URL(string: "http://example.com:9090")!, owner: "chat-owner", connection: viewID, target: "tab-A", ready: true)
+        expect(BrowserViewTestProtocol.requests.isEmpty && model.error != nil, "job grant remote origin rejected before transport")
+        await model.configure(origin: URL(string: "http://127.0.0.1:49130")!, owner: nil, connection: viewID, target: "tab-A", ready: true)
+        expect(BrowserViewTestProtocol.requests.isEmpty && !model.canReview, "missing owner never synthesized")
+    }
+    @MainActor private static func jobPermissionDraftAndTaskRaces() async {
+        for change in 0..<3 {
+            BrowserViewTestProtocol.reset(jobOrdinary)
+            let model = await configuredJob(); model.selectedTools = ["browser__snapshot"]; await model.prepareReview()
+            if change == 0 { model.selectedTools = ["browser__click"] }
+            else if change == 1 { model.ttl = 60 }
+            else { model.selectedFlow = "foreign-flow" }
+            await model.confirm()
+            expect(model.review == nil && !BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/confirm") }, "draft drift invalidates one-use review")
+        }
+        BrowserViewTestProtocol.reset { instance, request in
+            if request.url!.path.hasSuffix("/tasks") { var inventory = jobInventory(), task = jobTask(); task["step_type"] = "skill.invoke"; inventory["tasks"] = [task]; instance.reply(inventory) }
+            else if request.url!.path == "/api/taskflows/flow-1" { var detail = jobDetail(); detail["steps"] = [["id": 7, "flow_id": "flow-1", "step_index": 0, "step_type": "skill.invoke", "status": "waiting"]]; instance.reply(detail) }
+            else { jobOrdinary(instance, request) }
+        }
+        let skill = await configuredJob(); skill.selectedTools = ["browser__snapshot"]; await skill.prepareReview(); await skill.confirm()
+        expect(skill.grant?.status == "active", "real eligible skill.invoke current step supported")
+        for change in ["step", "tools"] {
+            BrowserViewTestProtocol.reset(jobOrdinary)
+            let current = await configuredJob(); current.selectedTools = ["browser__snapshot"]; await current.prepareReview()
+            BrowserViewTestProtocol.reset { instance, request in
+                if change == "step", request.url!.path == "/api/taskflows/flow-1" { var detail = jobDetail(); detail["current_step"] = 1; instance.reply(detail) }
+                else if change == "tools", request.url!.path.hasSuffix("/tasks") { var inventory = jobInventory(); inventory["allowed_tools"] = ["browser__click"]; instance.reply(inventory) }
+                else { jobOrdinary(instance, request) }
+            }
+            await current.confirm()
+            expect(current.grant == nil && !BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/confirm") }, "real current step or available tool drift blocks confirm")
+        }
+        var clock = instant
+        BrowserViewTestProtocol.reset(jobOrdinary)
+        let expired = await configuredJob(now: { clock }); expired.selectedTools = ["browser__snapshot"]; await expired.prepareReview(); clock = instant.addingTimeInterval(300); await expired.confirm()
+        expect(!expired.canConfirm && !BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/confirm") }, "expired review not consumed")
+        BrowserViewTestProtocol.reset(jobOrdinary)
+        let stale = await configuredJob(); stale.selectedTools = ["browser__snapshot"]; await stale.prepareReview()
+        BrowserViewTestProtocol.reset { instance, request in
+            if request.url!.path.hasSuffix("/tasks") { var inventory = jobInventory(), task = jobTask(); task["flow_terms_digest"] = String(repeating: "b", count: 64); inventory["tasks"] = [task]; instance.reply(inventory) } else { jobOrdinary(instance, request) }
+        }
+        await stale.confirm()
+        expect(stale.grant == nil && stale.review == nil && !BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/confirm") }, "changed actual task terms require a new review")
+        let held = BrowserViewHeldResponse()
+        BrowserViewTestProtocol.reset { instance, request in if request.url!.lastPathComponent == "review" { held.hold(instance) } else { jobOrdinary(instance, request) } }
+        let late = await configuredJob(); late.selectedTools = ["browser__snapshot"]
+        let pending = Task { await late.prepareReview() }; await wait { held.ready }; late.selectedTools = ["browser__click"]; held.release(jobReviewReply()); await pending.value
+        expect(late.review == nil && !late.canConfirm, "late review cannot restore a changed tool draft")
+        BrowserViewTestProtocol.reset { instance, request in if request.url!.lastPathComponent == "review" { held.hold(instance) } else { jobOrdinary(instance, request) } }
+        let disconnected = await configuredJob(); disconnected.selectedTools = ["browser__snapshot"]
+        let reviewing = Task { await disconnected.prepareReview() }; await wait { held.ready }
+        await disconnected.configure(origin: URL(string: "http://127.0.0.1:49130")!, owner: "chat-owner", connection: nil, target: nil, ready: false)
+        held.release(jobReviewReply()); await reviewing.value
+        expect(disconnected.review == nil && !disconnected.canConfirm, "disconnect invalidates delayed review")
+    }
+    @MainActor private static func jobPermissionConfirmRaces() async {
+        BrowserViewTestProtocol.reset(jobOrdinary)
+        let malformed = await configuredJob(); malformed.selectedTools = ["browser__snapshot"]; await malformed.prepareReview()
+        BrowserViewTestProtocol.reset { instance, request in if request.url!.lastPathComponent == "confirm" { var scope = jobScope("active"); scope["grant_id"] = viewID; instance.reply(scope) } else { jobOrdinary(instance, request) } }
+        await malformed.confirm()
+        expect(malformed.grant?.status == "review" && malformed.grant?.id == jobGrantID && malformed.error != nil, "uncertain foreign confirmation retains exact reviewed cleanup identity")
+        let count = BrowserViewTestProtocol.requests.count; await malformed.confirm()
+        expect(BrowserViewTestProtocol.requests.count == count, "uncertain confirm is never replayed")
+        await malformed.inspectGrant(revoke: true)
+        expect(malformed.grant?.status == "revoked", "uncertain confirmation can be revoked using captured identity")
+        let held = BrowserViewHeldResponse()
+        BrowserViewTestProtocol.reset { instance, request in if request.url!.lastPathComponent == "confirm" { held.hold(instance) } else { jobOrdinary(instance, request) } }
+        let late = await configuredJob(); late.selectedTools = ["browser__snapshot"]; await late.prepareReview()
+        let pending = Task { await late.confirm() }; await wait { held.ready }
+        await late.configure(origin: URL(string: "http://127.0.0.1:49131")!, owner: "new-owner", connection: nil, target: nil, ready: false)
+        held.release(jobScope("active")); await pending.value
+        expect(late.grant?.status != "active" && !late.canConfirm, "late successful grant never restores new context authority")
+        let cleanup = BrowserViewTestProtocol.requests.last!
+        expect(cleanup.url!.path.hasSuffix("/revoke") && cleanup.url!.port == 49130 && body(cleanup)["session_id"] as? String == "chat-owner" && body(cleanup)["connection_id"] as? String == viewID, "late success is revoked with original resource and origin")
+        BrowserViewTestProtocol.reset(jobOrdinary)
+        let fenced = await configuredJob(port: 49132); fenced.selectedTools = ["browser__snapshot"]; await fenced.prepareReview()
+        let origin = URL(string: "http://127.0.0.1:49132")!; try! NativeLocalActionGate.shared.pause(origin: origin)
+        expect(!fenced.canConfirm, "runtime epoch drift disables confirmation")
+        await fenced.confirm()
+        expect(!BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/confirm") } && fenced.grant == nil, "runtime action fence prevents stale review transport")
+        BrowserViewTestProtocol.reset(jobOrdinary)
+        let suspended = await configuredJob(port: 49133); suspended.selectedTools = ["browser__snapshot"]; await suspended.prepareReview()
+        let passiveOrigin = URL(string: "http://127.0.0.1:49133")!; try! NativeLocalActionGate.shared.suspend(origin: passiveOrigin); try! NativeLocalActionGate.shared.resume(origin: passiveOrigin)
+        expect(!suspended.canConfirm, "passive proof interruption permanently invalidates captured review")
+        await suspended.confirm()
+        expect(!BrowserViewTestProtocol.requests.contains { $0.url!.path.hasSuffix("/confirm") }, "passive proof recovery never revives old review")
+    }
     @MainActor static func main() async throws {
         let sharedReview = NativeSharedConversationReview(currentSessionID: "isolated-fixture", primarySessionID: "primary-fixture", origin: URL(string: "http://127.0.0.1:49122")!, runtimeRevision: UUID(), admissionRevision: UUID(), conversationRevision: UUID())
         expect(sharedReview.explanation.contains("isolated history is not inserted") && sharedReview.explanation.contains("Disconnect Chrome") && sharedReview.explanation.contains("does not transfer browser access"), "shared selection review discloses history and browser-owner boundaries")
@@ -385,6 +553,7 @@ private final class BrowserViewHeldResponse {
         await delayedFrameAndNonoverlap(); await cleanupAndOriginRace(); await staleGrantAndRuntimeFence(); await automaticPollingStopsCleanly()
         await expiryWhileFramePending(); await automaticPollingPace()
         await chromeConsent(); await chromeResponseRaces()
+        await jobPermissionConsent(); await jobPermissionWireFailures(); await jobPermissionDraftAndTaskRaces(); await jobPermissionConfirmRaces()
         print("NativeBrowserViewFeatureTests: \(checks) checks passed")
     }
 }

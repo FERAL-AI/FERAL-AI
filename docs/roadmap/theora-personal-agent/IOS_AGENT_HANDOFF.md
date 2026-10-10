@@ -1,5 +1,24 @@
 # Theora iOS personal-agent research and handoff
 
+## October 10: verified client adoption and scoped Chrome source
+
+Local unpushed iOS commits f513f8d, ab516b5, adaaf69 and aa77855 adopt persisted
+request IDs, exact receipts/cards, bounded atomic storage and read-only recovery.
+Final production Foundation fixtures pass 539 assertions; unsigned device build
+and compiled Swift/registered ASGI/real pairing/SQLite recovery pass. One task,
+one inert call and zero prompt resend are verified. No physical acceptance ran.
+
+Backend source negotiates durable phone_turn_contract version 1 and read-only
+phone_turn_status. Chrome permission is reviewed on the Mac for one exact step;
+first use saves the next call and waits. Explicit Workflows Resume and action
+approval remain separate. Reconnect refreshes current private waiting ownership
+without granting permission or dispatching. Integration passes 1,147 tests/four
+skips; typing adds zero diagnostics. Canonical 9.52 lacks these additions until
+the new candidate is built and accepted. Phone target/live configuration remain
+pending. See WORK_STATE for source/publication/artifact identity.
+
+[Current source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
+
 ## October 10: Mac 9.52 exact device reviews
 
 Mac 9.52/build2026101001 packages runtime 0138f3d24. The backend now supplies
