@@ -1,15 +1,18 @@
 # FERAL app completion: executable plan
 
-**Current source checkpoint (October 10; candidate pending).**
+**Current checkpoint (October 10; layout correction pending).**
 
-Source adds durable phone receipt recovery, one-step Chrome consent, exact-call
-waiting/explicit Resume and atomic private review renewal. Frozen integration
-passes 1,147 tests/four skips across 64 suites; CI Ruff and zero-added Mac typing
-pass. Native typecheck/164 checks and local iOS 539 assertions/build/registered
-round trip pass. Mac 9.53 packaging/GUI and physical phone acceptance are pending;
-canonical 9.52 is unchanged. Publication and artifact identity are in WORK_STATE.
+Published fd64e38f8 is packaged in 9.53 with 504 Python/70 WebUI comparisons and
+fresh native compilation. Frozen integration passes 1,147 tests/four skips;
+Mac typing adds zero diagnostics. Actual expanded Browser permission layout
+fails, while avatar/setup/Chat/Home/collapsed Browser and normal Quit work.
+A bounded scroll/preview correction passes native typecheck/164 checks; parent
+owns fresh 9.54 packaging and actual GUI verification. iOS adoption is verified
+locally at aa77855, but publication, installation and physical acceptance remain
+open. Known-good rollback is 9.52. See WORK_STATE for exact ownership and evidence.
 
-[Source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
+[9.53 evidence](NATIVE_9_53_ACCEPTANCE.md),
+[source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
 
 **Preceding canonical artifact (October 10).** Immutable Mac 9.52/build2026101001 contains
 exact runtime source `0138f3d24751adb00b1728adc5dfc7b086663c3e`.

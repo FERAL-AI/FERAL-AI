@@ -1,6 +1,13 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 10).** Immutable Mac 9.52/build2026101001 contains
+**Current checkpoint (October 10).** Published fd64e38f8 and packaged 9.53 add
+phone receipt recovery and exact-step Chrome consent. Package checks pass; actual
+expanded Browser layout fails. A verified bounded layout correction is being
+packaged as 9.54. iOS adoption is locally verified but unpushed/uninstalled.
+Physical phone/provider/browser/audio and broader product gates remain open.
+[9.53 evidence](NATIVE_9_53_ACCEPTANCE.md), [current ownership](WORK_STATE.md).
+
+**Historical checkpoint (October 10).** Immutable Mac 9.52/build2026101001 contains
 exact runtime source `0138f3d24751adb00b1728adc5dfc7b086663c3e`.
 Private phone task reviews now have exact-device publication and guarded REST
 discovery/decisions. Stored waiting model reviews support explicit same-device

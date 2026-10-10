@@ -1,15 +1,14 @@
 # FERAL Native Preview: feature parity inventory
 
-**Current source checkpoint (October 10; candidate pending).**
+**Current checkpoint (October 10; layout correction pending).**
 
-Source adds durable phone receipt recovery, one-step Chrome consent, exact-call
-waiting/explicit Resume and atomic private review renewal. Frozen integration
-passes 1,147 tests/four skips across 64 suites; CI Ruff and zero-added Mac typing
-pass. Native typecheck/164 checks and local iOS 539 assertions/build/registered
-round trip pass. Mac 9.53 packaging/GUI and physical phone acceptance are pending;
-canonical 9.52 is unchanged. Publication and artifact identity are in WORK_STATE.
-
-[Source contract](../docs/roadmap/theora-personal-agent/PHONE_TASK_CHROME_CONTRACT_20261010.md).
+Published fd64e38f8 is packaged in 9.53. Package/native checks pass, but actual
+expanded Browser task permissions move controls offscreen. The bounded scroll/
+preview correction passes typecheck/164 checks; fresh 9.54 and actual GUI checks
+are pending. iOS adoption is locally verified, unpushed and uninstalled. Known-good
+rollback remains 9.52; physical phone/provider/browser/audio acceptance is open.
+[9.53 evidence](../docs/roadmap/theora-personal-agent/NATIVE_9_53_ACCEPTANCE.md),
+[current ownership](../docs/roadmap/theora-personal-agent/WORK_STATE.md).
 
 **Preceding canonical artifact (October 10).** Immutable Mac 9.52/build2026101001 contains
 exact runtime source `0138f3d24751adb00b1728adc5dfc7b086663c3e`.

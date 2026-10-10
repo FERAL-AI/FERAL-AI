@@ -597,13 +597,15 @@ struct NativeBrowserViewFeatureView: View {
                 if let task = jobs.currentTask {
                     Text("Task \(task.id) · current step \(task.step) · \(task.flowStatus)/\(task.stepStatus) · execution conversation \(task.executionOwner)").font(.caption).textSelection(.enabled)
                 }
-                ScrollView {
-                    VStack(alignment: .leading, spacing: 4) {
-                        ForEach(jobs.availableTools, id: \.self) { tool in
-                            Toggle(tool, isOn: Binding(get: { jobs.selectedTools.contains(tool) }, set: { chosen in if chosen { jobs.selectedTools.insert(tool) } else { jobs.selectedTools.remove(tool) } })).toggleStyle(.checkbox).disabled(jobs.busy || !chrome.canGrantJobs)
-                        }
-                    }.frame(maxWidth: .infinity, alignment: .leading)
-                }.frame(maxHeight: 100)
+                if !jobs.availableTools.isEmpty {
+                    ScrollView {
+                        VStack(alignment: .leading, spacing: 4) {
+                            ForEach(jobs.availableTools, id: \.self) { tool in
+                                Toggle(tool, isOn: Binding(get: { jobs.selectedTools.contains(tool) }, set: { chosen in if chosen { jobs.selectedTools.insert(tool) } else { jobs.selectedTools.remove(tool) } })).toggleStyle(.checkbox).disabled(jobs.busy || !chrome.canGrantJobs)
+                            }
+                        }.frame(maxWidth: .infinity, alignment: .leading)
+                    }.frame(height: 100)
+                }
                 HStack {
                     Picker("Expires after", selection: $jobs.ttl) { Text("1 minute").tag(60); Text("3 minutes").tag(180); Text("5 minutes").tag(300) }.disabled(jobs.busy)
                     Button("Review task permission…") { Task { await jobs.prepareReview() } }.disabled(!jobs.canReview)
@@ -630,7 +632,7 @@ struct NativeBrowserViewFeatureView: View {
             }
         }.padding(24).frame(width: 680)
     }
-    var body: some View {
+    private func browserContent(previewHeight: CGFloat) -> some View {
         VStack(alignment: .leading, spacing: 16) {
             HStack { Text("Browser").font(.title2.bold()); Spacer(); Button("Refresh") { Task { await model.refresh() } }.disabled(model.busy || model.watching) }
             Text("Watch FERAL work in the attached browser tab.").foregroundStyle(.secondary)
@@ -670,15 +672,24 @@ struct NativeBrowserViewFeatureView: View {
                         Image(nsImage: frame.image).resizable().interpolation(.medium).frame(width: width, height: height)
                         if let cursor = frame.cursor { Circle().stroke(.orange, lineWidth: 3).background(Circle().fill(.orange.opacity(0.2))).frame(width: 16, height: 16).offset(x: cursor.x * scale - 8, y: cursor.y * scale - 8).accessibilityLabel("Browser input location") }
                     }.frame(width: geometry.size.width, height: geometry.size.height, alignment: .center)
-                }.background(.black.opacity(0.1)).accessibilityLabel("Live browser page")
+                }.frame(height: previewHeight).background(.black.opacity(0.1)).accessibilityLabel("Live browser page")
                 Text("Frame \(frame.sequence) · \(frame.captured.formatted(date: .omitted, time: .standard))\(frame.cursor == nil ? "" : " · Browser input location")").font(.caption).foregroundStyle(.secondary)
             } else {
-                VStack(spacing: 8) { Image(systemName: "rectangle.on.rectangle").font(.largeTitle); Text(model.watching ? "Waiting for the browser…" : model.activeTarget == nil ? "Start a browser task in Chat, then refresh here." : "Start viewing to see this browser tab.") }.frame(maxWidth: .infinity, maxHeight: .infinity).foregroundStyle(.secondary)
+                VStack(spacing: 8) { Image(systemName: "rectangle.on.rectangle").font(.largeTitle); Text(model.watching ? "Waiting for the browser…" : model.activeTarget == nil ? "Start a browser task in Chat, then refresh here." : "Start viewing to see this browser tab.") }.frame(maxWidth: .infinity).frame(height: previewHeight).foregroundStyle(.secondary)
             }
             Text(model.status).font(.callout)
             if let error = model.error { NativeSelectableText(error).foregroundStyle(.red) }
             Text("Viewing this browser tab does not stop or authorize agent tasks. Use Chat or Oversight for task Stop.").font(.caption).foregroundStyle(.secondary)
-        }.padding(24)
+        }.frame(maxWidth: .infinity, alignment: .leading).padding(24)
+    }
+    var body: some View {
+        GeometryReader { viewport in
+            // Expanded permission controls must scroll within the detail column,
+            // rather than raise the NavigationSplitView's minimum height.
+            ScrollView {
+                browserContent(previewHeight: max(180, viewport.size.height * 0.45))
+            }.frame(width: viewport.size.width, height: viewport.size.height)
+        }
         .task(id: "\(baseURL?.absoluteString ?? "")|\(sessionID ?? "")|\(taskReady)") {
             review = false; chromeReview = false; tabReview = false
             await model.stop(); await model.configure(baseURL: baseURL)

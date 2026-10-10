@@ -13,8 +13,9 @@ phone_turn_status. Chrome permission is reviewed on the Mac for one exact step;
 first use saves the next call and waits. Explicit Workflows Resume and action
 approval remain separate. Reconnect refreshes current private waiting ownership
 without granting permission or dispatching. Integration passes 1,147 tests/four
-skips; typing adds zero diagnostics. Canonical 9.52 lacks these additions until
-the new candidate is built and accepted. Phone target/live configuration remain
+skips; typing adds zero diagnostics. Mac 9.53 packages these additions, but its expanded Browser layout fails GUI
+acceptance. A separate 9.54 layout correction is being packaged; 9.52 remains
+the known-good rollback. Phone target/live configuration remain
 pending. See WORK_STATE for source/publication/artifact identity.
 
 [Current source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).

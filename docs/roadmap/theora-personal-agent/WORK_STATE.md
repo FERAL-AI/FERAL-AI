@@ -7,38 +7,40 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Verified phone recovery and Chrome source; candidate pending
+### Phone recovery published; Browser layout correction packaging
 
-The source batch implements negotiated durable phone receipt recovery, explicit
-one-step Chrome permission and an initial exact-call consent waiting checkpoint.
-Grant confirmation does not resume or approve work. Explicit Workflows Resume
-uses the saved call; mutations require a separate exact review. Authenticated
-reconnect refreshes matching private waiting sources without task DB writes or
-dispatch. Approval publisher identity and atomic renewal repairs are integrated.
+Runtime source fd64e38f8893025c5f2c51550f4882139c34e3ca is published on the
+PR310 feature branch. Mac 9.53/build2026101002 contains that exact source: fresh
+54-input optimized Swift compilation, 504 Python/70 WebUI comparisons, contained
+runtime dependencies and strict ad-hoc signing pass. The retained 1,147-test/
+four-skip/64-suite source gate has zero drift; core Ruff passes and Mac typing
+retains 788 baseline diagnostics with zero additions/removals.
 
-Frozen integration passes 1,147 tests/four skips across 64 selected suites. Full
-core CI Ruff passes. Configured Mac typing retains 788 baseline diagnostics with
-zero additions/removals; 1,506 test inputs have zero drift. Earlier snapshot SDK
-omissions and a nullable publisher typing diagnostic are retained in evidence;
-the final source fixes both. Native typechecking and 164 browser checks pass.
+Actual isolated native avatar/setup/Chat/Home and collapsed Browser work. Expanding
+Chrome task permissions reproducibly moves controls/sidebar offscreen. Normal
+Quit exits0. This candidate fails expanded-layout acceptance; known-good 9.52 is
+the rollback. A bounded scroll/preview correction passes native typecheck and
+164 checks. Parent owns its one fresh 9.54 package and actual expansion/scroll/
+sidebar acceptance. All worker source files are released. Backend/model/wire
+inputs are unchanged by this correction; retain their matching source evidence.
 
-Local unpushed iOS commits f513f8d, ab516b5, adaaf69 and aa77855 adopt persisted
-task IDs, exact receipts/cards, address-alias recovery and bounded atomic storage.
-The final source passes 539 Foundation assertions and an unsigned device build.
-Actual compiled Swift/registered ASGI/real disposable pairing and SQLite recovery
-passes with one stored turn, one inert model call and zero prompt resend. This is
-separate from physical network/audio/provider/account/Chrome acceptance.
+Independent review confirms iOS local HEAD aa77855 contains persisted task IDs,
+read-only reconnect recovery, exact cards and separate renewal. Retained 539
+Foundation assertions and compiled Swift/registered ASGI/pairing/SQLite round
+trip pass: one task, one inert model call, zero prompt resends. Remote still
+points to 7d51197 and the updated app remains uninstalled. iOS publication and
+installation belong to its agent; this checkout makes no iOS edits. Physical
+phone/provider/Chrome/audio acceptance remains open. Selected live configuration
+is pending; no real model/account/message/payment is tested by these fixtures.
 
-Canonical Mac 9.52 remains unchanged until the 9.53 build and actual GUI acceptance
-complete. No new app has been installed on a phone. Source publication and exact
-candidate acceptance are separate gates. Preserve unrelated local edits and the
-existing canonical/rollback artifacts. The selected phone and live Mac/provider
-configuration remain pending. All worker assignments are complete; the parent
-owns source integration, publication and one offline candidate build.
+Preserve unrelated AUDIT-FIXES.md edits. Keep one canonical candidate and the
+known-good 9.52 rollback; retain small failed53 receipts instead of another app
+copy. Verify actual source/candidate/remote before resuming interrupted work.
 
-[Source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
+[9.53 checks and layout failure](NATIVE_9_53_ACCEPTANCE.md),
+[source contract](PHONE_TASK_CHROME_CONTRACT_20261010.md).
 
-### Current 9.52 completed review batch
+### Historical 9.52 completed review batch
 
 Immutable 9.52/build2026101001 contains exact runtime source
 `0138f3d24751adb00b1728adc5dfc7b086663c3e`. Private phone task reviews now
