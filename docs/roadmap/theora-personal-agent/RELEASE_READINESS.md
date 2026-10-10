@@ -1,29 +1,20 @@
 # Theora / FERAL full-product release readiness
 
-**October 9 source wave after 9.47.** Provider/setup parity is published as
-`3da563c4d`; phone intake is locally committed as `c8749b56a` with frozen isolated
-verification. Native shared-conversation source passes 29 linked model groups,
-118 browser checks and production typecheck. Runtime approvals, workflow origin
-scope, phone dispatch ownership and actual node sender corrections pass final
-combined source verification: 4,734 tests, 22 skips across 232 suites, zero source
-drift; full Mac typing adds zero diagnostics and removes three versus pre-wave.
-Exact-source candidate acceptance remains pending. The immutable 9.47 below contains
-none of this later source wave. [Shared-conversation behavior and gates](SHARED_THEORA_CONVERSATION_20261009.md),
-[phone integration evidence](IOS_PHONE_INTEGRATION_20261009.md),
-[active ownership and next action](WORK_STATE.md).
-
-**Current checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
-published exact runtime source `4bc4128cc74c85f6eaba08cf613b7730fc60ab76`:
-restored Home routing/navigation, stable native saved endpoint, truthful passive
-setup discovery and a disabled signed messaging admission foundation. Fresh
-54-input native compilation, 499 packaged Python comparisons, 70 WebUI
-comparisons, runtime/import/signature audits and backend lifecycle checks pass.
-Actual isolated native avatar/setup/Home and normal Quit/relaunch pass with the
-same saved port and distinct instance identities. 9.46 is the sole rollback.
-Actual Theora/browser handoff, messaging transport, physical voice/accounts and
-distribution remain open. [Artifact and executed acceptance](NATIVE_9_47_ACCEPTANCE.md),
-[repair evidence and next gates](END_TO_END_REPAIR_20261009.md).
-Coding expansion, Linux expansion and Gen-UI remain deferred.
+**Current checkpoint (October 9).** Immutable Mac 9.48/build2026100902 contains
+published exact runtime source `24a44c6ba42de9c3fbba9d597f3e441cf740b1f1`.
+Provider/setup parity, reviewed shared Theora conversation selection, durable
+model-task approval continuation, workflow origin policy, phone dispatch ownership
+and HUP approval sending are included. Frozen verification passes 4,734 tests,
+22 skips across 232 suites; full Mac typing adds zero diagnostics versus pre-wave.
+Fresh native compilation, 500 packaged Python and 70 WebUI comparisons, runtime
+imports and strict ad-hoc signatures pass. Actual isolated avatar/setup/Home,
+negative local provider probe, shared-conversation cancel/confirm, exact history
+readback and normal Quit/relaunch pass. 9.47 is the sole generated rollback.
+Originating-chat background approvals and job-scoped Chrome delegation are next;
+real inference, physical phone/audio/accounts, messaging transport, commerce and
+distribution remain open. [Artifact and acceptance](NATIVE_9_48_ACCEPTANCE.md),
+[current work and ownership](WORK_STATE.md). Coding expansion, Linux expansion
+and Gen-UI remain deferred.
 
 **Historical Mac artifact (October 5).** Immutable 9.45/build2026100501 contains
 published exact source `3cfe733b4`, with exact tracked-task approval and selected

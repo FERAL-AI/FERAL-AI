@@ -1,8 +1,10 @@
 # Reviewed shared Theora conversation
 
 October 9, 2026. Native source adds an explicit Browser action to select the
-verified canonical conversation used by Theora. Immutable 9.47 does not contain
-this change; new exact-source assembly and actual packaged interaction are pending.
+verified canonical conversation used by Theora. Published runtime 24a44c6ba is
+packaged in immutable 9.48. Actual isolated review/cancel/confirm, rich history
+readback and persistence across normal Quit/relaunch pass. No phone, attached
+Chrome or model task is inferred. [Packaged acceptance](NATIVE_9_48_ACCEPTANCE.md).
 
 The review captures the current thread, primary session, local runtime and
 selection revisions. Confirmation refreshes primary identity, saves the current

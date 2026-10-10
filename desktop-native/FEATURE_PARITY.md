@@ -1,17 +1,20 @@
 # FERAL Native Preview: feature parity inventory
 
-**Current checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
-published exact runtime source `4bc4128cc74c85f6eaba08cf613b7730fc60ab76`:
-restored Home routing/navigation, stable native saved endpoint, truthful passive
-setup discovery and a disabled signed messaging admission foundation. Fresh
-54-input native compilation, 499 packaged Python comparisons, 70 WebUI
-comparisons, runtime/import/signature audits and backend lifecycle checks pass.
-Actual isolated native avatar/setup/Home and normal Quit/relaunch pass with the
-same saved port and distinct instance identities. 9.46 is the sole rollback.
-Actual Theora/browser handoff, messaging transport, physical voice/accounts and
-distribution remain open. [Artifact and executed acceptance](../docs/roadmap/theora-personal-agent/NATIVE_9_47_ACCEPTANCE.md),
-[repair evidence and next gates](../docs/roadmap/theora-personal-agent/END_TO_END_REPAIR_20261009.md).
-Coding expansion, Linux expansion and Gen-UI remain deferred.
+**Current checkpoint (October 9).** Immutable Mac 9.48/build2026100902 contains
+published exact runtime source `24a44c6ba42de9c3fbba9d597f3e441cf740b1f1`.
+Provider/setup parity, reviewed shared Theora conversation selection, durable
+model-task approval continuation, workflow origin policy, phone dispatch ownership
+and HUP approval sending are included. Frozen verification passes 4,734 tests,
+22 skips across 232 suites; full Mac typing adds zero diagnostics versus pre-wave.
+Fresh native compilation, 500 packaged Python and 70 WebUI comparisons, runtime
+imports and strict ad-hoc signatures pass. Actual isolated avatar/setup/Home,
+negative local provider probe, shared-conversation cancel/confirm, exact history
+readback and normal Quit/relaunch pass. 9.47 is the sole generated rollback.
+Originating-chat background approvals and job-scoped Chrome delegation are next;
+real inference, physical phone/audio/accounts, messaging transport, commerce and
+distribution remain open. [Artifact and acceptance](../docs/roadmap/theora-personal-agent/NATIVE_9_48_ACCEPTANCE.md),
+[current work and ownership](../docs/roadmap/theora-personal-agent/WORK_STATE.md). Coding expansion, Linux expansion
+and Gen-UI remain deferred.
 
 **Historical Mac artifact (October 4).** Immutable 9.44/build2026100408 contains
 published source `4c8498bf0`: truthful local inventory, guarded vision preset

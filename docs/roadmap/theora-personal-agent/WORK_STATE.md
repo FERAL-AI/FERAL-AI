@@ -7,90 +7,73 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 9
 
-### Active source wave after 9.47
+### Published 9.48 artifact and verified source wave
 
-Provider/setup and WebUI corrections are published as `3da563c4d` in draft PR310.
-The immutable application below has not changed. Current local work is not yet
-packaged or accepted as a completed end-to-end product:
+**Current checkpoint (October 9).** Immutable Mac 9.48/build2026100902 contains
+published exact runtime source `24a44c6ba42de9c3fbba9d597f3e441cf740b1f1`.
+Provider/setup parity, reviewed shared Theora conversation selection, durable
+model-task approval continuation, workflow origin policy, phone dispatch ownership
+and HUP approval sending are included. Frozen verification passes 4,734 tests,
+22 skips across 232 suites; full Mac typing adds zero diagnostics versus pre-wave.
+Fresh native compilation, 500 packaged Python and 70 WebUI comparisons, runtime
+imports and strict ad-hoc signatures pass. Actual isolated avatar/setup/Home,
+negative local provider probe, shared-conversation cancel/confirm, exact history
+readback and normal Quit/relaunch pass. 9.47 is the sole generated rollback.
+Originating-chat background approvals and job-scoped Chrome delegation are next;
+real inference, physical phone/audio/accounts, messaging transport, commerce and
+distribution remain open. [Artifact and acceptance](NATIVE_9_48_ACCEPTANCE.md),
+[current work and ownership](WORK_STATE.md). Coding expansion, Linux expansion
+and Gen-UI remain deferred.
 
-- Native provider selection/probe fidelity is published. An explicit reviewed
-  switch to the canonical Theora conversation in Browser is verified in source.
-  Provider/setup standalone fixtures pass 66/89 assertions. Shared-session source
-  passes 29 linked model groups, 118 browser checks and production typecheck;
-  actual packaged interaction remains pending. Parent catalog/runtime alias activation, restart
-  and fallback parity plus API/registry regressions pass 89 tests, seven warnings,
-  using isolated data. Shared-session source publication follows; workflow changes
-  remain local until independent review and frozen integration complete.
-- Runtime worker owns truthful natural-language TaskFlow outcomes and durable
-  approval continuation through the existing orchestrator/executor. Actual-class
-  isolated probing reproduced a two-step goal marked completed with a pending
-  unbound approval and zero execution calls. Existing 225 focused regressions
-  pass but do not cover that complete journey. Keep the working durable handoff,
-  result ownership, recovery and cancellation; retain the shared effect lane.
-  Independent review then reproduced structured credential leakage, delegated
-  pending work labeled complete and lost fresh-process reviews. Repairs now
-  include redacted receipts, original known-surface preservation, unsupported
-  nested-delegation refusal and explicit review renewal without dispatch/replay.
-  Further independent checks found first-step global-constraint omission and
-  constructed task context admitted as personal user-memory evidence through two
-  paths. Both are corrected; final frozen runtime selection passes 289 tests,
-  seven warnings, and independent postfix probes pass five checks. Combined
-  source-wave acceptance remains pending. [Behavior and limits](TASK_MODEL_APPROVAL_EVIDENCE_20261009.md).
-- Web worker owns the stale seven-tile Playwright expectation after Home became
-  the eighth dock tile. Exact published-head CI passed all ten geometry cases;
-  its tile-count assertion failed. This is separate from the earlier local
-  missing-browser launch failures. Corrected installed-Chrome acceptance passes
-  20 dock checks and full official E2E: 108 passed, 63 opt-in real-backend skips,
-  zero failures. 47 Home/navigation Vitest checks and the unchanged production
-  JS/CSS build pass. Actual live-backend/model/device tests remain separate.
+Branch: `feat/native-product-release-foundation-20261001`, draft PR310. Runtime
+source 24a44c6ba is published. The final integration receipt is
+feral-oct9-source-wave-k7shp3dk/receipt.json; 4,734 passed, 22 skipped, 571 warnings,
+232 selected suites, 130.66 seconds, no source drift. Full Mac typing is 796
+versus pre-wave 799, zero additions and three removals; Linux baseline untouched.
+Earlier failed typing/API/compiler runs and counterexamples remain separate.
 
-The concurrent phone-intake source is now reviewed and locally committed as
-c8749b56a with its regression tests and evidence. Frozen verification passes 274
-tests, two skipped. It remains outside immutable 9.47; full combined source-wave
-and candidate acceptance remains separate. A further actual-class review found
-that stale reply fencing did not stop new tool dispatch when a collaborator
-suppressed task cancellation. The task-local phone dispatch ownership correction
-and queued pre-effect checks pass 47 targeted tests and nine independent probes;
-unrelated sessions retain their authority and earlier unknown outcomes remain
-unknown. Combined acceptance remains pending. A separate reproduced routine/REST
-workflow surface bypass is corrected in frozen source: 376 focused tests and
-11 independent checks pass, plus zero inert denied effects through the original
-public creation paths. [Scope, migration and evidence](TASKFLOW_ORIGIN_POLICY_EVIDENCE_20261009.md).
-The first parent combined gate passed 4,703 tests, 22 skips across 230 suites,
-with no source drift. A full pre-wave Mac typing comparison then identified nine
-added diagnostics. Narrow corrections and phone sensor-identity regressions are
-verified by the final 231-suite rerun. Final configured Mac typing comparison
-reports 797 versus 799 diagnostics, zero normalized additions and two removals;
-the Linux baseline remains untouched. Full CI-rule Ruff passes. Final combined
-verification passes 4,726 tests, 22 skips, 573 warnings across 231 suites in
-130.81 seconds, with no source drift. Private receipt:
-feral-oct9-source-wave-q045d52p/receipt.json. The preceding failed typing
-comparison remains retained separately.
+Both actual GUI hosts quit normally with exit 0. Finalizer verifies stopped hosts
+and observed backends, closed saved port 43283, distinct instances, no endpoint
+overrides and unchanged native/manifest hashes. Shared and separate rich histories
+are independently unchanged before/after restart. No inference, physical phone,
+mic/account/message/payment operation was performed. The negative probe's passive
+badge and Chat context-ready wording remain readiness-presentation follow-ups.
 
-A subsequent actual BrainState sender probe found dictionary approval frames
-passed into an object-only serializer, resulting in zero node sends. The narrow
-state sender correction passes 53 tests, one skip, and preserves the voice
-callback contract while counting only accepted socket sends. Independent transport
-review passes eight checks. The final frozen source wave passes 4,734 tests,
-22 skips, 571 warnings across 232 suites in 130.66 seconds with zero source drift
-(feral-oct9-source-wave-k7shp3dk/receipt.json). Final full Mac typing reports
-796 versus pre-wave 799 diagnostics, zero additions and three removals. Origin-specific
-background approval and job browser delegation remain separate implementation
-cards. All production ownership is released and source is frozen for verification.
-Details of the preceding phone integration and ownership are below.
+Build uses cached offline dependencies; free space 15,567,773,696 before /
+15,494,037,504 after. Net 73,736,192 bytes is within 2 GiB; peak use unmeasured.
+Canonical 9.48 and sole rollback 9.47 are retained. Inspected obsolete 9.46 retired
+with identity/process/signature checks. No personal model/profile/Git cleanup.
+Pre-existing AUDIT-FIXES.md remains unstaged. No documentation-only rebuild.
 
-Sources are frozen and combined verification passes; coherent publication and
-exact-source assembly follow. Planned 9.48 uses at most 2 GiB of new
-artifacts, cached offline dependencies, canonical 9.48 plus sole rollback 9.47.
-Inspected obsolete generated 9.46 may retire only after identity/process/signature
-checks. Latest free-space observation is 15,687,680,000 bytes. Personal data/model caches
-and unrelated AUDIT-FIXES.md remain preserved. Ollama is reachable but its actual
-inventory is empty; no real local inference is accepted by these fixtures.
+### Next ready cards and ownership
 
-The initial parent API-test invocation omitted isolated environment variables and
-failed during state initialization; the corrected disposable run then exposed an
-incorrect test-only provider ID. Both attempts are retained separately. The final
-isolated 89-test run passes. No live provider/account operation was performed.
+Parent owns shared contracts, checkpoint, publication and candidate integration.
+The prior implementation wave's source files are released. Current assignments:
+
+- Task journey worker: implements paired REST approval authorization in
+  api/routes/approvals.py and tests/test_phone_approval_authority.py. Preserve
+  local operator behavior; no job Chrome delegation or HUP handoff in this card.
+- Independent review worker: read-only caller/device/session/terms/replay boundary
+  review for the same contract; no shared edits.
+- Native provider worker: implements receipt-ready wording and separately labeled
+  explicit probe evidence in six owned native model/setup/provider files and tests.
+  No backend schema, provider operation, download or packaging changes.
+
+Independent review requires an explicit per-request device authority boundary for
+paired REST approval access. A bounded fail-closed repair is assigned before
+origin projection; automatic broadcast membership is not ownership. Paired
+resolution remains unavailable until trusted device provenance is added.
+Implementation assignments follow concrete contracts and exclusive file ownership.
+Next dependency order: originating-chat approval bridge, explicit task-scoped
+Chrome delegation, provisioned-model/browser/desktop/phone acceptance, then
+voice/messaging/commerce/distribution cards. Coding/Linux/Gen-UI expansion deferred.
+Actual provider/model choice and phone endpoint/error are still missing for live
+acceptance; do not infer permission to download models or use paid accounts.
+
+At exact runtime 24a, remote native contracts, Linux bundle, browser E2E, WebUI,
+SDK, lint/docs/version and typing checks pass; broad backend PR tests are pending.
+Opt-in/main-only checks are skipped. CI is observed, not a blocker for independent
+local cards. [Detailed artifact receipt](NATIVE_9_48_ACCEPTANCE.md).
 
 ### Local iOS and phone intake integration, October 9
 
@@ -105,21 +88,20 @@ The current backend adds bounded owned /v1/node chat scheduling so receive/contr
 traffic remains responsive during Mac work. Reviewed three-file patch is applied;
 the frozen current-source integration passes 274 tests, two skipped, with CI-rule
 Ruff passing. A first shared-working-tree run passed but was invalidated by
-concurrent runtime edits; the frozen receipt is the accepted check. This source
-wave is separate from the immutable 9.47 application and unrelated active workers.
+concurrent runtime edits; the frozen receipt is the accepted check. This reviewed backend source is included in immutable 9.48; physical iOS
+acceptance remains separate.
 [Implemented behavior, exact inputs and remaining acceptance](IOS_PHONE_INTEGRATION_20261009.md).
 
 Actual phone endpoint/error, canonical Chrome owner handoff, Wi-Fi/ATS,
 installation, audio/hardware and durable phone task/memory contracts remain open.
-Local implementation commits are iOS 8db007f and backend c8749b56a; neither
-was pushed by this task. The shared checkpoint/handoff is retained with the
-concurrent native source wave. Next integration must preserve other workers and
-build an exact-source candidate before device acceptance. Do not report source
-checks as the original device failure being fixed.
+Local iOS commit 8db007f is not pushed or installed by this task. Backend
+c8749b56a and subsequent ownership/sender repairs are published and included in
+9.48. Preserve the external iOS agent's ownership. Source checks do not establish
+that the original physical-device failure is fixed.
 
-### Published 9.47 artifact
+### Historical 9.47 artifact
 
-**Current checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
+**Historical checkpoint (October 9).** Immutable Mac 9.47/build2026100901 contains
 published exact runtime source `4bc4128cc74c85f6eaba08cf613b7730fc60ab76`:
 restored Home routing/navigation, stable native saved endpoint, truthful passive
 setup discovery and a disabled signed messaging admission foundation. Fresh
@@ -180,7 +162,7 @@ now supersedes its source-only repair list; physical phone state remains untouch
 
 Do not rebuild the passing artifact for documentation-only edits. Resume by
 checking current root/HEAD/diff/artifact/CI; preserve unrelated AUDIT-FIXES.md,
-9.46 rollback and private evidence. Actual clean installation, inference,
+current 9.47 rollback and private evidence. Actual clean installation, inference,
 physical device/audio/account/commerce acceptance remains separate.
 
 ## Historical execution checkpoint, October 5
@@ -643,7 +625,7 @@ supersedes the preceding pending-assembly status.
   71–77 seconds. Current-candidate GUI Stop and real audio remain open.
   [Actual evidence](NATIVE_9_36_ACCEPTANCE.md).
 - On resumption both exact acceptance host/backend were absent; the held restart
-  host receipt reports normal exit0. No unknown app was killed or relaunched.
+  host receipt reports normal exit 0. No unknown app was killed or relaunched.
   Account, microphone/speaker, glasses, Messages, payment, migration, clean-machine
   install and signed distribution were not verified by this reconciliation.
 - Baseline9a40 native, desktop, docs, naming and version CI pass. General CI
@@ -1079,7 +1061,7 @@ Parent staged the noneditable Python SDK in the bundled interpreter under the
 existing locked constraints; actual staged import/location and BaseSkill adapter
 probe passed. This does not repair the separate loader false-acknowledgement
 card in [registry recovery plan](REGISTRY_RELOAD_RECOVERY_PLAN.md).
-The required local full-suite recheck completed exit0:12,576 passed/50 skipped/
+The required local full-suite recheck completed exit 0:12,576 passed/50 skipped/
 574 warnings in818.52s;75.03% coverage against unchanged50% floor. It retained
 PR performance exclusions and read-only descriptor/mock observer;1261 frozen
 core files digest39a8b055528037f4a4652d67f9372a32c4871b3fed10791be3333ae14ca7d1d8
@@ -1181,7 +1163,7 @@ Actual isolated app acceptance ended **failed**. Original New conversation/
 retained-error AX path survives, real42 reply passed, and growing context now
 narrows complete optional schemas below the byte budget. **A new SIGTRAP during
 Permissions and Cost navigation was confirmed**; no crash-free claim.
-An earlier unexplained normal exit0 and early response-timeout banner are
+An earlier unexplained normal exit 0 and early response-timeout banner are
 preserved independently. New IPS identifies main-thread EXC_BREAKPOINT/SIGTRAP
 through `+[NSApplication _crashOnException:]` and repeated NSView constraint
 updates, distinct from the old accessibility-label recursion. The exact-time OS
@@ -1418,7 +1400,7 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
   checkpoint card](DATA01_CONTEXT_CHECKPOINT_PLAN.md) documents inspected writers,
   privacy and locking gaps; it is a proposal, not implemented durability.
 - Parent frozen runtime/SDK/maintenance integration: **330 passed,7 warnings
-  in9.52s**, exit0, disposable home/data. Exact selected suite inventory is in
+  in9.52s**, exit 0, disposable home/data. Exact selected suite inventory is in
   local `/private/tmp/feral-runtime-sdk-wave2-20261002.log`; Node72 passed with
   locked TypeScript5.9.3. Edited Python Ruff and diff checks pass.
 - Identity maintenance now awaits real asynchronous SQLite episode reads.
@@ -1438,7 +1420,7 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
   pass. Regenerated web assets are byte-identical. Default-branch alerts remain
   open until that branch receives the fixes. [Evidence](SECURITY_DEPENDENCY_EVIDENCE.md).
 - Native172-expression AppKit migration passes production typecheck and final
-  selected fixture runner, exit0: component groups plus linked20/desktop 39/
+  selected fixture runner, exit 0: component groups plus linked20/desktop 39/
   error 5. First runner failed because the standalone desktop fixture omitted
   the new shared text dependency; parent repaired that compile source list,
   and the rerun passed. A minimal New conversation/error disclosure A/B
