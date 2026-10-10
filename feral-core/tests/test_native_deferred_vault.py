@@ -159,18 +159,24 @@ def test_oauth_locked_boot_never_loads_or_writes_plaintext_tokens(
 
 
 @pytest.fixture
-def api_client(monkeypatch):
+def api_client(monkeypatch, tmp_path):
     from api.routes import config, llm, security_and_hardware
+    from providers.catalog import ProviderCatalog
+
+    monkeypatch.delenv("OLLAMA_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
 
     opened = SimpleNamespace(list_keys=lambda: [], to_safe_summary=lambda: {})
     factory = Mock(return_value=opened)
     coordinator = VaultCoordinator(vault_factory=factory)
     configuration = Mock()
     configuration._merged = {"llm": {"provider": "ollama", "model": "fixture-local"}}
-    configuration.get.return_value = "ollama"
+    configuration.get.side_effect = lambda section, key, default=None: configuration._merged.get(section, {}).get(key, default)
+    configuration.update_settings.side_effect = lambda section, key, value: configuration._merged.setdefault(section, {}).__setitem__(key, value)
     swap = AsyncMock()
     provider = SimpleNamespace(
-        provider="ollama", switch_provider=swap, set_config=Mock()
+        provider="ollama", base_url="http://127.0.0.1:11434/v1", api_key="",
+        switch_provider=swap, set_config=Mock()
     )
     fake = SimpleNamespace(
         vault_coordinator=coordinator,
@@ -180,7 +186,7 @@ def api_client(monkeypatch):
         _native_bootstrap_required=False,
         config=configuration,
         orchestrator=SimpleNamespace(llm=provider),
-        provider_catalog=Mock(),
+        provider_catalog=Mock(wraps=ProviderCatalog(cache_path=tmp_path / "catalog.json")),
         oauth=None,
     )
     for module in (config, llm, security_and_hardware):
@@ -305,7 +311,13 @@ def test_credential_free_local_routing_stays_usable(api_client):
         json={"section": "llm", "key": "call_site_tiers", "value": {"chat": "cheap"}},
     )
     assert response.status_code == 200 and response.json()["ok"]
-    swap.assert_awaited_once()
+    swap.assert_awaited_once_with("ollama", model="fixture-local", base_url="", api_key="")
+    state.orchestrator.llm.set_config.assert_called_once_with({
+        "provider": "ollama", "model": "fixture-local", "call_site_tiers": {"chat": "cheap"},
+    })
+    state.provider_catalog.bind_active_cloud.assert_called_once_with(
+        "ollama", "http://127.0.0.1:11434/v1", "",
+    )
     factory.assert_not_called()
 
 

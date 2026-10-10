@@ -1,19 +1,33 @@
 # FERAL app completion: executable plan
 
-**Current checkpoint (October 10; physical incident follow-up).**
+**Current checkpoint (October 10; integrated phone repair).**
 
-The phone pairs and sends voice PCM, but the observed page-control request loses
-its connection after browser tools begin. Its durable receipt is cancelled with
-unknown action outcome. iOS VPIO render failures remain physically unresolved.
-Concurrent iOS audio/ownership/recovery edits belong to its agent; the installed
-commit is not identified. An independent backend repair preserves owning-task
-authority in real model loops and accurate completed/deferred tool traces.
-Worker 88 scoped tests, parent 90 integration tests and full-core CI Ruff pass.
-The source repair is being published; immutable Mac 9.55 remains unchanged.
-Next is stabilized iOS failure-path verification, coherent build installation,
-and explicit benign browser/result/audio/reconnect acceptance without task replay.
-[Incident and handoff](PHONE_BROWSER_AUDIO_INCIDENT_20261010.md),
-[current ownership](WORK_STATE.md).
+The repaired iOS development app is installed in place on the connected iPhone
+17 Pro Max from local commit `5749babc52087698de21aec96e0926650a823f37`.
+568 Foundation assertions, actual Swift-to-Mac ambient schema validation, unsigned
+and signed device builds, strict signing verification and installation pass.
+iOS commits remain unpushed. The app has not been launched for physical retesting.
+
+Mac voice startup now leaves registered control intake responsive, orders queued
+audio behind startup and fences exact socket, credential, runtime and producer
+ownership. Retired attempts cannot feed or stop replacement sessions. Model-step
+Chrome authority and completed/deferred traces include the published 0cf4cb650
+repair. Four remote Ubuntu failures are repaired in test fixtures without changing
+production authorization or catalog guards.
+
+Frozen integration passed 1,237 tests/four skips and full-core CI Ruff. Two new
+Mac typing diagnostics were corrected with equivalent dynamic attribute stores;
+the final focused gate passes 217 tests, full-core CI Ruff and retains 788 baseline
+Mac diagnostics with zero additions/removals and zero source drift.
+
+Mac 9.56/build2026101005 assembly is next, using verified unchanged 54-input
+native output from 9.55. The existing 9.55 bundle does not contain this later
+backend wave. Known-good 9.52 remains the sole generated rollback. Actual live
+provider, microphone/HFP and browser/result/reconnect acceptance remains open.
+The prior page-control receipt is cancelled with unknown action outcome; reconcile
+it without replay. Code 9 still has no established termination cause.
+
+[Current checkpoint](WORK_STATE.md), [repair evidence](PHONE_VOICE_RECOVERY_20261010.md).
 
 **Historical completed Mac batch (October 10).**
 

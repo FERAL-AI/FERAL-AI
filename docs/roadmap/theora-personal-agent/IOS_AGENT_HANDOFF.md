@@ -1,6 +1,44 @@
 # Theora iOS personal-agent research and handoff
 
-## October 10: physical browser/audio incident
+## October 10: installed audio and connection repair
+
+The repaired iOS development app is installed in place on the connected iPhone
+17 Pro Max from local commit `5749babc52087698de21aec96e0926650a823f37`.
+568 Foundation assertions, actual Swift-to-Mac ambient schema validation, unsigned
+and signed device builds, strict signing verification and installation pass.
+iOS commits remain unpushed. The app has not been launched for physical retesting.
+
+Mac voice startup now leaves registered control intake responsive, orders queued
+audio behind startup and fences exact socket, credential, runtime and producer
+ownership. Retired attempts cannot feed or stop replacement sessions. Model-step
+Chrome authority and completed/deferred traces include the published 0cf4cb650
+repair. Four remote Ubuntu failures are repaired in test fixtures without changing
+production authorization or catalog guards.
+
+Frozen integration passed 1,237 tests/four skips and full-core CI Ruff. Two new
+Mac typing diagnostics were corrected with equivalent dynamic attribute stores;
+the final focused gate passes 217 tests, full-core CI Ruff and retains 788 baseline
+Mac diagnostics with zero additions/removals and zero source drift.
+
+Mac 9.56/build2026101005 assembly is next, using verified unchanged 54-input
+native output from 9.55. The existing 9.55 bundle does not contain this later
+backend wave. Known-good 9.52 remains the sole generated rollback. Actual live
+provider, microphone/HFP and browser/result/reconnect acceptance remains open.
+The prior page-control receipt is cancelled with unknown action outcome; reconcile
+it without replay. Code 9 still has no established termination cause.
+
+Theora retains Computer selection and shows pause/unknown-outcome notices on
+disconnect. Explicit End clears local text waits. Converter rebuilds preserve
+the capture stream; failed capture clears listening. Capture progress watchdogs
+track buffers and generations, stopped playback graphs rebuild, and late provider
+reconnect callbacks cannot restart a relinquished microphone route. Ambient
+confidence remains zero until calibration exists; signed deviation is separate.
+
+Detailed iOS evidence is in the iOS repository at
+`docs/ios-feral-voice-recovery-20261010.md`. Earlier installation/ownership notes
+below are historical.
+
+## Historical October 10: physical browser/audio incident
 
 The physical phone now pairs and exchanges audio, but a later browser-control
 turn is cancelled when its socket is replaced after tool execution begins. Its

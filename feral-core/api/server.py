@@ -29,7 +29,7 @@ from api.runtime_context import (
     require_attachment_ready,
     session_query,
 )
-from agents.runtime_context_checkpoint import RuntimeContextAttachment, RuntimeContextError, RuntimeContextScopeReceipt
+from agents.runtime_context_checkpoint import RuntimeContextAttachment, RuntimeContextError, RuntimeContextScopeReceipt, legacy_context_mutation
 from agents.learner import _self_learning_enabled
 from memory.runtime_session_checkpoint import CheckpointFence
 
@@ -75,6 +75,11 @@ from security.capability_grants import (
     frame_tier_enabled,
     live_grants,
 )
+from bridges.client_voice_attempt import (
+    VoiceAttemptBinding, assert_voice_attempt_current, require_voice_producer, voice_attempt_scope,
+)
+from security.agent_turn_lease import bind_agent_dispatch_owner
+from voice.realtime_tool_dispatch import RealtimeToolLane
 from config.runtime import (
     brain_bind_host,
     brain_port,
@@ -157,6 +162,225 @@ from observability.log_redaction import configure_brain_logging, install_log_red
 
 configure_brain_logging(level=logging.INFO)
 logger = logging.getLogger("feral.brain")
+
+
+
+class _NodeVoiceBinding(VoiceAttemptBinding):
+    def identity(self) -> dict:
+        # Reuse producer ownership without negotiating a client attempt or
+        # adding WebUI attempt identity to the existing node wire contract.
+        return {}
+
+
+class _OwnedNodeVoice:
+    """Retained, bounded, ordered node startup/audio; never replay input."""
+
+    MAX_PENDING = 1024
+    MAX_PENDING_BASE64 = 4 * 1024 * 1024
+
+    def __init__(self, brain, ws, intake, node_id, session_id, stream_id,
+                 admission_current, failure):
+        self.brain, self.ws, self.intake = brain, ws, intake
+        self.node_id, self.session_id, self.stream_id = node_id, session_id, stream_id
+        self.router, self.orchestrator, self.memory = brain.voice_router, brain.orchestrator, brain.memory
+        self.generation = getattr(brain, "_native_agent_turn_generation", 0)
+        self.admission_current, self.failure = admission_current, failure
+        self.closed, self.ready = False, False
+        self.mode = None
+        self.pending_base64, self.sequence = 0, 0
+        self.producer = None
+        self.binding = _NodeVoiceBinding(session_id, str(uuid4()), ws,
+            self.current, lambda: getattr(ws, "_feral_node_voice", None) is self)
+        self.lane = RealtimeToolLane(intake.tasks, max_pending=self.MAX_PENDING)
+        self.retirement = None
+
+    def owner_current(self):
+        try:
+            return (self.intake.current() and state is self.brain
+                    and self.brain.voice_router is self.router
+                    and self.brain.orchestrator is self.orchestrator and self.brain.memory is self.memory
+                    and getattr(self.brain, "_native_agent_turn_generation", 0) == self.generation
+                    and getattr(self.brain, "_native_bootstrap_required", False) is not True
+                    and (self.admission_current is None or self.admission_current() is True))
+        except Exception:
+            return False
+
+    def current(self):
+        return (not self.closed and self.owner_current()
+                and getattr(self.ws, "_feral_node_voice", None) is self)
+
+    def guard(self):
+        assert_voice_attempt_current(self.binding)
+
+    async def retire(self):
+        # Detach the exact producer before awaiting its disconnect. Broad proxy
+        # stop_session also flushes transcripts and publishes global state; an
+        # obsolete socket has no authority to do either during retirement.
+        disconnected = False
+        for name in ("_realtime", "_gemini", "_chained"):
+            proxy = getattr(self.router, name, None)
+            sessions = getattr(proxy, "_sessions", None)
+            producer = sessions.get(self.session_id) if isinstance(sessions, dict) else None
+            if producer is None or getattr(producer, "_voice_attempt", None) is not self.binding:
+                continue
+            if name == "_chained":
+                await proxy.close_session(self.session_id)
+            else:
+                sessions.pop(self.session_id, None)
+                node_map = getattr(proxy, "_node_to_session", None)
+                if isinstance(node_map, dict) and node_map.get(self.node_id) == self.session_id:
+                    node_map.pop(self.node_id, None)
+                pending = getattr(proxy, "_pending_replies", None)
+                if isinstance(pending, dict):
+                    pending.pop(self.session_id, None)
+                # No private text is persisted or republished after its owner
+                # is withdrawn. Already committed receipts are unaffected.
+                await producer.disconnect()
+                disconnected = producer is self.producer
+        producer = self.producer
+        if (not disconnected and producer is not None
+                and getattr(producer, "_voice_attempt", None) is self.binding):
+            disconnect = getattr(producer, "disconnect", None)
+            if callable(disconnect):
+                await disconnect()
+        if (self.brain.daemons.get(self.node_id) in (None, self.ws)
+                and getattr(self.ws, "_feral_node_voice", None) is self):
+            for name in ("_node_voice_config", "_node_session_map", "_node_surface_map"):
+                mapping = getattr(self.router, name, None)
+                if isinstance(mapping, dict):
+                    mapping.pop(self.node_id, None)
+
+    def schedule_retirement(self):
+        if self.retirement is not None:
+            return
+        from api.phone_chat_intake import phone_scope_lock
+
+        async def retire():
+            async with phone_scope_lock(self.brain, "node_voice", self.node_id):
+                await self.retire()
+
+        self.retirement = asyncio.create_task(retire())
+        self.brain.register_background_task(self.retirement)
+
+        def completed(task):
+            self.release_record()
+            if not task.cancelled() and task.exception() is not None:
+                logger.warning("Owned node voice retirement unconfirmed")
+
+        self.retirement.add_done_callback(completed)
+
+    def busy(self):
+        return ((self.lane._task is not None and not self.lane._task.done())
+                or (self.retirement is not None and (not self.retirement.done()
+                    or self.retirement.cancelled() or self.retirement.exception() is not None)))
+
+    def release_record(self):
+        if (self.closed and not self.busy() and self.retirement is not None
+                and self.retirement.done()):
+            records = getattr(self.brain, "_owned_node_voice", None)
+            if isinstance(records, dict) and records.get(self.node_id) is self:
+                records.pop(self.node_id, None)
+
+    def producer_current(self):
+        self.guard()
+        require_voice_producer(self.binding, self.producer)
+        # open_session may return the operator-configured chained fallback.
+        # Resolve only the exact returned handle; do not infer from requested mode.
+        for name in ("_realtime", "_gemini", "_chained"):
+            proxy = getattr(self.router, name, None)
+            if proxy is None:
+                continue
+            sessions = getattr(proxy, "_sessions", None)
+            nodes = getattr(proxy, "_node_to_session", None)
+            if (isinstance(sessions, dict) and sessions.get(self.session_id) is self.producer
+                    and (name == "_chained" or (isinstance(nodes, dict)
+                         and nodes.get(self.node_id) == self.session_id))):
+                return name, proxy
+        raise asyncio.CancelledError("Node voice producer superseded")
+
+    def close(self):
+        if not self.closed:
+            self.closed = True
+            self.binding.active = False
+            self.lane.close()
+            self.pending_base64 = 0
+        self.schedule_retirement()
+
+    def submit(self, operation, before=None):
+        from api.phone_chat_intake import phone_scope_lock
+        self.sequence += 1
+
+        async def run():
+            try:
+                if before is not None:
+                    await asyncio.shield(before)
+                async with phone_scope_lock(self.brain, "node_voice", self.node_id):
+                    self.guard()
+                    with voice_attempt_scope(self.binding), bind_agent_dispatch_owner(self.current):
+                        await operation()
+                        self.guard()
+            except asyncio.CancelledError:
+                self.close()
+                raise
+            except Exception as exc:
+                logger.warning("Owned node voice work failed (%s)", type(exc).__name__)
+                if self.current():
+                    await self.failure("Voice processing failed; earlier work may be uncertain")
+                self.close()
+
+        previous = self.lane._task
+        result = self.lane.submit((self.sequence, "voice"), self.current, run)
+        if self.lane._task is not None and self.lane._task is not previous:
+            self.brain.register_background_task(self.lane._task)
+            self.lane._task.add_done_callback(lambda task: self.release_record())
+        return result
+
+    def start(self, operation, previous):
+        async def open_session():
+            self.producer = await operation()
+            self.guard()
+            if self.producer is None:
+                self.close()
+            else:
+                self.ready = True
+
+        return self.submit(open_session, previous.retirement if isinstance(previous, _OwnedNodeVoice) else None)
+
+    def audio(self, payload):
+        stream = payload.get("stream_id")
+        if stream and stream != self.stream_id:
+            return "stale"
+        size = len(payload.get("data_b64", ""))
+        if self.pending_base64 + size > self.MAX_PENDING_BASE64:
+            return "full"
+        self.pending_base64 += size
+
+        async def deliver():
+            try:
+                self.guard()
+                if not self.ready or _frame_tier_refused(self.node_id, "audio_chunk", {"payload": payload}):
+                    return
+                async with legacy_context_mutation(self.orchestrator, self.memory, (self.session_id,), "voice", command_handoff=True):
+                    name, proxy = self.producer_current()
+                    if self.router.is_session_muted(self.session_id) or self.router._node_declares_mute(self.node_id):
+                        return
+                    # Send only to the captured producer. The legacy node router
+                    # may reopen a missing producer or select a newer SID owner.
+                    if name == "_chained":
+                        await proxy.handle_audio_for_session(self.producer, payload["data_b64"],
+                            payload.get("chunk_index", 0), payload.get("is_final", False), wait_for_turn=True)
+                    elif self.producer.connected:
+                        await self.producer.send_audio(payload["data_b64"])
+                    else:
+                        raise RuntimeError("Voice producer disconnected")
+                    self.producer_current()
+            finally:
+                self.pending_base64 = max(0, self.pending_base64 - size)
+
+        result = self.submit(deliver)
+        if result != "accepted":
+            self.pending_base64 = max(0, self.pending_base64 - size)
+        return result
 
 
 # ─────────────────────────────────────────────
@@ -3947,6 +4171,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 previous_intake = getattr(previous, "_feral_phone_chat_intake", None)
                 if isinstance(previous_intake, PhoneChatIntake) and previous is not ws:
                     previous_intake.stop()
+                    previous_voice = getattr(previous, "_feral_node_voice", None)
+                    if isinstance(previous_voice, _OwnedNodeVoice):
+                        previous_voice.close()
                 async with phone_scope_lock(phone_state, "node", node_id):
                     # The socket may have waited behind cleanup. Recheck the
                     # captured runtime before registering or replacing a node.
@@ -3959,6 +4186,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     previous_intake = getattr(previous, "_feral_phone_chat_intake", None)
                     if isinstance(previous_intake, PhoneChatIntake) and previous is not ws:
                         previous_intake.stop()
+                        previous_voice = getattr(previous, "_feral_node_voice", None)
+                        if isinstance(previous_voice, _OwnedNodeVoice):
+                            previous_voice.close()
                     phone_chats.node_id = node_id
                     phone_state.daemons[node_id] = ws
                     # Stash the HUP-declared node_type on the WebSocket so
@@ -4477,11 +4707,6 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     session_id = primary_sid
                 else:
                     session_id = stream_id or f"voice-{node_id}"
-                if session_id not in state.sessions:
-                    state.sessions[session_id] = ws
-                state.bind_session_to_daemon(session_id, node_id)
-                state.voice_router.bind_node_to_session(node_id, session_id)
-
                 # PR #61 (voice-v2) wire-up: dispatch to the user-selected
                 # voice mode (openai_realtime / gemini_live / chained) via
                 # VoiceRouter.open_session. Phone emits the selected mode
@@ -4517,103 +4742,97 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                     if selected_mode in {"openai_realtime", "gemini_live", "chained"}
                     else "openai_realtime"
                 )
-                state.voice_router.register_voice_config(
-                    node_id,
-                    {
-                        "node_id": node_id,
-                        "mode": mode_for_router,
-                        "voice_provider": voice_provider,
-                        "supports_realtime": selected_mode
-                        in {"openai_realtime", "gemini_live"},
-                        "sample_rate": payload_dict.get("sample_rate", 24000),
-                        "channels": payload_dict.get("channels", 1),
-                        "language_hint": payload_dict.get("language_hint", "en-US"),
-                        "interrupt_policy": payload_dict.get(
-                            "interrupt_policy", "barge_in"
-                        ),
-                        "camera_linked": bool(payload_dict.get("camera_linked", False)),
-                        "phone_mode": payload_dict.get("mode", "push_to_talk"),
-                        "skip_wake": True,
-                    },
-                )
+                records = getattr(phone_state, "_owned_node_voice", None)
+                if not isinstance(records, dict):
+                    records = {}
+                    setattr(phone_state, "_owned_node_voice", records)
+                previous_voice = records.get(node_id)
+                if isinstance(previous_voice, _OwnedNodeVoice):
+                    was_busy = previous_voice.busy()
+                    previous_voice.close()
+                    if was_busy:
+                        await _send_protocol_error(ws, 1099,
+                            "Previous voice startup or shutdown is still pending; retry explicitly after it settles",
+                            name="voice_session_failed")
+                        continue
 
-                # `open_session` reports a crash by raising and EVERY
-                # other failure by returning None: an unavailable
-                # realtime proxy, an unrecognised mode, a chained
-                # pipeline whose STT or TTS provider would not
-                # construct. This block used to catch only the crash,
-                # so a None fell through to the "allowed" record below.
-                # The audit row then said a session had opened, the
-                # node was told nothing, and the phone orb sat on
-                # "listening" against a session that did not exist.
-                # Both outcomes are now failures, and both are visible
-                # on both sides.
-                voice_session = None
-                open_error = ""
-                try:
-                    voice_session = await state.voice_router.open_session(
-                        session_id=session_id,
-                        mode=selected_mode,
-                        provider_opts={
-                            "node_id": node_id,
-                            "sample_rate": payload_dict.get("sample_rate", 24000),
-                            "language_hint": payload_dict.get("language_hint", "en-US"),
-                            **(payload_dict.get("provider_opts") or {}),
-                        },
-                    )
-                except Exception as exc:
-                    logger.exception(
-                        "voice_router.open_session failed for mode=%s: %s",
-                        selected_mode,
-                        exc,
-                    )
-                    open_error = str(exc)[:200] or exc.__class__.__name__
+                voice = _OwnedNodeVoice(phone_state, ws, phone_chats, node_id, session_id, stream_id,
+                    paired_peer_current if phone_principal is not None else None, None)
 
-                if voice_session is None:
-                    open_error = open_error or (
-                        f"the {selected_mode} backend did not open a session"
-                    )
-                    logger.warning(
-                        "voice_session_start refused for node=%s mode=%s: %s",
+                async def failure(message, voice=voice):
+                    if voice.current():
+                        await _send_protocol_error(voice.ws, 1099, message, name="voice_session_failed")
+                        voice.guard()
+
+                voice.failure = failure
+                voice.mode = selected_mode
+                records[node_id] = voice
+                setattr(ws, "_feral_node_voice", voice)
+
+                async def open_voice(voice=voice, payload_dict=dict(payload_dict),
+                                     session_id=session_id, node_id=node_id, stream_id=stream_id,
+                                     selected_mode=selected_mode, voice_provider=voice_provider,
+                                     mode_for_router=mode_for_router):
+                    voice.guard()
+                    if session_id not in voice.brain.sessions:
+                        voice.brain.sessions[session_id] = voice.ws
+                    voice.brain.bind_session_to_daemon(session_id, node_id)
+                    voice.router.bind_node_to_session(node_id, session_id)
+                    voice.router.register_voice_config(
                         node_id,
-                        selected_mode,
-                        open_error,
-                    )
-                    _record_phone_envelope(
-                        "error",
-                        "voice_session_start",
-                        detail={
-                            "reason": "open_session_failed",
-                            "mode": selected_mode,
-                            "stream_id": stream_id,
-                            "session_id": session_id,
-                            "error": open_error,
+                        {
+                            "node_id": node_id,
+                            "mode": mode_for_router,
+                            "voice_provider": voice_provider,
+                            "supports_realtime": selected_mode
+                            in {"openai_realtime", "gemini_live"},
+                            "sample_rate": payload_dict.get("sample_rate", 24000),
+                            "channels": payload_dict.get("channels", 1),
+                            "language_hint": payload_dict.get("language_hint", "en-US"),
+                            "interrupt_policy": payload_dict.get(
+                                "interrupt_policy", "barge_in"
+                            ),
+                            "camera_linked": bool(payload_dict.get("camera_linked", False)),
+                            "phone_mode": payload_dict.get("mode", "push_to_talk"),
+                            "skip_wake": True,
                         },
-                        payload_for_hash=payload_dict,
                     )
-                    # The router emits `voice_status` for the failures
-                    # it can name. This frame is the one the node can
-                    # always act on, whatever went wrong, so the orb
-                    # leaves "listening" instead of waiting forever.
-                    await _send_protocol_error(
-                        ws,
-                        1099,
-                        f"voice_session_start failed for stream {session_id} "
-                        f"(mode={selected_mode}): {open_error}",
-                        name="voice_session_failed",
-                    )
-                    continue
 
-                _record_phone_envelope(
-                    "allowed",
-                    "voice_session_start",
-                    detail={
-                        "stream_id": stream_id,
-                        "session_id": session_id,
-                        "voice_mode": selected_mode,
-                    },
-                    payload_for_hash=payload_dict,
-                )
+                    opened = None
+                    error = ""
+                    try:
+                        opened = await voice.router.open_session(
+                            session_id=session_id, mode=selected_mode,
+                            provider_opts={"sample_rate": payload_dict.get("sample_rate", 24000),
+                                "language_hint": payload_dict.get("language_hint", "en-US"),
+                                **(payload_dict.get("provider_opts") or {}), "node_id": node_id})
+                    except Exception as exc:
+                        error = str(exc)[:200] or type(exc).__name__
+                        logger.warning("Node voice startup failed (%s)", type(exc).__name__)
+                    # Capture a cancellation-resistant returned producer for exact
+                    # retirement before checking whether this source still owns it.
+                    voice.producer = opened
+                    voice.guard()
+                    if opened is None:
+                        error = error or f"the {selected_mode} backend did not open a session"
+                        _record_phone_envelope("error", "voice_session_start",
+                            detail={"reason": "open_session_failed", "mode": selected_mode,
+                                "stream_id": stream_id, "session_id": session_id, "error": error},
+                            payload_for_hash=payload_dict)
+                        await voice.failure(f"voice_session_start failed for stream {session_id} (mode={selected_mode}): {error}")
+                        return None
+                    _record_phone_envelope("allowed", "voice_session_start",
+                        detail={"stream_id": stream_id, "session_id": session_id, "voice_mode": selected_mode},
+                        payload_for_hash=payload_dict)
+                    return opened
+
+                if voice.start(open_voice, previous_voice) != "accepted":
+                    await voice.failure("Voice startup queue is unavailable; retry explicitly")
+                    voice.close()
+                # Yield scheduling once, never await provider startup. Fast
+                # failures keep their historical ordering; slow starts leave
+                # registered receive/control intake immediately available.
+                await asyncio.sleep(0)
 
             elif msg.type == "voice_interrupt":
                 payload_dict = raw.get("payload", {})
@@ -5085,6 +5304,15 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 payload_dict = raw.get("payload", {})
                 audio_b64 = payload_dict.get("data_b64", "")
                 chunk_idx = payload_dict.get("chunk_index", 0)
+                owned_voice = getattr(ws, "_feral_node_voice", None)
+                if isinstance(owned_voice, _OwnedNodeVoice):
+                    if audio_b64:
+                        result = owned_voice.audio(dict(payload_dict))
+                        if result == "full":
+                            await owned_voice.failure("Voice input backlog exceeded its limit; restart voice explicitly")
+                            owned_voice.close()
+                    continue
+
                 # Live-test diagnostic: log the FIRST chunk + every 50th
                 # chunk so the brain log shows whether phone PCM16 is
                 # actually reaching us. Without this, the "no audio"
@@ -5395,6 +5623,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         # Reset this receive task only. Already spawned work retains the
         # server-owned node restriction through its copied task context.
         end_node_approval_ingress(approval_ingress_token)
+        owned_voice = getattr(ws, "_feral_node_voice", None)
+        if isinstance(owned_voice, _OwnedNodeVoice):
+            owned_voice.close()
         phone_chats.stop()
 
         async def settle_phone():
@@ -5422,7 +5653,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         # node-shaped teardown — `stop_session_voice` only ever
                         # finds web sessions, whose node id is the synthetic
                         # `webclient_<sid>`.
-                        if phone_state.voice_router:
+                        if phone_state.voice_router and not isinstance(owned_voice, _OwnedNodeVoice):
                             try:
                                 await phone_state.voice_router.stop_node_voice(node_id)
                             except Exception as voice_exc:
