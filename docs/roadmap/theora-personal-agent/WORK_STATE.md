@@ -68,17 +68,22 @@ feral-oct9-source-wave-q045d52p/receipt.json. The preceding failed typing
 comparison remains retained separately.
 
 A subsequent actual BrainState sender probe found dictionary approval frames
-passed into an object-only serializer, resulting in zero node sends. The runtime
-worker owns only api/state.py and a focused real-class transport regression to
-correct this boundary before packaging. Origin-specific background approval and
-job browser delegation remain separate implementation cards.
+passed into an object-only serializer, resulting in zero node sends. The narrow
+state sender correction passes 53 tests, one skip, and preserves the voice
+callback contract while counting only accepted socket sends. Independent transport
+review passes eight checks. The final frozen source wave passes 4,734 tests,
+22 skips, 571 warnings across 232 suites in 130.66 seconds with zero source drift
+(feral-oct9-source-wave-k7shp3dk/receipt.json). Final full Mac typing reports
+796 versus pre-wave 799 diagnostics, zero additions and three removals. Origin-specific
+background approval and job browser delegation remain separate implementation
+cards. All production ownership is released and source is frozen for verification.
 Details of the preceding phone integration and ownership are below.
 
-Sources will freeze after worker release, then receive combined tests, coherent
-publication and an exact-source candidate. Planned 9.48 uses at most 2 GiB of new
+Sources are frozen and combined verification passes; coherent publication and
+exact-source assembly follow. Planned 9.48 uses at most 2 GiB of new
 artifacts, cached offline dependencies, canonical 9.48 plus sole rollback 9.47.
 Inspected obsolete generated 9.46 may retire only after identity/process/signature
-checks. Latest free-space observation is 17,760,000 KiB. Personal data/model caches
+checks. Latest free-space observation is 15,687,680,000 bytes. Personal data/model caches
 and unrelated AUDIT-FIXES.md remain preserved. Ollama is reachable but its actual
 inventory is empty; no real local inference is accepted by these fixtures.
 

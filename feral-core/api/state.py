@@ -3983,7 +3983,7 @@ class BrainState:
         if ws:
             await ws.send_json(stamp_hup_envelope(msg.model_dump()))
 
-    async def _send_dict_to_node(self, node_id: str, msg_dict: dict):
+    async def _send_dict_to_node(self, node_id: str, msg_dict: dict) -> None:
         """Send a raw dict message to a daemon node.
 
         The choke point for the voice pipeline (``RealtimeProxy`` and
@@ -3993,9 +3993,15 @@ class BrainState:
         every frame those paths built landed on the wire without the
         ``hup_version`` / ``ts`` HUP_SPEC.md section 5 requires.
         """
+        await self._queue_dict_to_node(node_id, msg_dict)
+
+    async def _queue_dict_to_node(self, node_id: str, msg_dict: dict) -> bool:
+        """Accepted socket queue receipt; not a delivery acknowledgment."""
         ws = self.daemons.get(node_id)
         if ws:
             await ws.send_json(stamp_hup_envelope(msg_dict))
+            return True
+        return False
 
     def bind_session_to_daemon(self, session_id: str, node_id: str):
         if node_id not in self._daemon_session_bindings:
@@ -4021,12 +4027,16 @@ class BrainState:
         ]
 
     async def push_to_session_nodes(self, session_id: str, msg_dict: dict) -> int:
-        """Send one frame to every node on a session. Never raises."""
+        """Queue one HUP frame per attached node; count accepted socket sends.
+
+        This is neither a delivered-message receipt nor proof of user attention.
+        Missing/failed sockets are not counted. Never raises.
+        """
         sent = 0
         for node_id in self.nodes_for_session(session_id):
             try:
-                await self.send_to_daemon(node_id, msg_dict)
-                sent += 1
+                if await self._queue_dict_to_node(node_id, msg_dict):
+                    sent += 1
             except Exception as exc:
                 logger.debug("push to node %s failed: %s", node_id, exc)
         return sent

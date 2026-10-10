@@ -27,6 +27,31 @@ These tests use inert effects and do not establish physical phone connectivity.
 
 ## Initial source integration
 
+### Actual approval node-sender correction
+
+An actual BrainState probe found push_to_session_nodes passing raw dictionaries
+to send_to_daemon, whose object serializer requires FeralMessage. The exception
+was caught before any matching node received a frame. Approval fixtures that
+replaced the state sender did not expose this failure.
+
+Raw approval dictionaries now use the existing HUP queue path. A shared internal
+helper reports accepted socket sends; the existing voice callback still returns
+None. Only matching current nodes are selected. Missing and failed sockets are
+not counted. This is socket acceptance, not delivery or read/seen confirmation.
+
+Frozen source verification passes 53 tests, one skipped, 18 warnings, 2.24
+seconds. Actual ToolRunner and Orchestrator publishers reach the real state
+sender with inert sockets; tests cover HUP envelope/schema parsing, foreign
+session exclusion, missing/replaced/failing sockets and voice callback
+compatibility. Ruff and whitespace checks pass; affected-file typing retains
+only the existing optional-browser diagnostic. Private receipt:
+feral-node-push-release-receipt-20261009.json. Combined source and application
+acceptance remain separate. Independent transport review passes eight checks.
+Final frozen combined source verification passes 4,734 tests, 22 skips across
+232 suites, zero source drift; full Mac typing adds zero diagnostics versus the
+pre-wave runtime and removes three. This fixes ordinary outbound transport; it does not
+implement originating-phone background review translation or job browser grants.
+
 This is local implementation and bounded verification, separate from installed
 device acceptance. Theora iOS baseline is
 `dfe2b08541e597c738bacd5fdc61275fc4f476a3`. Backend integration was captured from

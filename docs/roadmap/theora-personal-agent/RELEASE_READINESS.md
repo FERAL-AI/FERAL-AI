@@ -3,8 +3,11 @@
 **October 9 source wave after 9.47.** Provider/setup parity is published as
 `3da563c4d`; phone intake is locally committed as `c8749b56a` with frozen isolated
 verification. Native shared-conversation source passes 29 linked model groups,
-118 browser checks and production typecheck. Runtime TaskFlow review and combined
-source/candidate acceptance remain pending. The immutable 9.47 below contains
+118 browser checks and production typecheck. Runtime approvals, workflow origin
+scope, phone dispatch ownership and actual node sender corrections pass final
+combined source verification: 4,734 tests, 22 skips across 232 suites, zero source
+drift; full Mac typing adds zero diagnostics and removes three versus pre-wave.
+Exact-source candidate acceptance remains pending. The immutable 9.47 below contains
 none of this later source wave. [Shared-conversation behavior and gates](SHARED_THEORA_CONVERSATION_20261009.md),
 [phone integration evidence](IOS_PHONE_INTEGRATION_20261009.md),
 [active ownership and next action](WORK_STATE.md).
