@@ -9,11 +9,11 @@ import asyncio
 import copy
 from contextlib import contextmanager
 from contextvars import ContextVar
-from dataclasses import dataclass, field
+from dataclasses import InitVar, dataclass, field
 import hashlib
 import json
 import os
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any, Callable, ClassVar
 from uuid import UUID, uuid4
 
 from security.agent_turn_lease import spawn_agent_turn
@@ -258,6 +258,32 @@ class ValidatedTaskApprovalOrigin:
 _task_origin_transfer: ContextVar[TaskOriginTransfer | None] = ContextVar("feral_task_origin_transfer", default=None)
 
 
+@dataclass(frozen=True)
+class TrackedTaskOriginGuard:
+    """Private creation identity carried beside, never inside, public origin.
+
+    The principal is an init-only value kept outside dataclass fields, so
+    dataclass projections cannot turn it into model or wire metadata.
+    """
+    check: Callable[[], None] = field(repr=False)
+    _source_principal: ClassVar[PairedDevicePrincipal | None]
+    principal: InitVar[PairedDevicePrincipal | None] = field(default=None, repr=False)
+
+    def __post_init__(self, principal):
+        if not callable(self.check) or (principal is not None and type(principal) is not PairedDevicePrincipal):
+            raise ChatTurnError("origin_unavailable")
+        object.__setattr__(self, "_source_principal", principal)
+
+    @property
+    def source_principal(self) -> PairedDevicePrincipal | None:
+        return self._source_principal
+
+    def __call__(self):
+        if self.source_principal is not None:
+            self.source_principal.require_current()
+        self.check()
+
+
 @contextmanager
 def bind_task_origin_transfer(transfer: TaskOriginTransfer):
     if transfer.backing_task is not None or not transfer.active:
@@ -289,7 +315,8 @@ def claim_task_origin_transfer(args: dict):
     return ({"contract_version": 1, "source": "tracked_chat_turn", "owner_verified": True,
              "session_id": origin.session_id, "request_id": origin.request_id, "turn_id": origin.turn_id,
              "tool_call_id": origin.call_id, "surface": origin.surface,
-             "input_revision": None, "context_commit": "pending"}, transfer.guard)
+             "input_revision": None, "context_commit": "pending"},
+            TrackedTaskOriginGuard(transfer.guard, origin.source_principal))
 
 
 class ChatTurnManager:

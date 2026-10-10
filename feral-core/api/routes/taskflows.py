@@ -14,6 +14,9 @@ router = APIRouter()
 @router.post("/api/taskflows")
 async def create_taskflow(body: dict):
     """Create a persistent background TaskFlow."""
+    from agents.taskflow import _has_private_origin_claim
+    if _has_private_origin_claim(body):
+        return {"error": "TaskFlow private source cannot be supplied in request fields"}
     if not state.taskflows:
         return {"error": "TaskFlow runtime not initialized"}
     steps = body.get("steps", [])
@@ -82,7 +85,8 @@ async def cancel_taskflow(flow_id: str):
 # does not grant action permission or certify an external outcome.
 
 _ORIGIN_FIELDS = {"origin", "handoff_key", "terms_digest", "request_id", "turn_id",
-                  "input_revision", "context_checkpoint", "owner_id", "tool_call_id"}
+                  "input_revision", "context_checkpoint", "owner_id", "tool_call_id",
+                  "source_principal", "origin_principal", "origin_principal_json", "paired_device_id"}
 _CREATION_WORKERS: set[asyncio.Task] = set()
 
 
@@ -112,7 +116,9 @@ async def _owned_thread_call(function, *args):
 
 
 def _task_terms(body):
-    if not isinstance(body, dict) or len(body) > 32 or _ORIGIN_FIELDS.intersection(body):
+    from agents.taskflow import _has_private_origin_claim
+    if (not isinstance(body, dict) or len(body) > 32 or _ORIGIN_FIELDS.intersection(body)
+            or _has_private_origin_claim(body.get("context"))):
         raise _TaskRequestError("task_invalid_request", "Task origin is supplied by the runtime, not request fields.")
     goal = body.get("goal", "")
     raw_subtasks = body.get("subtasks", [])
@@ -155,7 +161,7 @@ async def _skill_origin(endpoint_id, args=None):
     connection after the receipt read; the context alone is never authority.
     """
     from agents import chat_turns
-    from agents.chat_turns import ChatTurnManager, exact_uuid, turn_audit
+    from agents.chat_turns import ChatTurnManager, TrackedTaskOriginGuard, exact_uuid, turn_audit
     from security.dangerous_tools import known_surfaces
     from security.agent_turn_lease import guard_agent_dispatch
     from skills.call_context import context_enabled, current_context
@@ -191,16 +197,19 @@ async def _skill_origin(endpoint_id, args=None):
                 "session_id": ctx.session_id or None, "request_id": None, "turn_id": None,
                 "surface": ctx.surface, "input_revision": None}, caller_guard
     manager = getattr(state, "chat_turns", None)
+    source = audit.source_principal
 
     def guard():
         caller_guard()
+        if source is not None:
+            source.require_current()
         live = manager._live.get((audit.session_id, audit.turn_id)) if isinstance(manager, ChatTurnManager) else None
         if (not isinstance(manager, ChatTurnManager) or manager.state is not state
                 or manager._store is not getattr(state, "memory", None)
                 or live is None or live.audit is not audit or live.request_id != audit.request_id
                 or live.task is None or live.task.done() or live.task.cancelling()
-                or audit.closed or audit.cancel_requested
-                or getattr(state, "sessions", {}).get(audit.session_id) is not live.owner):
+                or audit.closed or audit.cancel_requested or audit.source_principal is not source
+                or (source is None and getattr(state, "sessions", {}).get(audit.session_id) is not live.owner)):
             raise _TaskRequestError("task_origin_superseded", "The originating tracked turn is no longer current.")
     guard()
     if ctx.surface not in known_surfaces():
@@ -209,7 +218,8 @@ async def _skill_origin(endpoint_id, args=None):
         exact_uuid(audit.request_id)
         exact_uuid(audit.turn_id)
         receipt = await state.memory.chat_turn_get(session_id=audit.session_id,
-                                                   request_id=audit.request_id, turn_id=audit.turn_id)
+                                                   request_id=audit.request_id, turn_id=audit.turn_id,
+                                                   source_principal=source.storage_binding() if source is not None else None)
     except asyncio.CancelledError:
         raise
     except Exception:
@@ -225,10 +235,10 @@ async def _skill_origin(endpoint_id, args=None):
     return {"contract_version": 1, "source": "tracked_chat_turn", "owner_verified": True,
             "session_id": audit.session_id, "request_id": audit.request_id, "turn_id": audit.turn_id,
             "tool_call_id": ctx.call_id, "surface": ctx.surface,
-            "input_revision": None, "context_commit": "pending"}, guard
+            "input_revision": None, "context_commit": "pending"}, TrackedTaskOriginGuard(guard, source)
 
 
-def _start_task(body, origin, guard, runtime):
+def _start_task(body, origin, guard, runtime, source_principal=None):
     if not runtime:
         return _failure("task_runtime_unavailable", "TaskFlow runtime not initialized")
     try:
@@ -247,6 +257,8 @@ def _start_task(body, origin, guard, runtime):
             return _failure("task_runtime_unavailable", "Agent handoff requires the durable TaskFlow creation contract.")
         if isinstance(runtime, TaskFlowRuntime):
             kwargs = {"creation_guard": guard}
+            if source_principal is not None:
+                kwargs["source_principal"] = source_principal
             if origin.get("session_id"):
                 kwargs["origin_session_id"] = origin["session_id"]
             if origin["source"] != "legacy_local_operator":
@@ -265,7 +277,8 @@ def _start_task(body, origin, guard, runtime):
         if (not readback or readback.get("context", {}).get("task_origin") != context["task_origin"]
                 or isinstance(runtime, TaskFlowRuntime) and (
                     runtime.origin_session_for_flow(flow["id"]) != origin.get("session_id")
-                    or runtime.origin_surface_for_flow(flow["id"]) != origin.get("surface"))):
+                    or runtime.origin_surface_for_flow(flow["id"]) != origin.get("surface")
+                    or source_principal is not None and not runtime.flow_matches_source(flow["id"], source_principal))):
             return _failure("task_creation_outcome_unknown", "Creation readback failed. Inspect task status before retrying.")
         return {"ok": True, "flow_id": readback["id"], "steps": len(terms["steps"]),
                 "status": readback["status"], "title": readback["title"],
@@ -289,16 +302,22 @@ async def execute_background_task_skill(endpoint_id, args):
         if not isinstance(args, dict):
             raise _TaskRequestError("task_invalid_request", "Task arguments must be an object.")
         origin, guard = await _skill_origin(endpoint_id, args)
+        from agents.chat_turns import TrackedTaskOriginGuard
+        from security.approval_ingress import current_node_principal
+        source_principal = guard.source_principal if type(guard) is TrackedTaskOriginGuard else None
+        inspection_principal = source_principal or current_node_principal()
         brain = state
         runtime = state.taskflows
         source_guard = guard
 
         def guard():
             source_guard()
+            if inspection_principal is not None:
+                inspection_principal.require_current()
             if state is not brain or state.taskflows is not runtime:
                 raise _TaskRequestError("task_origin_superseded", "The originating TaskFlow runtime changed.")
         if endpoint_id == "start":
-            result = await _owned_thread_call(_start_task, args, origin, guard, runtime)
+            result = await _owned_thread_call(_start_task, args, origin, guard, runtime, source_principal)
             try:
                 guard()
             except _TaskRequestError:
@@ -316,6 +335,8 @@ async def execute_background_task_skill(endpoint_id, args):
                     return _failure("task_runtime_unavailable", "TaskFlow runtime not initialized")
                 if origin.get("session_id") and runtime.origin_session_for_flow(flow_id) != origin["session_id"]:
                     return _failure("task_not_found", "Task not found in the originating session.")
+                if inspection_principal is not None and not runtime.flow_matches_source(flow_id, inspection_principal):
+                    return _failure("task_not_found", "Task not found for the originating device.")
                 return _task_status(runtime.get_flow(flow_id), flow_id)
             result = await _owned_thread_call(read_status)
             guard()
@@ -328,7 +349,8 @@ async def execute_background_task_skill(endpoint_id, args):
                 return {"tasks": []}
             def read_flows():
                 if origin.get("session_id"):
-                    return runtime.list_origin_flows(origin["session_id"], limit=max(1, min(limit, 100)))
+                    return runtime.list_origin_flows(origin["session_id"], limit=max(1, min(limit, 100)),
+                                                     source_principal=inspection_principal)
                 return runtime.list_flows(limit=max(1, min(limit, 100)))
             flows = await _owned_thread_call(read_flows)
             guard()

@@ -8,6 +8,7 @@ import re
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
+from providers.catalog import bind_active_cloud_runtime
 from config.loader import ChatOutputBudgetError, clear_settings_cache as _clear_settings_cache, feral_home, validate_chat_output_settings_patch
 from config.runtime import ollama_base_url
 
@@ -189,14 +190,29 @@ async def update_config(body: dict):
         # id leaked into chat completions despite a clean settings
         # write. Await the swap so the in-memory provider always
         # matches what we just persisted.
-        await state.orchestrator.llm.switch_provider(
-            new_provider, model=new_model, base_url=new_base, api_key=new_key,
-        )
+        owner = state
+        orchestrator = owner.orchestrator
+        runtime = orchestrator.llm
+        catalog = getattr(owner, "provider_catalog", None)
+        try:
+            await runtime.switch_provider(new_provider, model=new_model, base_url=new_base, api_key=new_key)
+        except Exception:
+            # Keep this route's established generic HTTP 500 response while
+            # removing private connection details from the exception itself.
+            raise RuntimeError("Runtime activation was not verified; settings may already be saved") from None
+        if catalog is not None:
+            try:
+                bind_active_cloud_runtime(catalog, runtime, owner, orchestrator, state)
+            except (ValueError, RuntimeError):
+                raise HTTPException(status_code=503, detail={
+                    "code": "active_cloud_catalog_binding_unavailable",
+                    "message": "The active catalog connection could not be verified. Settings may already have changed; refresh before probing.",
+                }) from None
         # The provider swap applies the primary adapter, but route_call and
         # failover read a separate config snapshot. Refresh that full snapshot
         # too, so saved call-site tiers/overrides take effect on the next turn.
         # Detach nested maps from ConfigLoader's mutable merged settings.
-        state.orchestrator.llm.set_config(deepcopy(llm_config))
+        runtime.set_config(deepcopy(llm_config))
 
     elif section == "features":
         enabled = str(value).lower() in ("true", "1", "yes", "on")

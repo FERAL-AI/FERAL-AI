@@ -569,6 +569,43 @@ class ProviderCatalog:
             raise RuntimeError("Selected local provider adapter could not bind its endpoint")
         return True
 
+    def bind_active_cloud(self, provider_id: str, base_url: str, api_key: str) -> bool:
+        """Bind one supported HTTP catalog adapter to the resolved active runtime.
+
+        Call only after activation/credential hydration, not with a settings
+        draft. This performs no I/O, credential persistence or environment writes.
+        Unchanged binding retains its adapter/cache; inactive overrides survive.
+        Local/CLI/catalog-only providers keep their existing separate contracts.
+        """
+        from agents.llm_provider import is_supported_runtime_provider
+
+        if not isinstance(provider_id, str) or not is_supported_runtime_provider(provider_id):
+            return False
+        resolved = self.resolve_alias(provider_id) or provider_id
+        desc = self._descriptors.get(resolved)
+        if desc is None or desc.supports_local or not desc.requires_api_key:
+            return False
+        if not isinstance(base_url, str) or not base_url:
+            raise ValueError("Active cloud runtime endpoint is unavailable")
+        if not isinstance(api_key, str):
+            raise ValueError("Active cloud runtime credential is unavailable")
+        expected = base_url.rstrip("/")
+        current = self._adapters.get(resolved)
+        candidate = self._build_adapter(desc, api_key=api_key, base_url=base_url, _redact_errors=True)
+        if (candidate is None or getattr(candidate, "_base_url", None) != expected
+                or getattr(candidate, "_api_key", None) != api_key):
+            raise RuntimeError("Active cloud catalog connection could not be bound")
+        if (type(current) is type(candidate)
+                and getattr(current, "_base_url", None) == expected
+                and getattr(current, "_api_key", None) == api_key):
+            return False
+        # Publish only a validated replacement. In-flight probes already fence
+        # adapter identity and refuse stale success/error rather than retrying.
+        self._adapters[resolved] = candidate
+        self._models.pop(resolved, None)
+        self._warnings.pop(resolved, None)
+        return True
+
     async def list_models(
         self,
         provider_id: str,
@@ -920,6 +957,7 @@ class ProviderCatalog:
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        _redact_errors: bool = False,
         **extra: Any,
     ) -> Optional[Provider]:
         """Instantiate the concrete adapter class for *descriptor*.
@@ -1002,9 +1040,15 @@ class ProviderCatalog:
                 from .lmstudio_provider import LMStudioProvider
                 return LMStudioProvider(base_url=base_url)
         except ImportError as exc:
-            logger.debug("adapter import for %s failed: %s", pid, exc)
+            if _redact_errors:
+                logger.debug("active adapter import for %s failed; details withheld", pid)
+            else:
+                logger.debug("adapter import for %s failed: %s", pid, exc)
             return None
         except Exception as exc:
+            if _redact_errors:
+                logger.error("active adapter for %s failed to construct; details withheld", pid)
+                return None
             # One adapter's constructor must never be able to take down
             # the catalog. _bind_builtin_adapters walks every descriptor
             # from ProviderCatalog.__init__, so an exception raised here
@@ -1178,6 +1222,21 @@ class ProviderCatalog:
             self._cache_path.write_text(json.dumps(payload, indent=2))
         except OSError as exc:
             logger.debug("catalog cache write failed: %s", exc)
+
+
+def bind_active_cloud_runtime(catalog: ProviderCatalog, runtime: Any, owner: Any,
+                              orchestrator: Any, current_owner: Any) -> bool:
+    """Fence the captured live connection after an awaited activation.
+
+    API routes supply their current owner explicitly; this module never imports
+    API global state. It does not activate a provider or accept draft parameters.
+    """
+    if (runtime is None or orchestrator is None or current_owner is not owner
+            or getattr(owner, "orchestrator", None) is not orchestrator
+            or getattr(orchestrator, "llm", None) is not runtime
+            or getattr(owner, "provider_catalog", None) is not catalog):
+        raise RuntimeError("Active connection owner changed before catalog binding")
+    return catalog.bind_active_cloud(runtime.provider, runtime.base_url, runtime.api_key)
 
 
 # ----------------------------------------------------------------------

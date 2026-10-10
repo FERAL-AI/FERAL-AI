@@ -24,6 +24,16 @@ integration checkpoint, state what is published, what remains local, what is
 blocked and what comes next. Follow the public-publication wording rules in
 AGENTS.md; technical records must not reproduce private conversations.
 
+Keep work batches bounded by concrete failures and acceptance checks. Reuse
+completed source reviews and retained results when their relevant inputs are
+unchanged. Give workers concise file ownership and avoid repeating full history
+or assigning overlapping audits. Run focused regressions during implementation;
+broaden testing when integration or an unresolved risk requires it. Package a
+coherent verified wave instead of rebuilding after every small edit. At the end
+of each batch, checkpoint and report completed behavior, current artifact/source,
+unverified boundaries and the next ready work. Do not imply work continues after
+a deliberate pause or that a passing fixture proves physical-device operation.
+
 Resource and retention rules are in AGENTS.md. Before a build wave, record source,
 free disk space, estimated new artifacts, exclusive ownership and the acceptance
 command. Keep one active status summary in WORK_STATE; mark preceding summaries

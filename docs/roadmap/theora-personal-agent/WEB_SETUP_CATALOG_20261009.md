@@ -28,11 +28,11 @@ or a successful model inference.
 
 Probe measures the provider catalogue connection. It does not verify the active
 model endpoint, unsaved credentials, inference, FERAL tool use or voice. The
-existing backend explicitly binds saved local endpoints, but generic custom
-cloud endpoints can remain different from catalogue defaults after restart.
-That binding parity is a separate backend card: ProviderCatalog construction,
-BrainState initialization and set_llm_config must agree before claiming a probe
-verified the active custom cloud endpoint.
+existing backend explicitly binds saved local endpoints. In preceding 9.50,
+generic custom cloud endpoints can differ from catalogue defaults after restart
+or key changes. Follow-on source aligns active cloud connections at startup and
+all settings/key activation paths; [behavior and validation](ACTIVE_CLOUD_CATALOG_20261009.md).
+It does not make a reachability probe proof of model inference.
 
 The existing CLI can provision Ollama and consented local speech assets; this
 wizard and the native app do not yet expose a complete reviewed installer.

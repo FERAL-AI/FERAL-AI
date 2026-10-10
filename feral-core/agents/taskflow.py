@@ -26,6 +26,7 @@ import httpx
 
 from config.loader import feral_data_home
 from skills.call_context import bind_context
+from security.approval_ingress import PairedDevicePrincipal
 
 logger = logging.getLogger("feral.taskflow")
 
@@ -45,6 +46,22 @@ class TaskFlowHandoffConflict(ValueError):
 
 class TaskFlowReceiptError(ValueError):
     """A persisted origin or bounded read could not be verified."""
+
+
+def _principal_json(source: PairedDevicePrincipal | None) -> str | None:
+    """Canonical private identity; this validates no action permission."""
+    if source is None:
+        return None
+    if type(source) is not PairedDevicePrincipal:
+        raise ValueError("TaskFlow source identity must be authenticated")
+    source.require_current()
+    return json.dumps(source.storage_binding(), sort_keys=True, separators=(",", ":"), allow_nan=False)
+
+
+def _has_private_origin_claim(value) -> bool:
+    fields = {"source_principal", "origin_principal", "origin_principal_json", "paired_device_id"}
+    return (isinstance(value, dict) and (bool(fields.intersection(value))
+            or isinstance(value.get("task_origin"), dict) and bool(fields.intersection(value["task_origin"]))))
 
 
 _model_step: ContextVar["TaskFlowModelStep | None"] = ContextVar(
@@ -361,7 +378,7 @@ class TaskFlowRuntime:
             conn.execute("CREATE INDEX IF NOT EXISTS idx_taskflow_steps_flow ON taskflow_steps(flow_id, step_index)")
             # Optional creation identity lives with the flow, not a second runner.
             columns = {r[1] for r in conn.execute("PRAGMA table_info(taskflows)")}
-            for name in ("handoff_key", "terms_digest", "origin_session_id", "origin_surface"):
+            for name in ("handoff_key", "terms_digest", "origin_session_id", "origin_surface", "origin_principal_json"):
                 if name not in columns:
                     conn.execute(f"ALTER TABLE taskflows ADD COLUMN {name} TEXT")
             conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_taskflows_handoff ON taskflows(handoff_key)")
@@ -444,7 +461,14 @@ class TaskFlowRuntime:
         origin_session_id: Optional[str] = None,
         origin_surface: Optional[str] = None,
         creation_guard: Optional[Callable[[], None]] = None,
+        source_principal: PairedDevicePrincipal | None = None,
     ) -> dict:
+        if _has_private_origin_claim(context):
+            raise ValueError("TaskFlow private source cannot be supplied in context")
+        source_json = _principal_json(source_principal)
+        if source_json is not None and (handoff_key is None or origin_session_id is None
+                                       or origin_surface is None or creation_guard is None):
+            raise ValueError("Paired TaskFlow creation requires a tracked handoff")
         if not steps:
             raise ValueError("TaskFlow requires at least one step")
         for idx, step in enumerate(steps):
@@ -491,21 +515,23 @@ class TaskFlowRuntime:
                     if not busy:
                         if creation_guard is not None:
                             creation_guard()
+                        _principal_json(source_principal)
                         existing = conn.execute(
-                            "SELECT id, terms_digest, origin_session_id, origin_surface FROM taskflows WHERE handoff_key = ?", (handoff_key,),
+                            "SELECT id, terms_digest, origin_session_id, origin_surface, origin_principal_json FROM taskflows WHERE handoff_key = ?", (handoff_key,),
                         ).fetchone() if handoff_key is not None else None
                         if existing is not None:
                             if (existing["terms_digest"] != terms_digest or existing["origin_session_id"] != origin_session_id
-                                    or existing["origin_surface"] != origin_surface):
+                                    or existing["origin_surface"] != origin_surface
+                                    or existing["origin_principal_json"] != source_json):
                                 raise TaskFlowHandoffConflict("TaskFlow handoff terms changed")
                             flow_id, replayed = existing["id"], True
                         else:
                             conn.execute(
                                 """INSERT INTO taskflows
-                                (id, session_id, title, status, current_step, context_json, created_at, updated_at, handoff_key, terms_digest, origin_session_id, origin_surface)
-                                VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?)""",
+                                (id, session_id, title, status, current_step, context_json, created_at, updated_at, handoff_key, terms_digest, origin_session_id, origin_surface, origin_principal_json)
+                                VALUES (?, ?, ?, ?, 0, ?, ?, ?, ?, ?, ?, ?, ?)""",
                                 (flow_id, session_id, title or f"TaskFlow {flow_id}", TaskFlowStatus.QUEUED.value,
-                                 json.dumps(context or {}), now, now, handoff_key, terms_digest, origin_session_id, origin_surface),
+                                 json.dumps(context or {}), now, now, handoff_key, terms_digest, origin_session_id, origin_surface, source_json),
                             )
                             for i, step in enumerate(steps):
                                 payload = dict(step)
@@ -516,6 +542,10 @@ class TaskFlowRuntime:
                                     VALUES (?, ?, ?, ?, 'pending')""",
                                     (flow_id, i, step["type"], json.dumps(payload)),
                                 )
+                        if creation_guard is not None:
+                            creation_guard()
+                        if _principal_json(source_principal) != source_json:
+                            raise TaskFlowHandoffConflict("TaskFlow source identity changed")
                         conn.commit()
                 except BaseException:
                     conn.rollback()
@@ -592,14 +622,26 @@ class TaskFlowRuntime:
             raise RuntimeError("Workflow execution surface is unavailable")
         return surface
 
-    def list_origin_flows(self, origin_session_id: str, *, limit: int = 50) -> list[dict]:
+    def flow_matches_source(self, flow_id: str, source_principal: PairedDevicePrincipal) -> bool:
+        if type(source_principal) is not PairedDevicePrincipal:
+            raise ValueError("Missing authenticated TaskFlow source")
+        source_json = _principal_json(source_principal)
+        with self._lock:
+            row = self._conn.execute("SELECT origin_principal_json FROM taskflows WHERE id=?", (flow_id,)).fetchone()
+        _principal_json(source_principal)
+        return row is not None and row[0] == source_json
+
+    def list_origin_flows(self, origin_session_id: str, *, limit: int = 50,
+                          source_principal: PairedDevicePrincipal | None = None) -> list[dict]:
         from security.session_identity import validate_session_id
         validate_session_id(origin_session_id)
+        source_json = _principal_json(source_principal)
         with self._lock:
             rows = self._conn.execute(
-                "SELECT * FROM taskflows WHERE origin_session_id = ? ORDER BY updated_at DESC LIMIT ?",
-                (origin_session_id, max(1, min(limit, 100))),
+                "SELECT * FROM taskflows WHERE origin_session_id = ? AND (? IS NULL OR origin_principal_json=?) ORDER BY updated_at DESC LIMIT ?",
+                (origin_session_id, source_json, source_json, max(1, min(limit, 100))),
             ).fetchall()
+        _principal_json(source_principal)
         return [self._flow_row_to_dict(row) for row in rows]
 
     def _origin_receipt_snapshot(self, origin_session_id: str, *, flow_id=None,

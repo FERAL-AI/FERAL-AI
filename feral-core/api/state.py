@@ -1241,6 +1241,14 @@ class BrainState:
                     exc,
                 )
 
+            if self.provider_catalog is not None:
+                # Use the actual resolved connection after labeled credentials
+                # override legacy env keys; metadata reads must not probe or
+                # silently select a different cloud endpoint/credential.
+                self.provider_catalog.bind_active_cloud(
+                    _shared_llm.provider, _shared_llm.base_url, _shared_llm.api_key,
+                )
+
             # Self-heal contract (operator report 2026-05-09):
             # ``settings.json`` had ``llm.model`` pinned to
             # ``gpt-4o-mini-transcribe-2025-12-15`` (an audio-class

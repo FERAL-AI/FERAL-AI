@@ -9,6 +9,32 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ### Current 9.50 artifact and source wave
 
+Verified follow-on source batch, packaging pending: private phone origin now
+survives direct/reviewed TaskFlow creation and backing-skill discovery while the
+native client keeps shared-session routing ownership. Supported active cloud
+catalogue connections match resolved endpoints/credentials after startup and all
+Settings/key activation paths. Both workers released their files; parent owns
+integration, docs, packaging and publication. No native Swift/UI or iOS change.
+Existing immutable 9.50 does not contain this new source yet.
+
+Final frozen affected-path integration passes 685 tests, 200 warnings, 36 suites
+in 39.97 seconds with zero source drift. Full configured Mac typing has 788
+existing diagnostics: zero added, eight removed versus 9.50, with no input drift.
+Full-core CI Ruff and authored whitespace pass. Earlier 553/684-pass gates and
+the failed 797-diagnostic typing run remain historical; the unavailable-runtime
+guard was corrected before this acceptance. Worker focused phone verification
+passes 144 tests; final provider/activation checks and parent integration include
+the narrow failure/typing correction. No inference, account or physical test.
+
+Packaging target 9.51/build2026100905, one offline cached assembly. Planned net
+new payload limit 2 GiB; latest available space 15.5 GiB. All 54 Swift sources and
+flags are unchanged, so verified native reuse is eligible. Keep canonical 9.50
+until staging/identity checks pass, then sole rollback 9.50 and inspected obsolete
+9.49 retirement. Actual resource/identity receipts are mandatory after assembly.
+Parent prepared identity-gated builder and isolated bundled-method/startup probes.
+[Phone task behavior](PHONE_TASKFLOW_ORIGIN_20261009.md),
+[cloud connection behavior](ACTIVE_CLOUD_CATALOG_20261009.md).
+
 Immutable Mac 9.50/build2026100904 contains exact published runtime
 `5f488ba8a3e0012c6e02a145ca1c4bcb16cb3e91`. It adds negotiated paired-phone
 receipt ownership/replay/revocation and WebUI setup catalogue/probe/save parity.
