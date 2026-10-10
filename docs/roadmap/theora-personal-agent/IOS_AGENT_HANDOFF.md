@@ -1,5 +1,34 @@
 # Theora iOS personal-agent research and handoff
 
+## October 9: current Mac 9.49 authority boundary
+
+Mac 9.49/build2026100903 packages published runtime 58ad0a025. Native receipt status
+and explicit probe history pass actual GUI acceptance; Home and saved endpoint
+persist across normal Quit/relaunch. This does not establish a physical iPhone
+connection or a model-selected browser task. [Exact acceptance](NATIVE_9_49_ACCEPTANCE.md).
+
+Paired REST tool-review listing/approve/reject return typed 403 with
+approval_device_authority_unavailable. Node-origin plain approval/rejection
+acknowledgements refuse resolution and direct the user to the Mac operator inbox.
+No pending review is consumed and no effect is dispatched by that refusal.
+The originating-device principal is not yet persisted on each review. Preserve
+unresolved cards and show this unavailable state; do not replace the phone bearer
+with a profile operator credential or treat a supplied SID as review authority.
+Existing session broadcasts may still carry review metadata, so private origin
+publication is also a follow-on, not established behavior.
+
+The next contract negotiates additive tracked phone turns with stable canonical
+request IDs and existing ChatTurnManager receipts; reply_to remains correlation,
+not permission. Server-verified device/current-peer provenance must pass through
+TaskFlow creation and each exact review before matching-device discovery and
+resolution are enabled. Legacy records stay unavailable without invented
+ownership. Keep cancellation/revocation/replay and unknown-effect recovery gates.
+[Current boundary and next steps](DEVICE_APPROVAL_AUTHORITY_EVIDENCE_20261009.md).
+Job-scoped Chrome delegation remains separate from native shared-conversation
+selection. Actual installed phone endpoint/error and paired LAN/ATS checks remain
+required; the separate iOS agent's local 184 assertions/build are not device proof.
+
+
 Publication note: checkout paths are portable placeholders. Set `EVIDENCE_ROOT` to a new disposable directory outside personal/app data before running the commands below, for example `export EVIDENCE_ROOT="$(mktemp -d)"`. Evidence filenames identify historical local outputs, not shipped archives or fresh reruns. `<theora-ios-checkout>` denotes the separate Theora iOS repository.
 
 ## October 9 local source integration
@@ -13,9 +42,9 @@ current-source selection of 274 tests, two skipped, plus CI-rule Ruff.
 
 [Source integration, exact evidence and acceptance gates](IOS_PHONE_INTEGRATION_20261009.md)
 records the distinction between implemented, verified and installed behavior.
-Local source commits are iOS 8db007f and backend c8749b56a. Neither was pushed
-by this task. Mac 9.47 is unchanged; these changes require a new exact-source
-candidate.
+Local iOS source commit 8db007f remains unpushed/uninstalled by this task. Backend
+c8749b56a and subsequent ownership/authority corrections are published and
+packaged in 9.49. Their source checks do not establish physical-phone acceptance.
 The original phone error, Chrome attachment to the shared owner, actual Wi-Fi/
 ATS/credential recovery and device audio remain unverified. No iOS push or
 physical phone/account operation occurred. The shared UI is not yet a unified
@@ -23,7 +52,8 @@ durable memory/event ledger or durable simultaneous voice/task system.
 
 ## October 9 connection and browser review
 
-Current Mac artifact is [9.47](NATIVE_9_47_ACCEPTANCE.md). The Theora iOS checkout
+The initial review used [9.47](NATIVE_9_47_ACCEPTANCE.md); its read-only evidence
+below is historical and does not supersede the current 9.49 boundary above. The Theora iOS checkout
 was inspected at `dfe2b08541e597c738bacd5fdc61275fc4f476a3`; its existing project
 and vendor changes were preserved. No iOS files, credentials, personal logs,
 physical phone state, accounts or settings were changed. The iOS agent continues

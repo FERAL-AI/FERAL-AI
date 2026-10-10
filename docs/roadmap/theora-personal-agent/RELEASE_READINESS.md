@@ -1,20 +1,21 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 9).** Immutable Mac 9.48/build2026100902 contains
-published exact runtime source `24a44c6ba42de9c3fbba9d597f3e441cf740b1f1`.
-Provider/setup parity, reviewed shared Theora conversation selection, durable
-model-task approval continuation, workflow origin policy, phone dispatch ownership
-and HUP approval sending are included. Frozen verification passes 4,734 tests,
-22 skips across 232 suites; full Mac typing adds zero diagnostics versus pre-wave.
-Fresh native compilation, 500 packaged Python and 70 WebUI comparisons, runtime
+**Current checkpoint (October 9).** Immutable Mac 9.49/build2026100903 contains
+published exact runtime source `58ad0a0252a87230a5d08552b6ab316ce221451c`.
+It adds explicit device tool-review authority boundaries and corrects native chat/
+probe readiness presentation, retaining the prior provider, workflow, phone intake
+and shared-conversation work. Frozen verification passes 4,766 tests, 22 skips
+across 234 selected suites; full Mac typing adds zero diagnostics versus 9.48.
+Fresh native compilation, 501 packaged Python and 70 WebUI comparisons, runtime
 imports and strict ad-hoc signatures pass. Actual isolated avatar/setup/Home,
-negative local provider probe, shared-conversation cancel/confirm, exact history
-readback and normal Quit/relaunch pass. 9.47 is the sole generated rollback.
-Originating-chat background approvals and job-scoped Chrome delegation are next;
-real inference, physical phone/audio/accounts, messaging transport, commerce and
-distribution remain open. [Artifact and acceptance](NATIVE_9_48_ACCEPTANCE.md),
+negative probe history/passive refresh/draft invalidation, receipt-ready Chat and
+two normal Quit/relaunch checks pass. 9.48 is the sole generated rollback.
+Physical phone task execution, trusted phone-origin approval handoff, job-scoped
+Chrome delegation, provisioned inference/audio, messaging transport, commerce and
+distribution remain open. [Artifact and acceptance](NATIVE_9_49_ACCEPTANCE.md),
 [current work and ownership](WORK_STATE.md). Coding expansion, Linux expansion
 and Gen-UI remain deferred.
+
 
 **Historical Mac artifact (October 5).** Immutable 9.45/build2026100501 contains
 published exact source `3cfe733b4`, with exact tracked-task approval and selected

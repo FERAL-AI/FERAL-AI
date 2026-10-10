@@ -29,7 +29,8 @@ model/provider/account/microphone operation occurs. The initial macro-service
 sandbox failure is retained; identical source passes outside that sandbox.
 
 Private receipt: feral-oct9-native-readiness-fix-evidence.json. Six source/test
-files are frozen and released to parent integration. Immutable 9.48 is unchanged;
-the correction requires new exact-source assembly and actual packaged GUI
-acceptance. These changes do not install a local model or solve physical voice,
+files are integrated in published exact-source 9.49. Actual isolated setup and
+Providers probes retain history through passive refresh, draft editing clears it,
+and Chat receipt-only status persists across normal Quit/relaunch.
+[Packaged acceptance and limits](NATIVE_9_49_ACCEPTANCE.md). These changes do not install a local model or solve physical voice,
 phone networking, background device approval provenance or distribution gates.

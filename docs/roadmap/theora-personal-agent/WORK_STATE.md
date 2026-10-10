@@ -7,78 +7,77 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 9
 
-### Published 9.48 artifact and verified source wave
+### Published 9.49 artifact and integrated source wave
 
-**Current checkpoint (October 9).** Immutable Mac 9.48/build2026100902 contains
-published exact runtime source `24a44c6ba42de9c3fbba9d597f3e441cf740b1f1`.
-Provider/setup parity, reviewed shared Theora conversation selection, durable
-model-task approval continuation, workflow origin policy, phone dispatch ownership
-and HUP approval sending are included. Frozen verification passes 4,734 tests,
-22 skips across 232 suites; full Mac typing adds zero diagnostics versus pre-wave.
-Fresh native compilation, 500 packaged Python and 70 WebUI comparisons, runtime
+**Current checkpoint (October 9).** Immutable Mac 9.49/build2026100903 contains
+published exact runtime source `58ad0a0252a87230a5d08552b6ab316ce221451c`.
+It adds explicit device tool-review authority boundaries and corrects native chat/
+probe readiness presentation, retaining the prior provider, workflow, phone intake
+and shared-conversation work. Frozen verification passes 4,766 tests, 22 skips
+across 234 selected suites; full Mac typing adds zero diagnostics versus 9.48.
+Fresh native compilation, 501 packaged Python and 70 WebUI comparisons, runtime
 imports and strict ad-hoc signatures pass. Actual isolated avatar/setup/Home,
-negative local provider probe, shared-conversation cancel/confirm, exact history
-readback and normal Quit/relaunch pass. 9.47 is the sole generated rollback.
-Originating-chat background approvals and job-scoped Chrome delegation are next;
-real inference, physical phone/audio/accounts, messaging transport, commerce and
-distribution remain open. [Artifact and acceptance](NATIVE_9_48_ACCEPTANCE.md),
+negative probe history/passive refresh/draft invalidation, receipt-ready Chat and
+two normal Quit/relaunch checks pass. 9.48 is the sole generated rollback.
+Physical phone task execution, trusted phone-origin approval handoff, job-scoped
+Chrome delegation, provisioned inference/audio, messaging transport, commerce and
+distribution remain open. [Artifact and acceptance](NATIVE_9_49_ACCEPTANCE.md),
 [current work and ownership](WORK_STATE.md). Coding expansion, Linux expansion
 and Gen-UI remain deferred.
 
 Branch: `feat/native-product-release-foundation-20261001`, draft PR310. Runtime
-source 24a44c6ba is published. The final integration receipt is
-feral-oct9-source-wave-k7shp3dk/receipt.json; 4,734 passed, 22 skipped, 571 warnings,
-232 selected suites, 130.66 seconds, no source drift. Full Mac typing is 796
-versus pre-wave 799, zero additions and three removals; Linux baseline untouched.
-Earlier failed typing/API/compiler runs and counterexamples remain separate.
+source 58ad0a025 is published. Coherent implementation commits 11b1a5815 and 58ad0a025
+contain device tool-review authority and native readiness fixes. The final frozen
+integration receipt is feral-oct9-source-wave-d9q87ny4/receipt.json. Test-only fixture
+import reconciliation then passes 14 node cases; production unchanged. Full Mac
+mypy remains 796 diagnostics, no normalized additions/removals; Linux untouched.
+Earlier defect characterizations, compiler and lint failures remain separate.
 
-Both actual GUI hosts quit normally with exit 0. Finalizer verifies stopped hosts
-and observed backends, closed saved port 43283, distinct instances, no endpoint
-overrides and unchanged native/manifest hashes. Shared and separate rich histories
-are independently unchanged before/after restart. No inference, physical phone,
-mic/account/message/payment operation was performed. The negative probe's passive
-badge and Chat context-ready wording remain readiness-presentation follow-ups.
+Actual GUI 9.49 setup/Providers negative probes retain explicit history through
+passive refresh. Draft edits invalidate history without saving. Chat separates
+receipt connection from model availability. Home/avatar/name and saved port 43284
+persist under a distinct replacement runtime. Both normal Quits exit 0; finalizer
+confirms stopped hosts/backends, closed listener and unchanged artifact. No model,
+physical device/audio/account/message/payment operation was performed. Legacy
+runtime-available summary wording and settings action contrast remain UX follow-ups.
 
-Build uses cached offline dependencies; free space 15,567,773,696 before /
-15,494,037,504 after. Net 73,736,192 bytes is within 2 GiB; peak use unmeasured.
-Canonical 9.48 and sole rollback 9.47 are retained. Inspected obsolete 9.46 retired
-with identity/process/signature checks. No personal model/profile/Git cleanup.
-Pre-existing AUDIT-FIXES.md remains unstaged. No documentation-only rebuild.
+Build 262.34 seconds, free 16,471,724,032 before / 16,375,496,704 after; net 96,227,328
+bytes within 2 GiB. Canonical 9.49 and sole rollback 9.48 retained. Inspected obsolete
+9.47 retired only after identity/process/signature checks. No personal profile,
+model/cache/Git cleanup. AUDIT-FIXES.md remains unstaged. No docs-only rebuild.
 
-### Active source wave for 9.49
+### Next ready cards and ownership
 
-The paused review cards are implemented and verified in source; current app 9.48
-remains unchanged. Paired REST tool-review inspection/resolution and node-origin
-tool-review acknowledgements now fail closed until trusted per-request device
-provenance exists. Local operator approvals retain existing exact authority.
-Nine focused suites pass 207 tests; the frozen integration passes 4,766 tests,
-22 skips, 571 warnings across 234 suites in 159.66 seconds with zero source drift.
-Full pinned Mac typing remains 796 diagnostics, zero normalized additions/removals.
-A lint-only imported-fixture adjustment is verified separately by its 14 cases.
-[Boundary, verification and required follow-on](DEVICE_APPROVAL_AUTHORITY_EVIDENCE_20261009.md).
+All three workers released their implementation/review files. Parent owns shared
+contracts, publication, checkpoint and candidate integration. No new production
+ownership is active; reconcile exact source/dirty files/workers before assignment.
 
-Six native files correct receipt-connected wording and preserve explicitly
-validated last-probe history through unchanged passive refresh. Providers 75,
-Onboarding 100 and linked model 29 groups pass; production 54-source typecheck passes.
-Independent source review confirms generation/cancel fencing remains intact.
-[Behavior and limits](NATIVE_READINESS_PRESENTATION_20261009.md).
+1. Add trusted tracked phone ingress identity and receipts through existing
+   ChatTurnManager. Persist private paired-device principal and current peer;
+   never infer it from session IDs, node aliases or broadcast membership.
+2. Bind each exact review before publication, enable origin-facing discovery and
+   resolution only for its authenticated origin, translate internally to existing
+   execution identity, and preserve replay/cancellation/unknown-outcome guards.
+   Until accepted, paired REST/node tool-review resolution remains unavailable;
+   Mac operator inbox remains available. Origin-private publication is not done.
+3. Add explicit job-scoped Chrome resource permission without replacing physical
+   owner or widening local-only routes. Shared conversation selection alone does
+   not authorize a detached browser job.
+4. Run provisioned model/browser/desktop/physical-phone acceptance when model+
+   spend/download limits and installed phone endpoint/error are provided. No such
+   reply has arrived. Continue voice/local provisioning/messaging/commerce/
+   distribution contracts independently; coding/Linux/Gen-UI expansion deferred.
 
-All worker implementation files are released. Parent owns integration/docs/Git.
-After reviewed publication, build exact-source 9.49 with 54 native inputs and an
-estimated at most 2 GiB new artifacts, cached offline dependencies, canonical 9.49
-plus sole rollback 9.48. Inspected obsolete 9.47 may retire only after verified
-identity/signature/process checks. Last free-space observation is 14,540,800,000
-bytes. Pre-existing AUDIT-FIXES.md remains unstaged. No personal profile/model/Git
-cleanup or model download is authorized by these fixture checks.
+Detailed next-card handoff: feral-phone-tracked-origin-next-card-20261009.json
+(private). [Current device boundary](DEVICE_APPROVAL_AUTHORITY_EVIDENCE_20261009.md)
+and [native readiness scope](NATIVE_READINESS_PRESENTATION_20261009.md). The full
+product backlog remains in REQUEST_COVERAGE and EXECUTION_PLAN; no feature is
+removed or counted complete from a fixture alone.
 
-Next dependency order: trusted tracked phone principal/receipt handoff and
-origin-facing approval publication/resolution, then explicit job-scoped Chrome
-resource delegation, then provisioned-model/browser/desktop/physical-phone
-acceptance. Voice/messaging/commerce/distribution remain on the full plan;
-coding/Linux/Gen-UI expansion deferred. Provider/model choice and actual phone
-endpoint/error remain missing for live acceptance. The concrete next-card private
-handoff is feral-phone-tracked-origin-next-card-20261009.json; use existing
-ChatTurnManager/TaskFlow/dispatcher with additive contracts, not a second runner.
+At runtime 58ad, remote native, Linux bundle, browser E2E, WebUI, SDK, lint/docs/
+version and typing pass: 17 checks successful, four skipped, broad backend PR test
+pending. Older source 24a's broad run was cancelled by superseding publication,
+not recorded as a passed run. CI does not block independent local cards.
 
 ### Local iOS and phone intake integration, October 9
 
@@ -93,15 +92,17 @@ The current backend adds bounded owned /v1/node chat scheduling so receive/contr
 traffic remains responsive during Mac work. Reviewed three-file patch is applied;
 the frozen current-source integration passes 274 tests, two skipped, with CI-rule
 Ruff passing. A first shared-working-tree run passed but was invalidated by
-concurrent runtime edits; the frozen receipt is the accepted check. This reviewed backend source is included in immutable 9.48; physical iOS
-acceptance remains separate.
+concurrent runtime edits; the frozen receipt is the accepted check. This backend source is included in 9.48 and
+retained in 9.49; physical iOS acceptance remains separate. The 9.49 device
+review-authority boundary requires operator-inbox resolution until trusted
+phone-origin provenance is implemented.
 [Implemented behavior, exact inputs and remaining acceptance](IOS_PHONE_INTEGRATION_20261009.md).
 
 Actual phone endpoint/error, canonical Chrome owner handoff, Wi-Fi/ATS,
 installation, audio/hardware and durable phone task/memory contracts remain open.
 Local iOS commit 8db007f is not pushed or installed by this task. Backend
-c8749b56a and subsequent ownership/sender repairs are published and included in
-9.48. Preserve the external iOS agent's ownership. Source checks do not establish
+c8749b56a and subsequent ownership/sender repairs are published and retained in
+9.49. Preserve the external iOS agent's ownership. Source checks do not establish
 that the original physical-device failure is fixed.
 
 ### Historical 9.47 artifact
