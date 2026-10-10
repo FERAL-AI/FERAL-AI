@@ -595,7 +595,7 @@ struct NativeBrowserViewFeatureView: View {
                     Button("Refresh tasks") { Task { await jobs.refresh() } }.disabled(jobs.busy || !chrome.canGrantJobs)
                 }
                 if let task = jobs.currentTask {
-                    Text("Task \(task.id) · current step \(task.step) · \(task.flowStatus)/\(task.stepStatus) · execution conversation \(task.executionOwner)").font(.caption).textSelection(.enabled)
+                    NativeSelectableText("Task \(task.id) · current step \(task.step) · \(task.flowStatus)/\(task.stepStatus) · execution conversation \(task.executionOwner)").font(.caption)
                 }
                 if !jobs.availableTools.isEmpty {
                     ScrollView {
@@ -611,8 +611,8 @@ struct NativeBrowserViewFeatureView: View {
                     Button("Review task permission…") { Task { await jobs.prepareReview() } }.disabled(!jobs.canReview)
                 }
                 if let grant = jobs.grant {
-                    Text("Captured permission \(grant.id): \(grant.status) · expires \(grant.expires.formatted(date: .omitted, time: .standard))").font(.caption).textSelection(.enabled)
-                    Text("Task \(grant.flow) · step \(grant.step) · execution conversation \(grant.executionOwner)\nChrome owner \(grant.resource.owner) · tab \(grant.resource.target) · connection \(grant.resource.connection)\nTools: \(grant.tools.joined(separator: ", "))").font(.caption).textSelection(.enabled)
+                    NativeSelectableText("Captured permission \(grant.id): \(grant.status) · expires \(grant.expires.formatted(date: .omitted, time: .standard))").font(.caption)
+                    NativeSelectableText("Task \(grant.flow) · step \(grant.step) · execution conversation \(grant.executionOwner)\nChrome owner \(grant.resource.owner) · tab \(grant.resource.target) · connection \(grant.resource.connection)\nTools: \(grant.tools.joined(separator: ", "))").font(.caption)
                     HStack { Button("Inspect permission") { Task { await jobs.inspectGrant() } }; Button("Revoke permission") { Task { await jobs.inspectGrant(revoke: true) } } }.disabled(!jobs.canInspectGrant)
                 }
                 if let receipt = jobs.receipt { Text(receipt).font(.caption) }

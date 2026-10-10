@@ -52,6 +52,16 @@ The next candidate must bound the preview region and keep expanded controls
 scrollable, then repeat the actual expanded-screen check. Do not edit this signed
 artifact in place or relabel accessibility-only observations as visual success.
 
+Remote native-contracts also fails the existing NativeSelectableTextTests safety
+check: three new Browser metadata rows use unsafe SwiftUI text selection. The
+same failure is reproduced locally; the correction uses the established native
+selectable-text component. Intermediate 9.54 packages the layout-only correction
+at fee9e31bf, with fresh compilation and matching package checks, but is not GUI
+accepted. The final 9.55 batch includes both corrections and repeats GUI checks.
+The full local public-doc checker separately reports three preexisting W300
+references in untouched HANDOFF.md, HANDOVER.md and ROADMAP_NEXT.md. It is not a
+passing full-doc gate; this batch does not rewrite those unrelated documents.
+
 Private evidence includes feral-oct10-root-integration/combined-evidence,
 feral-oct10-root-browser-tests, feral-native-9-53-build-20261010,
 feral-candidate-9-53-manifest.json and feral-native-9-53-gui-20261010. Private

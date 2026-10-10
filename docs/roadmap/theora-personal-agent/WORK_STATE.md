@@ -20,8 +20,12 @@ Actual isolated native avatar/setup/Chat/Home and collapsed Browser work. Expand
 Chrome task permissions reproducibly moves controls/sidebar offscreen. Normal
 Quit exits0. This candidate fails expanded-layout acceptance; known-good 9.52 is
 the rollback. A bounded scroll/preview correction passes native typecheck and
-164 checks. Parent owns its one fresh 9.54 package and actual expansion/scroll/
-sidebar acceptance. All worker source files are released. Backend/model/wire
+164 checks. Intermediate 9.54 package checks pass. Remote native-contracts then
+identifies three unsafe SwiftUI selectable metadata rows; the same failure is
+reproduced locally and corrected using NativeSelectableText. Selector safety,
+164 Browser checks and full native typecheck pass on that correction. Parent
+owns final 9.55 packaging and actual expansion/scroll/sidebar acceptance.
+All worker source files are released. Backend/model/wire
 inputs are unchanged by this correction; retain their matching source evidence.
 
 Independent review confirms iOS local HEAD aa77855 contains persisted task IDs,
