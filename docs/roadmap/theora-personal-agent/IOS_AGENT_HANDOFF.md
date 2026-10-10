@@ -1,8 +1,8 @@
 # Theora iOS personal-agent research and handoff
 
-## October 9: negotiated paired input source wave
+## October 9: Mac 9.50 negotiated paired input
 
-New source above Mac 9.49 adds optional integer turn_contract_version 1 on
+Mac 9.50/build2026100904, exact runtime 5f488ba8a, adds optional integer turn_contract_version 1 on
 chat_request and preserves the existing text_command opt-in. Send and persist
 one explicit canonical lowercase top-level msg_id UUID for each committed input.
 Resend exact semantic terms to reconcile its accepted/terminal receipt. The
@@ -23,9 +23,12 @@ review device provenance, private publication and scoped resolution follow this
 input contract. Existing global review broadcasts are not claimed private.
 The separate iOS agent owns client changes and actual installation. No iOS code
 is edited or published here. [Wire contract and verification](PHONE_TRACKED_INPUT_20261009.md).
-Current exact-source package state is in [WORK_STATE](WORK_STATE.md).
+Source, packaged-method and normal Quit/relaunch checks pass. This does not
+establish physical iPhone connection, inference or browser action success.
+[Package acceptance](NATIVE_9_50_ACCEPTANCE.md); current state is in
+[WORK_STATE](WORK_STATE.md).
 
-## October 9: current Mac 9.49 authority boundary
+## October 9: preceding Mac 9.49 authority boundary retained in 9.50
 
 Mac 9.49/build2026100903 packages published runtime 58ad0a025. Native receipt status
 and explicit probe history pass actual GUI acceptance; Home and saved endpoint

@@ -47,8 +47,13 @@ desktop sibling inputs remain unchanged. Cases exercise HTTP negative receipts, 
 schema/support flags, unknown status, draft/config drift, delayed inventory,
 probe/save/readback/navigation, duplicate probe dispatch and saved unsupported
 selection. The WebUI rebuild and checked-in model-picker contract also pass.
-Exact generated-bundle acceptance is pending. No provider, model download, private account or physical-device test
-is performed by these fixtures.
+All 70 packaged WebUI files match source in Mac 9.50. Actual Chrome UI against
+that backend renders setup, read-only unsupported choices, unknown reachability,
+an explicit negative local catalogue probe and retained history on passive
+refresh. Welcome Continue accessibility activation did not advance; direct
+AI Provider tab selection did. No inference, model download, private account or
+physical-device test is performed by these checks.
 
-This source is not in the immutable preceding Mac 9.49. Build identity and
-current integrated acceptance are recorded in [WORK_STATE](WORK_STATE.md).
+This source is included in immutable Mac 9.50, not preceding 9.49. Build identity
+and scope are in [9.50 acceptance](NATIVE_9_50_ACCEPTANCE.md) and
+[WORK_STATE](WORK_STATE.md).

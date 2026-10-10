@@ -8,8 +8,9 @@ inputs gain durable processing receipts and private authenticated device identit
 Legacy messages retain their response contract. Actual installed iPhone and
 model-selected Mac task acceptance remain separate from isolated route tests.
 
-Mac 9.49 contains the preceding runtime. New source is not included in that
-immutable bundle. Exact-source assembly and final integration are pending.
+Mac 9.50/build2026100904 contains this runtime at exact source 5f488ba8a.
+Package identity, bundled methods and native lifecycle acceptance pass;
+[executed acceptance and remaining gates](NATIVE_9_50_ACCEPTANCE.md).
 
 ## Additive client contract
 
@@ -124,5 +125,6 @@ In a disposable Argon2-backed store, the former repeated verification took about
 138 ms median over six samples per credential kind. Read-only currentness took
 about 0.14 ms median over 200 samples per kind, without password verification or
 TTL writes. These are local fixture measurements, not a general device latency
-guarantee. Exact package identity and lifecycle acceptance remain pending.
+guarantee. Exact package identity and lifecycle acceptance are recorded separately
+in [9.50 acceptance](NATIVE_9_50_ACCEPTANCE.md); physical phone/inference remains open.
 No physical-device or inference outcome is claimed by these tests.

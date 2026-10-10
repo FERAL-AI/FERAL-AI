@@ -1,6 +1,18 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 9).** Immutable Mac 9.49/build2026100903 contains
+**Current checkpoint (October 9).** Immutable Mac 9.50/build2026100904 contains
+exact published runtime source `5f488ba8a3e0012c6e02a145ca1c4bcb16cb3e91`.
+Paired tracked input has private device ownership, stable receipts and credential
+revocation fences; WebUI setup uses passive supported inventory and truthful
+probe/save state. Frozen backend integration passes 4,967 tests/22 skips; full
+WebUI passes 1,409 tests. All 501 packaged Python and 70 WebUI files match source.
+The 54 unchanged Swift inputs reuse the verified native output. Actual isolated
+native setup/Home/Chat, bundled WebUI catalogue checks and normal Quit/relaunch
+pass. Sole rollback: 9.49. Device-owned approvals, job-scoped Chrome, physical
+phone/inference/audio, messaging, commerce and distribution remain open.
+[Exact acceptance](NATIVE_9_50_ACCEPTANCE.md), [current ownership](WORK_STATE.md).
+
+**Historical checkpoint (October 9).** Immutable Mac 9.49/build2026100903 contains
 published exact runtime source `58ad0a0252a87230a5d08552b6ab316ce221451c`.
 It adds explicit device tool-review authority boundaries and corrects native chat/
 probe readiness presentation, retaining the prior provider, workflow, phone intake

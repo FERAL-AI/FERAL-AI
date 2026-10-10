@@ -7,9 +7,47 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 9
 
-### Published 9.49 artifact and integrated source wave
+### Current 9.50 artifact and source wave
 
-**Current checkpoint (October 9).** Immutable Mac 9.49/build2026100903 contains
+Immutable Mac 9.50/build2026100904 contains exact published runtime
+`5f488ba8a3e0012c6e02a145ca1c4bcb16cb3e91`. It adds negotiated paired-phone
+receipt ownership/replay/revocation and WebUI setup catalogue/probe/save parity.
+Runtime commits b94fcc0d4 and 5f488ba8a are published on
+feat/native-product-release-foundation-20261001, draft PR310. Current-source CI
+has not completed at this checkpoint; preceding CI is separate. No merge,
+release or iOS repository change is performed by this wave.
+
+Final frozen backend integration passes 4,967 tests/22 skips across 251 suites;
+full WebUI passes 1,409 tests across 174 files. Full Mac mypy retains 796 existing
+diagnostics with zero normalized additions/removals. CI-rule core Ruff, version
+coherence and HUP naming pass. All 501 packaged Python and 70 WebUI files match
+committed source; runtime/import/strict ad-hoc signatures pass. All 54 unchanged
+Swift inputs and flags permit verified native binary reuse, not a new compile.
+
+Actual bundled-method checks cover disposable real pairing/private SQLite receipt,
+one inert effect, close/reopen replay, foreign-source refusal and revoked orphan
+bearer rejection. Native isolated avatar/name/setup/Home/Chat and two normal
+Quit/relaunch checks pass; saved port 43286 persists without an environment port
+override, under distinct runtime identities. The bundled WebUI renders in Chrome,
+with unsupported choices disabled, unprobed state unknown and explicit negative
+local catalogue probe history retained through refresh. Welcome Continue AX
+activation did not advance; direct AI Provider tab activation worked. No real
+inference, account, microphone, message, payment or physical phone test is claimed.
+Final hosts and the backend in the retained replacement log are absent; listener
+closed. Relaunch recreates the runtime log, limiting final PID evidence for the
+first backend. Artifact/manifest hashes remain unchanged.
+
+Assembly takes 30.89 seconds; free space is 15,422,464,000 before / 15,328,325,632
+after, net 94,138,368 bytes within 2 GiB. Canonical 9.50 and sole generated rollback
+9.49 remain; inspected obsolete 9.48 retired with identity/process/signature checks.
+Small receipts, profiles, models, caches and useful Git history remain. Pre-existing
+AUDIT-FIXES.md stays unstaged. [Exact artifact and acceptance](NATIVE_9_50_ACCEPTANCE.md),
+[paired input contract](PHONE_TRACKED_INPUT_20261009.md),
+[setup contract](WEB_SETUP_CATALOG_20261009.md).
+
+### Historical published 9.49 artifact and source wave
+
+**Historical checkpoint (October 9).** Immutable Mac 9.49/build2026100903 contains
 published exact runtime source `58ad0a0252a87230a5d08552b6ab316ce221451c`.
 It adds explicit device tool-review authority boundaries and corrects native chat/
 probe readiness presentation, retaining the prior provider, workflow, phone intake
@@ -48,11 +86,14 @@ model/cache/Git cleanup. AUDIT-FIXES.md remains unstaged. No docs-only rebuild.
 
 ### Next ready cards and ownership
 
-The next source wave is verified above published 50caf149e; it is not in 9.49.
-All three workers released their source/review files. Parent owns integration,
-documentation, publication and exact-source packaging. No iOS source is owned
-or changed by this wave. Preserve the current bundle and rollback until new
-exact-source packaging passes. Reconcile all worker/source claims before reuse.
+The completed source wave above 50caf149e is verified and packaged in 9.50.
+All three workers released their implementation files. Parent owns integration,
+checkpoint, publication and packaging. Independent follow-on read-only cards:
+task_journey_reconcile owns phone provenance assessment; web_regression_repair
+completed job/Chrome grant assessment; native_provider_readiness completed provider
+binding/readiness assessment. No source file is being edited by those assessments.
+No iOS source is owned or changed here. Reconcile worker claims
+and explicit file ownership before the next implementation wave.
 
 Implementation adds negotiated paired-phone receipt identity and private source
 storage through the existing ChatTurnManager. Device approval resolution remains
@@ -66,20 +107,21 @@ orphan/rotated/expired bearer authentication is refused. Read-only currentness
 avoids repeated hashing/TTL updates. Real pairing/store/public dispatch fixtures
 pass; installed phone/inference acceptance remains separate.
 The Chrome review identifies ToolRunner, selected CDP and review projection owner
-checks that require one coordinated resource grant. WebUI setup parity is being
+checks that require one coordinated resource grant. WebUI setup parity is
 corrected against shared catalogue flags and explicit probe responses. Full
 WebUI passes 1,409 tests across 174 files with 367 unchanged inputs; focused setup
 passes 48 tests. Final WebUI is rebuilt and its model-picker contract passes.
-New source prepares 9.50/build2026100904, with 54 unchanged Swift inputs eligible
-for verified 9.49 binary reuse. Packaging budget remains 2 GiB; measured available
-space is about 15 GiB. Assembly, package identity and lifecycle are pending.
+New source is packaged as 9.50/build2026100904 with verified 9.49 native binary
+reuse. Assembly, exact package identity and bounded lifecycle pass. Physical
+device/model/audio and account acceptance remain open.
 [Phone input contract](PHONE_TRACKED_INPUT_20261009.md),
 [setup behavior](WEB_SETUP_CATALOG_20261009.md).
 
-1. Add trusted tracked phone ingress identity and receipts through existing
-   ChatTurnManager. Persist private paired-device principal and current peer;
-   never infer it from session IDs, node aliases or broadcast membership.
-2. Bind each exact review before publication, enable origin-facing discovery and
+1. Completed in 9.50: trusted tracked phone ingress and private receipt ownership
+   through existing ChatTurnManager. Neither a SID nor broadcast membership grants
+   authority. Physical installed-phone acceptance remains open.
+2. Next: transfer private principal through direct/reviewed TaskFlow handoff and
+   bind each exact review before publication. Enable origin-facing discovery and
    resolution only for its authenticated origin, translate internally to existing
    execution identity, and preserve replay/cancellation/unknown-outcome guards.
    Until accepted, paired REST/node tool-review resolution remains unavailable;
@@ -87,8 +129,10 @@ space is about 15 GiB. Assembly, package identity and lifecycle are pending.
 3. Add explicit job-scoped Chrome resource permission without replacing physical
    owner or widening local-only routes. Shared conversation selection alone does
    not authorize a detached browser job.
-4. Run provisioned model/browser/desktop/physical-phone acceptance when model+
-   spend/download limits and installed phone endpoint/error are provided. No such
+4. Correct generic cloud endpoint catalogue binding and native readiness/action
+   contrast without passive network discovery. Provisioned model/browser/desktop/
+   physical-phone acceptance requires model choice, spend/download limits and
+   installed phone endpoint/error. No such
    reply has arrived. Continue voice/local provisioning/messaging/commerce/
    distribution contracts independently; coding/Linux/Gen-UI expansion deferred.
 
