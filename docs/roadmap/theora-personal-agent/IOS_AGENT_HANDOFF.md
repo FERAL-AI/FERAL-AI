@@ -1,5 +1,22 @@
 # Theora iOS personal-agent research and handoff
 
+## October 9: Mac 9.51 private task origin
+
+Mac 9.51/build2026100905, exact runtime 901c72f10, retains the negotiated
+turn_contract_version 1 wire contract below. Authenticated private phone origin
+now persists through direct/reviewed TaskFlow creation and backing-skill
+status/list discovery, including reopen and same-device credential renewal.
+No new iOS wire field is required; supplied device IDs or session membership
+remain insufficient authority. Public receipts exclude the private principal.
+
+Paired tool-review resolution still returns its existing unavailable state.
+Private review publication/resolution, later model-step renewal and job-scoped
+Chrome delegation are next. Preserve pending cards; do not substitute a Mac
+operator token. Active cloud catalogue binding is also corrected in this bundle.
+Source/packaged-method/lifecycle checks pass; physical installed-phone connection,
+inference and browser task acceptance remain required.
+[Exact 9.51 acceptance](NATIVE_9_51_ACCEPTANCE.md), [checkpoint](WORK_STATE.md).
+
 ## October 9: Mac 9.50 negotiated paired input
 
 Mac 9.50/build2026100904, exact runtime 5f488ba8a, adds optional integer turn_contract_version 1 on

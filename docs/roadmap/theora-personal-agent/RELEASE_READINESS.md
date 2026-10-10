@@ -1,6 +1,19 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 9).** Immutable Mac 9.50/build2026100904 contains
+**Current checkpoint (October 9).** Immutable Mac 9.51/build2026100905 contains
+exact runtime source `901c72f1075eab7ca59550e35142be6cecb524ff`.
+Private phone origin survives direct/reviewed TaskFlow creation and backing-skill
+discovery. Active cloud catalogue connections match resolved runtime settings
+across startup and activation. Frozen affected-path checks pass 685 tests; full
+Mac typing adds zero diagnostics and removes eight existing ones. All 501 Python
+and 70 WebUI files match source; strict ad-hoc signing, actual packaged methods
+and backend startup/lifeline shutdown pass. Unchanged Swift/WebUI retain earlier
+9.50 evidence; no new GUI or fresh compile is claimed. Sole rollback: 9.50.
+Phone review authority, job-scoped Chrome, physical inference/audio, messaging,
+commerce and distribution remain open. This is a deliberate batch checkpoint.
+[Exact acceptance](NATIVE_9_51_ACCEPTANCE.md), [current ownership](WORK_STATE.md).
+
+**Historical checkpoint (October 9).** Immutable Mac 9.50/build2026100904 contains
 exact published runtime source `5f488ba8a3e0012c6e02a145ca1c4bcb16cb3e91`.
 Paired tracked input has private device ownership, stable receipts and credential
 revocation fences; WebUI setup uses passive supported inventory and truthful

@@ -30,7 +30,7 @@ Probe measures the provider catalogue connection. It does not verify the active
 model endpoint, unsaved credentials, inference, FERAL tool use or voice. The
 existing backend explicitly binds saved local endpoints. In preceding 9.50,
 generic custom cloud endpoints can differ from catalogue defaults after restart
-or key changes. Follow-on source aligns active cloud connections at startup and
+or key changes. Mac 9.51 aligns active cloud connections at startup and
 all settings/key activation paths; [behavior and validation](ACTIVE_CLOUD_CATALOG_20261009.md).
 It does not make a reachability probe proof of model inference.
 
@@ -57,3 +57,7 @@ physical-device test is performed by these checks.
 This source is included in immutable Mac 9.50, not preceding 9.49. Build identity
 and scope are in [9.50 acceptance](NATIVE_9_50_ACCEPTANCE.md) and
 [WORK_STATE](WORK_STATE.md).
+
+Mac 9.51 retains these 70 unchanged WebUI files and adds the backend cloud
+binding correction. No new WebUI rebuild or GUI run is claimed in that batch.
+[9.51 artifact and scope](NATIVE_9_51_ACCEPTANCE.md).

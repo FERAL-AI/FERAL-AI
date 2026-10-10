@@ -37,6 +37,6 @@ credential rotation, before-commit revocation and post-read cancellation. Affect
 typing and lint checks pass. One existing baseline case attempts a model-hub
 lookup that is blocked by the test network guard; no live model is used.
 
-This source follows immutable Mac 9.50 and is not included in that package.
+This source is included in immutable Mac 9.51; it is absent from 9.50.
 Current integrated checks, packaging and publication are recorded in
 [WORK_STATE](WORK_STATE.md).

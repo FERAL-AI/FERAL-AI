@@ -7,33 +7,40 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 9
 
-### Current 9.50 artifact and source wave
+### Current 9.51 artifact and completed batch
 
-Verified follow-on source batch, packaging pending: private phone origin now
-survives direct/reviewed TaskFlow creation and backing-skill discovery while the
-native client keeps shared-session routing ownership. Supported active cloud
-catalogue connections match resolved endpoints/credentials after startup and all
-Settings/key activation paths. Both workers released their files; parent owns
-integration, docs, packaging and publication. No native Swift/UI or iOS change.
-Existing immutable 9.50 does not contain this new source yet.
+Immutable Mac 9.51/build2026100905 contains exact runtime source
+`901c72f1075eab7ca59550e35142be6cecb524ff`. Private phone origin survives
+TaskFlow creation and backing-skill discovery. Active cloud catalogue connections
+match resolved runtime settings after startup and Settings/key activation.
+The source is committed on the PR310 feature branch; verify its remote identity
+when resuming. Both workers released their files. This batch is deliberately
+paused after packaging, documentation and branch publication; no background
+implementation work is implied. No iOS source, native Swift or WebUI change.
 
-Final frozen affected-path integration passes 685 tests, 200 warnings, 36 suites
-in 39.97 seconds with zero source drift. Full configured Mac typing has 788
-existing diagnostics: zero added, eight removed versus 9.50, with no input drift.
-Full-core CI Ruff and authored whitespace pass. Earlier 553/684-pass gates and
-the failed 797-diagnostic typing run remain historical; the unavailable-runtime
-guard was corrected before this acceptance. Worker focused phone verification
-passes 144 tests; final provider/activation checks and parent integration include
-the narrow failure/typing correction. No inference, account or physical test.
+Final frozen affected-path integration passes 685 tests, 200 warnings across
+36 suites in 39.97 seconds with zero source drift. Full configured Mac typing
+has 788 existing diagnostics: zero added, eight removed versus 9.50. Full-core
+CI Ruff and authored whitespace pass. Earlier 553/684-pass gates and failed
+797-diagnostic typing remain historical; the unavailable-runtime guard was
+corrected before final acceptance. Prior unchanged-input WebUI/GUI evidence
+is retained, not relabeled as a new 9.51 run.
 
-Packaging target 9.51/build2026100905, one offline cached assembly. Planned net
-new payload limit 2 GiB; latest available space 15.5 GiB. All 54 Swift sources and
-flags are unchanged, so verified native reuse is eligible. Keep canonical 9.50
-until staging/identity checks pass, then sole rollback 9.50 and inspected obsolete
-9.49 retirement. Actual resource/identity receipts are mandatory after assembly.
-Parent prepared identity-gated builder and isolated bundled-method/startup probes.
-[Phone task behavior](PHONE_TASKFLOW_ORIGIN_20261009.md),
+All 501 packaged Python and 70 WebUI files match source. All 54 unchanged Swift
+inputs and flags permit verified native reuse. Strict signature/import audits,
+actual bundled phone/TaskFlow/cloud methods and isolated backend startup in
+2.08 seconds/lifeline shutdown pass. Listener closes and artifact identity is
+unchanged. No inference, audio, account, physical phone or new GUI test is claimed.
+
+Offline assembly takes 39.25 seconds; free space is 15,332,806,656 before and
+15,255,949,312 after, net 76,857,344 bytes within 2 GiB. Canonical 9.51 and sole
+rollback 9.50 remain. Inspected obsolete 9.49 is retired. Private profiles,
+models, caches, useful Git history and unstaged AUDIT-FIXES.md are preserved.
+[Exact artifact and evidence](NATIVE_9_51_ACCEPTANCE.md),
+[phone task behavior](PHONE_TASKFLOW_ORIGIN_20261009.md),
 [cloud connection behavior](ACTIVE_CLOUD_CATALOG_20261009.md).
+
+### Historical 9.50 artifact and source wave
 
 Immutable Mac 9.50/build2026100904 contains exact published runtime
 `5f488ba8a3e0012c6e02a145ca1c4bcb16cb3e91`. It adds negotiated paired-phone
@@ -112,57 +119,29 @@ model/cache/Git cleanup. AUDIT-FIXES.md remains unstaged. No docs-only rebuild.
 
 ### Next ready cards and ownership
 
-The completed source wave above 50caf149e is verified and packaged in 9.50.
-All three workers released their implementation files. Parent owns integration,
-checkpoint, publication and packaging. Independent follow-on read-only cards:
-task_journey_reconcile owns phone provenance assessment; web_regression_repair
-completed job/Chrome grant assessment; native_provider_readiness completed provider
-binding/readiness assessment. No source file is being edited by those assessments.
-No iOS source is owned or changed here. Reconcile worker claims
-and explicit file ownership before the next implementation wave.
+The phone creation/discovery and active cloud binding cards are complete in 9.51.
+No worker is assigned an implementation file at this deliberate pause. Parent
+owns integration, checkpoint and publication. Reconcile actual Git, candidate
+identity and worker status before resuming. The separate iOS agent owns that
+repository; no iOS code is edited here.
 
-Implementation adds negotiated paired-phone receipt identity and private source
-storage through the existing ChatTurnManager. Device approval resolution remains
-unavailable pending exact review provenance; no session membership grants it.
-Final frozen backend checks pass 4,967 tests, 22 skips across 251 suites, with
-zero source drift. Full Mac mypy remains 796 diagnostics with zero added/removed;
-the first callback annotation discrepancy is corrected and its failure retained.
-Full-core CI Ruff, HUP naming and version coherence pass. Legacy paired phone
-chat/text also retain credential revocation in the existing dispatch lease;
-orphan/rotated/expired bearer authentication is refused. Read-only currentness
-avoids repeated hashing/TTL updates. Real pairing/store/public dispatch fixtures
-pass; installed phone/inference acceptance remains separate.
-The Chrome review identifies ToolRunner, selected CDP and review projection owner
-checks that require one coordinated resource grant. WebUI setup parity is
-corrected against shared catalogue flags and explicit probe responses. Full
-WebUI passes 1,409 tests across 174 files with 367 unchanged inputs; focused setup
-passes 48 tests. Final WebUI is rebuilt and its model-picker contract passes.
-New source is packaged as 9.50/build2026100904 with verified 9.49 native binary
-reuse. Assembly, exact package identity and bounded lifecycle pass. Physical
-device/model/audio and account acceptance remain open.
-[Phone input contract](PHONE_TRACKED_INPUT_20261009.md),
-[setup behavior](WEB_SETUP_CATALOG_20261009.md).
+1. Complete private phone review publication, discovery, resolution and exact
+   model-step renewal using the persisted origin. Paired REST/node approvals
+   remain unavailable; the Mac operator inbox remains usable. Stored TaskFlow
+   provenance alone grants no review authority. Do not widen global broadcasts.
+2. Implement explicit job-scoped Chrome permission across ToolRunner, selected
+   CDP and review projection while retaining physical resource ownership. Shared
+   conversation selection alone does not authorize a detached browser task.
+3. Perform configured model and installed-phone browser/task acceptance with
+   the actual endpoint/error, provider/model and any spend/download limits.
+   Those details have not arrived. Fixture success is not physical acceptance.
+4. Retain continuous voice/local provisioning, messaging, commerce, proactive
+   multitasking, shared memory/social collaboration and distribution in the full
+   coverage plan. Native contrast/runtime wording and the historical Welcome
+   Continue accessibility observation remain UX follow-ups. Coding expansion,
+   Linux expansion and Gen-UI remain deferred.
 
-1. Completed in 9.50: trusted tracked phone ingress and private receipt ownership
-   through existing ChatTurnManager. Neither a SID nor broadcast membership grants
-   authority. Physical installed-phone acceptance remains open.
-2. Next: transfer private principal through direct/reviewed TaskFlow handoff and
-   bind each exact review before publication. Enable origin-facing discovery and
-   resolution only for its authenticated origin, translate internally to existing
-   execution identity, and preserve replay/cancellation/unknown-outcome guards.
-   Until accepted, paired REST/node tool-review resolution remains unavailable;
-   Mac operator inbox remains available. Origin-private publication is not done.
-3. Add explicit job-scoped Chrome resource permission without replacing physical
-   owner or widening local-only routes. Shared conversation selection alone does
-   not authorize a detached browser job.
-4. Correct generic cloud endpoint catalogue binding and native readiness/action
-   contrast without passive network discovery. Provisioned model/browser/desktop/
-   physical-phone acceptance requires model choice, spend/download limits and
-   installed phone endpoint/error. No such
-   reply has arrived. Continue voice/local provisioning/messaging/commerce/
-   distribution contracts independently; coding/Linux/Gen-UI expansion deferred.
-
-Detailed next-card handoff: feral-phone-tracked-origin-next-card-20261009.json
+Detailed next-card handoff: feral-phone-review-origin-next-card-20261009.json
 (private). [Current device boundary](DEVICE_APPROVAL_AUTHORITY_EVIDENCE_20261009.md)
 and [native readiness scope](NATIVE_READINESS_PRESENTATION_20261009.md). The full
 product backlog remains in REQUEST_COVERAGE and EXECUTION_PLAN; no feature is
