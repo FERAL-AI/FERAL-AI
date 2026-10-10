@@ -1396,6 +1396,11 @@ class Orchestrator:
         session_id: str | None = None,
         actor: str = "api",
     ) -> dict:
+        from security.approval_ingress import device_approval_authority_unavailable
+        if device_approval_authority_unavailable():
+            # A claimed SID, node alias or session broadcast membership cannot
+            # replace the missing per-review authenticated device principal.
+            return {"status": "approval_device_authority_unavailable"}
         if not approved:
             # Revocation requires the pending SID, not fresh context authority.
             return await self._resolve_tool_approval_request_impl(request_id, approved=False, session_id=session_id, actor=actor)
@@ -1561,6 +1566,9 @@ class Orchestrator:
                 session_id=session_id,
                 actor="chat_text",
             )
+            if outcome.get("status") == "approval_device_authority_unavailable":
+                await self._send_text(session_id, "Device approval ownership is unavailable. Resolve this request in the Mac operator inbox.")
+                return True
             if outcome.get("status") in {"origin_unavailable", "origin_unsettled", "origin_superseded", "stale_context"}:
                 await self._send_text(session_id, "This approval could not be verified. Inspect the pending request before continuing.")
                 return True
@@ -1576,6 +1584,9 @@ class Orchestrator:
                 session_id=session_id,
                 actor="chat_text",
             )
+            if outcome.get("status") == "approval_device_authority_unavailable":
+                await self._send_text(session_id, "Device approval ownership is unavailable. Resolve this request in the Mac operator inbox.")
+                return True
             return outcome.get("status") == "rejected"
 
         return False

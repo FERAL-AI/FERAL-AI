@@ -5,13 +5,28 @@ from __future__ import annotations
 import re
 from uuid import UUID
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request
 
 from api.state import state
 from agents.runtime_context_checkpoint import RuntimeContextError
 from memory.runtime_session_checkpoint import CheckpointValidationError, validate_session_id
 
 router = APIRouter(tags=["approvals"])
+
+
+def _require_approval_caller(request: Request) -> None:
+    """Paired-device authentication alone is not request ownership.
+
+    Pending approvals do not yet retain an authenticated originating device
+    principal. Session/body claims and broadcast membership cannot fill that
+    gap. The existing profile operator inbox remains available.
+    """
+    if (getattr(request.state, "phone_device_id", None) is not None
+            or getattr(request.state, "device_credential_kind", None) is not None):
+        raise HTTPException(status_code=403, detail={
+            "code": "approval_device_authority_unavailable",
+            "message": "This device cannot resolve or inspect approvals yet. Use the operator approval inbox.",
+        })
 
 
 def _require_orchestrator():
@@ -74,7 +89,8 @@ def _scope_projection(runner, row: dict) -> dict:
 
 
 @router.get("/api/approvals")
-async def list_pending_approvals(session_id: str = "", limit: int = 100):
+async def list_pending_approvals(request: Request, session_id: str = "", limit: int = 100):
+    _require_approval_caller(request)
     orch = _require_orchestrator()
     sid = session_id.strip() or None
     rows = orch.tool_runner.list_pending(
@@ -106,7 +122,8 @@ async def list_pending_approvals(session_id: str = "", limit: int = 100):
     }
 
 
-async def _resolve_request(request_id: str, *, approved: bool, body: dict | None = None) -> dict:
+async def _resolve_request(request_id: str, *, approved: bool, request: Request, body: dict | None = None) -> dict:
+    _require_approval_caller(request)
     orch = _require_orchestrator()
     payload = body or {}
     session_id = payload.get("session_id")
@@ -188,8 +205,8 @@ async def trust_state():
 
 
 @router.post("/api/approvals/{request_id}/approve")
-async def approve_request(request_id: str, body: dict | None = None):
-    outcome = await _resolve_request(request_id, approved=True, body=body)
+async def approve_request(request_id: str, request: Request, body: dict | None = None):
+    outcome = await _resolve_request(request_id, approved=True, request=request, body=body)
     return {
         "success": True,
         "status": outcome.get("status", "approved"),
@@ -203,8 +220,8 @@ async def approve_request(request_id: str, body: dict | None = None):
 
 
 @router.post("/api/approvals/{request_id}/reject")
-async def reject_request(request_id: str, body: dict | None = None):
-    outcome = await _resolve_request(request_id, approved=False, body=body)
+async def reject_request(request_id: str, request: Request, body: dict | None = None):
+    outcome = await _resolve_request(request_id, approved=False, request=request, body=body)
     return {
         "success": True,
         "status": outcome.get("status", "rejected"),

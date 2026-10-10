@@ -45,35 +45,40 @@ Canonical 9.48 and sole rollback 9.47 are retained. Inspected obsolete 9.46 reti
 with identity/process/signature checks. No personal model/profile/Git cleanup.
 Pre-existing AUDIT-FIXES.md remains unstaged. No documentation-only rebuild.
 
-### Next ready cards and ownership
+### Active source wave for 9.49
 
-Parent owns shared contracts, checkpoint, publication and candidate integration.
-The prior implementation wave's source files are released. Current assignments:
+The paused review cards are implemented and verified in source; current app 9.48
+remains unchanged. Paired REST tool-review inspection/resolution and node-origin
+tool-review acknowledgements now fail closed until trusted per-request device
+provenance exists. Local operator approvals retain existing exact authority.
+Nine focused suites pass 207 tests; the frozen integration passes 4,766 tests,
+22 skips, 571 warnings across 234 suites in 159.66 seconds with zero source drift.
+Full pinned Mac typing remains 796 diagnostics, zero normalized additions/removals.
+A lint-only imported-fixture adjustment is verified separately by its 14 cases.
+[Boundary, verification and required follow-on](DEVICE_APPROVAL_AUTHORITY_EVIDENCE_20261009.md).
 
-- Task journey worker: implements paired REST approval authorization in
-  api/routes/approvals.py and tests/test_phone_approval_authority.py. Preserve
-  local operator behavior; no job Chrome delegation or HUP handoff in this card.
-- Independent review worker: read-only caller/device/session/terms/replay boundary
-  review for the same contract; no shared edits.
-- Native provider worker: implements receipt-ready wording and separately labeled
-  explicit probe evidence in six owned native model/setup/provider files and tests.
-  No backend schema, provider operation, download or packaging changes.
+Six native files correct receipt-connected wording and preserve explicitly
+validated last-probe history through unchanged passive refresh. Providers 75,
+Onboarding 100 and linked model 29 groups pass; production 54-source typecheck passes.
+Independent source review confirms generation/cancel fencing remains intact.
+[Behavior and limits](NATIVE_READINESS_PRESENTATION_20261009.md).
 
-Independent review requires an explicit per-request device authority boundary for
-paired REST approval access. A bounded fail-closed repair is assigned before
-origin projection; automatic broadcast membership is not ownership. Paired
-resolution remains unavailable until trusted device provenance is added.
-Implementation assignments follow concrete contracts and exclusive file ownership.
-Next dependency order: originating-chat approval bridge, explicit task-scoped
-Chrome delegation, provisioned-model/browser/desktop/phone acceptance, then
-voice/messaging/commerce/distribution cards. Coding/Linux/Gen-UI expansion deferred.
-Actual provider/model choice and phone endpoint/error are still missing for live
-acceptance; do not infer permission to download models or use paid accounts.
+All worker implementation files are released. Parent owns integration/docs/Git.
+After reviewed publication, build exact-source 9.49 with 54 native inputs and an
+estimated at most 2 GiB new artifacts, cached offline dependencies, canonical 9.49
+plus sole rollback 9.48. Inspected obsolete 9.47 may retire only after verified
+identity/signature/process checks. Last free-space observation is 14,540,800,000
+bytes. Pre-existing AUDIT-FIXES.md remains unstaged. No personal profile/model/Git
+cleanup or model download is authorized by these fixture checks.
 
-At exact runtime 24a, remote native contracts, Linux bundle, browser E2E, WebUI,
-SDK, lint/docs/version and typing checks pass; broad backend PR tests are pending.
-Opt-in/main-only checks are skipped. CI is observed, not a blocker for independent
-local cards. [Detailed artifact receipt](NATIVE_9_48_ACCEPTANCE.md).
+Next dependency order: trusted tracked phone principal/receipt handoff and
+origin-facing approval publication/resolution, then explicit job-scoped Chrome
+resource delegation, then provisioned-model/browser/desktop/physical-phone
+acceptance. Voice/messaging/commerce/distribution remain on the full plan;
+coding/Linux/Gen-UI expansion deferred. Provider/model choice and actual phone
+endpoint/error remain missing for live acceptance. The concrete next-card private
+handoff is feral-phone-tracked-origin-next-card-20261009.json; use existing
+ChatTurnManager/TaskFlow/dispatcher with additive contracts, not a second runner.
 
 ### Local iOS and phone intake integration, October 9
 

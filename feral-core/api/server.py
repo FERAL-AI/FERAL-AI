@@ -3698,6 +3698,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
         guard_phone_chat()
         await ws.send_json(hup_frame("chat_response", chat_payload))
 
+    from security.approval_ingress import begin_node_approval_ingress, end_node_approval_ingress
+    approval_ingress_token = begin_node_approval_ingress()
     try:
         while True:
             try:
@@ -5170,6 +5172,9 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
     except WebSocketDisconnect:
         pass
     finally:
+        # Reset this receive task only. Already spawned work retains the
+        # server-owned node restriction through its copied task context.
+        end_node_approval_ingress(approval_ingress_token)
         phone_chats.stop()
 
         async def settle_phone():
