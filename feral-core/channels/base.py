@@ -1727,6 +1727,11 @@ class ChannelManager:
         to a channel that started degraded or did not come up.
         """
         cls = self.CHANNEL_TYPES.get(channel_type)
+        if cls is None and channel_type == "imessage":
+            # Lazy import avoids the Channel base/module import cycle while
+            # keeping the bridge explicitly visible to the manager.
+            from channels.imessage import IMessageChannel
+            cls = IMessageChannel
         if not cls:
             known = ", ".join(sorted(self.CHANNEL_TYPES))
             logger.warning(f"Unknown channel type: {channel_type}")

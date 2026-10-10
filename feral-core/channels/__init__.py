@@ -8,3 +8,4 @@ from channels.base import (
     SlackChannel,
     WhatsAppChannel,
 )
+from channels.imessage import IMessageChannel

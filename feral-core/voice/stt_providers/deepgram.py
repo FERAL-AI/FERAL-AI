@@ -18,7 +18,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from typing import AsyncIterator
+from typing import AsyncIterator, Protocol
 
 from voice.stt_providers import (
     STTProvider,
@@ -40,6 +40,14 @@ DEEPGRAM_WS_URL = (
 )
 
 
+class RecognitionTransport(Protocol):
+    """The shared modern/legacy WebSocket surface this provider actually uses."""
+
+    async def send(self, message: str | bytes) -> None: ...
+    async def close(self) -> None: ...
+    def __aiter__(self) -> AsyncIterator[str | bytes]: ...
+
+
 @register_stt_provider("deepgram")
 class DeepgramSTTProvider(STTProvider):
     """Streaming STT via Deepgram Nova."""
@@ -58,30 +66,41 @@ class DeepgramSTTProvider(STTProvider):
         self._model = model
         self._language = language
         self._sample_rate = sample_rate
-        self._ws = None
+        self._ws: RecognitionTransport | None = None
         self._transcript_queue: asyncio.Queue[TranscriptFragment | None] = asyncio.Queue()
         self._recv_task: asyncio.Task | None = None
         self._closed = False
+        self._prepare_lock = asyncio.Lock()
+
+    async def prepare(self) -> None:
+        """Open one transport before accepting the first microphone bytes."""
+        import websockets
+        async with self._prepare_lock:
+            if self._closed:
+                raise RuntimeError("Recognition provider is closed")
+            if self._ws is not None:
+                return
+            url = DEEPGRAM_WS_URL.format(
+                model=self._model, sample_rate=self._sample_rate, language=self._language,
+            )
+            auth_headers = {"Authorization": f"Token {self._api_key}"}
+            socket: RecognitionTransport
+            try:
+                from websockets.asyncio.client import connect as _ws_connect
+            except ImportError:
+                socket = await websockets.connect(url, extra_headers=auth_headers)
+            else:
+                socket = await _ws_connect(url, additional_headers=auth_headers)
+            # A delayed connection must not resurrect a closed provider.
+            if self._closed:
+                await socket.close()
+                raise RuntimeError("Recognition provider is closed")
+            self._ws = socket
+            self._recv_task = asyncio.create_task(self._receive_loop())
 
     async def open_stream(self) -> AsyncIterator[TranscriptFragment]:
-        """Connect to Deepgram and yield transcript fragments."""
-        import websockets
-
-        url = DEEPGRAM_WS_URL.format(
-            model=self._model,
-            sample_rate=self._sample_rate,
-            language=self._language,
-        )
-
-        # Cross-version `websockets`: 14.x dropped the legacy entry
-        # point + `extra_headers` kwarg. Prefer asyncio client.
-        auth_headers = {"Authorization": f"Token {self._api_key}"}
-        try:
-            from websockets.asyncio.client import connect as _ws_connect
-            self._ws = await _ws_connect(url, additional_headers=auth_headers)
-        except ImportError:
-            self._ws = await websockets.connect(url, extra_headers=auth_headers)
-        self._recv_task = asyncio.create_task(self._receive_loop())
+        """Prepare the transport and yield transcript fragments."""
+        await self.prepare()
 
         try:
             while True:
@@ -94,8 +113,11 @@ class DeepgramSTTProvider(STTProvider):
 
     async def _receive_loop(self) -> None:
         """Read Deepgram WebSocket events and enqueue transcript fragments."""
+        socket = self._ws
+        if socket is None:
+            return
         try:
-            async for raw_msg in self._ws:
+            async for raw_msg in socket:
                 try:
                     event = json.loads(raw_msg)
                 except (json.JSONDecodeError, TypeError):
@@ -166,14 +188,20 @@ class DeepgramSTTProvider(STTProvider):
 
     async def send_audio(self, audio_bytes: bytes) -> None:
         """Forward raw PCM16 audio to Deepgram."""
-        if self._ws and not self._closed:
-            await self._ws.send(audio_bytes)
+        await self.prepare()
+        socket = self._ws
+        if self._closed:
+            raise RuntimeError("Recognition provider is closed")
+        if socket is None:
+            raise RuntimeError("Recognition transport is unavailable")
+        await socket.send(audio_bytes)
 
     async def close(self) -> None:
         """Send CloseStream and tear down the WebSocket."""
         if self._closed:
             return
         self._closed = True
+        self._transcript_queue.put_nowait(None)
 
         if self._ws:
             try:

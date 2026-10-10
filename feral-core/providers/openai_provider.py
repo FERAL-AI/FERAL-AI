@@ -93,6 +93,9 @@ class OpenAIProvider(BaseProvider):
         tools: Optional[list[dict[str, Any]]] = None,
         **kwargs: Any,
     ) -> ChatResponse:
+        from providers.model_classes import is_unsupported_live_model
+        if is_unsupported_live_model("openai", model):
+            raise RuntimeError("unsupported_live_protocol: GPT-Live requires a dedicated Live session/delegation adapter")
         if not self._api_key:
             raise RuntimeError("openai provider has no api_key configured")
         payload: dict[str, Any] = {
@@ -119,14 +122,39 @@ class OpenAIProvider(BaseProvider):
         if "reasoning_effort" in kwargs and kwargs["reasoning_effort"]:
             payload["reasoning_effort"] = kwargs["reasoning_effort"]
 
+        responses_route = model in {"gpt-6.1-sol", "gpt-6-luna"}
+        if responses_route:
+            # Reuse the production body contract, including tool flattening and
+            # sampling removal for GPT-6 reasoning. No second adapter schema.
+            from agents.llm_provider import LLMProvider
+            builder = LLMProvider.__new__(LLMProvider)
+            builder.provider = "openai"
+            builder.model = model
+            payload = builder._build_responses_body(
+                [_msg_to_openai(m) for m in messages], tools,
+                temperature if temperature is not None else 1,
+                max_tokens if max_tokens is not None else 1024, stream=False,
+            )
+            if kwargs.get("reasoning_effort"):
+                effort = kwargs["reasoning_effort"]
+                supported = {"low", "medium", "high", "xhigh", "max"}
+                if model == "gpt-6-luna":
+                    supported.add("none")
+                if effort not in supported:
+                    raise ValueError("Unsupported reasoning effort for selected GPT-6 model")
+                payload["reasoning"]["effort"] = effort
         async with httpx.AsyncClient(timeout=60.0) as c:
             r = await c.post(
-                f"{self._base_url}/chat/completions",
+                f"{self._base_url}/{'responses' if responses_route else 'chat/completions'}",
                 headers={"Authorization": f"Bearer {self._api_key}"},
                 json=payload,
             )
             r.raise_for_status()
             data = r.json()
+        if responses_route:
+            data = LLMProvider._responses_payload_to_chat_dict(data)
+            if data.get("error"):
+                raise RuntimeError(str(data["error"]))
         choice = data["choices"][0]
         msg = choice["message"]
         return ChatResponse(

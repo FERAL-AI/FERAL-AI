@@ -9,6 +9,8 @@ missed-job catch-up within 1-day window.
 from __future__ import annotations
 
 import fcntl
+import hashlib
+import math
 import json
 import logging
 import os
@@ -16,10 +18,9 @@ import re
 import sqlite3
 import threading
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
-from pathlib import Path
 from typing import Any, Callable, Optional
 from uuid import uuid4
 from zoneinfo import ZoneInfo
@@ -381,6 +382,8 @@ class CronService:
             self._timezone = ZoneInfo(local_timezone_name())
         self._max_concurrent: int = int(config.get("max_concurrent_jobs", 5))
         self._running_jobs: set[int] = set()
+        self._active_occurrences: dict[int, str] = {}
+        self._occurrence_warnings: dict[str, None] = {}
         # Liveness bookkeeping. A scheduler that stops scheduling has to be
         # visible somewhere other than the server log.
         self._loop_started_at: float = 0.0
@@ -444,6 +447,29 @@ class CronService:
             )
             conn.execute(
                 "CREATE INDEX IF NOT EXISTS idx_runs_job ON routine_runs (job_id, started_at DESC)"
+            )
+            # Subordinate dispatch journal, not a second action runner. A
+            # callback return is not an externally verified effect receipt.
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS routine_occurrences (
+                    occurrence_id TEXT PRIMARY KEY,
+                    schema_version INTEGER NOT NULL DEFAULT 1,
+                    job_id INTEGER NOT NULL,
+                    scheduled_for REAL NOT NULL,
+                    input_sha256 TEXT NOT NULL,
+                    claimed_at REAL NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('claimed', 'callback_returned', 'outcome_unknown')),
+                    finished_at REAL,
+                    rearmed_at REAL,
+                    UNIQUE(job_id, scheduled_for)
+                )
+                """
+            )
+            conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_occurrences_job_status "
+                "ON routine_occurrences (job_id, status)"
             )
 
     def close(self) -> None:
@@ -551,7 +577,10 @@ class CronService:
         with self._lock:
             conn = self._conn
             cur = conn.execute(
-                "DELETE FROM scheduled_jobs WHERE id = ?", (job_id,)
+                "DELETE FROM scheduled_jobs WHERE id = ? AND NOT EXISTS "
+                "(SELECT 1 FROM routine_occurrences WHERE job_id = scheduled_jobs.id "
+                "AND (status IN ('claimed','outcome_unknown') OR "
+                "(status = 'callback_returned' AND rearmed_at IS NULL)))", (job_id,)
             )
             conn.commit()
             return cur.rowcount > 0
@@ -584,79 +613,118 @@ class CronService:
             ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
-    def mark_completed(self, job_id: int) -> None:
+    def mark_completed(self, job_id: int, *, occurrence_id: str | None = None) -> None:
+        """Rearm/count a completed callback once, preserving legacy direct calls.
+
+        With an occurrence identity, bookkeeping and its completion marker share
+        one transaction. The method never claims an external effect succeeded.
+        """
         now = time.time()
         with self._lock:
             conn = self._conn
-            row = conn.execute(
-                "SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,)
-            ).fetchone()
-            if row is None:
-                return
-
             try:
-                is_recurring = bool(row["recurring"])
-            except (IndexError, KeyError):
-                is_recurring = True
+                conn.execute("BEGIN IMMEDIATE")
+                occurrence = None
+                if occurrence_id is not None:
+                    occurrence = conn.execute(
+                        "SELECT * FROM routine_occurrences WHERE occurrence_id = ? AND job_id = ?",
+                        (occurrence_id, job_id),
+                    ).fetchone()
+                    if occurrence is None or occurrence["status"] != "callback_returned":
+                        raise ValueError("Only a returned callback can complete occurrence bookkeeping")
+                    if occurrence["rearmed_at"] is not None:
+                        conn.rollback()
+                        return
 
-            if is_recurring:
-                cron = row["cron_expr"]
+                def mark_rearmed():
+                    if occurrence_id is not None:
+                        conn.execute(
+                            "UPDATE routine_occurrences SET rearmed_at = ? WHERE occurrence_id = ?",
+                            (now, occurrence_id),
+                        )
+
+                row = conn.execute(
+                    "SELECT * FROM scheduled_jobs WHERE id = ?", (job_id,)
+                ).fetchone()
+                if row is None:
+                    conn.rollback()
+                    return
+                if occurrence is not None and row["next_run"] != occurrence["scheduled_for"]:
+                    # An operator changed the schedule after admission. Record that
+                    # old bookkeeping is settled without overwriting the new slot.
+                    mark_rearmed()
+                    conn.commit()
+                    return
+
                 try:
-                    tz = ZoneInfo(row["tz_name"] or "UTC")
-                except (KeyError, IndexError):
-                    tz = self._timezone
-                try:
-                    nxt = CronService._compute_next_run(cron, now, tz=tz)
-                except UnparseableCronExpression:
-                    # The runaway path. Re-arming on a guess here is what
-                    # turned "nightly at 9pm" into 4,170 orchestrator turns.
-                    # Disable the job instead so it costs nothing more, and
-                    # shout — the operator has to fix the expression.
+                    is_recurring = bool(row["recurring"])
+                except (IndexError, KeyError):
+                    is_recurring = True
+
+                if is_recurring:
+                    cron = row["cron_expr"]
+                    try:
+                        tz = ZoneInfo(row["tz_name"] or "UTC")
+                    except (KeyError, IndexError):
+                        tz = self._timezone
+                    try:
+                        nxt = CronService._compute_next_run(cron, now, tz=tz)
+                    except UnparseableCronExpression:
+                        # The runaway path. Re-arming on a guess here is what
+                        # turned "nightly at 9pm" into 4,170 orchestrator turns.
+                        # Disable the job instead so it costs nothing more, and
+                        # shout — the operator has to fix the expression.
+                        conn.execute(
+                            """
+                            UPDATE scheduled_jobs
+                            SET last_run = ?, run_count = run_count + 1, enabled = 0,
+                                disabled_reason = ?, disabled_notified = 0
+                            WHERE id = ?
+                            """,
+                            (
+                                now,
+                                f"Schedule {cron!r} matches no supported form, so "
+                                f"the next run time cannot be computed. Edit the "
+                                f"routine to use {_SUPPORTED_CRON_FORMS}, then "
+                                f"resume it.",
+                                job_id,
+                            ),
+                        )
+                        mark_rearmed()
+                        conn.commit()
+                        logger.critical(
+                            "feral.scheduler.disabled_unparseable_cron: job %d "
+                            "(%r) has schedule %r, which matches no supported "
+                            "form. The job has been DISABLED after this run so it "
+                            "cannot re-fire every 60s. Edit the routine to use "
+                            "%s, then re-enable it.",
+                            job_id, row["description"], cron, _SUPPORTED_CRON_FORMS,
+                        )
+                        return
                     conn.execute(
                         """
                         UPDATE scheduled_jobs
-                        SET last_run = ?, run_count = run_count + 1, enabled = 0,
-                            disabled_reason = ?, disabled_notified = 0
+                        SET last_run = ?, next_run = ?, run_count = run_count + 1
                         WHERE id = ?
                         """,
-                        (
-                            now,
-                            f"Schedule {cron!r} matches no supported form, so "
-                            f"the next run time cannot be computed. Edit the "
-                            f"routine to use {_SUPPORTED_CRON_FORMS}, then "
-                            f"resume it.",
-                            job_id,
-                        ),
+                        (now, nxt, job_id),
                     )
-                    conn.commit()
-                    logger.critical(
-                        "feral.scheduler.disabled_unparseable_cron: job %d "
-                        "(%r) has schedule %r, which matches no supported "
-                        "form. The job has been DISABLED after this run so it "
-                        "cannot re-fire every 60s. Edit the routine to use "
-                        "%s, then re-enable it.",
-                        job_id, row["description"], cron, _SUPPORTED_CRON_FORMS,
+                else:
+                    conn.execute(
+                        """
+                        UPDATE scheduled_jobs
+                        SET last_run = ?, run_count = run_count + 1, enabled = 0
+                        WHERE id = ?
+                        """,
+                        (now, job_id),
                     )
-                    return
-                conn.execute(
-                    """
-                    UPDATE scheduled_jobs
-                    SET last_run = ?, next_run = ?, run_count = run_count + 1
-                    WHERE id = ?
-                    """,
-                    (now, nxt, job_id),
-                )
-            else:
-                conn.execute(
-                    """
-                    UPDATE scheduled_jobs
-                    SET last_run = ?, run_count = run_count + 1, enabled = 0
-                    WHERE id = ?
-                    """,
-                    (now, job_id),
-                )
-                logger.info(f"Non-recurring job {job_id} completed and disabled")
-            conn.commit()
+                    logger.info(f"Non-recurring job {job_id} completed and disabled")
+                mark_rearmed()
+                conn.commit()
+
+            except BaseException:
+                conn.rollback()
+                raise
 
     def disable_job(self, job_id: int, reason: str) -> bool:
         """Turn a routine off because the runtime decided it cannot work.
@@ -1089,6 +1157,21 @@ class CronService:
                 last_run = 0.0
             late_by = now - next_run
 
+            # The occurrence journal outranks legacy timestamp/grace guards.
+            # A returned callback only needs bookkeeping; an unfinished claim
+            # must not be moved to a fresh slot by catch-up rearming.
+            with self._lock:
+                journal = self._conn.execute(
+                    "SELECT occurrence_id FROM routine_occurrences WHERE job_id = ? "
+                    "AND (scheduled_for = ? OR status IN ('claimed', 'outcome_unknown')) LIMIT 1",
+                    (job_id, next_run),
+                ).fetchone()
+            if journal is not None:
+                job = self.get_job(job_id)
+                if job and self._callback and self._fire(job):
+                    caught_up += 1
+                continue
+
             if last_run and last_run >= next_run:
                 logger.info(
                     "Missed job '%s' (id=%d) already ran for this slot; not re-running",
@@ -1119,7 +1202,7 @@ class CronService:
                     caught_up += 1
         if caught_up or skipped:
             logger.info(
-                "Boot catch-up: ran %d missed job(s), re-armed %d without running",
+                "Boot catch-up: settled %d callback occurrence(s), re-armed %d without dispatch",
                 caught_up, skipped,
             )
 
@@ -1151,36 +1234,175 @@ class CronService:
             )
             self._conn.commit()
 
-    def _fire(self, job: ScheduledJob) -> bool:
-        """Run one job's callback and re-arm it. NEVER raises.
+    def get_occurrences(self, job_id: int, limit: int = 20) -> list[dict]:
+        """Read dispatch/recovery evidence; statuses are not payment receipts."""
+        with self._lock:
+            rows = self._conn.execute(
+                "SELECT * FROM routine_occurrences WHERE job_id = ? "
+                "ORDER BY claimed_at DESC LIMIT ?", (job_id, max(1, min(int(limit), 200))),
+            ).fetchall()
+        return [dict(row) for row in rows]
 
-        A raising callback used to unwind through ``_catchup_missed_jobs``
-        into ``_loop`` and kill the scheduler thread, which stops every
-        routine on the brain permanently while ``start()`` has already
-        returned and ``/api/routines`` still renders them as enabled. One
-        contended ``record_run_start`` sqlite3 INSERT was enough.
+    def get_dispatch_state(self, job_id: int) -> dict:
+        """Read the whole journal's current fence, never grant replay authority.
 
-        Returns True when the callback completed without raising.
+        A bounded history page can omit an older unresolved claim. Select that
+        claim directly so an apparently complete recent page cannot hide it.
         """
-        ok = False
-        try:
-            self._callback(job)  # type: ignore[misc]
-            ok = True
-        except Exception:
-            logger.exception(
-                "Routine job %s ('%s') raised; the scheduler keeps running",
-                job.id, job.description,
-            )
-        finally:
-            # Re-arming is what stops a failed job from re-firing on every
-            # tick, so it must happen even when the callback blew up, and
-            # it must not be able to take the loop down either.
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT occurrence_id, job_id, scheduled_for, claimed_at, status, "
+                "finished_at, rearmed_at FROM routine_occurrences WHERE job_id = ? "
+                "AND status IN ('claimed', 'outcome_unknown') "
+                "ORDER BY claimed_at DESC LIMIT 1", (job_id,),
+            ).fetchone()
+            if row is not None:
+                active = row["status"] == "claimed" and self._active_occurrences.get(job_id) == row["occurrence_id"]
+                return {
+                    "tracking_available": True,
+                    "dispatch_state": "in_progress" if active else "reconciliation_required",
+                    "reconciliation_required": not active,
+                    "occurrence": dict(row),
+                }
+            row = self._conn.execute(
+                "SELECT occurrence_id, job_id, scheduled_for, claimed_at, status, "
+                "finished_at, rearmed_at FROM routine_occurrences WHERE job_id = ? "
+                "AND status = 'callback_returned' AND rearmed_at IS NULL "
+                "AND scheduled_for = (SELECT next_run FROM scheduled_jobs WHERE id = ?) "
+                "ORDER BY claimed_at DESC LIMIT 1", (job_id, job_id),
+            ).fetchone()
+        return {
+            "tracking_available": True,
+            "dispatch_state": "bookkeeping_pending" if row is not None else "scheduled",
+            "reconciliation_required": False,
+            "occurrence": dict(row) if row is not None else None,
+        }
+
+    def _warn_occurrence_once(self, key: str, job_id: int, reason: str) -> None:
+        # A blocked due job can be polled every second. Bound retained warnings
+        # and emit no repeated event writes or logs for the same fence.
+        with self._lock:
+            if key in self._occurrence_warnings:
+                return
+            if len(self._occurrence_warnings) >= 256:
+                self._occurrence_warnings.pop(next(iter(self._occurrence_warnings)))
+            self._occurrence_warnings[key] = None
+        logger.error("Routine %s dispatch is fenced: %s", job_id, reason)
+
+    def _claim_occurrence(self, job: ScheduledJob) -> tuple[str, str, ScheduledJob | None]:
+        """Commit one due-slot claim before callback; never steal an old claim."""
+        if type(job.id) is not int or type(job.next_run) not in (float, int) or not math.isfinite(job.next_run):
+            raise ValueError("Invalid occurrence identity")
+        if job.next_run > time.time():
+            return "stale", "", None
+        with self._lock:
+            conn = self._conn
             try:
-                self.mark_completed(job.id)
-            except Exception:
-                logger.exception(
-                    "Failed to re-arm routine job %s after its run", job.id,
+                conn.execute("BEGIN IMMEDIATE")
+                row = conn.execute("SELECT * FROM scheduled_jobs WHERE id = ?", (job.id,)).fetchone()
+                if row is None or not row["enabled"] or row["next_run"] != job.next_run:
+                    conn.rollback()
+                    return "stale", "", None
+                blocker = conn.execute(
+                    "SELECT occurrence_id FROM routine_occurrences WHERE job_id = ? "
+                    "AND status IN ('claimed', 'outcome_unknown') LIMIT 1", (job.id,),
+                ).fetchone()
+                if blocker is not None:
+                    conn.rollback()
+                    return "blocked", blocker["occurrence_id"], None
+                previous = conn.execute(
+                    "SELECT occurrence_id FROM routine_occurrences WHERE job_id = ? AND scheduled_for = ?",
+                    (job.id, job.next_run),
+                ).fetchone()
+                if previous is not None:
+                    conn.rollback()
+                    return "callback_returned", previous["occurrence_id"], None
+                current = self._row_to_job(row)
+                immutable_input = json.dumps(
+                    {"job_type": current.job_type.value, "cron_expr": current.cron_expr,
+                     "payload": current.payload, "session_id": current.session_id,
+                     "recurring": current.recurring, "tz_name": current.tz_name},
+                    sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False,
                 )
+                occurrence_id = str(uuid4())
+                conn.execute(
+                    "INSERT INTO routine_occurrences "
+                    "(occurrence_id, job_id, scheduled_for, input_sha256, claimed_at, status) "
+                    "VALUES (?, ?, ?, ?, ?, 'claimed')",
+                    (occurrence_id, job.id, job.next_run,
+                     hashlib.sha256(immutable_input.encode()).hexdigest(), time.time()),
+                )
+                conn.commit()
+                return "claimed", occurrence_id, current
+            except BaseException:
+                conn.rollback()
+                raise
+
+    def _finish_occurrence(self, occurrence_id: str, status: str) -> None:
+        if status not in {"callback_returned", "outcome_unknown"}:
+            raise ValueError("Invalid callback outcome")
+        with self._lock:
+            conn = self._conn
+            try:
+                conn.execute("BEGIN IMMEDIATE")
+                changed = conn.execute(
+                    "UPDATE routine_occurrences SET status = ?, finished_at = ? "
+                    "WHERE occurrence_id = ? AND status = 'claimed'",
+                    (status, time.time(), occurrence_id),
+                )
+                if changed.rowcount != 1:
+                    raise ValueError("Occurrence claim is no longer current")
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+
+    def _fire(self, job: ScheduledJob) -> bool:
+        """Dispatch one persistently claimed slot; recovery never repeats it.
+
+        True means callback returned, not verified external success. A claimed
+        or uncertain occurrence blocks this job until explicit reconciliation.
+        """
+        if self._callback is None:
+            return False
+        try:
+            status, occurrence_id, admitted_job = self._claim_occurrence(job)
+        except Exception:
+            self._warn_occurrence_once(f"claim:{job.id}", job.id, "claim persistence unavailable; no dispatch")
+            return False
+        if status == "stale":
+            return False
+        if status == "blocked":
+            self._warn_occurrence_once(occurrence_id, job.id, "unfinished occurrence requires reconciliation; no replay")
+            return False
+        ok = status == "callback_returned"
+        if admitted_job is not None:
+            with self._lock:
+                self._active_occurrences[job.id] = occurrence_id
+            try:
+                self._callback(admitted_job)
+                self._finish_occurrence(occurrence_id, "callback_returned")
+                ok = True
+            except Exception:
+                self._warn_occurrence_once(occurrence_id, job.id, "callback outcome is uncertain; no replay")
+                try:
+                    self._finish_occurrence(occurrence_id, "outcome_unknown")
+                except Exception:
+                    # The durable claimed row still blocks replay if recording
+                    # uncertainty also fails. Never release that authority.
+                    self._warn_occurrence_once(f"finish:{occurrence_id}", job.id,
+                                               "uncertainty persistence unavailable; claim retained")
+                return False
+            finally:
+                with self._lock:
+                    if self._active_occurrences.get(job.id) == occurrence_id:
+                        self._active_occurrences.pop(job.id, None)
+        if ok:
+            try:
+                self.mark_completed(job.id, occurrence_id=occurrence_id)
+            except Exception:
+                self._warn_occurrence_once(f"rearm:{occurrence_id}", job.id,
+                                           "callback returned but schedule bookkeeping needs recovery")
         return ok
 
     _MAX_POLL_SECONDS = 30.0
@@ -1224,6 +1446,22 @@ class CronService:
                     job.id,
                 )
                 break
+            # Sleep/wake polling has the same recovery authority as boot.
+            # Never advance an unfinished occurrence past its due identity;
+            # a returned callback retries bookkeeping before lateness guards.
+            with self._lock:
+                journal = self._conn.execute(
+                    "SELECT occurrence_id FROM routine_occurrences WHERE job_id = ? "
+                    "AND (scheduled_for = ? OR status IN ('claimed', 'outcome_unknown')) LIMIT 1",
+                    (job.id, job.next_run),
+                ).fetchone()
+            if journal is not None:
+                self._running_jobs.add(job.id)
+                try:
+                    self._fire(job)
+                finally:
+                    self._running_jobs.discard(job.id)
+                continue
             reason = self._too_late_to_run(job.cron_expr, job.next_run, time.time())
             if reason:
                 logger.info(

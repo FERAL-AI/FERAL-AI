@@ -137,6 +137,8 @@ _OPENAI_RULES: tuple[tuple[re.Pattern[str], ModelClass], ...] = (
     # 2025-12-17 / etc. dated variants don't leak into chat either.
     (re.compile(r"^gpt-(4o-)?realtime.*$"), "realtime"),
     (re.compile(r"^gpt-realtime(-.+)?$"), "realtime"),
+    # Live is a separate voice-session protocol, not Realtime or chat.
+    (re.compile(r"^gpt-live-1$"), "audio"),
     # Completion-only legacy (chat completions rejects these with 400).
     (re.compile(r"^babbage-.+$"), "completion-only"),
     (re.compile(r"^davinci-.+$"), "completion-only"),
@@ -165,6 +167,8 @@ _OPENAI_RULES: tuple[tuple[re.Pattern[str], ModelClass], ...] = (
     # and that behaviour (default to chat, never guess reasoning) is
     # what protects an operator who types an id we have not seen.
     (re.compile(r"^gpt-6-astra(-(pro|mini|nano))?(-\d{4}-\d{2}-\d{2})?$"), "reasoning"),
+    # Published Sol/Luna IDs only; do not guess future tier names.
+    (re.compile(r"^gpt-(6\.1-sol|6-luna)$"), "reasoning"),
     (re.compile(r"^o[134](-.*)?$"), "reasoning"),
     # Chat (gpt-4o / gpt-4.1 / gpt-4-turbo / gpt-4 / gpt-3.5-turbo).
     (re.compile(r"^gpt-4o(-.+)?$"), "chat"),
@@ -519,6 +523,9 @@ _RESPONSES_ONLY_OPENAI: tuple[_re_endpoint.Pattern[str], ...] = (
     # reasoning on. Unverified against a live account on 2026-09-04
     # because the model had not reached this operator's organisation yet.
     _re_endpoint.compile(r"^gpt-6-astra(-(pro|mini|nano))?(-\d{4}-\d{2}-\d{2})?$"),
+    # Sol tool calls require Responses. Luna uses Responses to retain
+    # reasoning with tools, rather than silently disabling reasoning.
+    _re_endpoint.compile(r"^gpt-(6\.1-sol|6-luna)$"),
     # o-series reasoning Pro variants (o3-pro etc).
     _re_endpoint.compile(r"^o[134]-pro(-.*)?$"),
     # Deep research models (responses-only per OpenAI docs).
@@ -560,9 +567,18 @@ def is_responses_only(provider_id: str, model_id: str) -> bool:
     return False
 
 
+def is_unsupported_live_model(provider_id: str, model_id: str) -> bool:
+    """A documented Live voice model with no FERAL session adapter."""
+    if provider_id == "openai":
+        return model_id == "gpt-live-1"
+    if provider_id == "openrouter":
+        return model_id.split(":", 1)[0] == "openai/gpt-live-1"
+    return False
+
+
 def classify_endpoint(
     provider_id: str, model_id: str
-) -> Literal["chat_completions", "responses"]:
+) -> Literal["chat_completions", "responses", "unsupported_live"]:
     """Return the HTTP endpoint family the LLM provider should use for
     ``(provider_id, model_id)``.
 
@@ -581,6 +597,8 @@ def classify_endpoint(
     silently re-route models the existing adapter already handles
     correctly. The opt-in is by membership in ``_RESPONSES_ONLY_OPENAI``.
     """
+    if is_unsupported_live_model(provider_id, model_id):
+        return "unsupported_live"
     if is_responses_only(provider_id, model_id):
         return "responses"
     return "chat_completions"

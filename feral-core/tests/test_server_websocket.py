@@ -39,6 +39,15 @@ def _make_ws_mock_state() -> MagicMock:
     """Minimal BrainState-like mock for api.server WebSocket + startup paths."""
     s = MagicMock()
 
+    # Model an ordinary ready, credential-free profile explicitly. During
+    # the parity test's nested server import, middleware captures this
+    # object; absent attributes would become truthy MagicMocks and falsely
+    # fence the phone as an encrypted profile awaiting bootstrap.
+    s._native_vault_deferred = False
+    s._native_bootstrap_required = False
+    s.vault_coordinator = None
+    s.agent_bootstrap_controller = None
+
     s.sessions = {}
     s.daemons = {}
     s.devices = {}
@@ -506,7 +515,7 @@ class TestSessionAuth:
 
 
 class TestSessionErrors:
-    def test_command_handler_error_sends_text_response(self, ws_mock_state, ws_client):
+    def test_command_handler_error_sends_safe_structured_error(self, ws_mock_state, ws_client):
         ws_mock_state.orchestrator.handle_command_stream = AsyncMock(side_effect=RuntimeError("boom"))
 
         with ws_client.websocket_connect("/v1/session") as ws:
@@ -518,8 +527,15 @@ class TestSessionErrors:
                 }
             )
             err_msg = ws.receive_json()
-            assert err_msg["type"] == "text_response"
-            assert "boom" in err_msg["payload"]["text"]
+            assert err_msg["type"] == "error"
+            assert err_msg["payload"] == {
+                "code": "chat_turn_failed",
+                "message": "The chat turn failed. Please try again.",
+                "recoverable": True,
+            }
+            assert err_msg["hop"] == "brain"
+            assert isinstance(err_msg["session_id"], str) and err_msg["session_id"]
+            assert "boom" not in str(err_msg)
 
     @pytest.mark.skip(reason="Pre-existing: send_to_session is a MagicMock, doesn't forward error to the client WS. The production code path IS correct (see api/server.py L414-422); this is purely a test-mock limitation. Fix would require wiring the mock's send_to_session to actually call ws.send_json on the stored session. Tracked separately.")
     def test_non_json_payload_returns_error(self, ws_client):
@@ -655,4 +671,3 @@ class TestSessionIdsAndBinding:
             ws.receive_json()
 
         ws_mock_state.bind_session_to_daemon.assert_called()
-

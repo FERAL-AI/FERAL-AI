@@ -33,6 +33,18 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 SCAN_ROOTS = [
     REPO_ROOT / "docs" / "mintlify",
     REPO_ROOT / "docs" / "site",
+    # Skill manifests. These are not documentation for humans, they are
+    # documentation for the MODEL: every description here is handed to
+    # the agent as the tool's contract, so a name in one of them is a
+    # name the agent can say out loud, on a recording, to anyone.
+    #
+    # Found 2026-09-12, hours before a demo was filmed:
+    # health_data.json described the vitals stream as coming from
+    # "W300 smart glasses" in three separate endpoint descriptions. The
+    # docs had been cleaned of that name a week earlier and this had
+    # been missed, because the linter written to prevent exactly this
+    # only ever looked at docs/.
+    REPO_ROOT / "feral-core" / "skills" / "manifests",
 ]
 
 # Every markdown file at the repository root, not a hand-maintained list.

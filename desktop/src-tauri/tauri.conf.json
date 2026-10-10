@@ -1,13 +1,13 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "FERAL",
-"version": "2026.9.7",
+  "version": "2026.9.7",
   "identifier": "ai.feral.desktop",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:1420",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build && npm run stage:bundle"
+    "beforeBuildCommand": "bash ../scripts/build_webui_v2.sh && npm run build && npm run stage:bundle"
   },
   "app": {
     "windows": [
@@ -22,7 +22,7 @@
         "fullscreen": false,
         "center": true,
         "decorations": true,
-        "titleBarStyle": "Overlay",
+        "titleBarStyle": "Visible",
         "hiddenTitle": true,
         "transparent": false
       },
@@ -44,13 +44,15 @@
     "trayIcon": {
       "id": "feral-tray",
       "iconPath": "icons/32x32.png",
-      "iconAsTemplate": true,
+      "iconAsTemplate": false,
       "showMenuOnLeftClick": false,
       "tooltip": "FERAL"
     },
     "security": {
       "csp": "default-src 'self' 'unsafe-inline' 'unsafe-eval'; connect-src 'self' ws://localhost:* http://localhost:* ws://127.0.0.1:* http://127.0.0.1:*; img-src 'self' data: blob: http://localhost:* http://127.0.0.1:*; media-src 'self' blob:; font-src 'self' data:; frame-src 'self' http://localhost:* http://127.0.0.1:*",
-      "capabilities": ["default"]
+      "capabilities": [
+        "default"
+      ]
     }
   },
   "bundle": {
@@ -58,7 +60,8 @@
     "targets": "all",
     "resources": {
       "resources/feral-core": "feral-core",
-      "resources/python": "python"
+      "resources/python": "python",
+      "resources/opencode": "opencode"
     },
     "icon": [
       "icons/32x32.png",
@@ -67,19 +70,12 @@
       "icons/icon.ico"
     ],
     "category": "Utility",
-    "shortDescription": "FERAL — Local-First AI Agent",
+    "shortDescription": "FERAL \u2014 Local-First AI Agent",
     "macOS": {
-      "minimumSystemVersion": "12.0",
-      "signingIdentity": null
+      "minimumSystemVersion": "13.0",
+      "signingIdentity": "-",
+      "infoPlist": "Info.plist"
     },
-    "createUpdaterArtifacts": "v1Compatible"
-  },
-  "plugins": {
-    "updater": {
-      "endpoints": [
-        "https://github.com/FERAL-AI/FERAL-AI/releases/latest/download/latest.json"
-      ],
-      "pubkey": ""
-    }
+    "createUpdaterArtifacts": false
   }
 }

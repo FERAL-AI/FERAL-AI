@@ -160,10 +160,46 @@ DEFAULT_STREAMING = True
 # from production.
 DEFAULT_MULTI_AGENT = True
 
+# Requested output allowance for ordinary chat; provider-specific request
+# shaping (for example Anthropic thinking headroom) remains authoritative.
+DEFAULT_CHAT_MAX_TOKENS = 1024
+
+
+class ChatOutputBudgetError(ValueError):
+    code = "llm_configuration_error"
+
+
+def validate_chat_output_budget(value: object) -> int:
+    """Accept a positive JSON integer, without coercing booleans or strings."""
+    if type(value) is not int or value <= 0:
+        raise ChatOutputBudgetError("llm.max_tokens must be a positive integer. Update the setting or remove it to use the default.")
+    return value
+
+
+def validate_chat_output_settings_patch(settings: object) -> None:
+    """Validate an explicitly written allowance; null keeps merge-patch deletion."""
+    if isinstance(settings, dict) and isinstance(settings.get("llm"), dict):
+        llm = settings["llm"]
+        if "max_tokens" in llm and llm["max_tokens"] is not None:
+            validate_chat_output_budget(llm["max_tokens"])
+
+
+def resolve_chat_output_budget(config: object, explicit: object = None, *, call_site: str = "chat") -> int:
+    """Explicit caller limits win; only ordinary chat reads the saved default."""
+    if explicit is not None:
+        return validate_chat_output_budget(explicit)
+    if call_site != "chat":
+        return DEFAULT_CHAT_MAX_TOKENS
+    if isinstance(config, dict) and "max_tokens" in config:
+        return validate_chat_output_budget(config["max_tokens"])
+    return DEFAULT_CHAT_MAX_TOKENS
+
+
 DEFAULT_SETTINGS = {
     "version": "0.4.0",
     "llm": {
         "provider": "openai",
+        "max_tokens": DEFAULT_CHAT_MAX_TOKENS,
         # Empty on purpose: ``LLMProvider.__init__`` falls through to
         # ``_default_model_for`` which reads the live model catalog. A
         # literal here pins every new install to whatever was current
@@ -468,8 +504,24 @@ DEFAULT_SETTINGS = {
             "map_concurrency": 3,
         },
     },
+    # Money. Zero means refuse: an install that has never set a limit
+    # must not treat "unset" as "unlimited". `currency` is the only
+    # currency the caps are expressed in, and nothing converts between
+    # currencies, so a price in another one is refused rather than
+    # guessed at a rate. See security/commerce.py.
+    "commerce": {
+        "currency": "USD",
+        "per_transaction_max": "0",
+        "per_day_max": "0",
+        "merchant_allowlist": [],
+    },
     "security": {
         "node_api_key": "",
+        # How long a pending tool approval stays answerable. A prompt
+        # spoken through the glasses and never answered must not still be
+        # answerable from a pocket an hour later. Read by
+        # agents/tool_runner.py.
+        "approval_ttl_seconds": 300,
         # Tool-approval tier the operator picks in `feral setup`
         # (capabilities step) or the timeline API. Exported to
         # ``FERAL_AUTONOMY`` by ``export_as_env`` because that env var
@@ -896,6 +948,10 @@ class ConfigLoader:
                 True. :func:`load_settings` is the caller that does not,
                 and its docstring already promised as much.
         """
+        from security.vault import native_vault_deferred
+        deferred = native_vault_deferred()
+        if deferred:
+            load_credentials = False
         self._merged = copy.deepcopy(DEFAULT_SETTINGS)
         self._sources = []
 
@@ -935,6 +991,10 @@ class ConfigLoader:
         # state the web "Same WiFi" button used to produce — which
         # advertises a LAN pair URL that nothing is listening on.
         self._repair_access_mode()
+
+        if deferred:
+            # Preserve explicit setup completion without opening stored keys.
+            self._setup_complete = self._merged.get("meta", {}).get("setup_complete") is True
 
         if load_credentials:
             # Load credentials separately
@@ -1166,9 +1226,9 @@ class ConfigLoader:
             )
 
         try:
-            from security.vault import BlindVault
+            from security.vault import BlindVault, get_vault, native_vault_deferred
 
-            vault = BlindVault(vault_path=str(cred_path))
+            vault = get_vault(vault_path=str(cred_path)) if native_vault_deferred() else BlindVault(vault_path=str(cred_path))
             for key in vault.list_keys():
                 value = vault.get_credential(key)
                 if isinstance(value, str) and value.strip():
@@ -1486,6 +1546,8 @@ class ConfigLoader:
         only, which matches the HTTP-route behaviour that has always
         skipped the vault for them.
         """
+        from security.vault import get_vault, native_vault_deferred
+        ready_vault = get_vault(vault_path=str(self.user_home / "credentials.json")) if native_vault_deferred() else None
         self.user_home.mkdir(parents=True, exist_ok=True)
         self._credentials.update(credentials)
 
@@ -1512,7 +1574,9 @@ class ConfigLoader:
         # ``feral_home()``) keep the encrypted payload inside the
         # expected directory. The BlindVault maps ``*.json`` → ``*.enc``
         # internally, so this never creates a plaintext file.
-        vault = BlindVault(vault_path=str(self.user_home / "credentials.json"))
+        from security.vault import get_vault, native_vault_deferred
+        vault_path = str(self.user_home / "credentials.json")
+        vault = ready_vault if native_vault_deferred() else BlindVault(vault_path=vault_path)
         for key, value in flat_creds.items():
             vault.set_credential(key, value)
         logger.info(
@@ -1576,10 +1640,14 @@ class ConfigLoader:
         :meth:`_publish_env_changes` for why the re-export is here rather
         than in each of the four surfaces that write settings.
         """
+        if section == "llm" and key == "max_tokens" and value is not None:
+            validate_chat_output_budget(value)
         before = self._env_snapshot()
         if section not in self._merged:
             self._merged[section] = {}
-        self._merged[section][key] = value
+        self._merged[section][key] = (
+            DEFAULT_CHAT_MAX_TOKENS if section == "llm" and key == "max_tokens" and value is None else value
+        )
 
         # Load existing user settings and update
         user_path = self.user_home / "settings.json"
@@ -1605,6 +1673,17 @@ class ConfigLoader:
             self._merged.setdefault("features", {})["vision"] = bool(value)
 
         self.save_user_settings(user_settings)
+
+        if section == "llm" and key == "max_tokens" and value is None:
+            # Removing the user value restores the effective layered setting,
+            # which may come from project/local config rather than the builtin
+            # default. Resolve without credentials and retain all other live
+            # settings, including credential-derived fallback providers.
+            layered = ConfigLoader(project_dir=str(self.project_dir))
+            layered.user_home = self.user_home
+            layered.data_home = self.data_home
+            effective = layered.discover(load_credentials=False)
+            self._merged["llm"]["max_tokens"] = effective["llm"]["max_tokens"]
 
         # Republish to os.environ only when a brain is actually running.
         #

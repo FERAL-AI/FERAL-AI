@@ -238,7 +238,8 @@ async def test_llm_exception_turn_records_its_assistant_reply():
 
 
 @pytest.mark.asyncio
-async def test_multi_agent_turn_records_both_rows():
+@pytest.mark.parametrize("stream", [False, True])
+async def test_multi_agent_turn_records_both_rows(stream):
     """The multi-agent hand-off never touched ``conversation_history``,
     so the whole exchange vanished from the next turn's context."""
     orch = _orchestrator()
@@ -247,12 +248,36 @@ async def test_multi_agent_turn_records_both_rows():
     orch._multi_agent = MagicMock()
     orch._multi_agent.run = AsyncMock(return_value="Three specialists agree: ship it.")
 
-    await orch.handle_command(sid, "should we ship on Friday?")
+    handle = orch.handle_command_stream if stream else orch.handle_command
+    await handle(sid, "should we ship on Friday?")
 
     history = orch.conversation_history[sid]
     assert [row["role"] for row in history] == ["user", "assistant"]
     assert history[0]["content"] == "should we ship on Friday?"
     assert history[1]["content"] == "Three specialists agree: ship it."
+    frames = [call.args[1] for call in orch.send.await_args_list]
+    assert any(frame.type == "text_response" and frame.payload["text"] == history[1]["content"] for frame in frames)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stream", [False, True])
+async def test_empty_multi_agent_reply_emits_error_without_assistant_history(stream):
+    from agents.multi_agent import MultiAgentOrchestrator
+
+    orch = _orchestrator()
+    orch.llm.chat = AsyncMock(return_value={})
+    orch.llm.extract_response = MagicMock(return_value=("", []))
+    orch._multi_agent_enabled = True
+    orch._multi_agent = MultiAgentOrchestrator(llm=orch.llm)
+    orch._multi_agent._router.route = AsyncMock(return_value={"workers": ["general"], "strategy": "single"})
+    sid = "sess-empty-multi-agent"
+    handle = orch.handle_command_stream if stream else orch.handle_command
+    await handle(sid, "reply exactly hello")
+
+    frames = [call.args[1] for call in orch.send.await_args_list]
+    assert any(frame.type == "error" and "did not generate a reply" in frame.payload["message"] for frame in frames)
+    assert not any(frame.type == "text_response" for frame in frames)
+    assert not any(row["role"] == "assistant" for row in orch.conversation_history.get(sid, []))
 
 
 # ─────────────────────────────────────────────────────────────────────

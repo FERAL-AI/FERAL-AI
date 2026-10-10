@@ -22,7 +22,7 @@ import json
 import logging
 import time
 from pathlib import Path
-from typing import Optional, TYPE_CHECKING
+from typing import Any, Optional, TYPE_CHECKING
 
 from config.loader import feral_home
 
@@ -137,7 +137,7 @@ class SkillGenerator:
         normalized = "".join(ch.lower() if ch.isalnum() else " " for ch in (capability or ""))
         return " ".join(normalized.split())[:160]
 
-    async def detect_unmet_need(self, conversation: list[dict]) -> Optional[dict]:
+    async def detect_unmet_need(self, conversation: list[dict], *, call_site: str | None = None) -> Optional[dict]:
         """
         Analyze recent conversation to detect if the user needs a capability
         that doesn't exist yet.
@@ -163,12 +163,14 @@ class SkillGenerator:
         )
 
         prompt = DETECT_NEED_PROMPT.format(skills=skills_str, conversation=conv_str)
+        call_options: dict[str, Any] = {"call_site": call_site} if call_site is not None else {}
 
         try:
             response = await self._llm.chat(
                 messages=[{"role": "user", "content": prompt}],
                 temperature=0.1,
                 max_tokens=200,
+                **call_options,
             )
             text, _ = self._llm.extract_response(response)
             if not text:
@@ -223,7 +225,7 @@ class SkillGenerator:
             logger.debug(f"Need detection failed: {e}")
             return None
 
-    async def generate_skill(self, capability: str, service: str = "") -> Optional[dict]:
+    async def generate_skill(self, capability: str, service: str = "", *, call_site: str | None = None) -> Optional[dict]:
         """
         Generate a new skill manifest using LLM based on what's needed.
         Returns the manifest dict or None.
@@ -234,6 +236,7 @@ class SkillGenerator:
         context = f"The user needs: {capability}"
         if service:
             context += f"\nSuggested service/API: {service}"
+        call_options: dict[str, Any] = {"call_site": call_site} if call_site is not None else {}
 
         try:
             response = await self._llm.chat(
@@ -243,6 +246,7 @@ class SkillGenerator:
                 ],
                 temperature=0.3,
                 max_tokens=1500,
+                **call_options,
             )
             text, _ = self._llm.extract_response(response)
             if not text:

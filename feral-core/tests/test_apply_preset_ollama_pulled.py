@@ -6,10 +6,9 @@ Operator report: applying an Ollama preset that hardcodes a model name
 (available=True)`` immediately followed by a 404 on the first chat
 turn when ``llava`` was not pulled locally.
 
-Fix: ``apply_preset`` consults ``/api/tags`` and, when the requested
-model is not pulled, falls through to ``switch_provider``'s auto-detect
-path so the brain lands on an installed model instead. The response
-carries a ``warning`` describing the substitution.
+Vision application requires an installed matching tag and the existing
+capability classification before switching. Missing or unknown inventory
+refuses without substituting a text model. Text presets retain auto-detection.
 """
 
 from __future__ import annotations
@@ -46,13 +45,14 @@ async def test_apply_preset_keeps_model_when_pulled():
     assert result["ok"] is True
     assert "warning" not in result
     assert llm.provider == "ollama"
-    assert llm.model == "llava"
+    assert llm.model == "llava:7b"
     await llm.close()
 
 
 @pytest.mark.asyncio
-async def test_apply_preset_falls_back_when_model_not_pulled():
+async def test_apply_preset_refuses_when_vision_model_not_pulled():
     llm = _llm_with_openai_env()
+    original = (llm.provider, llm.model)
     with patch.object(
         LLMProvider, "_ollama_pulled_models",
         new=AsyncMock(return_value={"mistral", "mistral:7b"}),
@@ -61,31 +61,24 @@ async def test_apply_preset_falls_back_when_model_not_pulled():
             LLMProvider, "_detect_ollama", return_value="mistral",
         ):
             result = await llm.apply_preset("ollama_vision")
-    assert result["ok"] is True
-    assert llm.provider == "ollama"
-    # Auto-detect substituted the installed model instead of the
-    # guaranteed-404 ``llava`` literal.
-    assert llm.model == "mistral"
-    assert "warning" in result
-    assert "llava" in result["warning"]
-    assert "ollama pull llava" in result["warning"]
+    assert result["ok"] is False
+    assert result["error_code"] == "vision_model_not_installed"
+    assert (llm.provider, llm.model) == original
     await llm.close()
 
 
 @pytest.mark.asyncio
-async def test_apply_preset_unreachable_ollama_preserves_request():
+async def test_apply_preset_unreachable_ollama_preserves_current_selection():
     llm = _llm_with_openai_env()
+    original = (llm.provider, llm.model)
     with patch.object(
         LLMProvider, "_ollama_pulled_models",
         new=AsyncMock(return_value=None),  # Ollama unreachable
     ):
         result = await llm.apply_preset("ollama_vision")
-    # With no signal from the server, apply_preset keeps the requested
-    # model so the brain's own probe ladder can surface the outage
-    # rather than silently rewriting the operator's intent.
-    assert result["ok"] is True
-    assert llm.provider == "ollama"
-    assert llm.model == "llava"
+    assert result["ok"] is False
+    assert result["error_code"] == "vision_model_unverified"
+    assert (llm.provider, llm.model) == original
     assert "warning" not in result
     await llm.close()
 

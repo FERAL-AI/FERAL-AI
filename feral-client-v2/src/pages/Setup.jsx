@@ -23,15 +23,15 @@ import Pane from '../ui/Pane';
 import Glass from '../ui/Glass';
 import Tabs from '../ui/Tabs';
 import StatusDot from '../ui/StatusDot';
-import { apiJson, apiFetch } from '../lib/api';
+import { apiJson, apiFetch, ApiError } from '../lib/api';
 
 
 const STEPS = [
   { id: 'welcome', label: 'Welcome' },
-  { id: 'llm', label: 'LLM provider' },
-  { id: 'audio', label: 'Voice (STT + TTS)' },
+  { id: 'llm', label: 'AI provider' },
+  { id: 'audio', label: 'Voice' },
   { id: 'identity', label: 'About you' },
-  { id: 'pair', label: 'Pair your phone' },
+  { id: 'pair', label: 'Connect devices' },
   { id: 'done', label: 'Ready' },
 ];
 
@@ -69,6 +69,53 @@ function formatApiDetail(body, fallback = 'request failed') {
   return fallback;
 }
 
+// Inventory is passive. Missing legacy flags are unconfirmed, not a claim that
+// an adapter is implemented; partial/false/malformed flags cannot authorize setup.
+function selectableProvider(p) {
+  return p && ((p.runtime_supported === true && p.setup_selectable === true)
+    || (!Object.hasOwn(p, 'runtime_supported') && !Object.hasOwn(p, 'setup_selectable')));
+}
+function providerRows(body) {
+  if (!Array.isArray(body?.providers) || body.providers.length > 128) throw new Error('Invalid inventory');
+  const ids = new Set();
+  for (const p of body.providers) {
+    if (!p || typeof p !== 'object' || Array.isArray(p) || typeof p.id !== 'string'
+      || !/^[a-zA-Z0-9_-]{1,80}$/.test(p.id) || ids.has(p.id)) throw new Error('Invalid provider identity');
+    ids.add(p.id);
+  }
+  return body.providers;
+}
+function configStamp(c) {
+  if (!c || typeof c !== 'object' || Array.isArray(c)
+    || ['provider', 'model', 'base_url'].some(k => c[k] != null && (typeof c[k] !== 'string' || c[k].length > 4096))
+    || (c.configured != null && typeof c.configured !== 'boolean')
+    || (c.fallback_providers != null && (!Array.isArray(c.fallback_providers)
+      || c.fallback_providers.length > 128 || c.fallback_providers.some(p => typeof p !== 'string' || p.length > 80))))
+    throw new Error('Invalid configuration');
+  return JSON.stringify([c.provider ?? '', c.model ?? '', c.base_url ?? '', c.fallback_providers ?? [], c.configured ?? null]);
+}
+function descriptorStamp(p) {
+  if (!p) return '';
+  // These observation fields can change as a consequence of our own probe.
+  const { reachable, last_refresh, default_model, error, ...identity } = p;
+  return JSON.stringify(Object.keys(identity).sort().map(k => [k, identity[k]]));
+}
+function probeReceipt(body, pid) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) throw new Error('Invalid probe receipt');
+  const ids = [body.id, body.provider_id].filter(v => v !== undefined);
+  if (!ids.length || ids.some(id => id !== pid) || typeof body.reachable !== 'boolean') throw new Error('Invalid probe identity');
+  if (body.error != null && (typeof body.error !== 'string' || body.error.length > 4096
+    || (body.reachable && body.error.trim()))) throw new Error('Invalid probe result');
+  return body.reachable;
+}
+function providerPresentation(p, history) {
+  if (!selectableProvider(p)) return 'Unsupported adapter — read-only';
+  if (history?.pid === p.id) return history.reachable ? 'Last explicit probe: reachable' : 'Last explicit probe: unreachable';
+  if (p.reachable === true) return 'Runtime reports reachable — inference unverified';
+  if (p.reachable === false) return 'Runtime reports unreachable';
+  return p.requires_api_key && p.configured === false ? 'Needs API key; reachability unknown' : 'Reachability unknown — not probed';
+}
+
 const ACCESS_MODE_LABELS = {
   local: 'Same WiFi',
   remote: 'Anywhere',
@@ -89,6 +136,19 @@ export default function Setup() {
   const [pickedModel, setPickedModel] = useState('');
   const [llmError, setLlmError] = useState(null);
   const [llmBusy, setLlmBusy] = useState(false);
+  const [probeHistory, setProbeHistory] = useState(null);
+  const llmScope = React.useRef({ mounted: false, revision: 0, operation: null, refresh: 0, config: null, providers: [] });
+  const retireDraft = useCallback(() => {
+    llmScope.current.revision += 1;
+    setProbeHistory(null);
+    setLlmError(null);
+  }, []);
+  const pickProvider = useCallback((pid) => {
+    if (!selectableProvider(llmScope.current.providers.find(p => p.id === pid))) return;
+    retireDraft(); setPickedProvider(pid); setPickedModel(''); setApiKey('');
+  }, [retireDraft]);
+  const pickModel = useCallback((model) => { retireDraft(); setPickedModel(model); }, [retireDraft]);
+  const editKey = useCallback((key) => { retireDraft(); setApiKey(key); }, [retireDraft]);
 
   const [audioProviders, setAudioProviders] = useState({ stt: [], tts: [] });
   const [audio, setAudio] = useState({
@@ -122,115 +182,174 @@ export default function Setup() {
   const [saved, setSaved] = useState(false);
   const [finishError, setFinishError] = useState(null);
 
-  // Initial fetch — providers, current config
+  // Requests carry a draft generation: editing and returning to the same values
+  // still retires any earlier asynchronous result.
   useEffect(() => {
+    const scope = llmScope.current;
+    scope.mounted = true;
+    const revision = scope.revision;
     (async () => {
-      try {
-        const [provs, currentLlm, currentAudio, audioAll] = await Promise.allSettled([
-          apiJson('/api/llm/providers'),
-          apiJson('/api/llm/config'),
-          apiJson('/api/audio/config'),
-          apiJson('/api/audio/providers'),
-        ]);
-        if (provs.status === 'fulfilled') {
-          setProviders(provs.value?.providers || []);
-          const readyLocal = (provs.value?.providers || []).find(p => p.supports_local && p.reachable);
-          const readyCloud = (provs.value?.providers || []).find(p => !p.supports_local && p.configured);
-          const fallback = (provs.value?.providers || [])[0]?.id || 'openai';
-          if (currentLlm.status === 'fulfilled' && currentLlm.value?.provider) {
-            setPickedProvider(currentLlm.value.provider);
-            setPickedModel(currentLlm.value.model || '');
-          } else {
-            setPickedProvider((readyLocal || readyCloud || { id: fallback }).id);
-          }
-        }
-        if (audioAll.status === 'fulfilled') {
-          setAudioProviders(audioAll.value || { stt: [], tts: [] });
-        }
-        if (currentAudio.status === 'fulfilled' && currentAudio.value) {
-          setAudio((prev) => ({ ...prev, ...currentAudio.value }));
-        }
-      } catch (e) {
-        // Non-fatal; user can still advance.
+      const [provs, currentLlm, currentAudio, audioAll] = await Promise.allSettled([
+        apiJson('/api/llm/providers', { silent: true }), apiJson('/api/llm/config', { silent: true }),
+        apiJson('/api/audio/config'), apiJson('/api/audio/providers'),
+      ]);
+      if (!scope.mounted) return;
+      if (scope.revision === revision) {
+        try {
+          if (provs.status !== 'fulfilled' || currentLlm.status !== 'fulfilled') throw new Error('Unavailable inventory');
+          const rows = providerRows(provs.value);
+          scope.config = configStamp(currentLlm.value); scope.providers = rows;
+          setProviders(rows);
+          const eligible = rows.filter(selectableProvider);
+          const preferred = eligible.find(p => p.supports_local && p.reachable === true)
+            || eligible.find(p => !p.supports_local && p.configured === true) || eligible[0];
+          // Keep an existing unsupported selection visible, without silently replacing it.
+          setPickedProvider(currentLlm.value.provider || preferred?.id || '');
+          setPickedModel(currentLlm.value.model || '');
+        } catch { setLlmError('Provider inventory or saved configuration could not be verified. Refresh to retry.'); }
       }
+      if (audioAll.status === 'fulfilled') setAudioProviders(audioAll.value || { stt: [], tts: [] });
+      if (currentAudio.status === 'fulfilled' && currentAudio.value) setAudio(prev => ({ ...prev, ...currentAudio.value }));
     })();
+    return () => { scope.mounted = false; scope.revision += 1; scope.refresh += 1; };
   }, []);
 
-  // Whenever provider changes, refresh its model list
   useEffect(() => {
-    if (!pickedProvider) return;
+    let active = true;
+    const revision = llmScope.current.revision;
+    setModels([]); setModelSource('');
+    if (!pickedProvider || !selectableProvider(llmScope.current.providers.find(p => p.id === pickedProvider))) return;
     (async () => {
-      setLlmError(null);
       try {
-        // Default to the conductor-curated chat-ready shortlist so the
-        // wizard surfaces "the 6-10 models that actually earn their $$"
-        // instead of the raw /v1/models dump (which includes embeddings,
-        // whisper-*, tts-*, image models, etc). Backend filter is
-        // projection-only — the catalog's raw list is untouched.
-        const r = await apiJson(
-          `/api/llm/providers/${encodeURIComponent(pickedProvider)}/models`
-          + `?live=true&recommended=true&model_class=chat`,
-        );
-        setModels(r?.models || []);
-        setModelSource(r?.source || '');
-        if (!pickedModel && r?.models?.length) {
-          // Default to descriptor default if present; otherwise first model.
-          const desc = providers.find(p => p.id === pickedProvider);
-          const defaultModel = desc?.default_model && r.models.includes(desc.default_model)
-            ? desc.default_model
-            : r.models[0];
-          setPickedModel(defaultModel);
-        }
-      } catch (e) {
-        setLlmError(e?.message || 'failed to fetch models');
+        const r = await apiJson(`/api/llm/providers/${encodeURIComponent(pickedProvider)}/models`
+          + '?live=false&recommended=true&model_class=chat', { silent: true });
+        if (!active || !llmScope.current.mounted || revision !== llmScope.current.revision) return;
+        if (!Array.isArray(r?.models) || r.models.length > 4096
+          || r.models.some(m => typeof m !== 'string' || !m || m.length > 256)) throw new Error('Invalid models');
+        setModels(r.models); setModelSource(typeof r.source === 'string' ? r.source : 'unknown');
+        // Suggestions do not change the draft or imply installation/inference.
+      } catch {
+        if (active && llmScope.current.mounted && revision === llmScope.current.revision)
+          setLlmError('Cached model inventory could not be verified. Enter a model name or refresh.');
       }
     })();
-  }, [pickedProvider]);  // eslint-disable-line react-hooks/exhaustive-deps
+    return () => { active = false; };
+  }, [pickedProvider]);
 
+  const readInventory = useCallback(async () => {
+    const [catalog, config] = await Promise.all([
+      apiJson('/api/llm/providers', { silent: true }), apiJson('/api/llm/config', { silent: true }),
+    ]);
+    return { rows: providerRows(catalog), config, stamp: configStamp(config) };
+  }, []);
   const refreshProviders = useCallback(async () => {
+    const scope = llmScope.current;
+    if (scope.operation) return;
+    const request = ++scope.refresh, revision = scope.revision;
     try {
-      const r = await apiJson('/api/llm/providers');
-      setProviders(r?.providers || []);
-    } catch (e) {
-      setLlmError(e?.message || 'refresh failed');
+      const fresh = await readInventory();
+      if (!scope.mounted || request !== scope.refresh || revision !== scope.revision || scope.operation) return;
+      setProbeHistory(history => history && history.config === fresh.stamp
+        && history.descriptor === descriptorStamp(fresh.rows.find(p => p.id === history.pid)) ? history : null);
+      scope.config = fresh.stamp; scope.providers = fresh.rows;
+      setProviders(fresh.rows); setLlmError(null);
+    } catch {
+      if (scope.mounted && request === scope.refresh && revision === scope.revision && !scope.operation) {
+        setProbeHistory(null); setLlmError('Provider inventory or saved configuration could not be verified.');
+      }
     }
-  }, []);
+  }, [readInventory]);
 
   const probeProvider = useCallback(async (pid) => {
+    const scope = llmScope.current;
+    const descriptor = scope.providers.find(p => p.id === pid);
+    if (scope.operation || !selectableProvider(descriptor) || scope.config === null) return;
+    const operation = {}, revision = scope.revision;
+    const config = scope.config, stamp = descriptorStamp(descriptor);
+    const current = () => scope.mounted && scope.operation === operation && scope.revision === revision;
+    scope.operation = operation; ++scope.refresh;
+    setLlmBusy(true); setLlmError(null); setProbeHistory(null);
     try {
-      const r = await apiFetch(`/api/llm/providers/${encodeURIComponent(pid)}/probe`, { method: 'POST' });
-      if (r.ok) {
-        await refreshProviders();
+      const before = await readInventory();
+      if (!current()) return;
+      if (before.stamp !== config || descriptorStamp(before.rows.find(p => p.id === pid)) !== stamp)
+        throw new Error('Configuration changed');
+      const path = `/api/llm/providers/${encodeURIComponent(pid)}/probe`;
+      let result;
+      try { result = await apiJson(path, { method: 'POST', silent: true }); }
+      catch (e) {
+        // apiFetch treats a successful negative ProviderStatus.error as ApiError.
+        // Only its exact HTTP-success receipt may represent an unreachable probe.
+        if (!(e instanceof ApiError) || e.path !== path || e.status < 200 || e.status >= 300
+          || probeReceipt(e.raw, pid) !== false) throw e;
+        result = e.raw;
       }
-    } catch { /* ignore */ }
-  }, [refreshProviders]);
+      if (!current()) return;
+      const reachable = probeReceipt(result, pid);
+      const after = await readInventory();
+      if (!current()) return;
+      if (after.stamp !== config || descriptorStamp(after.rows.find(p => p.id === pid)) !== stamp)
+        throw new Error('Configuration changed');
+      scope.providers = after.rows; setProviders(after.rows);
+      setProbeHistory({ pid, reachable, config, descriptor: stamp });
+    } catch {
+      if (current()) { setProbeHistory(null); setLlmError('Probe could not be verified for this configuration. Refresh and retry.'); }
+    } finally {
+      if (scope.operation === operation) { scope.operation = null; if (scope.mounted) setLlmBusy(false); }
+    }
+  }, [readInventory]);
 
   const saveLlm = useCallback(async () => {
-    if (!pickedProvider || !pickedModel) {
-      setLlmError('Pick a provider + model before continuing.');
-      return false;
+    const scope = llmScope.current;
+    if (scope.operation) return false;
+    if (!pickedProvider || !pickedModel || !selectableProvider(scope.providers.find(p => p.id === pickedProvider))) {
+      setLlmError('Choose a supported AI provider and model before continuing.'); return false;
     }
-    setLlmBusy(true);
-    setLlmError(null);
+    const descriptor = descriptorStamp(scope.providers.find(p => p.id === pickedProvider));
+    const operation = {}, revision = scope.revision;
+    const current = () => scope.mounted && scope.operation === operation && scope.revision === revision;
+    scope.operation = operation; ++scope.refresh;
+    setLlmBusy(true); setLlmError(null); setProbeHistory(null);
     try {
+      const before = await readInventory();
+      if (!current()) return false;
+      if (before.stamp !== scope.config || descriptorStamp(before.rows.find(p => p.id === pickedProvider)) !== descriptor
+        || !selectableProvider(before.rows.find(p => p.id === pickedProvider)))
+        throw new Error('Configuration changed');
+      const previousProvider = before.config.provider || '';
+      // The server resolves aliases before applying omitted-URL semantics. A
+      // noncanonical saved identity is not enough evidence to predict that write.
+      if (previousProvider && !before.rows.some(p => p.id === previousProvider))
+        throw new Error('Saved provider identity is ambiguous');
+      const expectedBaseURL = previousProvider === pickedProvider ? (before.config.base_url || '') : '';
+      const expectedFallbacks = (before.config.fallback_providers || []).filter(p => p !== pickedProvider);
+      if (previousProvider && previousProvider !== pickedProvider && !expectedFallbacks.includes(previousProvider))
+        expectedFallbacks.unshift(previousProvider);
       const body = { provider: pickedProvider, model: pickedModel };
       if (apiKey) body.api_key = apiKey;
-      const r = await apiFetch('/api/llm/config', {
-        method: 'POST',
-        body: JSON.stringify(body),
-      });
-      if (!r.ok) {
-        const err = await r.json().catch(() => ({}));
-        setLlmError(err?.detail || `${r.status}`);
-        return false;
-      }
-      // Refresh status so the "ready" badge updates
-      await refreshProviders();
+      const receipt = await apiJson('/api/llm/config', { method: 'POST', body: JSON.stringify(body), silent: true });
+      if (receipt?.success !== true || receipt.provider !== pickedProvider || receipt.model !== pickedModel
+        || receipt.persisted?.ok !== true) throw new Error('Invalid save receipt');
+      if (!current()) return false;
+      const after = await readInventory();
+      if (!current()) return false;
+      const beforeDescriptor = before.rows.find(p => p.id === pickedProvider);
+      const afterDescriptor = after.rows.find(p => p.id === pickedProvider);
+      if (after.config.provider !== pickedProvider || after.config.model !== pickedModel
+        || (after.config.base_url || '') !== expectedBaseURL
+        || JSON.stringify(after.config.fallback_providers || []) !== JSON.stringify(expectedFallbacks)
+        || !selectableProvider(afterDescriptor)
+        || ['requires_api_key', 'runtime_supported', 'setup_selectable'].some(k => afterDescriptor[k] !== beforeDescriptor[k]))
+        throw new Error('Saved configuration did not match');
+      scope.config = after.stamp; scope.providers = after.rows; setProviders(after.rows);
       return true;
+    } catch {
+      if (current()) setLlmError('Provider settings could not be verified. They may have been saved; refresh before retrying.');
+      return false;
     } finally {
-      setLlmBusy(false);
+      if (scope.operation === operation) { scope.operation = null; if (scope.mounted) setLlmBusy(false); }
     }
-  }, [pickedProvider, pickedModel, apiKey, refreshProviders]);
+  }, [pickedProvider, pickedModel, apiKey, readInventory]);
 
   const saveAudio = useCallback(async () => {
     setAudioError(null);
@@ -410,8 +529,9 @@ export default function Setup() {
   }, [step.id, stepIdx, saveLlm, saveAudio, pairChoice, finishSetup, navigate]);
 
   const back = useCallback(() => {
+    if (llmScope.current.operation) retireDraft();
     if (stepIdx > 0) setStepIdx(stepIdx - 1);
-  }, [stepIdx]);
+  }, [stepIdx, retireDraft]);
 
   const selectedDescriptor = useMemo(
     () => providers.find((p) => p.id === pickedProvider),
@@ -427,15 +547,17 @@ export default function Setup() {
             value={step.id}
             onChange={(id) => {
               const idx = STEPS.findIndex((s) => s.id === id);
-              if (idx >= 0) setStepIdx(idx);
+              if (idx >= 0) {
+                if (id !== step.id && llmScope.current.operation) retireDraft();
+                setStepIdx(idx);
+              }
             }}
             items={STEPS}
           />
         )}
       >
         <p className="v2-p v2-p--muted">
-          Same steps as <code>feral setup</code> in your terminal. Everything you enter here writes to the same
-          <code> ~/.feral/settings.json</code> so the two wizards are interchangeable.
+          Make FERAL your own. Choose how it responds, add a few details about you, and connect your devices.
         </p>
       </Pane>
 
@@ -445,18 +567,19 @@ export default function Setup() {
         <LLMStep
           providers={providers}
           pickedProvider={pickedProvider}
-          onPickProvider={(pid) => { setPickedProvider(pid); setPickedModel(''); setApiKey(''); }}
+          onPickProvider={pickProvider}
           apiKey={apiKey}
-          onApiKey={setApiKey}
+          onApiKey={editKey}
           models={models}
           modelSource={modelSource}
           pickedModel={pickedModel}
-          onPickModel={setPickedModel}
+          onPickModel={pickModel}
           onProbe={probeProvider}
           onRefresh={refreshProviders}
           error={llmError}
           busy={llmBusy}
           descriptor={selectedDescriptor}
+          probeHistory={probeHistory}
         />
       )}
 
@@ -517,16 +640,17 @@ function WelcomeStep() {
   return (
     <Pane title="Welcome">
       <p className="v2-p">
-        This wizard sets up your local FERAL brain in four steps:
+        Let’s get your personal assistant ready:
       </p>
       <ol>
-        <li>Choose an LLM provider (cloud or local).</li>
-        <li>Pick STT + TTS providers for voice.</li>
-        <li>Tell the agent who you are.</li>
+        <li>Choose an AI provider that runs on this device or in the cloud.</li>
+        <li>Set up voice if you’d like to speak with FERAL.</li>
+        <li>Add a few details about yourself (optional).</li>
+        <li>Connect your devices, or keep FERAL on this Mac.</li>
         <li>Start chatting.</li>
       </ol>
       <p className="v2-p v2-p--muted">
-        Prefer terminal? Run <code>feral setup</code> on your shell — same endpoints, same config.
+        You can change these choices later in Settings.
       </p>
     </Pane>
   );
@@ -536,26 +660,28 @@ function WelcomeStep() {
 function LLMStep({
   providers, pickedProvider, onPickProvider,
   apiKey, onApiKey, models, modelSource, pickedModel, onPickModel,
-  onProbe, onRefresh, error, busy, descriptor,
+  onProbe, onRefresh, error, busy, descriptor, probeHistory,
 }) {
   return (
     <>
       <Pane
-        title="Providers"
+        title="AI provider"
         actions={(
-          <button type="button" className="v2-btn v2-btn--ghost" onClick={onRefresh} aria-label="Refresh">
+          <button type="button" className="v2-btn v2-btn--ghost" onClick={onRefresh} disabled={busy} aria-label="Refresh">
             <RefreshCw size={13} />
           </button>
         )}
       >
         <p className="v2-p v2-p--muted">
-          Click any provider to select it. Local providers show <strong>ready</strong> when detected.
-          Cloud providers show <strong>needs API key</strong> until you enter one — you can still select
-          them and add the key on the right.
+          Choose how FERAL answers you. Local providers run on this device; cloud providers
+          connect to an online service. A cloud provider may need your API key.
+          Probe checks the provider catalog connection; it does not verify the active model endpoint, unsaved credentials or model inference.
         </p>
         <div className="v2-skills-grid" data-testid="v2-setup-providers">
           {providers.map((p) => {
             const isPicked = p.id === pickedProvider;
+            const label = providerPresentation(p, probeHistory);
+            const reachable = probeHistory?.pid === p.id ? probeHistory.reachable : p.reachable;
             return (
               <Glass
                 key={p.id}
@@ -566,32 +692,36 @@ function LLMStep({
               >
                 <header style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 6 }}>
                   <StatusDot
-                    tone={statusTone(p.reachable ? 'ready' : (p.configured ? 'unreachable' : 'needs_api_key'))}
-                    label={`${p.display_name}: ${p.reachable ? 'ready' : p.configured ? 'unreachable' : 'needs API key'}`}
+                    tone={statusTone(!selectableProvider(p) ? '' : reachable === true ? 'ready' : reachable === false ? 'unreachable' : '')}
+                    label={`${p.display_name}: ${label}`}
                   />
                   <div style={{ fontWeight: 600 }}>{p.display_name}</div>
                 </header>
                 <div className="v2-p v2-p--muted v2-p--tiny" style={{ marginBottom: 6 }}>
-                  {p.supports_local ? `local · ${p.default_base_url}` : `env: ${p.credential_env_var || '—'}`}
+                  {p.supports_local ? 'Local provider — installation unverified' : 'Cloud service'}
                 </div>
                 <div className="v2-p v2-p--tiny" style={{ marginBottom: 8 }}>
-                  {p.reachable ? 'ready' : p.configured ? 'unreachable' : 'needs API key'}
+                  {label}
+                  {selectableProvider(p) && p.runtime_supported !== true && <span> · Legacy adapter support unconfirmed</span>}
                 </div>
                 <div style={{ display: 'flex', gap: 4 }}>
                   <button
                     type="button"
                     className={`v2-btn ${isPicked ? 'v2-btn--primary' : ''}`}
                     onClick={() => onPickProvider(p.id)}
+                    disabled={busy || !selectableProvider(p)}
                     data-testid={`v2-setup-pick-${p.id}`}
                   >
                     {isPicked ? 'Selected' : 'Select'}
                   </button>
-                  {!p.reachable && (
+                  {selectableProvider(p) && (
                     <button
                       type="button"
                       className="v2-btn v2-btn--ghost"
                       onClick={() => onProbe(p.id)}
-                      title="Re-probe"
+                      title="Explicitly check provider reachability"
+                      disabled={busy}
+                      data-testid={`v2-setup-probe-${p.id}`}
                     >
                       Probe
                     </button>
@@ -601,12 +731,13 @@ function LLMStep({
             );
           })}
         </div>
+        {probeHistory && <p className="v2-p v2-p--muted">Explicit probe history checks reachability; model inference, tools and voice remain unverified.</p>}
       </Pane>
 
-      {descriptor && descriptor.requires_api_key && !descriptor.reachable && (
+      {descriptor && selectableProvider(descriptor) && descriptor.requires_api_key && !descriptor.reachable && (
         <Pane title={`API key for ${descriptor.display_name}`}>
           <p className="v2-p v2-p--muted">
-            Routed into the BlindVault under <code>{descriptor.credential_env_var}</code> — never written to settings.json in plaintext.
+            Enter your provider’s API key to connect FERAL to this service.
           </p>
           <input
             type="password"
@@ -624,14 +755,16 @@ function LLMStep({
         <Pane title="Model">
           <p className="v2-p v2-p--muted">
             {models.length > 0
-              ? `Found ${models.length} models (source: ${modelSource}). Pick one or type a newer name.`
-              : 'No models discovered yet — type the exact model id.'}
+              ? `Choose one of ${models.length} model suggestions, or enter another model name.`
+              : 'No cached model suggestions. Enter a model name from your provider.'}
           </p>
+          <p className="v2-p v2-p--muted v2-p--tiny">Inventory: {modelSource || 'unknown'}. Suggestions do not verify installation, inference, tools or voice.</p>
           <input
             type="text"
+            disabled={!selectableProvider(descriptor)}
             value={pickedModel}
             onChange={(e) => onPickModel(e.target.value)}
-            placeholder="Model id"
+            placeholder="Model name"
             className="v2-input"
             data-testid="v2-setup-model"
             style={{ width: '100%', padding: 8, marginBottom: 8 }}
@@ -644,6 +777,7 @@ function LLMStep({
                   type="button"
                   className={`v2-chip${m === pickedModel ? ' v2-chip--live' : ''}`}
                   onClick={() => onPickModel(m)}
+                  disabled={busy || !selectableProvider(descriptor)}
                 >
                   {m}
                 </button>
@@ -663,14 +797,14 @@ function LLMStep({
 function AudioStep({ providers, value, onChange, error }) {
   return (
     <>
-      <Pane title="Speech in / out">
+      <Pane title="Voice">
         <p className="v2-p v2-p--muted">
-          Cloud (OpenAI) needs the key you already entered. Local
-          (faster-whisper + piper) runs entirely offline once installed.
+          Choose how FERAL understands your speech and speaks back. Cloud voice needs
+          a provider API key. Local voice runs on this device once available.
         </p>
       </Pane>
 
-      <Pane title="Speech-to-text">
+      <Pane title="Speech recognition">
         <div className="v2-skills-grid">
           {(providers.stt || []).map((p) => {
             const picked = value.stt_provider === p.id;
@@ -690,7 +824,7 @@ function AudioStep({ providers, value, onChange, error }) {
                   <div style={{ fontWeight: 600 }}>{p.display_name}</div>
                 </header>
                 <div className="v2-p v2-p--tiny v2-p--muted">
-                  {p.is_local ? (p.available ? 'installed' : 'install via pip install feral-ai[stt]') : `env: ${p.credential_env_var}`}
+                  {p.is_local ? (p.available ? 'Available on this device' : 'Requires additional setup') : 'Cloud service'}
                 </div>
                 <button
                   type="button"
@@ -711,7 +845,7 @@ function AudioStep({ providers, value, onChange, error }) {
         </div>
         {value.stt_provider && (
           <div style={{ marginTop: 10 }}>
-            <label className="v2-p v2-p--muted">STT model</label>
+            <label className="v2-p v2-p--muted">Speech recognition model</label>
             <input
               type="text"
               value={value.stt_model || ''}
@@ -723,7 +857,7 @@ function AudioStep({ providers, value, onChange, error }) {
         )}
       </Pane>
 
-      <Pane title="Text-to-speech">
+      <Pane title="Spoken responses">
         <div className="v2-skills-grid">
           {(providers.tts || []).map((p) => {
             const picked = value.tts_provider === p.id;
@@ -762,7 +896,7 @@ function AudioStep({ providers, value, onChange, error }) {
         </div>
         {value.tts_provider && (
           <div style={{ marginTop: 10, display: 'grid', gap: 6, gridTemplateColumns: '1fr 1fr' }}>
-            <label className="v2-p v2-p--muted">TTS model</label>
+            <label className="v2-p v2-p--muted">Speech model</label>
             <label className="v2-p v2-p--muted">Voice</label>
             <input
               type="text"
@@ -792,7 +926,7 @@ function IdentityStep({ value, onChange }) {
   return (
     <Pane title="About you (optional)">
       <p className="v2-p v2-p--muted">
-        Short identity block the agent can reference. You can edit it anytime in Settings → Self.
+        Help FERAL get to know you. Share only what you’re comfortable with; you can edit this anytime in Settings.
       </p>
       <div style={{ display: 'grid', gap: 6, marginTop: 10 }}>
         <label className="v2-p v2-p--muted">Name</label>
@@ -978,10 +1112,10 @@ function DoneStep({ saved, error, pairChoice }) {
       <div style={{ textAlign: 'center', padding: 20 }}>
         <CheckCircle2 size={48} style={{ color: saved ? 'var(--v2-state-live)' : 'var(--v2-text-tertiary)' }} />
         <h2 style={{ marginTop: 12 }}>
-          {saved ? 'Setup complete.' : 'Click Finish to write settings to disk.'}
+          {saved ? 'Setup complete.' : 'You’re ready. Select Finish to start chatting.'}
         </h2>
         <p className="v2-p v2-p--muted">
-          Start a chat at <code>/chat</code> or open the dashboard at <code>/</code>.
+          Your conversation with FERAL is next.
         </p>
         {pairChoice === 'localhost' && (
           <p className="v2-p v2-p--muted" style={{ marginTop: 10 }}>

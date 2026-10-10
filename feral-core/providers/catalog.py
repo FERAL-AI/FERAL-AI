@@ -417,6 +417,13 @@ class CachedModelList:
     warning: str = ""
 
 
+class ProviderProbeConfigurationChanged(RuntimeError):
+    """An in-flight probe cannot certify a replacement provider adapter."""
+
+    def __init__(self):
+        super().__init__("Provider configuration changed during the probe; review it again.")
+
+
 class ProviderCatalog:
     """Holds one adapter instance per provider id + a disk-backed model cache."""
 
@@ -532,6 +539,73 @@ class ProviderCatalog:
         self._models.pop(provider_id, None)
         self._warnings.pop(provider_id, None)
 
+    def bind_active_local(self, provider_id: str, base_url: Optional[str] = None) -> bool:
+        """Bind only the selected local runtime; inactive scoped overrides survive.
+
+        Explicit active configuration takes precedence. An empty endpoint uses
+        the same defaults as LLMProvider. No credential or network work occurs.
+        Return False without cache invalidation when the binding is unchanged.
+        """
+        resolved = self.resolve_alias(provider_id) or provider_id
+        if resolved not in ("ollama", "lmstudio"):
+            return False
+        if base_url is not None and not isinstance(base_url, str):
+            raise ValueError("Selected local provider endpoint must be a string")
+        from .ollama_provider import OllamaProvider
+        from .lmstudio_provider import LMStudioProvider
+        from config.runtime import ollama_openai_base_url
+
+        chosen = base_url or (ollama_openai_base_url() if resolved == "ollama"
+                              else self._descriptors[resolved].default_base_url)
+        expected = (OllamaProvider.native_base_url(chosen) if resolved == "ollama"
+                    else chosen.rstrip("/"))
+        provider_type = OllamaProvider if resolved == "ollama" else LMStudioProvider
+        current = self._adapters.get(resolved)
+        if isinstance(current, provider_type) and getattr(current, "_base_url", None) == expected:
+            return False
+        self.configure(resolved, base_url=chosen)
+        current = self._adapters.get(resolved)
+        if not isinstance(current, provider_type) or getattr(current, "_base_url", None) != expected:
+            raise RuntimeError("Selected local provider adapter could not bind its endpoint")
+        return True
+
+    def bind_active_cloud(self, provider_id: str, base_url: str, api_key: str) -> bool:
+        """Bind one supported HTTP catalog adapter to the resolved active runtime.
+
+        Call only after activation/credential hydration, not with a settings
+        draft. This performs no I/O, credential persistence or environment writes.
+        Unchanged binding retains its adapter/cache; inactive overrides survive.
+        Local/CLI/catalog-only providers keep their existing separate contracts.
+        """
+        from agents.llm_provider import is_supported_runtime_provider
+
+        if not isinstance(provider_id, str) or not is_supported_runtime_provider(provider_id):
+            return False
+        resolved = self.resolve_alias(provider_id) or provider_id
+        desc = self._descriptors.get(resolved)
+        if desc is None or desc.supports_local or not desc.requires_api_key:
+            return False
+        if not isinstance(base_url, str) or not base_url:
+            raise ValueError("Active cloud runtime endpoint is unavailable")
+        if not isinstance(api_key, str):
+            raise ValueError("Active cloud runtime credential is unavailable")
+        expected = base_url.rstrip("/")
+        current = self._adapters.get(resolved)
+        candidate = self._build_adapter(desc, api_key=api_key, base_url=base_url, _redact_errors=True)
+        if (candidate is None or getattr(candidate, "_base_url", None) != expected
+                or getattr(candidate, "_api_key", None) != api_key):
+            raise RuntimeError("Active cloud catalog connection could not be bound")
+        if (type(current) is type(candidate)
+                and getattr(current, "_base_url", None) == expected
+                and getattr(current, "_api_key", None) == api_key):
+            return False
+        # Publish only a validated replacement. In-flight probes already fence
+        # adapter identity and refuse stale success/error rather than retrying.
+        self._adapters[resolved] = candidate
+        self._models.pop(resolved, None)
+        self._warnings.pop(resolved, None)
+        return True
+
     async def list_models(
         self,
         provider_id: str,
@@ -544,8 +618,9 @@ class ProviderCatalog:
         """Return models for *provider_id*.
 
         ``live=False`` returns the cached value without touching the
-        network. ``force=True`` ignores the TTL and always refreshes —
-        that's what the "Refresh models" button in v2 Settings hits.
+        network, including a cold cache. With ``live=True``, ``force=True``
+        ignores the TTL and refreshes. The v2 "Refresh models" button
+        explicitly requests both flags.
         When a live attempt fails the cached / fallback list is still
         returned, but ``CachedModelList.warning`` carries the error so
         the client can render a visible "key rejected" chip instead of
@@ -583,11 +658,15 @@ class ProviderCatalog:
             if warning and not cached.warning:
                 cached.warning = warning
             return cached
-        if not live and cached:
+        if not live:
+            # Passive reads are an egress boundary, including the first
+            # read on a fresh installation. ``force`` controls cache age
+            # only when live discovery was explicitly requested.
+            passive = cached if cached is not None else self._fallback_models(provider_id)
             warning = self._warnings.get(provider_id, "")
-            if warning and not cached.warning:
-                cached.warning = warning
-            return cached
+            if warning and not passive.warning:
+                passive.warning = warning
+            return passive
         async with self._lock:
             fresh = await self._refresh_models(provider_id)
             if fresh is not None:
@@ -670,21 +749,32 @@ class ProviderCatalog:
             return status
         try:
             models = await adapter.refresh_models()
-            cleaned = [m for m in (models or []) if m]
+            if self._adapters.get(provider_id) is not adapter:
+                raise ProviderProbeConfigurationChanged()
+            cleaned = self._clean_discovered_models(provider_id, models)
             status.reachable = bool(cleaned)
             status.last_refresh = time.time()
-            if cleaned:
+            if cleaned or desc.supports_local:
                 # Persist the hit so list_models can return it without
-                # re-reaching out a second time.
+                # re-reaching out a second time. A valid empty local hit
+                # also supersedes any previously installed model IDs.
                 self._models[provider_id] = CachedModelList(
                     models=cleaned, last_refresh=status.last_refresh, source="live"
                 )
+                if desc.supports_local:
+                    self._warnings.pop(provider_id, None)
                 self._save_cache()
-            else:
+            if not cleaned:
                 status.error = "provider returned no models"
+        except ProviderProbeConfigurationChanged:
+            raise
         except Exception as exc:
+            if self._adapters.get(provider_id) is not adapter:
+                raise ProviderProbeConfigurationChanged() from None
             status.reachable = False
             status.error = str(exc)
+            if desc.supports_local:
+                self._warnings[provider_id] = self._format_refresh_error(exc)
         return status
 
     def status_for(self, provider_id: str) -> ProviderStatus:
@@ -782,7 +872,7 @@ class ProviderCatalog:
 
         cached = self._models.get(provider_id)
         base_models: list[str] = []
-        if cached and cached.models:
+        if cached is not None and (cached.models or self._descriptors[provider_id].supports_local):
             base_models = list(cached.models)
         else:
             adapter = self._adapters.get(provider_id)
@@ -867,6 +957,7 @@ class ProviderCatalog:
         *,
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
+        _redact_errors: bool = False,
         **extra: Any,
     ) -> Optional[Provider]:
         """Instantiate the concrete adapter class for *descriptor*.
@@ -949,9 +1040,15 @@ class ProviderCatalog:
                 from .lmstudio_provider import LMStudioProvider
                 return LMStudioProvider(base_url=base_url)
         except ImportError as exc:
-            logger.debug("adapter import for %s failed: %s", pid, exc)
+            if _redact_errors:
+                logger.debug("active adapter import for %s failed; details withheld", pid)
+            else:
+                logger.debug("adapter import for %s failed: %s", pid, exc)
             return None
         except Exception as exc:
+            if _redact_errors:
+                logger.error("active adapter for %s failed to construct; details withheld", pid)
+                return None
             # One adapter's constructor must never be able to take down
             # the catalog. _bind_builtin_adapters walks every descriptor
             # from ProviderCatalog.__init__, so an exception raised here
@@ -977,6 +1074,7 @@ class ProviderCatalog:
             return None
         try:
             models = await adapter.refresh_models()
+            cleaned = self._clean_discovered_models(provider_id, models)
         except Exception as exc:
             # Capture the failure so list_models() can surface it as a
             # warning on the cached / fallback list. Without this the
@@ -985,7 +1083,11 @@ class ProviderCatalog:
             logger.debug("refresh_models(%s) raised: %s", provider_id, exc)
             self._warnings[provider_id] = self._format_refresh_error(exc)
             return None
-        cleaned = [m for m in (models or []) if m]
+        descriptor = self._descriptors.get(provider_id)
+        if descriptor is not None and descriptor.supports_local:
+            # Successful emptiness is a discovery result, not a failed
+            # request and not permission to revive stale adapter defaults.
+            return CachedModelList(models=cleaned, last_refresh=time.time(), source="live")
         if not cleaned:
             # Distinguish "provider returned nothing" from "network error"
             # by falling back to the adapter's synchronous cache — still
@@ -999,6 +1101,16 @@ class ProviderCatalog:
         return CachedModelList(
             models=cleaned, last_refresh=time.time(), source="live"
         )
+
+    def _clean_discovered_models(self, provider_id: str, models: Any) -> list[str]:
+        descriptor = self._descriptors.get(provider_id)
+        if descriptor is not None and descriptor.supports_local:
+            if not isinstance(models, list) or any(not isinstance(m, str) or not m.strip() for m in models):
+                raise ValueError("Local provider returned an invalid model inventory")
+            return list(models)
+        # Preserve the existing discovery contract for cloud/community
+        # adapters that use bundled models as their synchronous fallback.
+        return [m for m in (models or []) if m]
 
     @staticmethod
     def _format_refresh_error(exc: Exception) -> str:
@@ -1110,6 +1222,21 @@ class ProviderCatalog:
             self._cache_path.write_text(json.dumps(payload, indent=2))
         except OSError as exc:
             logger.debug("catalog cache write failed: %s", exc)
+
+
+def bind_active_cloud_runtime(catalog: ProviderCatalog, runtime: Any, owner: Any,
+                              orchestrator: Any, current_owner: Any) -> bool:
+    """Fence the captured live connection after an awaited activation.
+
+    API routes supply their current owner explicitly; this module never imports
+    API global state. It does not activate a provider or accept draft parameters.
+    """
+    if (runtime is None or orchestrator is None or current_owner is not owner
+            or getattr(owner, "orchestrator", None) is not orchestrator
+            or getattr(orchestrator, "llm", None) is not runtime
+            or getattr(owner, "provider_catalog", None) is not catalog):
+        raise RuntimeError("Active connection owner changed before catalog binding")
+    return catalog.bind_active_cloud(runtime.provider, runtime.base_url, runtime.api_key)
 
 
 # ----------------------------------------------------------------------

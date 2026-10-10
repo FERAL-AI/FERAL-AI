@@ -80,10 +80,35 @@ class TestAnomaly:
     def test_critical_severity_at_3sigma(self, engine: BaselineEngine):
         self._seed(engine)
         metric = engine.get_baseline("hr_resting")
-        extreme = metric.mean + metric.std_dev * 4
+        # Measured against the metric's noise floor, not the window's own
+        # spread: this seed is tight (~1 bpm), and a deviation smaller
+        # than a heart-rate sensor's own noise is not a signal.
+        floor = BaselineEngine._effective_sigma("hr_resting", metric.std_dev)
+        extreme = metric.mean + floor * 4
         alert = engine.check_anomaly("hr_resting", extreme)
         assert alert is not None
         assert alert.severity == "critical"
+
+    def test_a_tight_window_cannot_manufacture_an_impossible_sigma(
+        self, engine: BaselineEngine,
+    ):
+        """The bug this floor exists for.
+
+        A continuously-sampled vital can fill the whole 14-value window
+        from one steady minute. The operator's install did exactly that
+        while walking: mean 103.5, std_dev 1.12. A normal 64 bpm then
+        scored 35 sigma and persisted a CRITICAL alert, which the health
+        page rendered.
+        """
+        self._seed(engine, values=[105, 105, 105, 104, 104, 102, 102,
+                                   102, 102, 103, 103, 104, 104, 104])
+        alert = engine.check_anomaly("hr_resting", 64.0)
+        # It may still alert -- 64 really is far from 103 -- but the
+        # number attached to it has to be physically meaningful.
+        if alert is not None:
+            assert alert.deviation_sigma < 10.0, (
+                f"{alert.deviation_sigma:.1f}σ is not a real deviation"
+            )
 
 
 class TestTrend:

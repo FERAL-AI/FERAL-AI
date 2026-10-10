@@ -26,6 +26,8 @@ serves HTML to the health probe would take the container down.
 from __future__ import annotations
 
 import pytest
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 from starlette.testclient import TestClient
 
 
@@ -50,10 +52,42 @@ def app_module():
     return server
 
 
-@pytest.fixture(scope="module")
-def client(app_module):
-    with TestClient(app_module.app, raise_server_exceptions=False) as c:
+@pytest.fixture
+def client(app_module, monkeypatch):
+    # Exercise the actual routes and negotiation middleware, not the singleton
+    # brain lifespan (which opens storage and starts unrelated providers/jobs).
+    from api.routes import dashboard, skills
+    from security.agent_bootstrap_fence import AgentBootstrapFence
+
+    passive = SimpleNamespace(
+        memory=object(), orchestrator=object(), vault_coordinator=None,
+        _native_bootstrap_required=False, skill_registry=SimpleNamespace(skills={}),
+    )
+    monkeypatch.setattr(dashboard, "state", passive)
+    monkeypatch.setattr(skills, "state", passive)
+    # Server reload tests can leave the constructed middleware holding a
+    # different state object than the current module. Model an ordinary
+    # ready profile on each actual captured fence owner for this route test.
+    owners = [app_module.state]
+    for middleware in app_module.app.user_middleware:
+        if middleware.cls is AgentBootstrapFence:
+            owners.append(middleware.kwargs["state"])
+    current = app_module.app.middleware_stack
+    while current is not None:
+        if isinstance(current, AgentBootstrapFence):
+            owners.append(current.state)
+        current = getattr(current, "app", None)
+    for owner in owners:
+        monkeypatch.setattr(owner, "_native_vault_deferred", False)
+        monkeypatch.setattr(owner, "_native_bootstrap_required", False)
+    init = AsyncMock(side_effect=AssertionError("route inspection must not boot the brain"))
+    monkeypatch.setattr(app_module.state, "init", init)
+    c = TestClient(app_module.app, raise_server_exceptions=True)
+    try:
         yield c
+    finally:
+        c.close()
+        init.assert_not_awaited()
 
 
 class TestTheNavigationTest:
@@ -130,6 +164,7 @@ class TestBothHalvesHold:
 
     def test_a_probe_still_gets_json(self, client, path):
         r = client.get(path, headers=CURL)
+        assert r.status_code == 200
         assert "json" in r.headers["content-type"], (
             f"{path} served {r.headers['content-type']} to a curl-style "
             "probe; this is the Docker HEALTHCHECK path"
@@ -137,6 +172,7 @@ class TestBothHalvesHold:
 
     def test_the_dashboards_own_fetch_still_gets_json(self, client, path):
         r = client.get(path, headers=SPA_FETCH)
+        assert r.status_code == 200
         assert "json" in r.headers["content-type"]
 
 
@@ -144,6 +180,20 @@ def test_health_still_reports_what_it_always_did(client):
     body = client.get("/health", headers=CURL).json()
     assert body["status"] == "ok"
     assert "version" in body
+    assert body["agent_ready"] is True
+    assert body["memory_available"] is True
+
+
+def test_native_instance_marker_is_opt_in_and_preserves_health_json(client, monkeypatch):
+    with monkeypatch.context() as environment:
+        environment.delenv("FERAL_DESKTOP_INSTANCE_ID", raising=False)
+        original = client.get("/health", headers=CURL)
+        assert "X-Feral-Desktop-Instance" not in original.headers
+        environment.setenv("FERAL_DESKTOP_INSTANCE_ID", "isolated-desktop-instance")
+        owned = client.get("/health", headers=CURL)
+        assert owned.headers["X-Feral-Desktop-Instance"] == "isolated-desktop-instance"
+        assert owned.json()["status"] == original.json()["status"] == "ok"
+        assert owned.json().keys() == original.json().keys()
 
 
 class TestOneUrlTwoRepresentationsNeedsVary:

@@ -207,8 +207,12 @@ def test_two_genuinely_different_units_of_one_capability_do_not_merge(tmp_path):
                  observed_at=now - 30)
 
     phone = build_device_view(live_nodes=[], subdevice_rows=store.list_all(now=now), now=now)["offline"][0]
-    names = sorted(s["name"] for s in phone["subdevices"])
-    assert names == ["W300", "W610"], "distinct device_name means distinct hardware"
+    subs = phone["subdevices"]
+    assert sorted(s["reported_name"] for s in subs) == ["W300", "W610"], \
+        "distinct device_name means distinct hardware"
+    # Display names are mapped, but two units must still read as two
+    # things: collapsing both to one product name would hide a device.
+    assert len({s["name"] for s in subs}) == 2
 
 
 def test_two_live_phones_are_never_collapsed(tmp_path):

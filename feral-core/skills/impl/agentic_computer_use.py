@@ -4,27 +4,23 @@ FERAL Agentic Computer Use — Vision-Action Loop
 Combines screen capture, VLM analysis, and desktop automation into
 an autonomous loop: screenshot -> understand -> act -> verify.
 
-This is the component that makes FERAL capable of performing any
-GUI task, surpassing single-shot tool calling by iterating until
-the objective is achieved.
+Actions use the existing executor and caller authority. Unsupported
+primitives and unavailable authority stop the task without dispatch.
 """
 from __future__ import annotations
 
 import asyncio
-import base64
 import json
 import logging
 import os
-import platform
 import re
-import shutil
-import subprocess
+import shlex
 import sys
-import time
-from pathlib import Path
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+from uuid import uuid4
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ValidationError
 
 from agents.computer_use_driver import (  # boundary-ok: provider-neutral driver lives in agents/ by design (PR 4)
     GUI_ENDPOINT_FOR,
@@ -35,7 +31,6 @@ from agents.computer_use_driver import (  # boundary-ok: provider-neutral driver
 from skills.base import BaseSkill
 from skills.impl import register_skill
 from skills.impl.gui_computer_use import (
-    capture_screenshot_bytes,
     detect_dpi_scale,
 )
 
@@ -43,6 +38,34 @@ logger = logging.getLogger("feral.agentic_cu")
 
 MAX_ITERATIONS = 15
 SCREENSHOT_DELAY = 0.8
+
+
+class _ActionStopped(Exception):
+    """Preserve a dispatch refusal without retrying the vision loop."""
+
+    def __init__(self, result: dict):
+        self.result = result
+        super().__init__("Computer-use action did not complete")
+
+
+@dataclass(frozen=True)
+class _SelectedVision:
+    """Immutable request binding; the shared provider owns wire/budget logic."""
+    owner: Any = field(repr=False)
+    provider: str
+    model: str
+    base_url: str = field(repr=False)
+    api_key: str = field(repr=False)
+
+    async def chat(self, *, messages, temperature=0.1, max_tokens=300):
+        return await self.owner.chat_selected_vision(
+            messages, provider=self.provider, model=self.model,
+            base_url=self.base_url, api_key=self.api_key,
+            temperature=temperature, max_tokens=max_tokens,
+        )
+
+    def extract_response(self, response):
+        return self.owner.extract_response(response)
 
 ACTION_SYSTEM_PROMPT = """You are an AI agent that controls a computer to accomplish tasks.
 You are given a screenshot of the current screen and a task to perform.
@@ -54,7 +77,7 @@ Available actions (return EXACTLY ONE as JSON):
 - {"action": "type", "text": "<string>", "description": "what you're typing"}
 - {"action": "key", "keys": "<combo>", "description": "what shortcut"} (e.g. "cmd+c", "enter", "tab")
 - {"action": "scroll", "direction": "up"|"down", "amount": <int>, "description": "why scrolling"}
-- {"action": "shell", "command": "<string>", "description": "shell command to run"}
+- {"action": "shell", "command": "open -a '<App Name>'", "description": "application to open"}
 - {"action": "done", "summary": "what was accomplished"}
 - {"action": "failed", "reason": "why it cannot be done"}
 
@@ -63,7 +86,8 @@ Rules:
 - Click coordinates should target the CENTER of the element you want to interact with.
 - After clicking a text field, use "type" to enter text.
 - Use "key" for keyboard shortcuts (cmd+a, cmd+v, enter, tab, escape, etc.).
-- Use "shell" for opening apps (open -a "App Name") or running commands.
+- "shell" only supports opening an application with open -a "App Name".
+- Other shell commands and dragging require separately available reviewed tools.
 - Return "done" when the task is complete.
 - Return "failed" only if the task is truly impossible after trying.
 - ALWAYS return valid JSON. Nothing else.
@@ -204,20 +228,36 @@ class AgenticComputerUseSkill(BaseSkill):
         if not task:
             return {"success": False, "status_code": 400, "data": None, "error": "task description is required"}
 
+        authority = self._registered_authority("gui_computer_use", "screenshot")
+        if isinstance(authority, dict):
+            return authority
+
         max_steps = min(int(args.get("max_steps", MAX_ITERATIONS)), MAX_ITERATIONS)
         steps_log: list[dict] = []
 
         llm = await self._get_vlm(vault)
+        if isinstance(llm, dict):
+            return llm
         if not llm:
-            return {"success": False, "status_code": 503, "data": None, "error": "No VLM available. Set OPENAI_API_KEY or FERAL_VLM_PROVIDER."}
+            return self._vision_refusal("vision_binding_unavailable", "Select a configured vision provider and model.")
 
         for i in range(max_steps):
-            screenshot_b64 = await self._capture_screen()
+            try:
+                screenshot_b64 = await self._capture_screen(stop_on_refusal=True)
+            except _ActionStopped as stopped:
+                return {
+                    **stopped.result, "success": False,
+                    "data": {"completed": False, "steps": len(steps_log), "log": steps_log,
+                             "action_result": stopped.result.get("data")},
+                }
             if not screenshot_b64:
                 steps_log.append({"step": i + 1, "error": "Screenshot capture failed"})
                 break
 
-            action = await self._decide_action(llm, task, screenshot_b64, steps_log, vault)
+            try:
+                action = await self._decide_action(llm, task, screenshot_b64, steps_log, vault)
+            except _ActionStopped as stopped:
+                return {**stopped.result, "data": {"completed": False, "steps": len(steps_log), "log": steps_log}}
             if not action:
                 steps_log.append({"step": i + 1, "error": "VLM returned no valid action"})
                 break
@@ -243,7 +283,21 @@ class AgenticComputerUseSkill(BaseSkill):
                     "error": action.get("reason"),
                 }
 
-            result = await self._execute_action(action)
+            try:
+                result = await self._execute_action(action, stop_on_refusal=True)
+            except _ActionStopped as stopped:
+                step_record["result"] = stopped.result
+                steps_log.append(step_record)
+                return {
+                    **stopped.result,
+                    "success": False,
+                    "data": {
+                        "completed": False,
+                        "steps": len(steps_log),
+                        "log": steps_log,
+                        "action_result": stopped.result.get("data"),
+                    },
+                }
             step_record["result"] = result
             steps_log.append(step_record)
 
@@ -256,59 +310,102 @@ class AgenticComputerUseSkill(BaseSkill):
         }
 
     async def _get_vlm(self, vault: dict) -> Optional[Any]:
-        """Get an LLM provider that supports vision.
-
-        This used to call ``LLMProvider(provider=, model=, api_key=)``.
-        ``LLMProvider.__init__`` takes ``(self)`` and accepts none of those,
-        so the call raised TypeError every single time, the except below
-        turned it into ``None``, and the caller rendered that as "No VLM
-        available. Set OPENAI_API_KEY". A user who had set the key was told
-        to set the key, which is why a dead capability was never reported as
-        a bug. See AUDIT-FIXES F-16.
-
-        Configuration goes through ``switch_provider``, which is the real
-        API for this and is async, hence this method is now async too. The
-        only caller was already inside ``async def _execute_task``.
-        """
-        from agents.llm_provider import LLMProvider
-
-        api_key = (
-            vault.get("OPENAI_API_KEY")
-            or os.getenv("OPENAI_API_KEY")
-            or vault.get("ANTHROPIC_API_KEY")
-            or os.getenv("ANTHROPIC_API_KEY")
+        """Resolve a passive selected binding; never construct or switch chat."""
+        import httpx
+        from agents.llm_provider import (
+            _PROVIDER_REGISTRY, _resolve_api_key,
+            _chat_completions_model_guard, _unsupported_live_error,
+            is_supported_runtime_provider,
         )
-        # Genuinely not configured. Not an error, and deliberately silent:
-        # the caller already returns an actionable 503 for this case.
-        if not api_key:
-            return None
+        from config.runtime import ollama_openai_base_url
+        from providers.catalog import ProviderCatalog
+        from providers.ollama_provider import OllamaProvider
 
-        provider = os.getenv("FERAL_VLM_PROVIDER", "openai")
-        model = os.getenv("FERAL_VLM_MODEL", "gpt-4o")
         try:
-            llm = LLMProvider()
-            await llm.switch_provider(provider, model=model, api_key=api_key)
-            return llm
+            state = getattr(sys.modules.get("api.state"), "state", None)
+            owner = getattr(getattr(state, "orchestrator", None), "llm", None)
+            if owner is None or not callable(getattr(owner, "chat_selected_vision", None)):
+                return self._vision_refusal("vision_binding_unavailable", "The shared vision runtime is unavailable.")
+            config = getattr(state, "config", None)
+
+            def selection(key):
+                env_key = f"FERAL_VLM_{key.upper()}"
+                if env_key in os.environ:
+                    return os.environ[env_key]
+                return config.get("vision", key, "") if callable(getattr(config, "get", None)) else ""
+
+            provider, model, base_url = (selection(key) for key in ("provider", "model", "base_url"))
+            if any(not isinstance(value, str) or len(value) > 2048 or any(ord(c) < 32 for c in value)
+                   for value in (provider, model, base_url)):
+                return self._vision_refusal("vision_binding_invalid", "Vision selection must use valid bounded strings.")
+            explicit_provider = bool(provider.strip())
+            provider = provider.strip() or getattr(owner, "provider", "")
+            model = model.strip() or (getattr(owner, "model", "") if provider == getattr(owner, "provider", None)
+                                      else "")
+            if (not provider or not model or not is_supported_runtime_provider(provider)
+                    or provider in {"codex", "local", "hybrid"}):
+                return self._vision_refusal("vision_binding_unavailable", "Select a supported vision provider and model.")
+            capable, _reason = owner._vision_support_for(provider, model)
+            if not capable or _unsupported_live_error(provider, model) or _chat_completions_model_guard(provider, model):
+                return self._vision_refusal("vision_model_unsupported", "The selected model cannot process screen images.")
+            if not explicit_provider and not getattr(owner, "available", False):
+                return self._vision_refusal("vision_binding_unavailable", "The configured primary vision provider is unavailable.")
+            base_url = base_url.strip() or (getattr(owner, "base_url", "") if provider == getattr(owner, "provider", None) else "")
+            base_url = base_url or (ollama_openai_base_url() if provider == "ollama" else _PROVIDER_REGISTRY.get(provider, ("", ""))[0])
+            url = httpx.URL(base_url)
+            if url.scheme not in {"http", "https"} or not url.host or url.username or url.password or url.query or url.fragment:
+                return self._vision_refusal("vision_binding_invalid", "The selected vision endpoint is invalid.")
+            if provider == "ollama":
+                path = url.path.rstrip("/")
+                base_url = str(url.copy_with(path=path if path.endswith("/v1") else path + "/v1")).rstrip("/")
+                catalog = getattr(state, "provider_catalog", None)
+                adapter = catalog.get_adapter(provider) if isinstance(catalog, ProviderCatalog) else None
+                # Inventory is evidence for one configured endpoint, never
+                # for an unrelated selected vision server. No discovery here.
+                if (isinstance(catalog, ProviderCatalog) and isinstance(adapter, OllamaProvider)
+                        and httpx.URL(adapter._base_url) == httpx.URL(OllamaProvider.native_base_url(base_url))):
+                    inventory = await catalog.list_models(provider, live=False)
+                    if inventory.source == "live" and model not in inventory.models:
+                        return self._vision_refusal("vision_model_not_installed", "The selected vision model is absent from the recorded local inventory.")
+            key_name = _PROVIDER_REGISTRY.get(provider, ("", ""))[1]
+            api_key = ("ollama" if provider == "ollama" else
+                       os.getenv("FERAL_VLM_API_KEY", "") or vault.get("FERAL_VLM_API_KEY", "")
+                       or (vault.get(key_name, "") if key_name else "") or _resolve_api_key(provider)
+                       or (os.getenv(key_name, "") if key_name else "")
+                       or (getattr(owner, "api_key", "") if provider == getattr(owner, "provider", None) else ""))
+            if not isinstance(api_key, str) or not api_key.strip() or any(ord(c) < 32 for c in api_key):
+                return self._vision_refusal("vision_credentials_unavailable", "Configure credentials for the selected vision provider.")
+            return _SelectedVision(owner=owner, provider=provider, model=model, base_url=base_url, api_key=api_key)
         except Exception as exc:
-            # Reached only with a key present, so this is never a
-            # configuration problem and must not be reported as one. Kept
-            # narrow-in-meaning by the early return above: everything that
-            # lands here is a real failure to build a provider.
-            logger.warning(
-                "VLM construction failed for provider=%s model=%s: %s. "
-                "This is not a missing API key; a key was supplied.",
-                provider, model, exc, exc_info=True,
-            )
-            return None
+            logger.warning("Vision selection could not be resolved (%s)", type(exc).__name__)
+            return self._vision_refusal("vision_binding_unavailable", "The selected vision configuration could not be resolved.")
 
-    async def _capture_screen(self) -> Optional[str]:
-        """Capture the screen and return base64-encoded JPEG."""
+    @staticmethod
+    def _vision_refusal(code: str, reason: str) -> dict:
+        return {"success": False, "status_code": 503, "data": None, "error": reason, "error_code": code}
+
+    async def _capture_screen(self, *, stop_on_refusal: bool = False) -> Optional[str]:
+        """Use the registered capture primitive and its caller policy."""
         try:
-            raw = await capture_screenshot_bytes()
-            if raw is None:
+            result = await self._execute_gated("screenshot", {})
+            self._stop_if_refused(result, stop_on_refusal=stop_on_refusal)
+            data = result.get("data")
+            encoded = data.get("image_base64") if isinstance(data, dict) else None
+            if not isinstance(encoded, str) or not encoded:
+                self._stop_if_refused(self._refusal(
+                    "The reviewed screenshot returned no image.",
+                    code="computer_use_capture_unavailable",
+                ), stop_on_refusal=stop_on_refusal)
                 return None
-            return base64.b64encode(raw).decode()
+            return encoded
+        except _ActionStopped:
+            raise
         except Exception as e:
+            if stop_on_refusal:
+                raise _ActionStopped(self._refusal(
+                    "The reviewed screenshot did not complete.",
+                    code="computer_use_capture_unavailable",
+                )) from e
             logger.error(f"Screenshot failed: {e}")
             return None
 
@@ -342,16 +439,27 @@ class AgenticComputerUseSkill(BaseSkill):
                 temperature=0.1,
                 max_tokens=300,
             )
+            if isinstance(response, dict) and response.get("error"):
+                code = response.get("error_code", "vision_request_unavailable")
+                allowed = {"pricing_unavailable", "budget_unavailable", "vision_model_unsupported",
+                           "vision_binding_unavailable", "vision_request_unavailable"}
+                if response.get("budget_exceeded"):
+                    code = "vision_budget_exceeded"
+                elif code not in allowed:
+                    code = "vision_request_unavailable"
+                raise _ActionStopped(self._vision_refusal(code, "Screen reasoning did not complete; no further computer action was dispatched."))
             text, _ = llm.extract_response(response)
             if not text:
                 return None
 
             return parse_vlm_action(text)
+        except _ActionStopped:
+            raise
         except Exception as e:
-            logger.warning(f"VLM action decision failed: {e}")
+            logger.warning("VLM action decision failed (%s)", type(e).__name__)
             return None
 
-    async def _execute_action(self, action: dict) -> str:
+    async def _execute_action(self, action: dict, *, stop_on_refusal: bool = False) -> str:
         """Execute a single action on the computer.
 
         The previous implementation duplicated pyautogui calls and DPI
@@ -365,11 +473,15 @@ class AgenticComputerUseSkill(BaseSkill):
         normalized = normalize_action(action)
         if normalized is None:
             action_type = action.get("action") or action.get("type") or "?"
+            self._stop_if_refused(self._refusal(
+                "Computer-use action could not be validated; nothing was dispatched.",
+                code="computer_use_action_unavailable",
+            ), stop_on_refusal=stop_on_refusal)
             return f"Unknown action: {action_type}"
 
         try:
             if normalized.action == "shell":
-                return await self._do_shell(normalized.command)
+                return await self._do_shell(normalized.command, stop_on_refusal=stop_on_refusal)
 
             if normalized.action == "wait":
                 ms = max(0, int(normalized.duration_ms))
@@ -377,13 +489,22 @@ class AgenticComputerUseSkill(BaseSkill):
                 return f"Waited {ms}ms"
 
             if normalized.action == "drag":
-                return await self._do_drag(normalized.path)
+                return await self._do_drag(normalized.path, stop_on_refusal=stop_on_refusal)
 
-            return await self._dispatch_via_gui(normalized)
+            return await self._dispatch_via_gui(normalized, stop_on_refusal=stop_on_refusal)
+        except _ActionStopped:
+            raise
         except Exception as e:
+            if stop_on_refusal:
+                raise _ActionStopped({
+                    "success": False, "status_code": 503, "data": None,
+                    "error": "Computer-use dispatch did not return a verified result. Reconcile before retrying.",
+                    "error_code": "computer_use_dispatch_unknown",
+                    "outcome": "unknown",
+                }) from e
             return f"Action failed: {e}"
 
-    async def _dispatch_via_gui(self, action: NormalizedAction) -> str:
+    async def _dispatch_via_gui(self, action: NormalizedAction, *, stop_on_refusal: bool = False) -> str:
         """Route a normalized action to ``GUIComputerUseSkill`` so DPI,
         rate limiting, and pyautogui/AppleScript fallbacks live in a
         single module. Returns the human-readable message the legacy
@@ -391,104 +512,88 @@ class AgenticComputerUseSkill(BaseSkill):
         """
         endpoint_id = GUI_ENDPOINT_FOR.get(action.action)
         if endpoint_id is None:
+            self._stop_if_refused(self._refusal(
+                "Computer-use action has no registered primitive.",
+                code="computer_use_action_unavailable",
+            ), stop_on_refusal=stop_on_refusal)
             return f"Unknown action: {action.action}"
         gui_args = gui_args_for(action)
 
         result = await self._execute_gated(endpoint_id, gui_args)
-        if result is None:
-            return (
-                "gui_computer_use skill is not registered; "
-                "agentic_computer_use cannot execute physical actions"
-            )
+        self._stop_if_refused(result, stop_on_refusal=stop_on_refusal)
         return self._describe_gui_result(action, result)
 
-    async def _execute_gated(
-        self, endpoint_id: str, gui_args: Dict[str, Any],
-    ) -> Optional[Dict[str, Any]]:
-        """Run one inner action through the gates every tool passes.
-
-        This used to call ``get_implementation("gui_computer_use")``
-        and invoke the skill instance directly. ``SkillExecutor.execute``
-        is the chokepoint where plan mode, approval and the hourly rate
-        limit are enforced, and its docstring says why they live there:
-        "a gate the caller has to opt into fails open for every path
-        that does not know to ask". This was such a path.
-
-        The effect was that one approved ``execute_task`` bought up to
-        fifteen VLM iterations of clicking and typing that were never
-        gated and never counted against the budget, and that plan mode,
-        whose entire promise is that nothing acts, did not stop them.
-        The operator's autonomy tier is meant to own that decision, and
-        a tier governing the outer call but not the fifteen actions it
-        spawns is not governing much.
-
-        Routing through the executor means the tier applies as written:
-        strict prompts for each non-read-only action, hybrid prompts for
-        CONFIRM-level ones, loose prompts for none. That is not a new
-        policy, it is the configured one finally reaching this loop.
-
-        Falls back to the direct instance only when there is no brain to
-        gate against, which is offline tooling, the CLI and tests.
-        ``SkillExecutor._gate`` fails open in exactly that case and for
-        exactly that reason; refusing here would break those callers
-        without making a live session any safer.
-
-        Returns ``None`` when the GUI skill is not registered at all.
-        """
-        tool_name = f"gui_computer_use__{endpoint_id}"
-
-        state_mod = sys.modules.get("api.state")
-        state_obj = getattr(state_mod, "state", None)
-        executor = getattr(state_obj, "skill_executor", None)
-
-        if executor is not None:
-            manifest, endpoint = self._resolve_gui_endpoint(endpoint_id)
-            if manifest is not None and endpoint is not None:
-                from skills.call_context import bind_context, current_context
-
-                # Keep the parent's session and turn so the gate judges
-                # this against the same session that approved the task,
-                # and so a checkpoint revert groups the inner actions
-                # with the turn that caused them.
-                parent = current_context()
-                with bind_context(
-                    session_id=parent.session_id,
-                    surface=parent.surface,
-                    tool_name=tool_name,
-                    turn_id=parent.turn_id,
-                ):
-                    return await executor.execute(
-                        tool_name, gui_args, manifest, endpoint,
-                    )
-            logger.warning(
-                "gui_computer_use__%s is not in the registry; falling back to "
-                "the ungated direct path", endpoint_id,
-            )
-
-        from skills.impl import get_implementation
-
-        gui = get_implementation("gui_computer_use")
-        if gui is None:
-            return None
-        return await gui.execute(endpoint_id, gui_args, vault={})
+    @staticmethod
+    def _refusal(reason: str, *, code: str = "computer_use_authority_unavailable") -> dict:
+        return {"success": False, "status_code": 503, "data": None,
+                "error": reason, "error_code": code}
 
     @staticmethod
-    def _resolve_gui_endpoint(endpoint_id: str):
-        """``(manifest, endpoint)`` for a gui_computer_use endpoint."""
+    def _stop_if_refused(result: Any, *, stop_on_refusal: bool) -> None:
+        if not stop_on_refusal:
+            return
+        if not isinstance(result, dict) or result.get("success") is not True:
+            if not isinstance(result, dict):
+                result = AgenticComputerUseSkill._refusal(
+                    "Computer-use dispatch returned no valid result. Reconcile before retrying.",
+                    code="computer_use_dispatch_unknown",
+                )
+                result["outcome"] = "unknown"
+            raise _ActionStopped(result)
+
+    async def _execute_gated(self, endpoint_id: str, gui_args: Dict[str, Any]) -> Dict[str, Any]:
+        return await self._execute_registered("gui_computer_use", endpoint_id, gui_args)
+
+    async def _execute_registered(self, skill_id: str, endpoint_id: str, args: dict) -> dict:
+        """Use the live central executor, never a raw implementation.
+
+        Offline parsing remains available, but autonomous effects require a
+        registered endpoint, caller session and policy runner. The approval
+        of an outer task does not grant its different inner actions.
+        """
+        from skills.call_context import current_context
+
+        authority = self._registered_authority(skill_id, endpoint_id)
+        if isinstance(authority, dict):
+            return authority
+        runner, manifest, _endpoint = authority
+        parent = current_context()
+        # The normal ToolRunner entry isolates each inner call from an outer
+        # one-use approval admission. It validates and reviews the exact new
+        # action, then hands it to the same central executor.
+        return await runner.execute_tool_call_for_llm(parent.session_id, {
+            "id": f"computer-use-{uuid4().hex}",
+            "name": f"{skill_id}__{endpoint_id}", "args": args,
+        }, [manifest], surface=parent.surface)
+
+    def _registered_authority(self, skill_id: str, endpoint_id: str):
+        """Preflight availability before accessing the screen or VLM."""
+        from security.session_identity import SessionIdentityValidationError, validate_session_id
+        from skills.call_context import current_context
+
+        parent = current_context()
         try:
-            state_mod = sys.modules.get("api.state")
-            state_obj = getattr(state_mod, "state", None)
-            registry = getattr(state_obj, "skill_registry", None)
-            manifest = getattr(registry, "skills", {}).get("gui_computer_use")
-            if manifest is None:
-                return None, None
-            for ep in getattr(manifest, "endpoints", []) or []:
-                if getattr(ep, "id", None) == endpoint_id:
-                    return manifest, ep
-            return manifest, None
-        except Exception:
-            logger.debug("could not resolve gui_computer_use endpoint", exc_info=True)
-            return None, None
+            validate_session_id(parent.session_id)
+        except SessionIdentityValidationError:
+            return self._refusal("Computer use cannot execute without a valid caller session.")
+        state_obj = getattr(sys.modules.get("api.state"), "state", None)
+        executor = getattr(state_obj, "skill_executor", None)
+        runner = getattr(state_obj, "tool_runner", None)
+        if runner is None:
+            runner = getattr(getattr(state_obj, "orchestrator", None), "tool_runner", None)
+        if (not callable(getattr(executor, "execute", None))
+                or not callable(getattr(runner, "execute_tool_call_for_llm", None))
+                or not callable(getattr(runner, "enforce_plan_mode", None))
+                or not (callable(getattr(runner, "enforce_executor_safety", None))
+                        or callable(getattr(runner, "enforce_safety", None)))):
+            return self._refusal("Computer use cannot execute without its central executor and policy runner.")
+        registry = getattr(state_obj, "skill_registry", None)
+        manifest = getattr(registry, "skills", {}).get(skill_id)
+        endpoint = next((ep for ep in getattr(manifest, "endpoints", [])
+                         if getattr(ep, "id", None) == endpoint_id), None)
+        if manifest is None or endpoint is None:
+            return self._refusal(f"{skill_id}__{endpoint_id} is not registered; computer use cannot execute this action.")
+        return runner, manifest, endpoint
 
     def _describe_gui_result(self, action, result) -> str:
         """Human-readable message the step log and tests expect."""
@@ -503,60 +608,52 @@ class AgenticComputerUseSkill(BaseSkill):
                     return str(msg)
         return f"{action.action} executed"
 
-    async def _do_drag(self, path: list) -> str:
-        """Best-effort drag along ``path`` via pyautogui. We keep this
-        local because gui_computer_use does not yet expose a ``drag``
-        endpoint — adding one is a follow-up. Until then, drag on a
-        host without pyautogui is honestly reported as unavailable."""
-        if not path:
-            return "drag failed: empty path"
-        try:
-            import pyautogui
-        except ImportError:
-            return "drag failed: pyautogui not available"
-        from skills.impl.gui_computer_use import scale_coordinates
-        scale = self.dpi_scale
-        scaled = [scale_coordinates(int(x), int(y), scale) for (x, y) in path]
-        sx, sy = scaled[0]
-        await asyncio.to_thread(pyautogui.moveTo, sx, sy)
-        await asyncio.to_thread(pyautogui.mouseDown)
-        try:
-            for ex, ey in scaled[1:]:
-                await asyncio.to_thread(pyautogui.moveTo, ex, ey, duration=0.1)
-        finally:
-            await asyncio.to_thread(pyautogui.mouseUp)
-        return f"Dragged through {len(scaled)} points"
+    async def _do_drag(self, path: list, *, stop_on_refusal: bool = False) -> str:
+        # No registered canonical drag endpoint exists. Never synthesize raw
+        # pointer events outside the executor to fill that capability gap.
+        result = self._refusal("drag failed: no registered reviewed drag endpoint is available.",
+                               code="computer_use_action_unavailable")
+        self._stop_if_refused(result, stop_on_refusal=stop_on_refusal)
+        return result["error"]
 
-    # Anything beyond this allowlist must NOT execute through the GUI
-    # vision loop. Real shell work goes through `coding_tools__bash` so
-    # the canonical sandbox/policy boundary applies.
-    _SHELL_ACTION_ALLOWLIST = ("open", "osascript", "screencapture")
+    @staticmethod
+    def _open_app_name(command: str) -> Optional[str]:
+        """Accept one literal application name, never shell syntax."""
+        if not isinstance(command, str) or len(command) > 512:
+            return None
+        if any(c in command for c in ";&|$`<>\n\r\x00"):
+            return None
+        try:
+            parts = shlex.split(command)
+        except ValueError:
+            return None
+        if len(parts) != 3 or parts[0] not in ("open", "/usr/bin/open") or parts[1] != "-a":
+            return None
+        name = parts[2]
+        if (not name or name != name.strip() or len(name) > 128
+                or not all(c.isalnum() or c in " ._-" for c in name)):
+            return None
+        return name
 
     @classmethod
     def _shell_command_allowed(cls, command: str) -> bool:
-        head = command.strip().split(None, 1)
-        if not head:
-            return False
-        program = Path(head[0]).name.lower()
-        return program in cls._SHELL_ACTION_ALLOWLIST
+        return cls._open_app_name(command) is not None
 
-    async def _do_shell(self, command: str) -> str:
-        if not self._shell_command_allowed(command):
-            # Refusing here is the canonical-execution promise: the VLM
-            # loop can launch UIs (`open -a`, `osascript`) but cannot
-            # become a generic host shell. Free-form commands belong on
-            # `coding_tools__bash` where the execution-mode decision applies.
-            return (
-                "blocked: agentic_computer_use shell only permits "
-                f"{', '.join(self._SHELL_ACTION_ALLOWLIST)}; route other "
-                "commands through coding_tools__bash"
+    async def _do_shell(self, command: str, *, stop_on_refusal: bool = False) -> str:
+        app = self._open_app_name(command)
+        if app is None:
+            result = self._refusal(
+                "blocked: computer use only supports opening one literal application; "
+                "other commands require separately reviewed coding_tools__bash or desktop_control tools.",
+                code="computer_use_action_unavailable",
             )
-        proc = await asyncio.create_subprocess_shell(
-            command,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=15.0)
-        output = (stdout or b"").decode()[:500]
-        err = (stderr or b"").decode()[:200]
-        return f"exit={proc.returncode} out={output}" + (f" err={err}" if err else "")
+        else:
+            # The restricted literal name is not supplied shell or AppleScript.
+            # The existing registered tool still applies central action policy.
+            result = await self._execute_registered("desktop_control", "open_app", {
+                "script": f'tell application "{app}" to activate',
+            })
+        self._stop_if_refused(result, stop_on_refusal=stop_on_refusal)
+        if result.get("success") is not True:
+            return str(result.get("error") or "Application opening did not complete")
+        return "Application opening returned a successful tool result; verify the visible outcome."

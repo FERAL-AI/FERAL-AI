@@ -16,6 +16,7 @@ import base64
 import io
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -31,6 +32,8 @@ CDP_PORT = int(os.getenv("FERAL_CDP_PORT", "9222"))
 CDP_HOST = os.getenv("FERAL_CDP_HOST", "localhost")
 MAX_SCREENSHOT_WIDTH = 1920
 JPEG_QUALITY = 75
+VIEW_MAX_DIMENSION = 1280
+VIEW_MAX_BASE64_BYTES = 2 * 1024 * 1024
 
 # ── Session video recording ──────────────────────────────────────────
 #
@@ -427,6 +430,11 @@ class BrowserController:
         self._bg_tasks: set = set()
         # CDP target id of the tab this controller is currently driving.
         self._attached_target_id: str = ""
+        self._view_document_id: Optional[int] = None
+        self._view_pointer: Optional[dict] = None
+        self._view_pointer_revision = 0
+        self._view_capture_lock = asyncio.Lock()
+        self._view_input_lock = asyncio.Lock()
 
     @property
     def connected(self) -> bool:
@@ -728,6 +736,8 @@ class BrowserController:
             }
 
         old = self._cdp
+        self._view_document_id = None
+        self._retire_view_pointer()
         self._cdp = fresh
         self._console_listener_attached = False
         self._attach_cdp_listeners(fresh)
@@ -1466,6 +1476,8 @@ class BrowserController:
           * If the browser is not connected at all, we fail loudly instead of
             faking success.
         """
+        self._view_document_id = None
+        self._retire_view_pointer()
         try:
             if wait_until not in ("load", "domcontentloaded", "networkidle", "commit"):
                 wait_until = "domcontentloaded"
@@ -1569,6 +1581,322 @@ class BrowserController:
             return {"success": True, "image_b64": img_b64, "format": "jpeg"}
         except Exception as e:
             return {"success": False, "error": str(e)}
+
+    async def capture_view_frame(self, target_id: str) -> dict:
+        """Memory-only, selected-tab viewport for an explicitly consented viewer.
+
+        The caller owns explicit operator viewing consent and connection identity. This
+        driver never initializes or switches tabs, persists pixels, or accepts
+        page JavaScript from the viewer. Child frames are hidden; shadow-root
+        surfaces are unsupported and refused. This is password-field masking,
+        not a promise to redact every secret a website renders as ordinary text.
+        """
+        def refusal(code):
+            return {"success": False, "error_code": code}
+
+        async with self._view_capture_lock:
+            cdp = self._cdp
+
+            def current():
+                return (isinstance(target_id, str) and bool(target_id)
+                        and self._cdp is cdp and cdp.connected
+                        and self._attached_target_id == target_id
+                        and cdp.target_id == target_id)
+
+            if not current():
+                return refusal("view_target_changed")
+            mask_id = "feral-view-mask-" + uuid4().hex
+            installed = False
+            stage = "view_capture_failed"
+            try:
+                document = await cdp.send_command("DOM.getDocument", {"depth": -1, "pierce": True}, timeout=5)
+                if not current():
+                    return refusal("view_target_changed")
+                root = document.get("root", {})
+                document_id = root.get("backendNodeId")
+                document_element_id = self._view_document_element(root)
+                if type(document_id) is not int or document_id <= 0:
+                    return refusal("view_unavailable")
+                if not self._view_document_supported(root):
+                    return refusal("view_mask_failed")
+                if self._view_document_id != document_id:
+                    self._retire_view_pointer()
+                if (self._view_pointer and "document_element_id" in self._view_pointer
+                        and self._view_pointer["document_element_id"] != document_element_id):
+                    self._retire_view_pointer()
+                self._view_document_id = document_id
+                stage = "view_mask_failed"
+                selectors = 'input[type="password" i],input[autocomplete="current-password" i],input[autocomplete="new-password" i],iframe,frame'
+                install = (
+                    "/* FERAL_VIEW_MASK_INSTALL */(()=>{const s=document.createElement('style');"
+                    "s.id=%s;s.textContent=%s;(document.head||document.documentElement).appendChild(s);"
+                    "return s.isConnected;})()"
+                ) % (json.dumps(mask_id), json.dumps(selectors + "{visibility:hidden!important;}"))
+                installed = True  # A lost command response may still have installed the mask.
+                result = await cdp.send_command("Runtime.evaluate", {"expression": install, "returnByValue": True}, timeout=5)
+                if not current():
+                    return refusal("view_target_changed")
+                if result.get("result", {}).get("value") is not True:
+                    return refusal("view_mask_failed")
+                verify = (
+                    "/* FERAL_VIEW_MASK_VERIFY */(()=>{const s=document.getElementById(%s);"
+                    "if(!s||!s.isConnected||!Array.from(document.querySelectorAll(%s)).every("
+                    "e=>getComputedStyle(e).visibility==='hidden'||getComputedStyle(e).display==='none'))return null;"
+                    "return {width:innerWidth,height:innerHeight,scale:devicePixelRatio,"
+                    "scroll_x:scrollX,scroll_y:scrollY};})()"
+                ) % (json.dumps(mask_id), json.dumps(selectors))
+                result = await cdp.send_command("Runtime.evaluate", {"expression": verify, "returnByValue": True}, timeout=5)
+                if not current():
+                    return refusal("view_target_changed")
+                viewport = result.get("result", {}).get("value")
+                if not self._view_valid_viewport(viewport):
+                    return refusal("view_mask_failed")
+                stage = "view_capture_failed"
+                result = await cdp.send_command("Page.captureScreenshot", {
+                    "format": "jpeg", "quality": 70, "captureBeyondViewport": False,
+                    "fromSurface": False,
+                }, timeout=5)
+                if not current():
+                    return refusal("view_target_changed")
+                # Recheck document, unsupported surfaces, mask and viewport after
+                # capture. A navigation/resize/scroll cannot certify old pixels.
+                after = await cdp.send_command("DOM.getDocument", {"depth": -1, "pierce": True}, timeout=5)
+                if not current():
+                    return refusal("view_target_changed")
+                after_root = after.get("root", {})
+                if (after_root.get("backendNodeId") != document_id
+                        or self._view_document_element(after_root) != document_element_id):
+                    self._view_document_id = None
+                    self._retire_view_pointer()
+                    return refusal("view_target_changed")
+                if not self._view_document_supported(after_root):
+                    return refusal("view_mask_failed")
+                checked = await cdp.send_command("Runtime.evaluate", {"expression": verify, "returnByValue": True}, timeout=5)
+                if not current():
+                    return refusal("view_target_changed")
+                if checked.get("result", {}).get("value") != viewport:
+                    return refusal("view_mask_failed")
+                encoded, width, height, source_width, source_height = await asyncio.to_thread(self._view_encode_image, result.get("data"))
+                if not current():
+                    return refusal("view_target_changed")
+                # The actual view can be shorter than an emulated layout. Its
+                # backing scale can also differ from emulated devicePixelRatio
+                # (observed on Retina). Use one uniform width scale for both
+                # axes; never stretch y to the larger layout height.
+                capture_width = viewport["width"]
+                capture_height = source_height * capture_width / source_width
+                if capture_height > viewport["height"] + 1:
+                    return refusal("view_frame_invalid")
+                latest = await cdp.send_command("DOM.getDocument", {"depth": 1}, timeout=5)
+                if (not current() or latest.get("root", {}).get("backendNodeId") != document_id
+                        or self._view_document_element(latest.get("root", {})) != document_element_id):
+                    return refusal("view_target_changed")
+                # Cleanup is itself an await. Finish it before the final owner/
+                # document check so a superseded capture cannot return pixels.
+                await cdp.send_command("Runtime.evaluate", {
+                    "expression": "/* FERAL_VIEW_MASK_CLEANUP */document.getElementById(%s)?.remove()" % json.dumps(mask_id),
+                    "returnByValue": True,
+                }, timeout=2)
+                installed = False
+                latest = await cdp.send_command("DOM.getDocument", {"depth": 1}, timeout=5)
+                if (not current() or latest.get("root", {}).get("backendNodeId") != document_id
+                        or self._view_document_element(latest.get("root", {})) != document_element_id):
+                    return refusal("view_target_changed")
+                pointer = self._view_pointer
+                cursor = None
+                if (pointer and pointer["target_id"] == target_id
+                        and pointer["document_id"] == document_id
+                        and pointer.get("page", self._page) is self._page
+                        and pointer.get("cdp", cdp) is cdp
+                        and 0 <= pointer["x"] < capture_width
+                        and 0 <= pointer["y"] < capture_height):
+                    cursor = {"x": pointer["x"] * width / capture_width,
+                              "y": pointer["y"] * height / capture_height,
+                              "phase": pointer["phase"]}
+                return {"success": True, "format": "jpeg", "image_b64": encoded,
+                        "target_id": target_id, "captured_at": time.time(),
+                        "width": width, "height": height,
+                        "viewport_width": capture_width, "viewport_height": capture_height,
+                        "device_scale_factor": viewport["scale"],
+                        "scroll_x": viewport["scroll_x"], "scroll_y": viewport["scroll_y"],
+                        "masked_password_fields": True, "cursor": cursor}
+            except (ValueError, TypeError):
+                return refusal("view_frame_invalid")
+            except Exception:
+                return refusal(stage)  # No CDP error, page text or pixels in diagnostics.
+            finally:
+                if installed:
+                    try:
+                        await cdp.send_command("Runtime.evaluate", {
+                            "expression": "/* FERAL_VIEW_MASK_CLEANUP */document.getElementById(%s)?.remove()" % json.dumps(mask_id),
+                            "returnByValue": True,
+                        }, timeout=2)
+                    except Exception:
+                        pass  # Only the private nonce-owned mask; never a replacement's mask.
+
+    @staticmethod
+    def _view_document_element(root: dict) -> Optional[int]:
+        # document.open/write can replace HTML without changing Document's id.
+        for child in root.get("children") or []:
+            if isinstance(child, dict) and child.get("nodeType") == 1:
+                value = child.get("backendNodeId")
+                return value if type(value) is int and value > 0 else None
+        return None
+
+    @staticmethod
+    def _view_document_supported(root: dict) -> bool:
+        pending = [root]
+        seen = 0
+        while pending:
+            node = pending.pop()
+            seen += 1
+            if (seen > 50000 or not isinstance(node, dict)
+                    or any(shadow.get("shadowRootType") != "user-agent"
+                           for shadow in (node.get("shadowRoots") or []))):
+                return False
+            pending.extend(node.get("children") or [])
+        return True
+
+    @staticmethod
+    def _view_valid_viewport(viewport) -> bool:
+        if not isinstance(viewport, dict):
+            return False
+        for key in ("width", "height", "scale", "scroll_x", "scroll_y"):
+            value = viewport.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+                return False
+        return (0 < viewport["width"] <= 10000 and 0 < viewport["height"] <= 10000
+                and 0 < viewport["scale"] <= 8)
+
+    @staticmethod
+    def _view_encode_image(encoded) -> tuple[str, int, int, int, int]:
+        from PIL import Image
+        if not isinstance(encoded, str) or len(encoded) > 12 * 1024 * 1024:
+            raise ValueError("invalid capture")
+        raw = base64.b64decode(encoded, validate=True)
+        with Image.open(io.BytesIO(raw)) as image:
+            # Chrome's actual-view path may return PNG despite a JPEG request;
+            # both bounded browser formats are always re-encoded as JPEG here.
+            if image.format not in ("JPEG", "PNG") or image.width * image.height > 16 * 1024 * 1024:
+                raise ValueError("invalid capture")
+            source_width, source_height = image.size
+            image.thumbnail((VIEW_MAX_DIMENSION, VIEW_MAX_DIMENSION), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.convert("RGB").save(buffer, format="JPEG", quality=70)
+            output = base64.b64encode(buffer.getvalue()).decode("ascii")
+            if len(output) > VIEW_MAX_BASE64_BYTES:
+                raise ValueError("oversized frame")
+            return output, image.width, image.height, source_width, source_height
+
+    def _remember_view_pointer(self, target: str, x: float, y: float, phase: str) -> None:
+        if (target and target == self._attached_target_id and self._view_document_id is not None
+                and math.isfinite(x) and math.isfinite(y)):
+            self._view_pointer = {"target_id": target, "document_id": self._view_document_id,
+                                  "x": x, "y": y, "phase": phase}
+
+    def _retire_view_pointer(self) -> None:
+        self._view_pointer_revision += 1
+        self._view_pointer = None
+
+    async def _playwright_pointer_action(self, selector: str, phase: str) -> None:
+        """Preserve Playwright dispatch; observe actual input, never infer a point.
+
+        A temporary closure owns its event data and listener. No page-global
+        binding, persistent listener, guessed element center or action retry.
+        If observation is unavailable, the action still runs without a marker.
+        """
+        async with self._view_input_lock:
+            self._retire_view_pointer()
+            page, cdp, target = self._page, self._cdp, self._attached_target_id
+            revision = self._view_pointer_revision
+            session = observer = element = None
+            document_id = None
+            document_element_id = None
+
+            def current():
+                return (revision == self._view_pointer_revision
+                        and page is self._page and cdp is self._cdp and cdp.connected
+                        and target and target == self._attached_target_id
+                        and cdp.target_id == target)
+
+            try:
+                try:
+                    if current():
+                        session = await asyncio.wait_for(page.context.new_cdp_session(page), 2)
+                        identity = await asyncio.wait_for(session.send("Target.getTargetInfo"), 2)
+                        document = await cdp.send_command("DOM.getDocument", {"depth": 1}, timeout=5)
+                        document_id = document.get("root", {}).get("backendNodeId")
+                        document_element_id = self._view_document_element(document.get("root", {}))
+                        if (current() and identity.get("targetInfo", {}).get("targetId") == target
+                                and type(document_id) is int and document_id > 0
+                                and document_element_id is not None):
+                            element = await asyncio.wait_for(page.query_selector(selector), 2)
+                            if element is not None and current():
+                                observer = await asyncio.wait_for(element.evaluate_handle("""(element, phase) => {
+                                    if (window.top !== window) return null;
+                                    const doc = element.ownerDocument;
+                                    let point = null;
+                                    const type = phase === 'click' ? 'click' : 'mousemove';
+                                    const handler = event => {
+                                        if (event.isTrusted && element.isConnected
+                                            && event.composedPath().includes(element)) {
+                                            point = {x:event.clientX, y:event.clientY};
+                                        }
+                                    };
+                                    doc.addEventListener(type, handler, true);
+                                    const expiry = setTimeout(()=>doc.removeEventListener(type, handler, true), 12000);
+                                    return {read:()=>point, stop:()=>{
+                                        clearTimeout(expiry); doc.removeEventListener(type, handler, true);
+                                    }};
+                                }""", phase), 2)
+                except Exception as error:
+                    logger.debug("Pointer observation unavailable: %s", type(error).__name__)
+
+                # Use the original methods, selectors, timeout and waiting rules.
+                # A dispatch exception is not retried or turned into a marker.
+                if (page is not self._page or cdp is not self._cdp
+                        or target != self._attached_target_id):
+                    raise RuntimeError("Browser ownership changed before pointer dispatch")
+                if phase == "click":
+                    await page.click(selector, timeout=5000)
+                else:
+                    await page.hover(selector, timeout=5000)
+                if observer is None or not current():
+                    return
+                try:
+                    point = await asyncio.wait_for(observer.evaluate("observer => observer.read()"), 2)
+                    after = await cdp.send_command("DOM.getDocument", {"depth": 1}, timeout=5)
+                    if (current() and after.get("root", {}).get("backendNodeId") == document_id
+                            and self._view_document_element(after.get("root", {})) == document_element_id
+                            and isinstance(point, dict)
+                            and all(type(point.get(axis)) in (int, float)
+                                    and math.isfinite(point[axis]) for axis in ("x", "y"))):
+                        self._view_document_id = document_id
+                        self._view_pointer = {"target_id": target, "document_id": document_id,
+                                              "document_element_id": document_element_id,
+                                              "page": page, "cdp": cdp,
+                                              "x": point["x"], "y": point["y"], "phase": phase}
+                except Exception as error:
+                    logger.debug("Pointer observation unconfirmed: %s", type(error).__name__)
+            finally:
+                if observer is not None:
+                    try:
+                        await asyncio.wait_for(observer.evaluate("observer => observer.stop()"), 2)
+                    except Exception as error:
+                        logger.debug("Pointer listener cleanup unavailable: %s", type(error).__name__)
+                for handle in (observer, element):
+                    if handle is not None:
+                        try:
+                            await asyncio.wait_for(handle.dispose(), 2)
+                        except Exception as error:
+                            logger.debug("Pointer handle cleanup unavailable: %s", type(error).__name__)
+                if session is not None:
+                    try:
+                        await asyncio.wait_for(session.detach(), 2)
+                    except Exception as error:
+                        logger.debug("Pointer session cleanup unavailable: %s", type(error).__name__)
+                if not current():
+                    self._retire_view_pointer()
 
     async def snapshot(
         self,
@@ -1927,16 +2255,17 @@ class BrowserController:
 
     async def click(self, ref_or_selector: str) -> dict:
         """Click an element by ARIA ref or CSS selector."""
+        self._retire_view_pointer()
         try:
             if self._page:
                 if ref_or_selector.startswith("ax"):
                     node_info = self._aria_refs.get(ref_or_selector)
                     if node_info and node_info.get("selector"):
-                        await self._page.click(node_info["selector"], timeout=5000)
+                        await self._playwright_pointer_action(node_info["selector"], "click")
                     else:
-                        await self._page.click(f"text={ref_or_selector}", timeout=5000)
+                        await self._playwright_pointer_action(f"text={ref_or_selector}", "click")
                 else:
-                    await self._page.click(ref_or_selector, timeout=5000)
+                    await self._playwright_pointer_action(ref_or_selector, "click")
             else:
                 await self._cdp_click(ref_or_selector)
             return {"success": True, "clicked": ref_or_selector}
@@ -1945,6 +2274,8 @@ class BrowserController:
 
     async def type_text(self, ref_or_selector: str, text: str) -> dict:
         """Type text into an element."""
+        self._retire_view_pointer()
+        using_cdp = self._page is None
         try:
             if self._page:
                 if ref_or_selector.startswith("ax"):
@@ -1956,12 +2287,39 @@ class BrowserController:
                 else:
                     await self._page.fill(ref_or_selector, text, timeout=5000)
             else:
-                await self._cdp.send_command("Input.dispatchKeyEvent", {
-                    "type": "keyDown", "text": text,
+                selector = self._resolve_selector(ref_or_selector)
+                if not selector or (ref_or_selector.startswith("ax") and selector == ref_or_selector):
+                    return {"success": False, "error": "A current resolved field is required."}
+                cdp, target = self._cdp, self._attached_target_id
+                focused = await cdp.send_command("Runtime.evaluate", {
+                    "expression": "(function(){const es=document.querySelectorAll(%s);"
+                    "if(es.length!==1)return false; const e=es[0];"
+                    "if(!(e instanceof HTMLInputElement||e instanceof HTMLTextAreaElement)"
+                    "||e.disabled||e.readOnly||typeof e.selectionStart!=='number')return false;"
+                    "e.focus();e.select();return document.activeElement===e"
+                    "&&e.selectionStart===0&&e.selectionEnd===e.value.length;})()" % json.dumps(selector),
+                    "returnByValue": True,
                 })
+                if (self._cdp is not cdp or self._attached_target_id != target
+                        or focused.get("result", {}).get("value") is not True):
+                    return {"success": False, "error": "The requested field could not retain focus."}
+                await cdp.send_command("Input.insertText", {"text": text})
+                if self._cdp is not cdp or self._attached_target_id != target:
+                    return {"success": False, "error": "Browser target changed after text dispatch; verify the outcome before retrying."}
+                verified = await cdp.send_command("Runtime.evaluate", {
+                    "expression": "(function(){const es=document.querySelectorAll(%s);"
+                    "return es.length===1&&document.activeElement===es[0]&&es[0].value===%s;})()"
+                    % (json.dumps(selector), json.dumps(text)),
+                    "returnByValue": True,
+                })
+                if (self._cdp is not cdp or self._attached_target_id != target
+                        or verified.get("result", {}).get("value") is not True):
+                    return {"success": False, "error": "Text was dispatched but the requested field outcome is unconfirmed; inspect before retrying."}
             return {"success": True, "typed": text[:50]}
         except Exception as e:
-            return {"success": False, "error": str(e)}
+            return {"success": False, "error": (
+                "CDP typing failed; inspect the field before retrying because dispatch may have occurred."
+                if using_cdp else str(e))}
 
     async def fill(self, ref_or_selector: str, value: str) -> dict:
         """Fill a form field (clears first, then types)."""
@@ -1990,10 +2348,11 @@ class BrowserController:
 
     async def hover(self, ref_or_selector: str) -> dict:
         """Hover over an element by ARIA ref or selector."""
+        self._retire_view_pointer()
         try:
             selector = self._resolve_selector(ref_or_selector)
             if self._page:
-                await self._page.hover(selector, timeout=5000)
+                await self._playwright_pointer_action(selector, "hover")
             else:
                 await self._cdp_hover(selector)
             return {"success": True, "hovered": ref_or_selector}
@@ -3090,20 +3449,24 @@ class BrowserController:
 
     async def _cdp_click(self, selector: str):
         """Click via CDP (fallback when Playwright isn't available)."""
+        target = self._attached_target_id
         x, y = await self._cdp_get_element_center(selector)
         for event_type in ("mousePressed", "mouseReleased"):
             await self._cdp.send_command("Input.dispatchMouseEvent", {
                 "type": event_type, "x": x, "y": y, "button": "left", "clickCount": 1,
             })
+        self._remember_view_pointer(target, x, y, "click")
 
     async def _cdp_hover(self, selector: str):
         """Move mouse over element center via CDP."""
+        target = self._attached_target_id
         x, y = await self._cdp_get_element_center(selector)
         await self._cdp.send_command("Input.dispatchMouseEvent", {
             "type": "mouseMoved",
             "x": x,
             "y": y,
         })
+        self._remember_view_pointer(target, x, y, "hover")
 
     async def _cdp_get_element_center(self, selector: str) -> tuple[float, float]:
         # `:has-text("X")` is a Playwright pseudo, not real CSS. When
@@ -3505,6 +3868,7 @@ class BrowserController:
             count = max(1, min(int(click_count), 3))
         except (TypeError, ValueError):
             count = 1
+        target = self._attached_target_id
         try:
             if self._page:
                 await self._page.mouse.click(bx, by, button=btn, click_count=count)
@@ -3514,6 +3878,7 @@ class BrowserController:
                         "type": phase, "x": bx, "y": by,
                         "button": btn, "clickCount": count,
                     })
+            self._remember_view_pointer(target, bx, by, "click")
             return {"success": True, "x": bx, "y": by, "button": btn, "click_count": count}
         except Exception as e:
             return {"success": False, "error": str(e)}
@@ -3791,6 +4156,7 @@ class BrowserController:
         return await self._history_step(1, "forward")
 
     async def _history_step(self, delta: int, label: str) -> dict:
+        self._retire_view_pointer()
         try:
             if self._page:
                 # Two Playwright behaviours make the obvious implementation
@@ -3843,6 +4209,7 @@ class BrowserController:
 
     async def reload_page(self, ignore_cache: bool = False) -> dict:
         """Reload the current page."""
+        self._retire_view_pointer()
         try:
             if self._page:
                 await self._page.reload(timeout=30000)

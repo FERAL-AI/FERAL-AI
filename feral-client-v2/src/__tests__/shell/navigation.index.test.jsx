@@ -97,7 +97,7 @@ describe('the navigation index mirrors the router', () => {
     // the user lost a page.
     const previouslyReachable = [
       // eight Dock slots
-      '/', '/chat', '/flows', '/devices', '/apps', '/canvas', '/oversight', '/settings',
+      '/home', '/chat', '/flows', '/devices', '/apps', '/canvas', '/oversight', '/settings',
       // fifteen Hub items
       '/forge', '/skills', '/memory', '/wiki', '/agents', '/identity', '/health',
       '/intents', '/timeline', '/glass-brain', '/marketplace', '/webhooks',
@@ -125,12 +125,13 @@ describe('the palette indexes what the Dock pins', () => {
     expect(new Set(DOCK_ITEMS.map((d) => d.to)).size).toBe(DOCK_PATHS.length);
   });
 
-  it('pins Home, which the whole v2 overview lives behind', () => {
-    // Dropping it left briefing, in-flight work, suggestions, hardware,
-    // consciousness, channels, LLM and the digital twin reachable only
-    // by remembering the palette shortcut.
-    expect(DOCK_PATHS).toContain('/');
-    expect(DOCK_ITEMS.find((d) => d.to === '/')?.label).toBe('Home');
+  it('leads with Home and keeps Chat and Coding directly reachable', () => {
+    expect(DOCK_PATHS[0]).toBe('/home');
+    expect(DOCK_PATHS).toContain('/chat');
+    expect(DOCK_PATHS).toContain('/coding');
+    expect(DOCK_PATHS.length).toBeLessThan(9);
+    expect(GO_ITEMS.find((d) => d.to === '/home')?.label).toBe('Home');
+    expect(appSource).toContain('<Route path="/" element={<Navigate to="/home" replace />}');
   });
 
   it('gives every destination exactly one owner: a Dock tile or the palette', () => {
@@ -211,7 +212,7 @@ describe('every destination lights exactly one Dock control', () => {
     const to = DESTINATIONS.map((d) => d.to)
       .find((t) => t !== '/' && !DOCK_PATHS.some((d) => t === d || t.startsWith(`${d}/`)));
     const { container } = renderV2(<Dock />, { route: to });
-    expect(lit(container)).toEqual(['Command']);
+    expect(lit(container)).toEqual(['More']);
   });
 
   it('keeps the safety surfaces one click away', () => {

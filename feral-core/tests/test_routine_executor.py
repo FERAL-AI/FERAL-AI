@@ -16,8 +16,11 @@ import pytest
 
 from agents.scheduler import CronService, JobType
 from agents.taskflow import TaskFlowRuntime
+from agents.orchestrator import Orchestrator
+from agents.tool_runner import ToolRunner
+from skills.executor import SkillExecutor
 from agents.persona_loader import WorkflowPackManifest, WorkflowStep
-from models.skill_manifest import BrandProfile, SkillEndpoint, SkillManifest
+from models.skill_manifest import BrandProfile, EndpointParam, SkillEndpoint, SkillManifest
 from skills.base import BaseSkill
 from skills.registry import SkillRegistry
 from skills.impl import SKILL_IMPLEMENTATIONS
@@ -47,6 +50,7 @@ def _manifest(skill_id, endpoint_id, safety_tier):
                 url=f"python://{skill_id}/{endpoint_id}",
                 description="test endpoint",
                 safety_tier=safety_tier,
+                params=[EndpointParam(name="x", type="integer", required=False)],
             )
         ],
     )
@@ -65,7 +69,7 @@ def env(monkeypatch):
     reg = SkillRegistry()
     safe = _RecordingSkill("safe_skill")
     danger = _RecordingSkill("danger_skill")
-    reg.register(_manifest("safe_skill", "ping", "safe"))
+    reg.register(_manifest("safe_skill", "read", "safe"))
     reg.register(_manifest("danger_skill", "wipe", "deny"))
     # CI-flake fix: monkeypatch the global registry so these test
     # fakes are restored at teardown (otherwise they leak into
@@ -87,13 +91,24 @@ def env(monkeypatch):
     server.state.skill_registry = reg
     server.state.taskflows = taskflows
     server.state.workflow_packs = {"demo_pack": pack}
-    server.state.orchestrator = None
+    orch = Orchestrator.__new__(Orchestrator)
+    orch.skills = reg
+    orch._mcp_client = None
+    orch._session_surfaces = {}
+    orch._active_turns = {}
+    orch._background_tasks = set()
+    orch.memory = None
+    orch.executor = SkillExecutor()
+    orch.tool_runner = ToolRunner(orch)
+    monkeypatch.setattr(server.state, "tool_runner", orch.tool_runner, raising=False)
+    server.state.orchestrator = orch
     server.state.cron_cost_guard = None
 
     yield {"cron": cron, "taskflows": taskflows, "safe": safe, "danger": danger, "reg": reg}
 
     for k, v in saved.items():
         setattr(server.state, k, v)
+    asyncio.run(orch.executor.close())
     cron.close()
     os.unlink(cron_path)
     os.unlink(flow_path)
@@ -106,9 +121,9 @@ def _latest_run(cron, job_id):
 
 def test_skill_branch_runs_and_records(env):
     cron = env["cron"]
-    job = cron.create_job(JobType.SCHEDULED, "every 30m", "safe", {"skill": "safe_skill", "endpoint": "ping", "args": {"x": 1}}, "")
+    job = cron.create_job(JobType.SCHEDULED, "every 30m", "safe", {"skill": "safe_skill", "endpoint": "read", "args": {"x": 1}}, "")
     server.execute_routine_job(job)
-    assert env["safe"].calls == [("ping", {"x": 1})]
+    assert env["safe"].calls == [("read", {"x": 1})]
     run = _latest_run(cron, job.id)
     assert run["status"] == "success"
 

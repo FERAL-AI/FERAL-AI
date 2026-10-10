@@ -13,10 +13,13 @@ import json
 import logging
 import time
 import uuid
+import ipaddress
 import httpx
-from typing import Any, Optional, AsyncGenerator
+from contextvars import ContextVar
+from functools import wraps
+from typing import Any, Optional, AsyncGenerator, Callable, TypeVar, cast
 
-from config.loader import feral_data_home
+from config.loader import ChatOutputBudgetError, feral_data_home, resolve_chat_output_budget
 from config.runtime import ollama_base_url, ollama_openai_base_url
 from agents.chat_sanitizer import sanitize_assistant_display_text
 
@@ -70,8 +73,12 @@ from agents.multimodal_blocks import (
     tool_list_contains,
 )
 from agents.tool_list import OPENAI_TOOL_HARD_LIMIT, cap_tools_with_pins
-from agents.token_estimate import estimate_message_tokens
-from agents.context_manager import configured_context_window_tokens
+from agents.local_tool_budget import retrieve_local_tools, fit_local_request, local_input_bytes, MAX_REQUEST_BYTES, LocalRequestRefusal
+from agents.token_estimate import estimate_message_tokens, estimate_tokens
+from agents.context_manager import (
+    configured_context_window_tokens, declared_ollama_context_tokens,
+    verify_ollama_request_context, OllamaContextRefusal, fit_request_history, OLLAMA_TEMPLATE_RESERVE,
+)
 
 # Cost-budget surface (Wave 1 Lane 04). The runtime gate lives on the
 # public chat entry points — see ``_budget_check`` /
@@ -83,6 +90,73 @@ except Exception:  # pragma: no cover - defensive
         """Stand-in when the cost module is unavailable in stripped builds."""
 
 logger = logging.getLogger("feral.llm")
+
+
+_budget_scope: ContextVar[Any] = ContextVar("llm_budget_scope", default=None)
+_BudgetCallable = TypeVar("_BudgetCallable", bound=Callable[..., Any])
+
+
+def _scoped_budget(*, streaming: bool = False) -> Callable[[_BudgetCallable], _BudgetCallable]:
+    """Keep attempt receipts within one task, including explicit nested fallback."""
+    def decorate(method: _BudgetCallable) -> _BudgetCallable:
+        @wraps(method)
+        async def call(self, *args, **kwargs):
+            existing = _budget_scope.get()
+            if existing is not None and existing["provider"] is self and existing["task"] is asyncio.current_task():
+                return await method(self, *args, **kwargs)
+            scope = {"provider": self, "task": asyncio.current_task(), "site": kwargs.get("call_site", "chat"), "attempts": []}
+            token = _budget_scope.set(scope)
+            try:
+                result = await method(self, *args, **kwargs)
+                if scope["attempts"]:
+                    attempt = scope["attempts"][-1]
+                    if (attempt["status"] == "dispatched" and not scope.get("unmatched_usage")
+                            and isinstance(result, dict) and not result.get("error")):
+                        await self._budget_record(scope["site"], attempt["model"], result)
+                if isinstance(result, dict) and result.get("error") and scope.get("block"):
+                    return scope["block"]
+                return result
+            finally:
+                try:
+                    await self._budget_finish_scope(scope)
+                finally:
+                    _budget_scope.reset(token)
+
+        @wraps(method)
+        async def stream(self, *args, **kwargs):
+            existing = _budget_scope.get()
+            nested = existing is not None and existing["provider"] is self and existing["task"] is asyncio.current_task()
+            scope = existing if nested else {"provider": self, "task": asyncio.current_task(), "site": kwargs.get("call_site", "chat"), "attempts": []}
+            iterator = method(self, *args, **kwargs)
+            try:
+                while True:
+                    if scope["task"] is not asyncio.current_task():
+                        raise RuntimeError("Budget stream cannot migrate to another task")
+                    token = _budget_scope.set(scope)
+                    try:
+                        event = await iterator.__anext__()
+                    except StopAsyncIteration:
+                        return
+                    finally:
+                        # Never leak reservation authority into the consumer
+                        # while an async generator is suspended at its yield.
+                        _budget_scope.reset(token)
+                    if event.get("type") == "error" and scope.get("block"):
+                        block = scope["block"]
+                        event = {"type": "budget_exceeded" if "budget_exceeded" in block else "error",
+                                 "content": block["error"], "error_code": block.get("error_code"),
+                                 "payload": block.get("budget_exceeded", {})}
+                    yield event
+            finally:
+                token = _budget_scope.set(scope)
+                try:
+                    await iterator.aclose()
+                    if not nested:
+                        await self._budget_finish_scope(scope)
+                finally:
+                    _budget_scope.reset(token)
+        return cast(_BudgetCallable, stream if streaming else call)
+    return decorate
 
 
 # Endpoints (provider, base_url) known to reject
@@ -357,6 +431,11 @@ _RUNTIME_PROVIDER_MAP: dict[str, str] = {
 }
 
 
+def runtime_provider_id(provider_id: str) -> str:
+    """Resolve a catalog identity without inventing a runtime for unknown IDs."""
+    return _RUNTIME_PROVIDER_MAP.get(provider_id, provider_id)
+
+
 def is_supported_catalog_provider(catalog_id: str) -> bool:
     """``is_supported_runtime_provider`` keyed by a *catalog* provider id.
 
@@ -366,9 +445,7 @@ def is_supported_catalog_provider(catalog_id: str) -> bool:
     returns False for a provider that works perfectly, which made the setup
     wizard hide Kimi from the picker entirely. Resolve through the map first.
     """
-    return is_supported_runtime_provider(
-        _RUNTIME_PROVIDER_MAP.get(catalog_id, catalog_id)
-    )
+    return is_supported_runtime_provider(runtime_provider_id(catalog_id))
 
 
 # Canonical set of provider ids the runtime can actually execute chat
@@ -468,6 +545,13 @@ def _cooldown_state_path() -> str:
     except Exception as exc:  # pragma: no cover - defensive
         logger.debug("cooldown state path unavailable: %s", exc)
         return ""
+
+
+def _unsupported_live_error(provider_name: str, model: str) -> str:
+    from providers.model_classes import is_unsupported_live_model
+    if is_unsupported_live_model(provider_name, model):
+        return "unsupported_live_protocol: GPT-Live requires a dedicated Live session/delegation adapter; chat and legacy Realtime are unsupported."
+    return ""
 
 
 def _responses_endpoint_for(provider_name: str, model: str) -> bool:
@@ -602,7 +686,7 @@ class LLMProvider:
     """
 
     def __init__(self):
-        self.provider = os.getenv("FERAL_LLM_PROVIDER", "openai")
+        self.provider = runtime_provider_id(os.getenv("FERAL_LLM_PROVIDER", "openai"))
         # Resolve the default model lazily from the shared
         # ``ProviderCatalog`` rather than burning a literal here. The
         # catalog reads ``model_catalog.json`` + each adapter's bundled
@@ -618,6 +702,7 @@ class LLMProvider:
         self._config: dict = {}
         self._cooldown = ProviderCooldownTracker(storage_path=_cooldown_state_path())
         self._last_budget_routing: dict[str, Any] = {}
+        self._ollama_context_observation: tuple[str, str, int, float] | None = None
         # Per-call cross-provider failover record. ``None`` means the
         # primary answered on its first hop (steady state). Populated
         # by ``chat_with_failover`` and read by ``health_snapshot`` /
@@ -837,7 +922,22 @@ class LLMProvider:
             headers["anthropic-version"] = "2023-06-01"
         elif self.api_key:
             headers["Authorization"] = f"Bearer {self.api_key}"
-        return httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=60.0)
+        # Cold local inference can spend over a minute loading/prefilling
+        # before emitting its first token. Only loopback local engines get
+        # that longer read window; cloud and remote endpoints keep 60s.
+        host = httpx.URL(self.base_url).host
+        local = host == "localhost"
+        if not local:
+            try:
+                local = ipaddress.ip_address(host).is_loopback
+            except ValueError:
+                pass
+        timeout = (
+            httpx.Timeout(60.0, connect=10.0, read=180.0)
+            if self.provider in {"ollama", "lmstudio"} and local
+            else httpx.Timeout(60.0)
+        )
+        return httpx.AsyncClient(base_url=self.base_url, headers=headers, timeout=timeout)
 
     def _get_codex_adapter(self):
         adapter = getattr(self, "_codex_adapter", None)
@@ -961,7 +1061,71 @@ class LLMProvider:
             engine_window = 0
         if engine_window > 0:
             return engine_window
+        if getattr(self, "provider", "") == "ollama":
+            observed = getattr(self, "_ollama_context_observation", None)
+            if (observed is not None and observed[:2] == (str(getattr(self, "base_url", "")).rstrip("/"), self.model)
+                    and time.monotonic() - observed[3] < 30):
+                declared = declared_ollama_context_tokens()
+                return min(observed[2], declared) if declared is not None else observed[2]
+            # Planning fallback only; every actual request rechecks capacity.
+            return declared_ollama_context_tokens() or 4096
         return configured_context_window_tokens()
+
+    async def _verify_ollama_context(self, client: httpx.AsyncClient, body: dict, provider: str, *, record_context: bool = True) -> None:
+        if provider != "ollama":
+            return
+        if record_context:
+            self._ollama_context_observation = None
+        window = await verify_ollama_request_context(client, body, fit_history=True)
+        if record_context:
+            self._ollama_context_observation = (str(client.base_url).rstrip("/"), body["model"], window, time.monotonic())
+
+    async def _prepare_local_request(self, client: httpx.AsyncClient, body: dict, provider: str, force_tool: Optional[str], *, record_context: bool = True) -> None:
+        if provider not in ("ollama", "lmstudio"):
+            return
+        source_messages, catalogue = body["messages"], body.get("tools")
+        def select(rows, fits=None):
+            if not catalogue:
+                return
+            body["messages"], body["tools"] = retrieve_local_tools(rows, catalogue, force_tool, request_fits=fits)
+            body["tool_choice"] = _resolve_tool_choice(provider, body["tools"], force_tool)
+        select(source_messages)
+        protected = None
+        def protected_messages():
+            nonlocal protected
+            if protected is None:
+                protected = fit_request_history(source_messages, lambda rows: False)
+            return protected
+        def byte_fits(rows, schemas):
+            return local_input_bytes(rows, schemas) <= MAX_REQUEST_BYTES
+        try:
+            fit_local_request(body, provider)
+        except LocalRequestRefusal as exc:
+            if exc.code != "local_request_byte_overflow" or not catalogue:
+                raise
+            try:
+                select(protected_messages(), byte_fits)
+            except LocalRequestRefusal:
+                raise exc from None
+            fit_local_request(body, provider)
+        try:
+            await self._verify_ollama_context(client, body, provider, record_context=record_context)
+        except OllamaContextRefusal as exc:
+            capacity = exc.context_capacity
+            if exc.code != "local_context_overflow" or capacity is None or not catalogue:
+                raise
+            def capacity_fits(rows, schemas):
+                serialized = json.dumps({"messages": rows, "tools": schemas}, ensure_ascii=False,
+                                        separators=(",", ":"), allow_nan=False)
+                return byte_fits(rows, schemas) and estimate_tokens(serialized) + body["max_tokens"] + OLLAMA_TEMPLATE_RESERVE <= capacity
+            try:
+                select(protected_messages(), capacity_fits)
+            except LocalRequestRefusal:
+                raise exc from None
+            fit_local_request(body, provider)
+            # Recheck allocation after retrieval. Runtime changes never enlarge
+            # the request or enable inference against a stale observation.
+            await self._verify_ollama_context(client, body, provider, record_context=record_context)
 
     def _init_hybrid_cloud(self):
         """In hybrid mode, cloud is used for complex reasoning."""
@@ -973,12 +1137,13 @@ class LLMProvider:
                 timeout=30.0,
             )
 
+    @_scoped_budget()
     async def chat(
         self,
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         *,
         call_site: str = "chat",
         force_tool: Optional[str] = None,
@@ -999,6 +1164,13 @@ class LLMProvider:
         caller (digital twin, proactive, ideas engine, wherever) gains
         cross-provider failover without knowing about the distinction.
         """
+        try:
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site=call_site)
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "choices": [], "error_code": exc.code}
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            return {"error": live_error, "choices": [], "error_code": "unsupported_live_protocol"}
         # Permanent-auth short-circuit. If a previous call established
         # that the current key is invalid (HTTP 401 + "invalid_api_key"),
         # don't keep poking the wire every 60s -- return the cached
@@ -1236,11 +1408,16 @@ class LLMProvider:
         # This is the exact shape of the v2026.5.0 400s in the shipped
         # terminal log (§A5 of docs/WAVE5_HARDENING_PROMPT.md).
         apply_reasoning_fork(self.provider, self.model, body)
+        try:
+            await self._prepare_local_request(self.client, body, self.provider, force_tool)
+        except OllamaContextRefusal as exc:
+            return {"error": str(exc), "error_code": exc.code, "choices": []}
 
         from observability.metrics import increment, measure
         increment("feral.llm.calls_total", attributes={"provider": self.provider, "model": self.model})
         try:
             async def _do_chat():
+                await self._budget_dispatch(body, local_free=self.provider in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                 resp = await self.client.post("/chat/completions", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -1574,6 +1751,7 @@ class LLMProvider:
 
         try:
             async def _do_anthropic():
+                await self._budget_dispatch(body)
                 resp = await self.client.post("/messages", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -1631,6 +1809,7 @@ class LLMProvider:
                 await self._local_engine.load_model()
 
             prompt = self._local_engine.format_chat(messages, tools)
+            await self._budget_dispatch({"model": self.model, "input": prompt, "max_tokens": max_tokens}, local_free=True)
             text = await self._local_engine.generate(prompt, max_tokens=max_tokens, temperature=temperature)
 
             clean_text, tool_calls = self._local_engine.parse_tool_calls(text)
@@ -1686,6 +1865,9 @@ class LLMProvider:
         the probe is advisory at boot time, not a circuit breaker
         for in-flight traffic.
         """
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            return False, live_error
         try:
             from providers.model_classes import classify_endpoint
             endpoint_class = classify_endpoint(self.provider, self.model)
@@ -2083,6 +2265,9 @@ class LLMProvider:
         from agents.llm_reasoning import apply_responses_param_fork
 
         model = model or self.model
+        live_error = _unsupported_live_error("openai", model)
+        if live_error:
+            raise ValueError(live_error)
         instructions, input_items = self._messages_to_responses_input(messages)
         body: dict = {
             "model": model,
@@ -2135,6 +2320,11 @@ class LLMProvider:
             else:
                 body["tool_choice"] = "auto"
         apply_responses_param_fork(model, body)
+        if model in {"gpt-6.1-sol", "gpt-6-luna"}:
+            # GPT-6 guidance rejects sampling controls with reasoning enabled.
+            if body.get("reasoning", {}).get("effort") != "none":
+                for key in ("temperature", "top_p", "top_logprobs"):
+                    body.pop(key, None)
         return body
 
     async def _post_responses(
@@ -2169,6 +2359,7 @@ class LLMProvider:
         )
 
         async def _do_responses():
+            await self._budget_dispatch(body)
             resp = await client.post("/responses", json=body)
             resp.raise_for_status()
             return resp.json()
@@ -2410,6 +2601,7 @@ class LLMProvider:
         try:
             for _attempt in range(MAX_RETRIES):
                 try:
+                    await self._budget_dispatch(body)
                     stream_cm = self.client.stream("POST", "/responses", json=body)
                     resp = await stream_cm.__aenter__()
                     # v2026.5.28 — pull the body BEFORE raise_for_status so
@@ -2556,13 +2748,13 @@ class LLMProvider:
                         # Responses names these input_/output_tokens; keep the
                         # provider's own keys AND the normalised pair so
                         # downstream readers don't need to know the shape.
-                        _in = _u.get("input_tokens") or _u.get("prompt_tokens") or 0
-                        _out = _u.get("output_tokens") or _u.get("completion_tokens") or 0
-                        _done["usage"] = {
-                            "input_tokens": int(_in),
-                            "output_tokens": int(_out),
-                            "total_tokens": int(_u.get("total_tokens") or (_in + _out)),
-                        }
+                        # Retain detail fields and absence. A terminal marker
+                        # does not turn an omitted counter into observed zero.
+                        _done["usage"] = dict(_u)
+                        if "input_tokens" not in _u and "prompt_tokens" in _u:
+                            _done["usage"]["input_tokens"] = _u["prompt_tokens"]
+                        if "output_tokens" not in _u and "completion_tokens" in _u:
+                            _done["usage"]["output_tokens"] = _u["completion_tokens"]
                     if _resp.get("model"):
                         # The model that actually answered, which can differ
                         # from the configured one after failover.
@@ -2666,6 +2858,8 @@ class LLMProvider:
 
         if not isinstance(result, dict):
             return None
+        if result.get("error") and str(result.get("error_code") or "").startswith("local_"):
+            return [{"type": "error", "content": str(result["error"]), "error_code": result["error_code"]}]
         if result.get("error"):
             return None
         if not result.get("choices"):
@@ -2682,12 +2876,13 @@ class LLMProvider:
         events.append({"type": "done"})
         return events
 
+    @_scoped_budget(streaming=True)
     async def chat_stream(
         self,
         messages: list[dict],
         tools: Optional[list[dict]] = None,
         temperature: float = 0.7,
-        max_tokens: int = 1024,
+        max_tokens: Optional[int] = None,
         *,
         call_site: str = "chat",
         force_tool: Optional[str] = None,
@@ -2704,6 +2899,15 @@ class LLMProvider:
         into their own caps by passing ``call_site="screen_loop"``,
         ``"learner"``, etc. (Wave 2 Lane 09).
         """
+        try:
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site=call_site)
+        except ChatOutputBudgetError as exc:
+            yield {"type": "error", "content": str(exc), "error_code": exc.code}
+            return
+        live_error = _unsupported_live_error(getattr(self, "provider", ""), getattr(self, "model", ""))
+        if live_error:
+            yield {"type": "error", "content": live_error, "error_code": "unsupported_live_protocol"}
+            return
         if self._messages_contain_vision(messages):
             ok, reason = self._vision_support_status()
             if not ok:
@@ -2746,6 +2950,7 @@ class LLMProvider:
             try:
                 adapter = self._get_codex_adapter()
                 converted = self._codex_messages(messages)
+                await self._budget_dispatch({"model": self.model, "messages": messages, "tools": tools, "max_tokens": max_tokens})
                 async for event in adapter.stream_events(
                     converted, model=self.model, tools=tools
                 ):
@@ -2943,6 +3148,19 @@ class LLMProvider:
             )
 
         apply_reasoning_fork(self.provider, self.model, body)
+        try:
+            await self._prepare_local_request(self.client, body, self.provider, force_tool)
+        except OllamaContextRefusal as exc:
+            if exc.code == "local_context_unverified":
+                events = await self._stream_via_nonstream_failover(
+                    messages, tools, temperature, max_tokens, primary_error=exc, force_tool=force_tool,
+                )
+                if events:
+                    for event in events:
+                        yield event
+                    return
+            yield {"type": "error", "content": str(exc), "error_code": exc.code}
+            return
 
         # Ask for the usage chunk. On chat-completions this is opt-in:
         # without ``stream_options.include_usage`` the provider closes
@@ -2967,7 +3185,7 @@ class LLMProvider:
         answering_model = ""
         billed = False
 
-        async def _record_stream_usage() -> None:
+        async def _record_stream_usage(*, complete: bool = True) -> None:
             """Bill this turn exactly once, on stream completion.
 
             Guarded by ``billed`` because the SSE loop has two exits
@@ -2983,7 +3201,7 @@ class LLMProvider:
             await self._budget_record(
                 call_site,
                 answering_model or self.model,
-                {"usage": usage_raw},
+                {"usage": usage_raw, "_feral_usage_complete": complete},
             )
 
         async def _open_stream(req_body: dict):
@@ -2996,6 +3214,7 @@ class LLMProvider:
             nonlocal stream_cm
             for _attempt in range(MAX_RETRIES):
                 try:
+                    await self._budget_dispatch(req_body, local_free=self.provider in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                     stream_cm = self.client.stream("POST", "/chat/completions", json=req_body)
                     _resp = await stream_cm.__aenter__()
                     # v2026.5.28 — see ``_responses_stream`` for the
@@ -3142,7 +3361,7 @@ class LLMProvider:
             # delivered its text, so bill whatever usage arrived rather
             # than losing the turn's cost. ``_record_stream_usage`` is
             # idempotent, so the ``[DONE]`` path above cannot double-bill.
-            await _record_stream_usage()
+            await _record_stream_usage(complete=False)
 
         except httpx.HTTPStatusError as e:
             detail = _describe_http_status_error(e)
@@ -3282,6 +3501,8 @@ class LLMProvider:
         # response grows. Neither event alone can bill a turn.
         usage_input = 0
         usage_output = 0
+        usage_input_observed = False
+        usage_output_final = False
         # Prompt-cache tokens ride the SAME ``message_start`` usage
         # block as ``input_tokens``, as two sibling fields, and are
         # NOT included in it. They are billed at their own rates now
@@ -3293,7 +3514,17 @@ class LLMProvider:
         billed = False
         answering_model = ""
 
-        async def _record_anthropic_usage() -> None:
+        def _observed_anthropic_usage() -> dict[str, int]:
+            usage = {}
+            if usage_input_observed:
+                usage["input_tokens"] = usage_input
+            if usage_output_final:
+                usage["output_tokens"] = usage_output
+            if usage_input_observed and usage_output_final:
+                usage["total_tokens"] = usage_input + usage_output
+            return usage
+
+        async def _record_anthropic_usage(*, complete: bool = True) -> None:
             """Bill this turn exactly once, on stream completion.
 
             ``billed`` guards the two completion exits (``message_stop``
@@ -3313,9 +3544,8 @@ class LLMProvider:
             await self._budget_record(
                 call_site,
                 answering_model or self.model,
-                {"usage": {
-                    "input_tokens": usage_input,
-                    "output_tokens": usage_output,
+                {"_feral_usage_complete": complete and usage_input_observed and usage_output_final, "usage": {
+                    **_observed_anthropic_usage(),
                     "cache_creation_input_tokens": usage_cache_write,
                     "cache_read_input_tokens": usage_cache_read,
                 }},
@@ -3357,6 +3587,7 @@ class LLMProvider:
 
         try:
             async with httpx.AsyncClient(timeout=120.0) as client:
+                await self._budget_dispatch(body)
                 async with client.stream(
                     "POST", url,
                     headers={
@@ -3399,6 +3630,7 @@ class LLMProvider:
                                 if _in is not None:
                                     try:
                                         usage_input = int(_in)
+                                        usage_input_observed = (type(_in) is int and _in >= 0) or (isinstance(_in, str) and _in.isdecimal())
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
@@ -3454,6 +3686,7 @@ class LLMProvider:
                                 if _out is not None:
                                     try:
                                         usage_output = int(_out)
+                                        usage_output_final = (type(_out) is int and _out >= 0) or (isinstance(_out, str) and _out.isdecimal())
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
@@ -3464,6 +3697,7 @@ class LLMProvider:
                                 if _in is not None and not usage_input:
                                     try:
                                         usage_input = int(_in)
+                                        usage_input_observed = (type(_in) is int and _in >= 0) or (isinstance(_in, str) and _in.isdecimal())
                                         saw_usage = True
                                     except (TypeError, ValueError):
                                         pass
@@ -3487,11 +3721,7 @@ class LLMProvider:
                                 yield {"type": "tool_call_delta", "tool_call": tc}
                             _stop_event: dict = {"type": "done"}
                             if saw_usage:
-                                _stop_event["usage"] = {
-                                    "input_tokens": usage_input,
-                                    "output_tokens": usage_output,
-                                    "total_tokens": usage_input + usage_output,
-                                }
+                                _stop_event["usage"] = _observed_anthropic_usage()
                             yield _stop_event
                             return
 
@@ -3499,14 +3729,10 @@ class LLMProvider:
             # delivered its text, so bill whatever usage arrived.
             # ``_record_anthropic_usage`` is idempotent, so the
             # ``message_stop`` path above cannot double-bill.
-            await _record_anthropic_usage()
+            await _record_anthropic_usage(complete=False)
             _end_event: dict = {"type": "done"}
             if saw_usage:
-                _end_event["usage"] = {
-                    "input_tokens": usage_input,
-                    "output_tokens": usage_output,
-                    "total_tokens": usage_input + usage_output,
-                }
+                _end_event["usage"] = _observed_anthropic_usage()
             yield _end_event
             return
         except httpx.HTTPStatusError as e:
@@ -3565,6 +3791,7 @@ class LLMProvider:
         TypeError -> every Save-&-switch 500'd). The regression test
         lives in ``tests/test_switch_provider_base_url.py``.
         """
+        provider = runtime_provider_id(provider)
         client = getattr(self, "client", None)
         if client is not None:
             await client.aclose()
@@ -4123,21 +4350,48 @@ class LLMProvider:
         preset = LLM_PRESETS.get(preset_id)
         if not preset:
             return {"ok": False, "error": f"Unknown preset: {preset_id}"}
-        requested_model = preset.get("model", "") or ""
-        # Ollama presets that hardcode a model name (``ollama_vision`` ->
-        # ``llava``) are a guaranteed 404 on the first chat turn when
-        # that model isn't pulled locally. Probe ``/api/tags`` and fall
-        # through to switch_provider's auto-detect path when the request
-        # doesn't match an installed model — the caller still gets an
-        # ``ok=True`` response but with a ``warning`` describing the
-        # substitution so the UI can prompt the operator to pull the
-        # preferred model. When Ollama itself is unreachable we leave
-        # the request unchanged: the running brain's own probe ladder
-        # will surface that failure.
+        requested_model = preset.get("model", "")
+        if not isinstance(requested_model, str):
+            return {"ok": False, "preset": preset_id, "error_code": "preset_model_invalid",
+                    "error": "The preset model must be a string. Settings were not changed."}
+        vision_preset = preset_id == "ollama_vision"
         fallback_warning = ""
         if preset.get("provider") == "ollama" and requested_model:
-            pulled = await self._ollama_pulled_models()
-            if pulled is not None:
+            try:
+                pulled = await self._ollama_pulled_models()
+            except Exception:
+                if not vision_preset:
+                    raise
+                return {"ok": False, "preset": preset_id, "error_code": "vision_model_unverified",
+                        "error": "Installed Ollama vision models could not be verified. Settings were not changed."}
+            if vision_preset:
+                if pulled is None:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_model_unverified",
+                            "error": "Installed Ollama vision models could not be verified. Settings were not changed."}
+                if ":" in requested_model:
+                    selected = requested_model if requested_model.partition(":")[2] and requested_model in pulled else None
+                else:
+                    # The inventory includes manufactured bare aliases. Use
+                    # an actual full tag rather than treating a base alias as
+                    # proof that Ollama's implicit latest tag is installed.
+                    candidates = sorted(name for name in pulled if isinstance(name, str)
+                                        and name.split(":", 1)[0] == requested_model
+                                        and name.partition(":")[2])
+                    latest = f"{requested_model}:latest"
+                    selected = latest if latest in candidates else (candidates[0] if candidates else None)
+                if selected is None:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_model_not_installed",
+                            "error": "The requested Ollama vision model is not verified as installed. Settings were not changed."}
+                try:
+                    vision_ok, _ = self._vision_support_for("ollama", selected)
+                except Exception:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_capability_unverified",
+                            "error": "Vision capability could not be classified. Settings were not changed."}
+                if not vision_ok:
+                    return {"ok": False, "preset": preset_id, "error_code": "vision_model_unsupported",
+                            "error": "The installed model is not classified as vision-capable. Settings were not changed."}
+                requested_model = selected
+            elif pulled is not None:
                 base = requested_model.split(":", 1)[0]
                 if requested_model not in pulled and base not in pulled:
                     fallback_warning = (
@@ -4147,6 +4401,9 @@ class LLMProvider:
                         "preset directly."
                     )
                     requested_model = ""
+        elif vision_preset:
+            return {"ok": False, "preset": preset_id, "error_code": "vision_model_unverified",
+                    "error": "The vision preset has no verifiable Ollama model. Settings were not changed."}
         await self.switch_provider(
             provider=preset["provider"],
             model=requested_model,
@@ -4161,6 +4418,9 @@ class LLMProvider:
         }
         if fallback_warning:
             payload["warning"] = fallback_warning
+        if vision_preset:
+            payload["readiness"] = {"model_presence": "confirmed", "capability_basis": "model_classification",
+                                    "inference_verified": False}
         return payload
 
     @staticmethod
@@ -4203,7 +4463,7 @@ class LLMProvider:
         After this call every ``chat`` / ``chat_stream`` /
         ``chat_with_failover`` invocation:
 
-        * pre-flights ``check_and_reserve`` — if the projected cost
+        * durably reserves each shaped wire attempt — if its estimated cost
           would breach a cap, the call short-circuits with a
           structured ``{error, budget_exceeded: {...}}`` response
           shape (no upstream HTTP traffic, no token spend).
@@ -4243,7 +4503,8 @@ class LLMProvider:
         """
         if not isinstance(result, dict):
             return (0, 0, 0)
-        usage = result.get("usage") if isinstance(result.get("usage"), dict) else {}
+        raw_usage = result.get("usage")
+        usage = raw_usage if isinstance(raw_usage, dict) else {}
         prompt = (
             usage.get("prompt_tokens")
             if usage.get("prompt_tokens") is not None
@@ -4255,7 +4516,11 @@ class LLMProvider:
             else usage.get("output_tokens")
         ) or 0
         reasoning = 0
-        details = usage.get("completion_tokens_details")
+        # These OpenAI detail fields are subsets of the reported output total.
+        # Keep the ledger's separate reasoning count, but avoid billing that
+        # subset twice when compute_token_cost adds completion + reasoning.
+        details = usage.get("completion_tokens_details") if "completion_tokens" in usage else usage.get("output_tokens_details")
+        reasoning_inclusive = isinstance(details, dict) and "reasoning_tokens" in details
         if isinstance(details, dict):
             reasoning = details.get("reasoning_tokens") or 0
         # Anthropic reports thinking tokens at the top level when
@@ -4264,7 +4529,10 @@ class LLMProvider:
         if not reasoning:
             reasoning = usage.get("reasoning_tokens") or usage.get("thinking_tokens") or 0
         try:
-            return int(prompt), int(completion), int(reasoning)
+            prompt, completion, reasoning = int(prompt), int(completion), int(reasoning)
+            if reasoning_inclusive:
+                completion = max(0, completion - reasoning)
+            return prompt, completion, reasoning
         except (TypeError, ValueError):
             return (0, 0, 0)
 
@@ -4376,16 +4644,42 @@ class LLMProvider:
         budget = getattr(self, "_cost_budget", None)
         if budget is None:
             return None
+        scope = _budget_scope.get()
+        if scope is not None and scope["provider"] is self and scope["task"] is asyncio.current_task():
+            # A nested stream fallback must retain the original call site.
+            if not scope["attempts"]:
+                scope["site"] = call_site
+        def unavailable() -> Optional[dict]:
+            # A configured cap cannot be enforced when admission accounting
+            # is unavailable. Preserve the operator's disabled/unlimited mode.
+            try:
+                bounded = budget.enabled and bool(budget._active_caps(call_site))
+            except Exception:
+                bounded = True
+            if not bounded:
+                return None
+            return {
+                "error": "Cost budget unavailable; no model request was dispatched.",
+                "error_code": "budget_unavailable",
+                "choices": [],
+            }
         try:
             await budget.ensure_ready()
         except Exception as exc:
-            logger.debug("CostBudget.ensure_ready failed (non-fatal): %s", exc)
+            logger.warning("CostBudget admission ledger unavailable (%s)", type(exc).__name__)
+            return unavailable()
+        from cost.budget import CostBudget
+        if (isinstance(budget, CostBudget) and scope is not None
+                and scope["provider"] is self and scope["task"] is asyncio.current_task()):
+            # The actual shaped model attempt is priced atomically at its wire
+            # boundary. A fallback or explicit local model may have different
+            # rates from the primary selected before routing.
             return None
         try:
             ok = budget.check_and_reserve(call_site, model, int(max_tokens or 0))
         except Exception as exc:
-            logger.debug("CostBudget.check_and_reserve raised (non-fatal): %s", exc)
-            return None
+            logger.warning("CostBudget admission check unavailable (%s)", type(exc).__name__)
+            return unavailable()
         if ok:
             return None
         # Build a synthetic BudgetExceeded so the response shape is
@@ -4413,6 +4707,93 @@ class LLMProvider:
                 "choices": [],
                 "budget_exceeded": {"call_site": call_site, "window": "hour"},
             }
+
+    async def _budget_dispatch(self, body: dict, *, model: str | None = None,
+                               local_free: bool = False) -> None:
+        """Durable, model-specific admission immediately before every wire attempt."""
+        budget = getattr(self, "_cost_budget", None)
+        if budget is None:
+            return
+        scope = _budget_scope.get()
+        if scope is None:
+            # Internal health/probe calls are outside public chat admission.
+            return
+        if scope["provider"] is not self or scope["task"] is not asyncio.current_task():
+            raise RuntimeError("Budget scope cannot authorize a copied child task")
+        from cost.budget import CostBudget, PricingUnavailable
+        if not isinstance(budget, CostBudget):
+            # Compatibility for integrations supplying the legacy budget protocol.
+            # Such a collaborator cannot establish durable atomic reservations.
+            if getattr(budget, "enabled", False) and getattr(budget, "_active_caps", lambda site: [])(scope["site"]):
+                raise RuntimeError("Atomic budget admission is unavailable")
+            return
+        wire_model = str(model or body.get("model") or getattr(self, "model", ""))
+        maximum = body.get("max_output_tokens", body.get("max_completion_tokens", body.get("max_tokens", 1024)))
+        input_payload = {key: value for key, value in body.items() if key not in {"temperature", "stream", "stream_options"}}
+        serialized = json.dumps(input_payload, ensure_ascii=False, default=str)
+        def multimodal(value):
+            if isinstance(value, dict):
+                if isinstance(value.get("type"), str) and value["type"] in {"input_audio", "audio", "audio_url", "video_url", "image_url", "input_image", "image", "image_base64"}:
+                    return True
+                if any(key in value for key in ("image_url", "audio_url", "video_url")):
+                    return True
+                return any(multimodal(item) for item in value.values())
+            return isinstance(value, list) and any(multimodal(item) for item in value)
+        unpriceable = multimodal(input_payload)
+        identity = str(uuid.uuid4())
+        attempt = {"budget": budget, "id": identity, "model": wire_model, "status": "held"}
+        scope["attempts"].append(attempt)
+        try:
+            receipt = await budget.reserve(scope["site"], wire_model,
+                                           estimate_tokens(serialized) + 256, int(maximum),
+                                           reservation_id=identity, local_free=local_free,
+                                           unpriceable_input=unpriceable)
+        except BudgetExceeded as exc:
+            scope["block"] = self._budget_exceeded_response(exc)
+            attempt["status"] = "rejected"
+            # Retry classification scans provider error text for HTTP codes.
+            # A monetary amount must not turn admission refusal into a retry.
+            raise RuntimeError("Model attempt admission refused") from None
+        except PricingUnavailable as exc:
+            scope["block"] = {"error": str(exc), "error_code": "pricing_unavailable", "choices": []}
+            attempt["status"] = "rejected"
+            raise
+        except Exception as exc:
+            if not budget._active_caps(scope["site"]):
+                attempt["status"] = "disabled"
+                logger.warning("Unlimited cost accounting is unavailable (%s)", type(exc).__name__)
+                return
+            scope["block"] = {"error": "Cost budget unavailable; no model request was dispatched.",
+                              "error_code": "budget_unavailable", "choices": []}
+            raise
+        except BaseException:
+            # A commit may have finished before cancellation reached the caller.
+            # Cleanup consults the durable receipt rather than assuming no hold.
+            raise
+        if receipt is None:
+            attempt["status"] = "disabled"
+            return
+        await budget.mark_dispatched(identity)
+        attempt["status"] = "dispatched"
+        scope.pop("block", None)
+
+    async def _budget_finish_scope(self, scope: dict) -> None:
+        for attempt in scope["attempts"]:
+            if attempt["status"] in {"settled", "disabled", "rejected"}:
+                continue
+            budget, identity = attempt["budget"], attempt["id"]
+            try:
+                # Release is legal only while the persisted row is held. If the
+                # dispatch marker committed before cancellation, retain it.
+                if attempt["status"] == "held":
+                    try:
+                        await budget.release(identity)
+                    except ValueError:
+                        await budget.mark_unknown(identity)
+                else:
+                    await budget.mark_unknown(identity)
+            except Exception as exc:
+                logger.warning("Cost attempt recovery remains pending (%s)", type(exc).__name__)
 
     async def _budget_record(
         self,
@@ -4453,6 +4834,7 @@ class LLMProvider:
         if budget is None:
             return
         try:
+            usage: dict[str, Any] = {}
             prompt, completion, reasoning = self._extract_usage(result)
             cache_write, cache_read = self._extract_cache_usage(result)
             # OpenAI's cached tokens are already counted inside the input
@@ -4481,13 +4863,56 @@ class LLMProvider:
                         "cache-token pricing failed for %s (non-fatal): %s",
                         model, exc,
                     )
+            scope = _budget_scope.get()
+            attempt = None
+            if scope is not None and scope["provider"] is self and scope["task"] is asyncio.current_task():
+                # Receipts belong to the current wire attempt. An earlier
+                # retry may still be unknown; never settle it with a later
+                # response, including repeated cumulative partial usage.
+                current = scope["attempts"][-1] if scope["attempts"] else None
+                if (current is not None and current["model"] != model
+                        and current["budget"].pricing.same_known_basis(current["model"], model)):
+                    # Some providers report a dated snapshot of the requested
+                    # alias. Preserve the wire-model receipt identity only when
+                    # the catalog explicitly recognizes that exact relationship.
+                    model = current["model"]
+                if (current is not None and current["model"] == model
+                        and current["status"] in {"dispatched", "partial"}):
+                    attempt = current
+                if (attempt is None and current is not None
+                        and current["model"] == model and current["status"] == "settled"):
+                    return
+                if attempt is None and scope["attempts"]:
+                    recorded = scope.setdefault("unmatched_usage", set())
+                    if model in recorded:
+                        return
+                    recorded.add(model)
+                if attempt is not None:
+                    raw_usage = result.get("usage") if isinstance(result, dict) else None
+                    if not isinstance(raw_usage, dict) or not any(key in raw_usage for key in
+                            ("prompt_tokens", "completion_tokens", "input_tokens", "output_tokens")):
+                        return
+                    usage = raw_usage
+                    call_site = scope["site"]
+                    budget = attempt["budget"]
+            usage_complete = True
+            if attempt is not None:
+                def count_present(value):
+                    return (type(value) is int and value >= 0) or (isinstance(value, str) and value.isdecimal())
+                usage_complete = any(all(key in usage and count_present(usage[key]) for key in pair)
+                                     for pair in (("prompt_tokens", "completion_tokens"), ("input_tokens", "output_tokens")))
+                usage_complete = usage_complete and result.get("_feral_usage_complete", True) is not False
+                usage_complete = usage_complete and not result.get("truncated") and not usage.get("truncated")
             await budget.record_usage(
                 call_site=call_site,
                 model=model,
                 prompt_tokens=prompt,
                 completion_tokens=completion,
                 reasoning_tokens=reasoning,
+                **({"reservation_id": attempt["id"], "usage_complete": usage_complete} if attempt is not None else {}),
             )
+            if attempt is not None:
+                attempt["status"] = "settled" if usage_complete else "partial"
         except Exception as exc:
             # Non-fatal: a billing failure must never take down a chat
             # turn. The cap-exceeded path is exercised through
@@ -4759,6 +5184,7 @@ class LLMProvider:
         exact footgun this method used to hide behind its two-arg
         ``dict.get`` fallback.
         """
+        provider_name = runtime_provider_id(provider_name)
         # For local providers we honour the operator-configured base
         # URL (``self.base_url`` when the primary IS the local
         # provider, otherwise ``FERAL_LLM_BASE_URL`` /
@@ -4846,9 +5272,12 @@ class LLMProvider:
                 "supported": is_supported_runtime_provider(self.provider),
             }),
         ]
+        seen = {self.provider}
         for fb in self._config.get("fallback_providers", []):
-            if fb != self.provider:
+            fb = runtime_provider_id(fb)
+            if fb not in seen:
                 candidates.append((fb, self._get_provider_config(fb)))
+                seen.add(fb)
         return candidates
 
     def _candidates_for_route(
@@ -4865,6 +5294,7 @@ class LLMProvider:
         fallback so a missing key on the routed provider degrades cleanly
         back to the operator's model instead of failing the turn.
         """
+        route_provider = runtime_provider_id(route_provider)
         candidates: list[tuple[str, dict]] = []
         seen: set[str] = set()
         if route_provider == self.provider:
@@ -4888,6 +5318,7 @@ class LLMProvider:
             }))
             seen.add(self.provider)
         for fb in self._config.get("fallback_providers", []):
+            fb = runtime_provider_id(fb)
             if fb not in seen:
                 candidates.append((fb, self._get_provider_config(fb)))
                 seen.add(fb)
@@ -5028,6 +5459,53 @@ class LLMProvider:
             LLMProvider._apply_anthropic_cache_breakpoints(body)
         return body
 
+    @_scoped_budget()
+    async def chat_selected_vision(
+        self, messages: list[dict], *, provider: str, model: str,
+        base_url: str, api_key: str, temperature: float = 0.1,
+        max_tokens: int = 300,
+    ) -> dict:
+        """Call one exact vision binding without switching or failing over.
+
+        Selection performs no inference probe. The initialized shared provider
+        owns budget admission and the existing provider-specific wire adapters;
+        an owned temporary client prevents a primary swap from changing this
+        request's endpoint or credentials. Never strip its image inputs.
+        """
+        if (not all(isinstance(value, str) and value.strip() for value in (provider, model, base_url, api_key))
+                or not is_supported_runtime_provider(provider) or provider in {"codex", "local", "hybrid"}):
+            return {"error": "The selected vision binding is unavailable.",
+                    "error_code": "vision_binding_unavailable", "choices": []}
+        try:
+            url = httpx.URL(base_url)
+            if url.scheme not in {"http", "https"} or not url.host or url.username or url.password or url.query or url.fragment:
+                raise ValueError("invalid_endpoint")
+            capable, _reason = self._vision_support_for(provider, model)
+            if not capable or _unsupported_live_error(provider, model) or _chat_completions_model_guard(provider, model):
+                return {"error": "The selected model does not support this vision request.",
+                        "error_code": "vision_model_unsupported", "choices": []}
+            max_tokens = resolve_chat_output_budget(getattr(self, "_config", {}), max_tokens, call_site="vision")
+            blocked = await self._budget_check("vision", model, max_tokens)
+            if blocked is not None:
+                return blocked
+            return await self._call_provider(
+                provider, {"base_url": base_url, "api_key": api_key, "model": model, "supported": True},
+                messages, None, temperature=temperature, max_tokens=max_tokens,
+                # One decision attempt: shared transient-retry logging carries
+                # supplier diagnostics, and this screen decision must stop
+                # truthfully on failure rather than leak or change its binding.
+                _reuse_primary_client=False, _record_context=False, _retry_max=1,
+            )
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "error_code": exc.code, "choices": []}
+        except Exception as exc:
+            scope = _budget_scope.get()
+            if scope is not None and scope.get("provider") is self and scope.get("block"):
+                return scope["block"]
+            logger.warning("Selected vision request failed (%s)", type(exc).__name__)
+            return {"error": "The selected vision request did not complete; no fallback was attempted.",
+                    "error_code": "vision_request_unavailable", "choices": []}
+
     async def _call_provider(
         self,
         provider_name: str,
@@ -5044,9 +5522,12 @@ class LLMProvider:
         ``RETRY_DELAYS`` budget on a known-bad provider before routing.
         Defaults preserve historical behaviour for direct callers.
         """
+        provider_name = runtime_provider_id(provider_name)
         retry_max = kwargs.pop("_retry_max", None)
         retry_delays = kwargs.pop("_retry_delays", None)
         force_tool = kwargs.pop("force_tool", None)
+        reuse_primary_client = kwargs.pop("_reuse_primary_client", True)
+        record_context = kwargs.pop("_record_context", True)
         # Refuse up front for provider ids that have no runtime
         # adapter. Previously the fallback path built an httpx client
         # against whatever default ``_get_provider_config`` handed
@@ -5068,11 +5549,15 @@ class LLMProvider:
             selected_model = str(config.get("model") or self.model)
         else:
             selected_model = str(config.get("model", "") or "")
+        live_error = _unsupported_live_error(provider_name, selected_model)
+        if live_error:
+            raise RuntimeError(live_error)
         temperature = kwargs.get("temperature", 0.7)
         max_tokens = kwargs.get("max_tokens", 1024)
 
         if provider_name == "codex":
             adapter = self._get_codex_adapter()
+            await self._budget_dispatch({"model": selected_model, "messages": messages, "tools": tools, "max_tokens": max_tokens})
             response = await adapter.chat(
                 self._codex_messages(messages),
                 model=selected_model,
@@ -5087,7 +5572,7 @@ class LLMProvider:
             raise RuntimeError(model_guard_error)
 
         # Primary provider — reuse existing client
-        if provider_name == self.provider:
+        if provider_name == self.provider and reuse_primary_client:
             if provider_name == "anthropic":
                 body = self._build_anthropic_body(
                     selected_model, messages, tools, temperature, max_tokens,
@@ -5095,6 +5580,7 @@ class LLMProvider:
                 )
 
                 async def _do_primary_anthropic():
+                    await self._budget_dispatch(body)
                     resp = await self.client.post("/messages", json=body)
                     resp.raise_for_status()
                     return resp.json()
@@ -5139,8 +5625,10 @@ class LLMProvider:
                 )
 
             apply_reasoning_fork(self.provider, selected_model, body)
+            await self._prepare_local_request(self.client, body, provider_name, force_tool)
 
             async def _do_primary():
+                await self._budget_dispatch(body, local_free=self.provider in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                 resp = await self.client.post("/chat/completions", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -5173,6 +5661,7 @@ class LLMProvider:
                 )
 
                 async def _do_fb_anthropic():
+                    await self._budget_dispatch(body)
                     resp = await tmp.post("/messages", json=body)
                     resp.raise_for_status()
                     return resp.json()
@@ -5213,8 +5702,10 @@ class LLMProvider:
                 )
 
             apply_reasoning_fork(provider_name, model, body)
+            await self._prepare_local_request(tmp, body, provider_name, force_tool, record_context=record_context)
 
             async def _do_fb():
+                await self._budget_dispatch(body, local_free=provider_name in {"local", "ollama", "lmstudio", "vllm", "llamacpp"})
                 resp = await tmp.post("/chat/completions", json=body)
                 resp.raise_for_status()
                 return resp.json()
@@ -5225,6 +5716,7 @@ class LLMProvider:
                 delays=retry_delays,
             )
 
+    @_scoped_budget()
     async def chat_with_failover(
         self,
         messages: list[dict],
@@ -5258,6 +5750,13 @@ class LLMProvider:
         on providers (Gemini) that can't name a single tool on the
         wire shape we drive.
         """
+        try:
+            kwargs["max_tokens"] = resolve_chat_output_budget(
+                getattr(self, "_config", {}), kwargs.get("max_tokens"),
+                call_site=str(kwargs.get("call_site", "chat") or "chat"),
+            )
+        except ChatOutputBudgetError as exc:
+            return {"error": str(exc), "choices": [], "error_code": exc.code}
         # Adaptive route (kw-only ``route`` = a ``route_call`` ProviderRef).
         # Popped FIRST so it never leaks into ``self.chat(**kwargs)`` on the
         # local-engine short-circuit below. When present and concrete it
@@ -5292,7 +5791,7 @@ class LLMProvider:
         # their own call_site name. Defaults to "chat" so a missing
         # kwarg does the safe thing.
         call_site = str(kwargs.pop("call_site", "chat") or "chat")
-        max_tokens_kw = int(kwargs.get("max_tokens", 1024) or 1024)
+        max_tokens_kw = kwargs["max_tokens"]
         budget_model = route_model or self.model
         budget_block = await self._budget_check(call_site, budget_model, max_tokens_kw)
         if budget_block is not None:
@@ -5472,6 +5971,15 @@ class LLMProvider:
                         exc,
                     )
                 return result
+            except OllamaContextRefusal as exc:
+                # Preserve the existing no-failover-on-overflow policy.
+                # Unavailable metadata may use the operator's existing
+                # configured candidate chain, never an invented provider.
+                if exc.code != "local_context_unverified" or len(candidates) == 1:
+                    return {"error": str(exc), "error_code": exc.code, "choices": []}
+                last_error = exc
+                failed_candidates.append({"provider": provider_name, "reason": exc.code})
+                continue
             except Exception as e:
                 increment("feral.llm.errors_total", attributes={"provider": provider_name})
                 reason = classify_error(e)
@@ -5545,6 +6053,8 @@ class LLMProvider:
                 "reason": "exhausted",
                 "candidates_tried": list(failed_candidates),
             }
+        if isinstance(last_error, OllamaContextRefusal):
+            return {"error": str(last_error), "error_code": last_error.code, "choices": []}
         if last_error:
             raise last_error
         raise RuntimeError("All LLM providers exhausted")

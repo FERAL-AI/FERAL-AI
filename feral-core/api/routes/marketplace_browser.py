@@ -1,11 +1,72 @@
 """Marketplace and browser control HTTP endpoints."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Request
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, StrictStr
 
+from api.browser_view import BrowserViewError, BrowserViewManager
 from api.state import state
 
 router = APIRouter()
+browser_views = BrowserViewManager(lambda: state.browser)
+
+
+class BrowserViewStart(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    target_id: StrictStr = Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")
+    consent: StrictBool
+
+
+class BrowserViewLease(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    view_id: StrictStr = Field(min_length=36, max_length=36, pattern=r"^[0-9a-f-]+$")
+    token: StrictStr = Field(min_length=43, max_length=43, pattern=r"^[A-Za-z0-9_-]+$")
+
+
+def _browser_view_local(request: Request) -> None:
+    """Local operator preview only; this header is a CSRF fence, not auth.
+
+    Existing application auth still applies. Proxied/remote viewing and agent
+    task ownership require separate grants and are deliberately unavailable.
+    """
+    if (request.client is None or request.client.host not in {"127.0.0.1", "::1", "localhost"}
+            or any(name in request.headers for name in (
+                "forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip", "origin"))
+            or any(name.startswith("sec-fetch-") for name in request.headers)
+            or request.headers.get("x-feral-browser-view") != "native-v1"):
+        raise BrowserViewError("view_local_operator_required", 403)
+
+
+async def _browser_view_response(request: Request, operation):
+    headers = {"Cache-Control": "no-store", "Pragma": "no-cache"}
+    try:
+        _browser_view_local(request)
+        value = await operation()
+        return JSONResponse(content=value, headers=headers)
+    except BrowserViewError as exc:
+        return JSONResponse(status_code=exc.status, headers=headers,
+                            content={"success": False, "error_code": exc.code,
+                                     "error": "Browser viewing is unavailable. Stop viewing and review the current tab."})
+
+
+@router.get("/api/browser/view/targets")
+async def browser_view_targets(request: Request):
+    return await _browser_view_response(request, browser_views.targets)
+
+
+@router.post("/api/browser/view/start")
+async def browser_view_start(request: Request, body: BrowserViewStart):
+    return await _browser_view_response(request, lambda: browser_views.start(body.target_id, body.consent))
+
+
+@router.post("/api/browser/view/frame")
+async def browser_view_frame(request: Request, body: BrowserViewLease):
+    return await _browser_view_response(request, lambda: browser_views.frame(body.view_id, body.token))
+
+
+@router.post("/api/browser/view/stop")
+async def browser_view_stop(request: Request, body: BrowserViewLease):
+    return await _browser_view_response(request, lambda: browser_views.stop(body.view_id, body.token))
 
 # Kinds the registry publishes and this route can install. `app` is not
 # here: third-party GenUI apps install through AppRegistry via
@@ -298,3 +359,7 @@ async def browser_action(body: dict):
     elif action == "wait":
         return await state.browser.wait(body.get("ms", 1000))
     return {"error": f"Unknown action: {action}"}
+
+
+from api.routes.existing_chrome import router as existing_chrome_router
+router.include_router(existing_chrome_router)

@@ -9,6 +9,7 @@ connected platforms with graceful degradation.
 from __future__ import annotations
 
 import logging
+import math
 import os
 import time
 from datetime import datetime, timedelta, timezone
@@ -17,6 +18,8 @@ from typing import Any, Callable, Optional
 import httpx
 
 logger = logging.getLogger("feral.integrations.health")
+
+from integrations.health_canonical import source_display_name  # re-exported
 
 WHOOP_API = "https://api.prod.whoop.com/developer/v1"
 OURA_API = "https://api.ouraring.com/v2/usercollection"
@@ -38,6 +41,34 @@ _SUMMARY_TO_CANONICAL: dict[str, str] = {
     "current_hr": "hr",
     "current_spo2": "spo2",
 }
+
+
+def strip_source_ids(payload: Any) -> Any:
+    """Remove internal source identifiers from a model-facing payload.
+
+    Four rounds of this fix added product names alongside the ids and
+    the agent kept speaking the id: given both, a model quotes the one
+    that looks like ground truth. An id anywhere in the JSON is an id
+    the model may say out loud, so the model-facing endpoints ship
+    names only.
+
+    Nothing in the `health_data` tool contract accepts a source id as an
+    argument, so the model has no use for them. Internal callers that
+    match on ids pass ``include_ids=True`` and get the full shape.
+    """
+    if isinstance(payload, dict):
+        out = {}
+        for key, value in payload.items():
+            if "source" in key and key.endswith(("_id", "_ids")):
+                continue
+            # A reading carries both forms; keep only the spoken one.
+            if key == "source" and "source_name" in payload:
+                continue
+            out[key] = strip_source_ids(value)
+        return out
+    if isinstance(payload, list):
+        return [strip_source_ids(v) for v in payload]
+    return payload
 
 
 class WhoopClient:
@@ -398,12 +429,12 @@ class HealthAggregator:
         self._oura = oura
         # Pluggable accessor for the brain's perception state. When
         # set, ``get_health_summary`` consults it for the most recent
-        # FRESH live-wearable HR/SpO2 sample (Theora W300 glasses,
+        # FRESH live-wearable HR/SpO2 sample (Theora glasses,
         # Veepoo wristband, etc.) so the chat path matches what the
         # WebUI's ``/api/dashboard.latest_health`` already surfaces.
         # Operator report 2026-06-07: the iOS chat assistant answered
         # "no current data coming in from your health sources right
-        # now" when asked about heart rate even though the W300 was
+        # now" when asked about heart rate even though the glasses were
         # streaming bpm into the perception frame — the previous
         # implementation only looked at Whoop/Oura, which were both
         # disconnected. The provider is a callable so the hot-path
@@ -438,6 +469,7 @@ class HealthAggregator:
         self._sync_provider = sync_provider
 
     @property
+
     def sources(self) -> list[str]:
         s = []
         if self._whoop and self._whoop.connected:
@@ -500,7 +532,53 @@ class HealthAggregator:
         return any(
             summary.get(k) is not None
             for k in ("recovery_score", "hrv", "readiness", "strain")
-        ) or ("whoop" in summary.get("sources", []) or "oura" in summary.get("sources", []))
+        ) or ("whoop" in summary.get("sources", [])
+              or "oura" in summary.get("sources", []))
+
+    @staticmethod
+    def _latest_blood_pressure(store, days: int = 7) -> Optional[dict[str, Any]]:
+        """The most recent systolic/diastolic pair, or None.
+
+        Stored as two metrics sharing one timestamp (the sample table is
+        one value per row). They are re-paired on the exact ts the writer
+        stamped; a systolic with no matching diastolic is dropped rather
+        than paired with the nearest one, because "nearest" across a week
+        of on-demand readings can be hours away.
+        """
+        since = time.time() - (float(max(int(days or 0), 1)) * 86400.0)
+        try:
+            sys_rows = store.get_samples("bp_systolic", since=since) or []
+            dia_rows = store.get_samples("bp_diastolic", since=since) or []
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning("blood pressure get_samples failed: %s", exc)
+            return None
+        if not sys_rows or not dia_rows:
+            return None
+
+        by_ts = {float(r.get("ts") or 0.0): r for r in dia_rows}
+        paired = [
+            (float(r.get("ts") or 0.0), r, by_ts[float(r.get("ts") or 0.0)])
+            for r in sys_rows
+            if float(r.get("ts") or 0.0) in by_ts
+        ]
+        if not paired:
+            return None
+
+        ts, sys_row, dia_row = max(paired, key=lambda t: t[0])
+        return {
+            "systolic": int(sys_row.get("value") or 0),
+            "diastolic": int(dia_row.get("value") or 0),
+            "unit": "mmHg",
+            "measured_at": ts,
+            "age_seconds": max(0.0, time.time() - ts),
+            "reading_count": len(paired),
+            "source_name": source_display_name(str(sys_row.get("source") or "")),
+            "note": (
+                "Taken on demand with the glasses, not streamed. This is a "
+                "single measurement at a moment in time, and an optical "
+                "estimate rather than a cuff."
+            ),
+        }
 
     def _build_glasses_vitals_trend(
         self, days: int = 7,
@@ -518,7 +596,19 @@ class HealthAggregator:
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning("biometric history get_trend failed: %s", exc)
             return None
-        if not hr["sample_count"] and not spo2["sample_count"] and not skin["sample_count"]:
+        # Blood pressure is not a trend line like the others: it is taken
+        # on demand, so a window holds a handful of discrete readings and
+        # the question is almost always "what was my last one". Paired by
+        # timestamp, because a systolic quoted next to someone else's
+        # diastolic is worse than no answer.
+        latest_bp = self._latest_blood_pressure(store, days=days)
+
+        if (
+            not hr["sample_count"]
+            and not spo2["sample_count"]
+            and not skin["sample_count"]
+            and latest_bp is None
+        ):
             return None
 
         # Daily resting-HR estimate = the day's minimum sample (lowest
@@ -535,11 +625,25 @@ class HealthAggregator:
         ]
         sources = sorted(set(hr["sources"]) | set(spo2["sources"]) | set(skin["sources"]))
         primary_source = sources[0] if sources else "wearable sensor"
+        # Both shapes: the ids for anything matching on them, the names
+        # for anything a person will read or hear.
+        source_names = [source_display_name(x) for x in sources]
 
+        # `sources` holds the names, not the ids. Four earlier fixes added
+        # a parallel `source_names` field and told the manifest to prefer
+        # it, and the model kept reading `sources` and title-casing the
+        # id anyway -- an id in a field called "sources" IS the answer to
+        # "where did this come from", whatever a description says. The
+        # ids are still here under `source_ids` for code that matches on
+        # them; nothing in the tool contract takes one as an argument.
         trend: dict[str, Any] = {
             "window_days": days,
-            "sources": sources,
-            "primary_source": primary_source,
+            "sources": source_names,
+            "source_ids": sources,
+            "source_names": source_names,
+            "primary_source": source_display_name(primary_source),
+            "primary_source_id": primary_source,
+            "primary_source_name": source_display_name(primary_source),
             "hr_sample_count": hr["sample_count"],
             "spo2_sample_count": spo2["sample_count"],
             "resting_hr_trend": resting_hr_trend,
@@ -559,14 +663,23 @@ class HealthAggregator:
             round(min(resting_candidates), 1) if resting_candidates else None
         )
 
+        if latest_bp is not None:
+            trend["blood_pressure"] = latest_bp
+
         total = hr["sample_count"] + spo2["sample_count"]
+        # The note is prose, and prose is what the model repeats back to
+        # the user. Interpolating the raw id here is what made the agent
+        # say "JW Health glasses" even after every structured field
+        # carried the product name alongside it.
         trend["note"] = (
-            f"Derived from {primary_source} ({total} samples over {days}d); "
-            "no third-party wearable connected."
+            f"Derived from {trend['primary_source_name']} ({total} samples "
+            f"over {days}d); no third-party wearable connected."
         )
         return trend
 
-    async def get_vitals_trend(self, days: int = 7) -> dict[str, Any]:
+    async def get_vitals_trend(
+        self, days: int = 7, *, include_ids: bool = False,
+    ) -> dict[str, Any]:
         """Week-over-week vitals trend built from the persisted
         glasses / wearable samples. Endpoint behind the ``health_data``
         skill so chat can answer "how were my vitals this week?" with
@@ -581,6 +694,7 @@ class HealthAggregator:
             return {
                 "window_days": days,
                 "sources": [],
+                "source_ids": [],
                 "resting_hr_trend": [],
                 "hr_range": None,
                 "spo2_avg": None,
@@ -588,11 +702,11 @@ class HealthAggregator:
                 "resting_hr_estimate": None,
                 "note": (
                     "No persisted wearable biometric history for the last "
-                    f"{days} days. Connect/stream the W300 glasses (or another "
+                    f"{days} days. Connect/stream the Theora glasses (or another "
                     "wearable) to build a vitals trend."
                 ),
             }
-        return trend
+        return trend if include_ids else strip_source_ids(trend)
 
     async def _maybe_sync_durable(self) -> None:
         """Give the Whoop mirror a chance to refresh before answering.
@@ -619,6 +733,8 @@ class HealthAggregator:
         self,
         days: int = 180,
         metric: str | None = None,
+        *,
+        include_ids: bool = False,
     ) -> dict[str, Any]:
         """Long-window history straight out of durable storage.
 
@@ -642,6 +758,8 @@ class HealthAggregator:
                 "window_days": window,
                 "metrics": [],
                 "sources": [],
+                "source_ids": [],
+                "source_names": [],
                 "series": {},
                 "note": (
                     "No durable biometric store is wired, so there is no "
@@ -664,6 +782,7 @@ class HealthAggregator:
         since = time.time() - (float(window) * 86400.0)
         series: dict[str, list[dict[str, Any]]] = {}
         sources: set[str] = set()
+        source_names: set[str] = set()
         for name in wanted:
             try:
                 rows = store.get_samples(name, since=since)
@@ -681,20 +800,26 @@ class HealthAggregator:
                 entries.append(reading)
                 if reading["source"]:
                     sources.add(reading["source"])
+                    source_names.add(reading["source_name"])
             if entries:
                 series[name] = entries
 
         total = sum(len(v) for v in series.values())
-        return {
+        result = {
             "window_days": window,
             "metrics": sorted(series),
-            "sources": sorted(sources),
+            "sources": sorted(source_names),
+            "source_ids": sorted(sources),
+            # The note is the first thing the model reads and the part it
+            # paraphrases back to the user, so it names the products. The
+            # raw ids stay in `sources` for anything matching on them.
+            "source_names": sorted(source_names),
             "sample_count": total,
             "series": series,
             "note": (
                 f"{total} durable reading{'' if total == 1 else 's'} across "
                 f"{len(series)} metric{'' if len(series) == 1 else 's'} over "
-                f"{window}d, from {', '.join(sorted(sources)) or 'no source'}."
+                f"{window}d, from {', '.join(sorted(source_names)) or 'no source'}."
                 if total
                 else (
                     f"No durable health readings in the last {window} days. "
@@ -702,6 +827,7 @@ class HealthAggregator:
                 )
             ),
         }
+        return result if include_ids else strip_source_ids(result)
 
     async def build_health_update(
         self,
@@ -724,27 +850,52 @@ class HealthAggregator:
         )
 
         if str(event_type) == HEALTH_EVENT_TREND:
-            history = await self.get_health_history(days=days)
+            history = await self.get_health_history(days=days, include_ids=True)
+            from integrations.health_canonical import metric_spec
+
             series = []
             for name in history.get("metrics", []):
-                entries = history["series"].get(name) or []
-                built = build_series(
-                    name,
-                    [{"ts": e["ts"], "value": e["value"]} for e in entries],
-                    source=entries[0]["source"] if entries else "",
-                )
-                if built:
-                    series.append(built)
-            return build_health_update_frame(
+                spec = metric_spec(name)
+                if spec is None:
+                    continue
+                groups: dict[tuple[str, str], list[dict]] = {}
+                for entry in history["series"].get(name) or []:
+                    # The durable API emits canonical units. Do not silently
+                    # relabel a malformed unit, invent a sample timestamp, or
+                    # blend different devices under the first source id.
+                    stamp, value = entry.get("ts"), entry.get("value")
+                    if (isinstance(stamp, bool) or not isinstance(stamp, (int, float))
+                            or not math.isfinite(stamp) or stamp <= 0
+                            or isinstance(value, bool) or not isinstance(value, (int, float))
+                            or not math.isfinite(value) or entry.get("unit") != spec.unit):
+                        continue
+                    source = str(entry.get("source") or "")
+                    groups.setdefault((source, spec.unit), []).append(entry)
+                for (source, _unit), entries in sorted(groups.items()):
+                    built = build_series(
+                        name,
+                        [{"ts": e["ts"], "value": e["value"]} for e in entries],
+                        source=source,
+                    )
+                    if built:
+                        # Retain source on each point too, so every receiver can
+                        # check the series envelope against point provenance.
+                        for point in built["points"]:
+                            point["source"] = source
+                        series.append(built)
+            frame = build_health_update_frame(
                 event_type=HEALTH_EVENT_TREND,
                 series=series,
-                sources=history.get("sources") or [],
+                # The frame matches on ids, not on what a person hears.
+                sources=history.get("source_ids") or [],
                 node_id=node_id,
                 window_days=int(history.get("window_days") or days),
                 note=str(history.get("note") or ""),
             )
+            frame["payload"]["data"]["source_grouping"] = "metric_source_unit"
+            return frame
 
-        summary = await self.get_health_summary()
+        summary = await self.get_health_summary(include_ids=True)
         now = time.time()
         readings: list[dict[str, Any]] = []
         for field, canonical in _SUMMARY_TO_CANONICAL.items():
@@ -763,12 +914,12 @@ class HealthAggregator:
         return build_health_update_frame(
             event_type=HEALTH_EVENT_SUMMARY,
             readings=readings,
-            sources=[str(s) for s in (summary.get("sources") or [])],
+            sources=[str(s) for s in (summary.get("source_ids") or [])],
             node_id=node_id,
             window_days=0,
         )
 
-    async def get_health_summary(self) -> dict[str, Any]:
+    async def get_health_summary(self, *, include_ids: bool = False) -> dict[str, Any]:
         """Merge data from all connected platforms into a unified dict."""
         await self._maybe_sync_durable()
         summary: dict[str, Any] = {
@@ -784,6 +935,8 @@ class HealthAggregator:
             "current_hr_source": None,
             "current_spo2": None,
             "current_spo2_source": None,
+            # Ids while the summary is being assembled; swapped for
+            # names at the return, since several branches below append.
             "sources": list(self.sources),
         }
 
@@ -854,11 +1007,11 @@ class HealthAggregator:
             except Exception as e:
                 logger.warning("Oura activity aggregation error: %s", e)
 
-        # Live wearable fan-in (Theora W300 glasses, Veepoo wristband,
+        # Live wearable fan-in (Theora glasses, Veepoo wristband,
         # any BLE PPG source flowing into perception). Operator report
         # 2026-06-07: the chat tool used to answer "no current data"
         # when neither Whoop nor Oura was connected even though the
-        # W300 was actively streaming HR. Surfacing the perception
+        # the glasses were actively streaming HR. Surfacing the perception
         # frame's fresh wearable reading here closes the gap so chat
         # and WebUI agree on what "current heart rate" means.
         snap = self._live_wearable_snapshot()
@@ -869,13 +1022,8 @@ class HealthAggregator:
                 summary["current_hr"] = int(hr)
                 if hr_source:
                     summary["current_hr_source"] = str(hr_source)
-                # Treat the fresh wearable HR as the authoritative
-                # "resting"-slot fallback when Whoop/Oura haven't
-                # contributed one. The UI label for ``resting_hr``
-                # is "current resting estimate" — a fresh PPG sample
-                # is a better answer than "null" for that slot.
-                if summary["resting_hr"] is None:
-                    summary["resting_hr"] = int(hr)
+                # A fresh reading does not establish that the wearer
+                # was resting. Only rest-qualified sources fill resting_hr.
                 if hr_source and str(hr_source) not in summary["sources"]:
                     summary["sources"].append(str(hr_source))
             spo2 = snap.get("spo2")
@@ -899,14 +1047,34 @@ class HealthAggregator:
             trend = self._build_glasses_vitals_trend(days=7)
             if trend is not None:
                 summary["vitals_trend"] = trend
-                # Fill the resting-HR slot from the glasses week when
-                # neither a cloud source nor a fresh live sample did.
-                if summary["resting_hr"] is None and trend.get("resting_hr_estimate"):
-                    summary["resting_hr"] = trend["resting_hr_estimate"]
-                for src in trend.get("sources", []):
+                # Keep the daily-minimum heuristic in the explicit trend
+                # estimate; it is not a rest-qualified summary measurement.
+                for src in trend.get("source_ids", []):
                     if src and src not in summary["sources"]:
                         summary["sources"].append(src)
 
+        named = self._name_summary_sources(summary)
+        return named if include_ids else strip_source_ids(named)
+
+    @staticmethod
+    def _name_summary_sources(summary: dict[str, Any]) -> dict[str, Any]:
+        """Swap internal ids for product names on the way out.
+
+        Everything above appends ids, because that is what the stores
+        and clients deal in. What leaves this method is read by the
+        model, which renders an unfamiliar id by title-casing it: that
+        is how `jw_health_glasses` became "JW Health Glasses" in a spoken
+        answer. Ids stay available under `source_ids`.
+        """
+        ids = [str(x) for x in (summary.get("sources") or [])]
+        summary["source_ids"] = ids
+        summary["sources"] = [source_display_name(x) for x in ids]
+        summary["source_names"] = list(summary["sources"])
+        for key in ("current_hr_source", "current_spo2_source"):
+            value = summary.get(key)
+            if value:
+                summary[f"{key}_id"] = str(value)
+                summary[key] = source_display_name(str(value))
         return summary
 
     async def get_sleep_trend(self, days: int = 7) -> list[dict[str, Any]]:
