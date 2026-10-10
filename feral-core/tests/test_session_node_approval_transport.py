@@ -123,6 +123,7 @@ async def test_real_approval_publishers_reach_actual_state_dict_sender(monkeypat
     state = state_with_nodes()
     monkeypatch.setattr(state_module, "state", state)
     runner = ToolRunner.__new__(ToolRunner)
+    runner._pending_phone_reviews = {}
     await runner._push_approval_request(
         "origin-chat",
         {

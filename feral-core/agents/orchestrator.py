@@ -1365,26 +1365,33 @@ class Orchestrator:
 
     async def _push_approval_resolved(
         self, session_id: str, request_id: str, outcome: str,
-        tool_name: str, actor: str,
+        tool_name: str, actor: str, *, phone_review: dict | None = None, private_review: bool = False,
     ) -> None:
-        """Tell every node on the session to stop asking. Never raises.
+        """Publish resolution using the audience captured before consumption.
 
-        Approvals are pushed to each attached surface, so one answered on
-        the phone has to disappear from the glasses rather than be asked
-        again by whichever surface did not hear the answer.
+        Private task reviews retain their exact device audience without a
+        session-broadcast fallback. Ordinary operator reviews retain their
+        existing session publication. Notification failure does not replay work.
         """
         try:
             from api.state import state as _state
-            push = getattr(_state, "push_to_session_nodes", None)
+            if private_review and phone_review is None:
+                return
+            push = getattr(_state, "push_to_review_device" if phone_review else "push_to_session_nodes", None)
             if not callable(push):
                 return
-            await push(session_id, {"type": "approval_resolved", "payload": {
+            payload = {
                 "request_id": request_id,
                 "session_id": session_id,
                 "outcome": outcome,
                 "resolved_by": actor,
                 "tool_name": tool_name,
-            }})
+            }
+            if phone_review is not None:
+                payload["session_id"] = phone_review["origin_session_id"]
+                payload["task_review"] = phone_review["task_review"]
+            await push(phone_review["source_binding"] if phone_review else session_id,
+                       {"type": "approval_resolved", "payload": payload})
         except Exception as exc:
             logger.debug("approval_resolved push failed: %s", exc)
 
@@ -1395,18 +1402,69 @@ class Orchestrator:
         approved: bool,
         session_id: str | None = None,
         actor: str = "api",
+        source_principal=None,
+        task_review: dict | None = None,
     ) -> dict:
-        from security.approval_ingress import device_approval_authority_unavailable
+        from security.approval_ingress import (
+            PairedDevicePrincipal, current_node_principal, device_approval_authority_unavailable, exact_review_card_matches,
+        )
+        if source_principal is not None:
+            admitted = current_node_principal()
+            if (type(source_principal) is not PairedDevicePrincipal
+                    or device_approval_authority_unavailable() and admitted is not source_principal):
+                return {"status": "approval_device_authority_unavailable"}
+            pending = self.tool_runner.get_pending(request_id)
+            descriptor = self.tool_runner.phone_review_descriptor(pending or {}, source_principal=source_principal)
+            if (descriptor is None or not exact_review_card_matches(task_review, descriptor["task_review"])
+                    or session_id != descriptor["origin_session_id"]):
+                return {"status": "approval_device_authority_unavailable"}
+            assert pending is not None
+            decision = (source_principal, descriptor)
+            captured_origin = self.tool_runner._pending_task_origins.get(request_id)
+            captured_runtime = self.taskflows
+            from security.agent_turn_lease import bind_agent_dispatch_owner
+            def caller_current():
+                source_principal.require_current()
+                if captured_origin is not None:
+                    # The full origin guard invokes this dispatcher fence. Keep
+                    # this callback nonrecursive; exact admission runs it again.
+                    original_source = captured_origin.source_principal
+                    if original_source is None:
+                        return False
+                    original_source.require_current()
+                    return bool(captured_origin.state.taskflows is captured_origin.runtime
+                                and captured_origin.state.orchestrator is self
+                                and not captured_origin.audit.cancel_requested
+                                and not captured_origin.original_task.cancelled()
+                                and not captured_origin.original_task.cancelling()
+                                and captured_origin.static_matches(pending))
+                if (captured_runtime is None or self.taskflows is not captured_runtime
+                        or captured_runtime._orchestrator is not self):
+                    return False
+                current = captured_runtime.private_review_origin_for(pending)
+                return bool(current and current["source_binding"] == descriptor["source_binding"]
+                            and current["origin_session_id"] == descriptor["origin_session_id"])
+            with bind_agent_dispatch_owner(caller_current):
+                result = await self._resolve_tool_approval_request_guarded(request_id, approved=approved,
+                    session_id=pending["session_id"], actor=actor, phone_decision=decision)
+                source_principal.require_current()
+                return {**result, "session_id": descriptor["origin_session_id"], "task_review": descriptor["task_review"]}
         if device_approval_authority_unavailable():
             # A claimed SID, node alias or session broadcast membership cannot
             # replace the missing per-review authenticated device principal.
             return {"status": "approval_device_authority_unavailable"}
+        if task_review is not None:
+            return {"status": "approval_device_authority_unavailable"}
+        return await self._resolve_tool_approval_request_guarded(request_id, approved=approved, session_id=session_id, actor=actor)
+
+    async def _resolve_tool_approval_request_guarded(self, request_id: str, *, approved: bool,
+                                                  session_id: str | None = None, actor: str = "api", phone_decision=None) -> dict:
         if not approved:
             # Revocation requires the pending SID, not fresh context authority.
-            return await self._resolve_tool_approval_request_impl(request_id, approved=False, session_id=session_id, actor=actor)
+            return await self._resolve_tool_approval_request_impl(request_id, approved=False, session_id=session_id, actor=actor, phone_decision=phone_decision)
         coordinator = self._context_checkpoints
         if coordinator is None:
-            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor, phone_decision=phone_decision)
         pending = self.tool_runner.get_pending(request_id)
         if not pending:
             return {"status": "not_found", "request_id": request_id}
@@ -1417,16 +1475,16 @@ class Orchestrator:
             return {"status": "stale_context", "request_id": request_id, "session_id": sid,
                     "reason": "Interrupted context review requires a fresh request and approval."}
         if coordinator.owns_writer(sid):
-            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor, phone_decision=phone_decision)
         async with coordinator.write_scope(sid):
             pending = self.tool_runner.get_pending(request_id)
             if approved and pending is not None and not self.tool_runner.pending_context_valid(pending):
                 return {"status": "stale_context", "request_id": request_id, "session_id": sid,
                         "reason": "Interrupted context review requires a fresh request and approval."}
-            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor)
+            return await self._resolve_tool_approval_request_impl(request_id, approved=approved, session_id=session_id, actor=actor, phone_decision=phone_decision)
 
     async def _resolve_tool_approval_request_impl(self, request_id: str, *, approved: bool,
-                                                session_id: str | None = None, actor: str = "api") -> dict:
+                                                session_id: str | None = None, actor: str = "api", phone_decision=None) -> dict:
         """Resolve a pending tool approval request by id.
 
         Returns a status payload:
@@ -1438,6 +1496,12 @@ class Orchestrator:
         pending = self.tool_runner.get_pending(request_id)
         if not pending:
             return {"status": "not_found", "request_id": request_id}
+        phone_review = self.tool_runner.phone_review_descriptor(pending)
+        private_review = bool(pending.get("phone_review_required"))
+        if phone_decision is not None:
+            source, expected = phone_decision
+            if self.tool_runner.phone_review_descriptor(pending, source_principal=source) != expected:
+                return {"status": "approval_device_authority_unavailable"}
 
         pending_session = str(pending.get("session_id", "") or "")
         effective_session = str(session_id or pending_session)
@@ -1479,6 +1543,7 @@ class Orchestrator:
             await self._send_text(effective_session, f"Cancelled `{tool_name}`.")
             await self._push_approval_resolved(
                 effective_session, request_id, "rejected", tool_name, actor,
+                phone_review=phone_review, private_review=private_review,
             )
             return {
                 "status": "rejected",
@@ -1500,6 +1565,10 @@ class Orchestrator:
             current = self.tool_runner.get_pending(request_id)
             if current is None or current != pending or not task_origin.matches(current):
                 return {"status": "origin_superseded", "request_id": request_id, "session_id": effective_session}
+        if phone_decision is not None:
+            source, expected = phone_decision
+            if self.tool_runner.phone_review_descriptor(pending, source_principal=source) != expected:
+                return {"status": "approval_device_authority_unavailable"}
         taskflow_pending = pending if pending.get("taskflow") else None
         if taskflow_pending is not None and (
             self.taskflows is None or not self.taskflows.prepare_approved_dispatch(pending)
@@ -1523,6 +1592,7 @@ class Orchestrator:
         try:
             await self._push_approval_resolved(
                 effective_session, request_id, "approved", tool_name, actor,
+                phone_review=phone_review, private_review=private_review,
             )
             outcome = await self._execute_approved_pending_tool(
                 effective_session,

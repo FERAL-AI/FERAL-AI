@@ -7,7 +7,7 @@ This is the single source of truth for all message types.
 """
 
 from __future__ import annotations
-from pydantic import AliasChoices, BaseModel, Field, field_validator, model_validator, model_serializer, ValidationInfo
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator, model_serializer, ValidationInfo
 from typing import Optional, Literal, Any, Self, Callable
 from uuid import UUID, uuid4
 from time import time
@@ -438,13 +438,33 @@ class SourceRef(BaseModel):
     url: str = Field(..., max_length=MAX_PATH_LEN)
 
 
+class TaskReviewPayload(BaseModel):
+    """Versioned correlation and exact terms; these public fields grant nothing."""
+    model_config = ConfigDict(extra="forbid")
+    version: Literal[1]
+    request_id: StrictStr = Field(min_length=1, max_length=MAX_ID_LEN)
+    origin_session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    kind: Literal["task_start", "taskflow_action"]
+    terms_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    turn_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+    flow_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+    step_id: StrictInt | None = Field(default=None, gt=0)
+    action_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_NAME_LEN)
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported review contract")
+        return value
+
+
 class ApprovalRequestPayload(BaseModel):
     """Brain to client: something needs a yes or no before it happens.
 
-    Pushed to every node attached to the session, because the operator is
-    not necessarily at the Mac. Before this, a pending approval only
-    reached the web UI and the phone was told to go and approve it there,
-    which is useless for anything acted on while out of the house.
+    Reviews with private device provenance go only to authenticated current
+    connections for the originating device. Legacy session notifications
+    retain their existing audience; session membership grants no approval.
 
     Typed rather than an ``sdui`` card on purpose: a screenless surface
     needs a sentence it can speak and a hard yes or no, and inferring one
@@ -468,20 +488,32 @@ class ApprovalRequestPayload(BaseModel):
     currency: str = Field(default="", max_length=8)
     created_at: float = 0.0
     expires_at: float = 0.0
+    task_review: dict | None = None
+
+    @field_validator("task_review")
+    @classmethod
+    def validate_task_review(cls, value):
+        return TaskReviewPayload.model_validate(value).model_dump(exclude_none=True) if value is not None else None
 
 
 class ApprovalResolvedPayload(BaseModel):
     """Brain to client: this approval is settled, stop asking.
 
-    Sent to every node on the session so a prompt answered on one
-    surface disappears from the others. ``outcome`` is ``approved``,
-    ``rejected`` or ``expired``.
+    Device-owned reviews retain their private audience after settlement.
+    Legacy session notifications retain their existing audience.
+    ``outcome`` is ``approved``, ``rejected`` or ``expired``.
     """
     request_id: str = Field(..., max_length=MAX_ID_LEN)
     session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
     outcome: str = Field(default="", max_length=32)
     resolved_by: str = Field(default="", max_length=MAX_NAME_LEN)
     tool_name: str = Field(default="", max_length=MAX_NAME_LEN)
+    task_review: dict | None = None
+
+    @field_validator("task_review")
+    @classmethod
+    def validate_task_review(cls, value):
+        return TaskReviewPayload.model_validate(value).model_dump(exclude_none=True) if value is not None else None
 
 
 class ChatResponsePayload(BaseModel):

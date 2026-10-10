@@ -654,6 +654,7 @@ _PHONE_BEARER_POST.add_literal("/api/wiki/ingest/text")
 # construction the same set of paths FastAPI accepts.
 _PHONE_BEARER_POST.add_pattern("/api/approvals/{request_id}/approve")
 _PHONE_BEARER_POST.add_pattern("/api/approvals/{request_id}/reject")
+_PHONE_BEARER_POST.add_pattern("/api/approvals/{request_id}/renew")
 
 
 def _is_webhook_receive(path: str) -> bool:
@@ -792,6 +793,22 @@ class APIKeyMiddleware(BaseHTTPMiddleware):
                     try:
                         request.state.phone_device_id = device_id
                         request.state.device_credential_kind = credential_kind
+                        from security.approval_ingress import PairedDevicePrincipal
+                        captured_state, captured_store = _state, store
+                        captured_runtime = (getattr(_state, "orchestrator", None),
+                                            getattr(_state, "memory", None), getattr(_state, "taskflows", None))
+                        def current_device():
+                            from api.state import state as current_state
+                            if (current_state is not captured_state
+                                    or captured_state.device_pairing_store is not captured_store
+                                    or any(getattr(captured_state, key, None) is not value for key, value in
+                                           zip(("orchestrator", "memory", "taskflows"), captured_runtime))):
+                                return False
+                            if isinstance(captured_store, DevicePairingStore):
+                                return captured_store.admitted_credential_current(
+                                    device_id=device_id, credential=bearer, bearer_kind=credential_kind)
+                            return _verify_http_device_credential(captured_store, bearer) == (device_id, credential_kind)
+                        request.state.paired_device_principal = PairedDevicePrincipal(device_id, current_device)
                     except Exception:
                         pass
                     return await call_next(request)
@@ -3445,6 +3462,14 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
             # Old/invalid identity records remain legacy node ingress; they
             # cannot acquire private tracked ownership from a message field.
             pass
+    if phone_principal is not None:
+        try:
+            phone_chats.bind_review_principal(phone_principal)
+        except asyncio.CancelledError:
+            await _send_protocol_error(ws, 4003, "Paired device authority unavailable",
+                                       name="chat_turn_device_authority_unavailable")
+            await ws.close(code=4003, reason="Paired device authority expired or revoked")
+            return
 
     async def run_phone_chat(payload_dict, target_sid, source_node, orchestrator, memory,
                              *, tracked=False):

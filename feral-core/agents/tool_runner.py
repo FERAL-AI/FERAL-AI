@@ -353,6 +353,7 @@ class ToolRunner:
         self._pending_daemon_acks: dict[str, asyncio.Future] = {}
         self._pending_approvals: dict[str, dict] = {}
         self._pending_task_origins: dict[str, PendingTaskOrigin] = {}
+        self._pending_phone_reviews: dict[str, object] = {}
         self._pending_scope_kinds: dict[str, str] = {}
         # -A9: approval state must be shared across BrainState/API +
         # ToolRunner. If no manager is injected (legacy/tests), fall back
@@ -808,6 +809,7 @@ class ToolRunner:
                 model_scope = model_step_for(session_id, self._orch)
                 if model_scope is not None:
                     model_scope.bind_approval(self, pending)
+                self.bind_phone_review(pending)
                 return pending
 
         pending = {
@@ -849,7 +851,13 @@ class ToolRunner:
             except BaseException:
                 self._pending_approvals.pop(request_id, None)
                 self._pending_scope_kinds.pop(request_id, None)
+                self._pending_phone_reviews.pop(request_id, None)
                 raise
+        try:
+            self.bind_phone_review(pending)
+        except BaseException:
+            self.deny_pending(request_id, session_id=session_id)
+            raise
         logger.info(f"Approval required ({self._autonomy_mode}): {tool_name} → request_id={request_id}")
         return pending
 
@@ -893,6 +901,89 @@ class ToolRunner:
             return []
 
     # ─── Approval lifecycle ───
+
+    def _private_phone_origin(self, pending):
+        """Read authentic original input/job provenance; never a supplied SID."""
+        origin = self._pending_task_origins.get(pending.get("request_id", ""))
+        if origin is not None and origin.source_principal is not None:
+            if not origin.matches(pending):
+                return None
+            return {"source_binding": origin.source_principal.storage_binding(),
+                    "origin_session_id": origin.session_id, "turn_id": origin.turn_id,
+                    "surface": origin.surface, "kind": "task_start"}
+        if pending.get("taskflow"):
+            runtime = getattr(self._orch, "taskflows", None)
+            read = getattr(runtime, "private_review_origin_for", None)
+            if callable(read):
+                value = read(pending)
+                if value is not None:
+                    return {**value, "kind": "taskflow_action"}
+        return None
+
+    def bind_phone_review(self, pending: dict) -> None:
+        """Bind actual private origin after exact checkpoint and before publish."""
+        from security.approval_ingress import PhoneReviewOrigin, canonical_device_binding, review_terms_digest
+        if self._pending_approvals.get(pending.get("request_id", "")) != pending:
+            raise RuntimeError("Review is not a current issued request")
+        captured = self._pending_task_origins.get(pending.get("request_id", ""))
+        if captured is not None and captured.source_principal is not None:
+            pending["phone_review_required"] = True
+        origin = self._private_phone_origin(pending)
+        if origin is None:
+            if pending.get("phone_review_required"):
+                raise RuntimeError("Private review origin is unavailable")
+            return
+        surface = origin.get("surface")
+        if surface is None:
+            runtime = getattr(self._orch, "taskflows", None)
+            if runtime is None:
+                raise RuntimeError("Private review runtime is unavailable")
+            surface = runtime.execution_surface_for_flow(origin["flow_id"])
+        from security.dangerous_tools import known_surfaces
+        if surface not in known_surfaces() or not isinstance(origin.get("origin_session_id"), str):
+            raise RuntimeError("Private review scope is unavailable")
+        source = canonical_device_binding(origin["source_binding"])
+        pending["phone_review_required"] = True
+        digest = review_terms_digest(pending, surface)
+        card = {"version": 1, "request_id": pending["request_id"],
+                "origin_session_id": origin["origin_session_id"], "kind": origin["kind"], "terms_digest": digest}
+        for key in ("turn_id", "flow_id", "step_id", "action_id"):
+            if key in origin:
+                card[key] = origin[key]
+        bound = PhoneReviewOrigin(source, origin["origin_session_id"],
+                                  json.dumps(card, sort_keys=True, separators=(",", ":"), allow_nan=False), surface, digest)
+        previous = self._pending_phone_reviews.get(pending["request_id"])
+        if previous is not None and previous != bound:
+            raise RuntimeError("Issued private review changed")
+        self._pending_phone_reviews[pending["request_id"]] = bound
+        self._pending_scope_kinds[pending["request_id"]] = "exact_request"
+
+    def phone_review_descriptor(self, pending: dict, *, source_principal=None) -> Optional[dict]:
+        """Current private publisher/API lookup. Output is never a model value."""
+        from security.approval_ingress import (
+            PairedDevicePrincipal, PhoneReviewOrigin, canonical_device_binding, review_terms_digest,
+        )
+        try:
+            if source_principal is not None:
+                if type(source_principal) is not PairedDevicePrincipal:
+                    return None
+                source_principal.require_current()
+            bound = self._pending_phone_reviews.get(pending.get("request_id", ""))
+            if (type(bound) is not PhoneReviewOrigin or self._pending_approvals.get(pending.get("request_id", "")) != pending
+                    or self.approval_scope_for(pending) is None
+                    or review_terms_digest(pending, bound.surface) != bound.terms_digest):
+                return None
+            origin = self._private_phone_origin(pending)
+            if (origin is None or canonical_device_binding(origin["source_binding"]) != bound.source_binding_json
+                    or origin["origin_session_id"] != bound.origin_session_id):
+                return None
+            if source_principal is not None:
+                if canonical_device_binding(source_principal.storage_binding()) != bound.source_binding_json:
+                    return None
+                source_principal.require_current()
+            return bound.descriptor()
+        except (Exception, asyncio.CancelledError):
+            return None
 
     def approval_scope_for(self, pending: dict) -> Optional[dict]:
         """Project server-owned scope; invalid exact metadata never becomes session permission."""
@@ -972,6 +1063,7 @@ class ToolRunner:
                 self._pending_approvals.pop(request_id, None)
                 self._pending_task_origins.pop(request_id, None)
                 self._pending_scope_kinds.pop(request_id, None)
+                self._pending_phone_reviews.pop(request_id, None)
 
     def approved_backing_transfer(self, tool_name: str, args: dict):
         """Capture only the actual reviewed executor entry before its child is scheduled."""
@@ -1043,6 +1135,7 @@ class ToolRunner:
             self._pending_approvals.pop(request_id, None)
             self._pending_task_origins.pop(request_id, None)
             self._pending_scope_kinds.pop(request_id, None)
+            self._pending_phone_reviews.pop(request_id, None)
             logger.info("Approval %s expired before it was answered", request_id)
             return None
         return dict(pending)
@@ -1060,6 +1153,7 @@ class ToolRunner:
             return None
         self._pending_task_origins.pop(req_id, None)
         self._pending_scope_kinds.pop(req_id, None)
+        self._pending_phone_reviews.pop(req_id, None)
         return self._pending_approvals.pop(req_id, None)
 
     def grant_session_approval(self, tool_name: str, session_id: str) -> None:
@@ -1088,6 +1182,7 @@ class ToolRunner:
         self._pending_approvals.pop(request_id, None)
         self._pending_task_origins.pop(request_id, None)
         self._pending_scope_kinds.pop(request_id, None)
+        self._pending_phone_reviews.pop(request_id, None)
         logger.info(f"Approved pending request {request_id} for {pending['tool_name']}")
         result = {"tool_name": pending["tool_name"], "args": pending["args"]}
         if exact_once or pending.get("browser_resource") is not None:
@@ -1105,6 +1200,7 @@ class ToolRunner:
         self._pending_approvals.pop(request_id, None)
         self._pending_task_origins.pop(request_id, None)
         self._pending_scope_kinds.pop(request_id, None)
+        self._pending_phone_reviews.pop(request_id, None)
         logger.info(f"Denied pending request {request_id} for {pending['tool_name']}")
         return {
             "status": "PermissionOutcome::Deny",
@@ -1647,7 +1743,7 @@ class ToolRunner:
                 f"({level}). Approve in the Devices/Approvals pane "
                 f"to continue."
             )
-            if request_id:
+            if request_id and not denial.get("phone_review_required"):
                 msg += f"\n\nrequest_id: `{request_id}`"
             await send_text(session_id, msg)
             await self._push_approval_request(session_id, denial)
@@ -1655,11 +1751,11 @@ class ToolRunner:
             logger.debug("pending_approval user-notify failed: %s", exc)
 
     async def _push_approval_request(self, session_id: str, denial: dict) -> None:
-        """Tell every node on this session that something needs an answer.
+        """Publish an issued review to its existing authoritative audience.
 
-        Until now a pending approval only reached the Mac web UI, and the
-        phone was told to go and approve it there, which is no use for
-        anything acted on while out of the house.
+        Privately owned task reviews go only to their originating device. A
+        missing current private audience never falls back to session broadcast.
+        Ordinary operator reviews retain their existing session publication.
 
         `speak` is built here rather than left to the client: a screenless
         surface has to say a sentence, and one derived from a card layout
@@ -1667,7 +1763,11 @@ class ToolRunner:
         """
         try:
             from api.state import state as _state
-            push = getattr(_state, "push_to_session_nodes", None)
+            descriptor = self.phone_review_descriptor(denial)
+            owned = denial.get("phone_review_required") or denial.get("request_id") in self._pending_phone_reviews
+            if owned and descriptor is None:
+                return
+            push = getattr(_state, "push_to_review_device" if descriptor else "push_to_session_nodes", None)
             if not callable(push):
                 return
             tool_name = str(denial.get("tool_name", "") or "")
@@ -1692,7 +1792,7 @@ class ToolRunner:
             else:
                 speak = f"Approve {human}?"
 
-            await push(session_id, {"type": "approval_request", "payload": {
+            payload = {
                 "request_id": str(denial.get("request_id", "") or ""),
                 "session_id": session_id,
                 "tool_name": tool_name,
@@ -1705,7 +1805,12 @@ class ToolRunner:
                 "currency": currency,
                 "created_at": float(denial.get("created_at") or 0.0),
                 "expires_at": float(denial.get("expires_at") or 0.0),
-            }})
+            }
+            if descriptor is not None:
+                payload["session_id"] = descriptor["origin_session_id"]
+                payload["task_review"] = descriptor["task_review"]
+            await push(descriptor["source_binding"] if descriptor else session_id,
+                       {"type": "approval_request", "payload": payload})
         except Exception as exc:
             logger.debug("approval_request push failed: %s", exc)
 

@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass
 
 from security.agent_turn_lease import bind_agent_dispatch_owner, spawn_agent_turn
+from security.approval_ingress import PairedDevicePrincipal
 
 logger = logging.getLogger(__name__)
 MAX_PHONE_CHAT_TASKS = 16
@@ -50,6 +51,34 @@ class PhoneChatIntake:
         self.closed = False
         self.tasks: set[asyncio.Task] = set()
         self.tracked_tasks: set[asyncio.Task] = set()
+        self._review_principal: PairedDevicePrincipal | None = None
+        self._review_runtime: tuple[object, ...] = ()
+
+    def bind_review_principal(self, principal: PairedDevicePrincipal) -> None:
+        """Bind only the private principal verified by this socket's ingress."""
+        if type(principal) is not PairedDevicePrincipal or self._review_principal is not None:
+            raise ValueError("Phone review principal is unavailable")
+        principal.require_current()
+        self._review_principal = principal
+        self._review_runtime = tuple(getattr(self.state, key, None) for key in
+                                     ("orchestrator", "memory", "taskflows"))
+
+    def review_current(self, source_binding: dict) -> bool:
+        """Exact-device audience check, independent of session broadcast membership."""
+        principal = self._review_principal
+        try:
+            if (type(principal) is not PairedDevicePrincipal or not self.current()
+                    or any(getattr(self.state, key, None) is not value for key, value in
+                           zip(("orchestrator", "memory", "taskflows"), self._review_runtime))
+                    or not isinstance(source_binding, dict)
+                    or set(source_binding) != {"version", "kind", "device_id"}
+                    or type(source_binding.get("version")) is not int
+                    or source_binding != principal.storage_binding()):
+                return False
+            principal.require_current()
+            return True
+        except (Exception, asyncio.CancelledError):
+            return False
 
     def current(self) -> bool:
         return (not self.closed and self.current_state() is self.state

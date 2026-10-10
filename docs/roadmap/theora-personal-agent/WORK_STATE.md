@@ -1,11 +1,40 @@
 # FERAL completion checkpoint
 
-Updated October 9, 2026. Parent/integrator owns this file. Reconcile it with actual
+Updated October 10, 2026. Parent/integrator owns this file. Reconcile it with actual
 Git, CI and processes after resuming; it is a checkpoint, not a live process lock.
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
 
-## Current execution checkpoint, October 9
+## Current execution checkpoint, October 10
+
+### Active phone review integration batch
+
+Published predecessor HEAD 5995116f2 and immutable 9.51 remain available.
+The completed follow-on source batch binds private exact task reviews, delivers
+cards only to the current originating device, enables guarded REST decisions and
+renews persisted waiting model reviews with freshly authenticated same-device
+credentials. Both workers released their files; parent owns integration,
+documentation, packaging and publication. No iOS/UI, Chrome delegation, physical
+model/audio/account or release operation is part of this batch.
+
+Final frozen integration passes 917 tests, one skip and 325 warnings across 53
+suites in 62.67 seconds, zero input drift. Configured Mac mypy retains 788 existing
+diagnostics, zero additions/removals and zero drift. Full-core CI Ruff and authored
+whitespace pass. Four nullable-route typing defects were corrected before final
+acceptance. Earlier 917-pass/792-diagnostic runs and two legacy constructor-bypass
+fixture failures are retained separately. The two fixture maps now match the
+actual constructor; production permissions were not loosened.
+
+Packaging target: 9.52/build2026101001, one cached offline assembly; net generated
+payload budget 2 GiB. Disk headroom is approximately 14 GiB; actual before/after
+resource receipts are mandatory. All Swift/WebUI inputs remain unchanged and
+verified native reuse is eligible. Keep canonical 9.51 until identity/staging
+checks pass, then retain sole rollback 9.51 and retire inspected generated 9.50.
+[Phone review contract](PHONE_REVIEW_AUTHORITY_20261010.md) includes the iOS
+negotiation and exact-card requirements; no physical client operation is claimed.
+Remote predecessor checks report 17 successes, four skips and one failure in the
+Ubuntu PR backend fast lane. That failure is not a passing local or remote gate;
+its cause remains unclassified here. No merge or production release is implied.
 
 ### Current 9.51 artifact and completed batch
 

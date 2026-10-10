@@ -256,6 +256,7 @@ class TaskFlowModelStep:
             )
             self.runtime._conn.commit()
         pending["taskflow"] = binding
+        self.runtime._bind_phone_review_checkpoint(runner, pending)
         self.pending, self.review_issued = exact, True
 
     def observe_result(self, call, result):
@@ -631,6 +632,151 @@ class TaskFlowRuntime:
         _principal_json(source_principal)
         return row is not None and row[0] == source_json
 
+    def private_review_origin_for(self, pending: dict) -> dict | None:
+        """Creation-owned provenance beside an exact checkpoint; no live grant."""
+        flow, step = self._approval_step(pending)
+        if not flow or not step:
+            return None
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT f.origin_principal_json,f.origin_session_id,f.status AS flow_status,"
+                "s.status AS step_status,s.result_json FROM taskflows f JOIN taskflow_steps s "
+                "ON s.flow_id=f.id WHERE f.id=? AND s.id=?", (flow["id"], step["id"]),
+            ).fetchone()
+        if row is None or row["origin_principal_json"] is None:
+            return None
+        if (self._stop_event.is_set()
+                or (row["flow_status"], row["step_status"]) not in {("waiting", "waiting"), ("running", "running")}
+                or json.loads(row["result_json"] or "{}") != step.get("result")):
+            raise ValueError("Private task review checkpoint is unavailable")
+        binding = json.loads(row["origin_principal_json"])
+        if (not isinstance(binding, dict) or set(binding) != {"version", "kind", "device_id"}
+                or type(binding["version"]) is not int or binding["version"] != 1
+                or binding["kind"] != "paired_device" or type(binding["device_id"]) is not str
+                or str(UUID(binding["device_id"])) != binding["device_id"]):
+            raise ValueError("Private task review origin is unavailable")
+        from security.session_identity import validate_session_id
+        validate_session_id(row["origin_session_id"])
+        result = {"source_binding": binding, "origin_session_id": row["origin_session_id"],
+                  "flow_id": flow["id"], "step_id": step["id"]}
+        if step["step_type"] == "llm.chat":
+            result["action_id"] = pending["taskflow"]["model_call_id"]
+        return result
+
+    def _bind_phone_review_checkpoint(self, runner, pending, *, source_principal=None):
+        """Keep a public renewal card only after the existing exact binding."""
+        origin = self.private_review_origin_for(pending)
+        if origin is None:
+            return None
+        runner.bind_phone_review(pending)
+        descriptor = runner.phone_review_descriptor(pending)
+        if not descriptor or descriptor["source_binding"] != origin["source_binding"]:
+            raise ValueError("Private task review binding is unavailable")
+        card = copy.deepcopy(descriptor["task_review"])
+        flow, step = self._approval_step(pending)
+        if not flow or not step or flow["status"] != "waiting" or step["status"] != "waiting":
+            raise ValueError("Private task review checkpoint changed")
+        with self._lock:
+            try:
+                if source_principal is not None:
+                    source_principal.require_current()
+                raw = self._conn.execute("SELECT result_json FROM taskflow_steps WHERE id=?", (step["id"],)).fetchone()[0]
+                prior = json.loads(raw or "{}")
+                if prior != step["result"]:
+                    raise ValueError("Private task review checkpoint changed")
+                prior["task_review"] = card
+                changed = self._conn.execute(
+                    "UPDATE taskflow_steps SET result_json=? WHERE id=? AND status='waiting' AND result_json=? "
+                    "AND EXISTS(SELECT 1 FROM taskflows WHERE id=? AND status='waiting')",
+                    (json.dumps(prior, allow_nan=False), step["id"], raw, flow["id"]),
+                ).rowcount
+                if changed != 1:
+                    raise ValueError("Private task review checkpoint changed")
+                if source_principal is not None:
+                    source_principal.require_current()
+                self._conn.commit()
+            except BaseException:
+                self._conn.rollback()
+                raise
+        return card
+
+    def _device_review_checkpoint(self, flow, *, origin_session_id, source_principal):
+        """A stored waiting model card can be renewed, never used as a grant."""
+        if (not self.flow_matches_source(flow["id"], source_principal)
+                or self.origin_session_for_flow(flow["id"]) != origin_session_id
+                or flow["status"] != "waiting"
+                or any(s["status"] in {"running", "outcome_unknown"} for s in flow["steps"])
+                or not 0 <= flow["current_step"] < len(flow["steps"])):
+            return None
+        step = flow["steps"][flow["current_step"]]
+        prior = step.get("result") or {}
+        card = prior.get("task_review")
+        exact = prior.get("approval") or {}
+        terms = (prior.get("model_action") or {}).get("terms") or {}
+        required = {"version", "request_id", "origin_session_id", "kind", "terms_digest", "flow_id", "step_id", "action_id"}
+        if (step["step_type"] != "llm.chat" or step["status"] != "waiting"
+                or prior.get("reason") != "approval_required" or not isinstance(card, dict)
+                or set(card) != required or type(card["version"]) is not int or card["version"] != 1
+                or card["kind"] != "taskflow_action" or card["request_id"] != exact.get("request_id")
+                or card["origin_session_id"] != origin_session_id or card["flow_id"] != flow["id"]
+                or type(card["step_id"]) is not int or card["step_id"] != step["id"]
+                or card["action_id"] != terms.get("call_id") or type(card["terms_digest"]) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", card["terms_digest"]) is None):
+            return None
+        pending = {**exact, "taskflow": {"flow_id": flow["id"], "step_id": step["id"],
+                                       "model_call_id": terms.get("call_id")},
+                   "browser_resource": terms.get("resource")}
+        if self._approval_step(pending)[1] is None:
+            return None
+        source_principal.require_current()
+        return {"request_id": exact["request_id"], "session_id": origin_session_id,
+                "tool_name": exact["tool_name"], "args": redact_model_task_result(copy.deepcopy(exact["args"])),
+                "task_review": copy.deepcopy(card), "status": "renewal_required",
+                "approval_scope": {"contract_version": 1, "kind": "exact_request"},
+                "approval_available": False, "review_renewal_required": True}
+
+    def list_device_review_checkpoints(self, origin_session_id, *, source_principal, limit=100):
+        flows = self.list_origin_flows(origin_session_id, source_principal=source_principal, limit=limit)
+        result = []
+        for row in flows:
+            flow = self.get_flow(row["id"])
+            if flow is None:
+                continue
+            card = self._device_review_checkpoint(flow, origin_session_id=origin_session_id,
+                                                  source_principal=source_principal)
+            if card is not None:
+                result.append(card)
+        source_principal.require_current()
+        return result
+
+    async def renew_device_model_review(self, flow_id, *, origin_session_id, task_review, source_principal):
+        """Fresh authenticated owner explicitly renews one stored exact review."""
+        if type(source_principal) is not PairedDevicePrincipal:
+            raise ValueError("Missing authenticated task review source")
+        source_principal.require_current()
+        unavailable = {"review_renewal": {"status": "refused", "error_code": "task_review_unavailable"}}
+        if not self.flow_matches_source(flow_id, source_principal):
+            return unavailable
+        flow = self.get_flow(flow_id)
+        card = self._device_review_checkpoint(flow, origin_session_id=origin_session_id,
+                                              source_principal=source_principal) if flow else None
+        try:
+            same_review = (type(task_review) is dict and card is not None
+                           and json.dumps(card["task_review"], sort_keys=True, separators=(",", ":"), allow_nan=False)
+                           == json.dumps(task_review, sort_keys=True, separators=(",", ":"), allow_nan=False))
+        except (TypeError, ValueError):
+            same_review = False
+        if not same_review or flow is None:
+            return unavailable
+        step = flow["steps"][flow["current_step"]]
+        source_principal.require_current()
+        renewed = self._renew_model_review(flow, step, source_principal=source_principal)
+        source_principal.require_current()
+        if (renewed.get("review_renewal") or {}).get("status") == "waiting":
+            fresh_step = renewed["steps"][renewed["current_step"]]
+            renewed["review_renewal"]["task_review"] = copy.deepcopy(fresh_step["result"].get("task_review"))
+        return renewed
+
     def list_origin_flows(self, origin_session_id: str, *, limit: int = 50,
                           source_principal: PairedDevicePrincipal | None = None) -> list[dict]:
         from security.session_identity import validate_session_id
@@ -895,7 +1041,7 @@ class TaskFlowRuntime:
         self._wake_event.set()
         return self.get_flow(flow_id)
 
-    def _renew_model_review(self, flow, step):
+    def _renew_model_review(self, flow, step, *, source_principal=None):
         """Explicit Resume renews a lost review, never an action or model goal."""
         runner = getattr(self._orchestrator, "tool_runner", None)
         prior = step.get("result") or {}
@@ -936,11 +1082,20 @@ class TaskFlowRuntime:
             pending["taskflow"] = binding
             new_review = {**prior, "approval": {k: copy.deepcopy(pending[k]) for k in ("request_id", "session_id", "tool_name", "args")}}
             with self._lock:
-                changed = self._conn.execute("UPDATE taskflow_steps SET result_json=? WHERE id=? AND status='waiting' AND result_json=? AND EXISTS(SELECT 1 FROM taskflows WHERE id=? AND status='waiting')",
-                    (json.dumps(new_review, allow_nan=False), step["id"], raw, flow["id"])).rowcount
-                self._conn.commit()
+                try:
+                    if source_principal is not None:
+                        source_principal.require_current()
+                    changed = self._conn.execute("UPDATE taskflow_steps SET result_json=? WHERE id=? AND status='waiting' AND result_json=? AND EXISTS(SELECT 1 FROM taskflows WHERE id=? AND status='waiting')",
+                        (json.dumps(new_review, allow_nan=False), step["id"], raw, flow["id"])).rowcount
+                    if source_principal is not None:
+                        source_principal.require_current()
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.rollback()
+                    raise
             if not changed:
                 return refused("task_review_superseded")
+            self._bind_phone_review_checkpoint(runner, pending, source_principal=source_principal)
             committed = True
             publication = loop.create_task(runner._notify_user_of_pending_approval(pending["session_id"], pending["tool_name"], pending))
             self._review_publications.add(publication)
@@ -1641,6 +1796,7 @@ class TaskFlowRuntime:
                         self._conn.commit()
                     # Persist identity/action binding before publishing the
                     # existing review, including an immediate user response.
+                    self._bind_phone_review_checkpoint(runner, refusal)
                     await runner._notify_user_of_pending_approval(session_id, tool_name, refusal)
                     return {"status": "deferred"}
                 result = await runner.execute_tool_call_for_llm(

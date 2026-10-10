@@ -4003,13 +4003,50 @@ class BrainState:
         """
         await self._queue_dict_to_node(node_id, msg_dict)
 
-    async def _queue_dict_to_node(self, node_id: str, msg_dict: dict) -> bool:
+    async def _queue_dict_to_node(self, node_id: str, msg_dict: dict, *,
+                                  expected_socket=None, current=None) -> bool:
         """Accepted socket queue receipt; not a delivery acknowledgment."""
         ws = self.daemons.get(node_id)
+        if expected_socket is not None and ws is not expected_socket:
+            return False
+        if current is not None and current() is not True:
+            return False
         if ws:
             await ws.send_json(stamp_hup_envelope(msg_dict))
+            if (expected_socket is not None and self.daemons.get(node_id) is not expected_socket
+                    or current is not None and current() is not True):
+                return False
             return True
         return False
+
+    async def push_to_review_device(self, source_binding: dict, msg_dict: dict) -> bool:
+        """Queue a private review only to a currently authenticated owner device.
+
+        Capture each exact socket before awaiting. Shared SID membership and
+        node aliases are not review authority. Acceptance is not seen/delivered.
+        """
+        from api.phone_chat_intake import PhoneChatIntake
+        source_binding = dict(source_binding)
+        accepted = False
+        for node_id, socket in list(self.daemons.items()):
+            intake = getattr(socket, "_feral_phone_chat_intake", None)
+            if (type(intake) is not PhoneChatIntake or intake.state is not self
+                    or intake.ws is not socket or intake.node_id != node_id
+                    or not intake.review_current(source_binding)):
+                continue
+            def current(intake=intake, socket=socket, node_id=node_id):
+                return (self.daemons.get(node_id) is socket
+                        and getattr(socket, "_feral_phone_chat_intake", None) is intake
+                        and intake.review_current(source_binding))
+            try:
+                if await self._queue_dict_to_node(node_id, msg_dict,
+                        expected_socket=socket, current=current):
+                    accepted = True
+            except Exception:
+                # A revoked/disconnected subscriber must not block another
+                # authenticated connection for the same originating device.
+                pass
+        return accepted
 
     def bind_session_to_daemon(self, session_id: str, node_id: str):
         if node_id not in self._daemon_session_bindings:
