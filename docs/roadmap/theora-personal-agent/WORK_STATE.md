@@ -40,8 +40,9 @@ it without replay. Code 9 still has no established termination cause.
 The parent owns this integrated source and packaging wave; workers have released
 files. AUDIT-FIXES.md and preexisting iOS project/vendor edits remain untouched.
 No personal runtime, provider choice, account or autonomy setting is changed.
-The repair and exact candidate evidence are complete locally. Parent is publishing
-the existing PR310 branch; verify remote HEAD and CI when resuming. Offline assembly
+The source repair 82a6c269e and candidate evidence c85a89447 are published on the
+existing PR310 branch. New remote CI is queued/running, not yet accepted; verify
+actual remote HEAD and results when resuming. Offline assembly
 took 32.81 seconds; free space was 13,054,025,728 before and 12,990,926,848 after,
 net growth 63,098,880 bytes within the 2 GiB budget. Only inspected generated 9.55
 was replaced; 9.52 and small preceding receipts remain. No personal runtime is
