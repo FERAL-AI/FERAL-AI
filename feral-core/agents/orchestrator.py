@@ -1748,6 +1748,26 @@ class Orchestrator:
         except Exception:
             pass
 
+    async def _emit_browser_consent_wait_results(self, session_id: str, tool_calls: list[dict]) -> None:
+        """Close started traces without recording a dispatch or settling its step."""
+        from agents.taskflow_browser_consent import REASON
+        # These frames describe deferred calls, not executor receipts to feed
+        # into model result observation. Use the same session transport as
+        # their starts; the persisted checkpoint remains the execution owner.
+        for tool_call in tool_calls:
+            try:
+                await self.send(session_id, FeralMessage(
+                    session_id=session_id, hop="brain", type="tool_result",
+                    payload=ToolResultPayload(
+                        tool=str(tool_call.get("name", "tool")),
+                        call_id=str(tool_call.get("id", "")),
+                        success=False, error_code=REASON,
+                        error="Task is waiting for selected Chrome permission and explicit Resume. Nothing was dispatched for this call.",
+                    ).model_dump(),
+                ))
+            except Exception:
+                logger.warning("Deferred browser tool_result delivery failed", exc_info=True)
+
     # ─────────────────────────────────────────────
     # Device/robot action provenance (timeline gap fix)
     # ─────────────────────────────────────────────
@@ -4080,20 +4100,37 @@ class Orchestrator:
                             "latency_ms": latency_ms,
                         }
 
-                tool_outputs = await asyncio.gather(
-                    *[_run_tool(tc) for tc in tool_calls]
-                )
+                if task_model_scope is not None:
+                    # A durable step owns its selected-browser authority in
+                    # this exact task. Parallel children cannot inherit it.
+                    from agents.taskflow_browser_consent import BrowserConsentWait
+                    tool_outputs = []
+                    try:
+                        for tc in tool_calls:
+                            output = await _run_tool(tc)
+                            tool_outputs.append(output)
+                            # Settle the returned call before a later call can
+                            # pause this scope. Its actual receipt stays true.
+                            await self._emit_tool_result(session_id, tc, output["result"], output["latency_ms"])
+                    except BrowserConsentWait:
+                        await self._emit_browser_consent_wait_results(session_id, tool_calls[len(tool_outputs):])
+                        raise
+                else:
+                    tool_outputs = await asyncio.gather(
+                        *[_run_tool(tc) for tc in tool_calls]
+                    )
 
                 # Step 3 — ordered tool_result emission. ``tool_outputs``
                 # is already ordered because asyncio.gather preserves
                 # input order regardless of completion order.
-                for output in tool_outputs:
-                    await self._emit_tool_result(
-                        session_id,
-                        output["tc"],
-                        output["result"],
-                        output["latency_ms"],
-                    )
+                if task_model_scope is None:
+                    for output in tool_outputs:
+                        await self._emit_tool_result(
+                            session_id,
+                            output["tc"],
+                            output["result"],
+                            output["latency_ms"],
+                        )
 
                 for tool_output in tool_outputs:
                     tc = tool_output["tc"]
@@ -4301,6 +4338,8 @@ class Orchestrator:
         Falls back to non-streaming if LLM doesn't support it.
         """
         self._stamp_session_surface(session_id, context)
+        from agents.taskflow import model_step_for
+        task_model_scope = model_step_for(session_id, self)
         # Explicit plan-mode entry/exit, before routing. `/plan` would
         # otherwise be read as the `/skill` prefix form in `_route_prompt`.
         if await self._maybe_handle_plan_meta_command(session_id, text):
@@ -4820,9 +4859,21 @@ class Orchestrator:
                             "latency_ms": latency_ms,
                         }
 
-                outputs = await asyncio.gather(
-                    *[_stream_run(tc) for tc in normalized_tool_calls]
-                )
+                if task_model_scope is not None:
+                    from agents.taskflow_browser_consent import BrowserConsentWait
+                    outputs = []
+                    try:
+                        for tc in normalized_tool_calls:
+                            output = await _stream_run(tc)
+                            outputs.append(output)
+                            await self._emit_tool_result(session_id, tc, output["result"], output["latency_ms"])
+                    except BrowserConsentWait:
+                        await self._emit_browser_consent_wait_results(session_id, normalized_tool_calls[len(outputs):])
+                        raise
+                else:
+                    outputs = await asyncio.gather(
+                        *[_stream_run(tc) for tc in normalized_tool_calls]
+                    )
 
                 for output in outputs:
                     tc = output["tc"]
@@ -4833,7 +4884,8 @@ class Orchestrator:
                     stream_audit_status = audit_status_of(result_data)
                     stream_tool_pending = stream_audit_status == "pending_approval"
                     stream_tool_success = stream_audit_status == "success"
-                    await self._emit_tool_result(session_id, tc, result_data, latency_ms)
+                    if task_model_scope is None:
+                        await self._emit_tool_result(session_id, tc, result_data, latency_ms)
                     await self._emit_brain_event(
                         session_id, "tool_exec",
                         {"tool": tc["name"], "success": stream_tool_success},

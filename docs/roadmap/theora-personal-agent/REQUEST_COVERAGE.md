@@ -1,6 +1,18 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 10; completed Mac batch).**
+**Current checkpoint (October 10; physical incident follow-up).**
+
+The phone connects and opens a URL, but the subsequent page-control request is
+cancelled after browser tools start during connection replacement. Its stored
+action outcome is unknown, and physical iOS audio remains faulty. Source repair
+for real task-model ownership and accurate completed/deferred traces passes
+88 worker tests, 90 parent integration tests and full-core CI Ruff; it is separate
+from the unchanged Mac 9.55 bundle. The iOS owner is editing recovery paths.
+This is an incomplete physical journey, not completed browser/voice acceptance.
+[Incident and next acceptance](PHONE_BROWSER_AUDIO_INCIDENT_20261010.md),
+[ownership](WORK_STATE.md).
+
+**Historical completed Mac batch (October 10).**
 
 Immutable Mac 9.55/build2026101004 contains runtime
 `3717ad646a676301879933bba9d042dc8a1f2c41`: durable phone receipt recovery,

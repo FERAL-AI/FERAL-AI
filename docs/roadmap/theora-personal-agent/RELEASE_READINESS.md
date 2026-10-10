@@ -1,6 +1,20 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 10; completed Mac batch).**
+**Current checkpoint (October 10; physical incident follow-up).**
+
+Physical phone pairing and voice PCM transport are observed, but the subsequent
+browser-control request is cancelled after tools begin when its socket is
+replaced. Its durable action outcome is unknown. Repeated iOS VPIO render errors
+remain unresolved on hardware. Concurrent iOS recovery edits are uninstalled/
+unverified here; the installed source identity is unknown. Independent backend
+model-loop ownership and completed/deferred trace repairs pass 88 worker tests,
+90 parent integration tests and full-core CI Ruff. These source changes are being
+published; Mac 9.55 is unchanged and does not contain the repair. Full physical
+browser/result/audio/reconnect acceptance remains a release gate.
+[Incident evidence and handoff](PHONE_BROWSER_AUDIO_INCIDENT_20261010.md),
+[current checkpoint](WORK_STATE.md).
+
+**Historical completed Mac batch (October 10).**
 
 Immutable Mac 9.55/build2026101004 contains runtime
 `3717ad646a676301879933bba9d042dc8a1f2c41`: durable phone receipt recovery,

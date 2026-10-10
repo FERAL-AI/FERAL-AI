@@ -1,6 +1,21 @@
 # FERAL app completion: executable plan
 
-**Current checkpoint (October 10; completed Mac batch).**
+**Current checkpoint (October 10; physical incident follow-up).**
+
+The phone pairs and sends voice PCM, but the observed page-control request loses
+its connection after browser tools begin. Its durable receipt is cancelled with
+unknown action outcome. iOS VPIO render failures remain physically unresolved.
+Concurrent iOS audio/ownership/recovery edits belong to its agent; the installed
+commit is not identified. An independent backend repair preserves owning-task
+authority in real model loops and accurate completed/deferred tool traces.
+Worker 88 scoped tests, parent 90 integration tests and full-core CI Ruff pass.
+The source repair is being published; immutable Mac 9.55 remains unchanged.
+Next is stabilized iOS failure-path verification, coherent build installation,
+and explicit benign browser/result/audio/reconnect acceptance without task replay.
+[Incident and handoff](PHONE_BROWSER_AUDIO_INCIDENT_20261010.md),
+[current ownership](WORK_STATE.md).
+
+**Historical completed Mac batch (October 10).**
 
 Immutable Mac 9.55/build2026101004 contains runtime
 `3717ad646a676301879933bba9d042dc8a1f2c41`: durable phone receipt recovery,

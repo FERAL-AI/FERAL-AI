@@ -1,5 +1,22 @@
 # Theora iOS personal-agent research and handoff
 
+## October 10: physical browser/audio incident
+
+The physical phone now pairs and exchanges audio, but a later browser-control
+turn is cancelled when its socket is replaced after tool execution begins. Its
+stored receipt has unknown action outcome and no final prose. Thousands of VPIO
+render errors coexist with continuous PCM transport; neither silent capture nor
+a particular crash cause is established. Preserve/reconcile the receipt without
+resending the goal. The earlier uninstalled status below is historical.
+
+[Focused incident evidence and iOS review](PHONE_BROWSER_AUDIO_INCIDENT_20261010.md)
+records source defects and the physical acceptance still required. The iOS owner
+is making concurrent converter/watchdog/ownership/disconnect edits. Read-only
+review finds capture-stream failure can still leave listening set, stopped nonnil
+playback can still discard chunks, and direct OpenAI socket loss can retain stale
+processing state. Main-actor session activation also remains. This follow-up does
+not edit or install iOS files, validate glasses audio recovery or certify the dirty build.
+
 ## October 10: Mac 9.55 packaged; iOS adoption independently verified
 
 Mac 9.55/build2026101004, runtime 3717ad646, packages the durable phone recovery

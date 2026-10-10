@@ -7,7 +7,41 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Completed 9.55 recovery and Chrome-controls batch
+### Physical phone incident follow-up
+
+The installed phone now supplies user-observed physical evidence: pairing and
+`node_ack` succeed, voice PCM reaches the brain, and a URL-opening response
+completes. A later typed page-control request runs accessibility/browser tools
+before socket replacement; the stored terminal receipt is cancelled with unknown
+action outcome and empty final prose. This is an incomplete physical journey.
+The iPhone also reports repeated VPIO render errors and ambient-confidence
+validation failures. Code 9 has no established termination cause.
+
+Read-only evidence is reconciled in
+[the incident handoff](PHONE_BROWSER_AUDIO_INCIDENT_20261010.md). iOS source is
+being edited concurrently by its owner; preserve those files. Its committed
+aa77855 review is historical, not proof of the installed build. Port-9090 CLI
+package metadata names 2026.9.7 but is editable against this checkout; it does
+not identify loaded source. No personal runtime or settings are changed here.
+
+A focused backend repair now keeps real model-step tools on their owning task
+and closes only undispatched traces when exact Chrome consent pauses execution.
+Earlier completed results remain accurate and are not replayed on Resume.
+The worker's 88 scoped tests and parent integration's 90 tests pass; full-core
+CI Ruff, whitespace and affected public-doc checks pass. Parent integration
+covers phone intake, durable receipt reconciliation and cancellation. No public
+protocol or signature changes. The actual incident has a cancelled receipt,
+not an evidenced Chrome-consent wait. Both workers released their files.
+
+Parent is publishing the source repair and incident handoff on the existing
+PR310 branch; verify remote HEAD before resuming. Mac 9.55 remains the unchanged
+packaged candidate and does not contain this later source repair. iOS owner
+still owns its source/build/installation; audio recovery and the full physical
+browser journey remain unverified. Next: close the listed iOS failure-path gaps,
+identify and install a coherent pair of builds, then perform the explicit benign
+browser/result/audio/reconnect acceptance. No further background work is implied.
+
+### Historical completed 9.55 recovery and Chrome-controls batch
 
 Immutable Mac 9.55/build2026101004 contains exact runtime
 3717ad646a676301879933bba9d042dc8a1f2c41. The fd64e38f8 recovery/Chrome source
