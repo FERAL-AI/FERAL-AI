@@ -1,6 +1,16 @@
 # FERAL app completion: executable plan
 
-**Current checkpoint (October 10; integrated phone repair).**
+**Current checkpoint (October 10; native live acceptance).**
+
+Native 9.60 has a fresh compile and passes exact-source/signature audits. Its
+actual Chrome workflow reaches validation and capture, then stops on selected
+image cost admission. A distinct native follow-up completes after a long idle
+period without replay. The installed iOS follow-up is local77858a5; physical
+voice and the normal paired desktop deployment remain open. Current evidence
+and ready work are maintained in [WORK_STATE.md](WORK_STATE.md) and
+[NATIVE_9_60_ACCEPTANCE.md](NATIVE_9_60_ACCEPTANCE.md).
+
+**Historical checkpoint (October 10; integrated phone repair).**
 
 The repaired iOS development app is installed in place on the connected iPhone
 17 Pro Max from local commit `5749babc52087698de21aec96e0926650a823f37`.

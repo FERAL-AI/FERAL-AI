@@ -2370,7 +2370,8 @@ class LLMProvider:
         )
 
         async def _do_responses():
-            await self._budget_dispatch(body)
+            await self._budget_dispatch(body, provider_name=provider_name or self.provider,
+                                        base_url=str(getattr(client, "base_url", "")))
             resp = await client.post("/responses", json=body)
             resp.raise_for_status()
             return resp.json()
@@ -4724,7 +4725,8 @@ class LLMProvider:
             }
 
     async def _budget_dispatch(self, body: dict, *, model: str | None = None,
-                               local_free: bool = False) -> None:
+                               local_free: bool = False, provider_name: str | None = None,
+                               base_url: str | None = None) -> None:
         """Durable, model-specific admission immediately before every wire attempt."""
         budget = getattr(self, "_cost_budget", None)
         if budget is None:
@@ -4755,12 +4757,21 @@ class LLMProvider:
                 return any(multimodal(item) for item in value.values())
             return isinstance(value, list) and any(multimodal(item) for item in value)
         unpriceable = multimodal(input_payload)
+        prompt_bound = estimate_tokens(serialized) + 256
+        if unpriceable and not local_free and scope["site"] == "vision":
+            from cost.image_input import openai_image_input_bound
+            image_bound = openai_image_input_bound(input_payload,
+                provider=str(provider_name or getattr(self, "provider", "") or ""), model=wire_model,
+                base_url=base_url if base_url is not None else str(getattr(self, "base_url", "")))
+            if image_bound is not None:
+                prompt_bound = image_bound.prompt_tokens
+                unpriceable = False
         identity = str(uuid.uuid4())
         attempt = {"budget": budget, "id": identity, "model": wire_model, "status": "held"}
         scope["attempts"].append(attempt)
         try:
             receipt = await budget.reserve(scope["site"], wire_model,
-                                           estimate_tokens(serialized) + 256, int(maximum),
+                                           prompt_bound, int(maximum),
                                            reservation_id=identity, local_free=local_free,
                                            unpriceable_input=unpriceable)
         except BudgetExceeded as exc:

@@ -1,6 +1,20 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 10; live browser acceptance).**
+**Current checkpoint (October 10; native9.60 live acceptance).**
+
+Fresh 54-input native9.60/build2026101009 contains local4c5cf65. Exact507 Python
+and70 WebUI comparisons, strict signatures and bundle audits pass. Its actual
+native-composer Chrome task reaches validation and capture, then stops on
+selected image cost admission. A second distinct read-only request completes
+after long idle without replay. No itinerary or draft saved. Image cost, AX
+value/URL inspection and capture of the exact selected window are integrated
+for9.61. Focused parent gates pass185 image-cost,99 AX and79 capture checks;
+these overlapping suites do not establish the saved live outcome. Normal personal-profile
+activation, physical iOS voice and distribution remain open. The installed
+legacy /Applications/FERAL.app and public PyPI remain2026.9.7.
+[Actual evidence and limits](NATIVE_9_60_ACCEPTANCE.md), [current work](WORK_STATE.md).
+
+**Historical checkpoint (October 10;9.59 live browser acceptance).**
 
 Local Mac candidate 9.59 / build 2026101008 contains be8173f05b51d7fad5796bdf6f476d1e88a4c7e7.
 Its strict signatures and exact 507 Python / 70 WebUI source comparisons pass.

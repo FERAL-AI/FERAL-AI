@@ -7,7 +7,52 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Current candidate and actual live follow-up failure
+### Current native 9.60 result and next integration
+
+Fresh 54-input optimized native 9.60/build2026101009 contains exact local source
+4c5cf65d84cbebce12fa197d12090ff3a93097a9. All507 Python/70 WebUI comparisons,
+strict deep signatures and bundle audits pass. The actual native composer drove
+regular Chrome through window inspection, validation error and Reference.
+Capture succeeded but selected GPT-5.4 image analysis failed cost admission
+with pricing_unavailable. Independent state has one validation error, no saved
+itinerary and no saved draft. This is incomplete browser acceptance.
+
+A second distinct read-only native request completed on the existing connection
+after long idle, without replay or browser actions. Two durable receipts and
+unchanged fixture state are recorded; combined cost estimates are $0.5208025.
+The app quit normally before source integration. [Exact evidence](NATIVE_9_60_ACCEPTANCE.md).
+
+The image admission repair adds a conservative bound only for standard OpenAI
+GPT-5.4 selected vision, retaining caps, atomic reservations and refusal of
+unsupported media/model/context. Parent integration passes185 focused tests
+with six existing warnings and full-core CI Ruff.
+AX nonsecure value/URL inspection is integrated; parent checks pass99 tests
+with14 live checks skipped and five existing warnings. Exact refs/window
+selection and secure never-read guards are retained. Inspecting the actual captured image revealed a
+foreground coding window instead of Chrome; no image inference was dispatched.
+Explicit window capture is now integrated with exact ID/PID/title checks
+before and after capture, keeping unintended images out of inference. Parent
+verification passes79 checks with six existing warnings; full-core CI Ruff passes.
+Final full-project typing retains780 baseline diagnostics with zero additions
+or removals after line-number normalization. The9.61 source wave is frozen
+for reviewed assembly and actual native-composer acceptance.
+[Capture behavior and limits](SELECTED_WINDOW_CAPTURE_20261010.md).
+Root owns integration, packaging, documentation and live retest. Native sources
+remain unchanged for verified reuse in9.61.
+
+The installed /Applications/FERAL.app is still legacy2026.9.7. Native preview
+defaults to separate storage; normal existing paired-profile activation remains
+required. Personal9090 had no listener at reconciliation. No saved models,
+pairing, vault or personal data were changed by scratch acceptance. The iOS
+follow-up at local77858a5 remains installed with733 Foundation assertions;
+physical voice/interruption/ambient/concurrent-task acceptance is still open.
+Phone Mirroring remains TouchID-locked. Public PyPI remains2026.9.7; local
+repair commits are unreleased. Next: freeze/build9.61, finish the live workflow,
+then activate the normal paired brain. Build-wave free space is20,480,000,000
+bytes, with a2GiB new-artifact budget. Reuse the verified54 Swift inputs from9.60,
+offline cached dependencies and one canonical bundle; retain only9.52 rollback.
+
+### Historical 9.59 candidate and live follow-up failure
 
 Canonical 9.59 / build 2026101008 contains runtime be8173f05b51d7fad5796bdf6f476d1e88a4c7e7.
 All 507 packaged Python and 70 WebUI files match; strict deep signatures pass.

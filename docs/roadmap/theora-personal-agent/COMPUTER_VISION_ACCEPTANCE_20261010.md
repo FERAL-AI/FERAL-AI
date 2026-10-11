@@ -1,5 +1,19 @@
 # Computer and browser vision acceptance, October 10
 
+## Latest actual native 9.60 result
+
+Freshly compiled 9.60 reaches regular Chrome validation, Reference and screen
+capture through its own composer and tools. Selected GPT-5.4 scene inference
+is blocked by image cost admission, not absent model token rates. No itinerary
+or draft saves. A second distinct native request completes after long idle
+without replay. The next repair retains spending caps while admitting documented
+bounded image costs and exposes nonsecure AX values/URLs for inspection.
+Actual captured pixels showed the foreground coding window. The new capture
+route verifies and captures the selected Chrome window independently of focus,
+with79 focused parent checks passing. It remains to be exercised in the assembled
+app and full workflow. [Capture integration](SELECTED_WINDOW_CAPTURE_20261010.md).
+[Exact artifact, live results and limits](NATIVE_9_60_ACCEPTANCE.md).
+
 The new physical trace reached desktop tool execution without an approval wait.
 It exposed three independent capability failures: the selected Ollama vision
 model was unavailable, the 128-tool realtime catalog retained browser navigation

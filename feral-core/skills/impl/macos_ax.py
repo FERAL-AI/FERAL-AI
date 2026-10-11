@@ -84,6 +84,8 @@ the model reads.
 from __future__ import annotations
 
 import logging
+import json
+import math
 import re
 import time
 from collections import OrderedDict
@@ -188,6 +190,7 @@ HARD_MAX_DEPTH = 60
 DEFAULT_TIMEOUT_S = 8.0
 MAX_TIMEOUT_S = 30.0
 DEFAULT_FIND_LIMIT = 20
+MAX_AX_TEXT_CHARS = 2048
 
 # Hard ceiling on elements touched in one walk, independent of the clock.
 # A malformed tree that answers instantly could otherwise produce an
@@ -343,6 +346,44 @@ def _is_secure(role: str, subrole: str) -> bool:
     return role in SECURE_ROLES or subrole in SECURE_SUBROLES
 
 
+def _content_attributes(element, role: str, subrole: str) -> dict:
+    """Bounded display data, separate from the label; never read secure fields.
+
+    AXURL may be a toll-free bridged NSURL. Unsupported objects must not
+    be stringified: their description is neither a URL nor a field value.
+    """
+    if _is_secure(role, subrole):
+        return {}
+    out: dict[str, Any] = {}
+    for attribute, key in (("AXValue", "value"), ("AXURL", "url")):
+        err, value = _attr(element, attribute)
+        if err != 0 or value is None:
+            continue
+        text = None
+        if isinstance(value, str):
+            text = value
+        elif attribute == "AXValue" and isinstance(value, (int, float)):
+            if isinstance(value, float) and not math.isfinite(value):
+                continue
+            try:
+                text = str(value)
+            except ValueError:
+                continue
+        elif attribute == "AXURL":
+            try:
+                from Foundation import NSURL
+                if isinstance(value, NSURL):
+                    text = value.absoluteString()
+            except (ImportError, AttributeError, TypeError, ValueError):
+                continue
+        if not isinstance(text, str) or not text:
+            continue
+        out[key] = text[:MAX_AX_TEXT_CHARS]
+        if len(text) > MAX_AX_TEXT_CHARS:
+            out[key + "_truncated"] = True
+    return out
+
+
 def _label(element, role: str, subrole: str) -> Tuple[str, str]:
     """``(label, which_attribute_supplied_it)``.
 
@@ -470,6 +511,10 @@ class AXNode:
     secure: bool = False
     window_index: Optional[int] = None
     window_title: str = ""
+    value: str = ""
+    url: str = ""
+    value_truncated: bool = False
+    url_truncated: bool = False
 
     def is_interactive(self) -> bool:
         if self.role in INTERACTIVE_ROLES:
@@ -495,6 +540,13 @@ class AXNode:
             out["secure"] = True
         if self.window_index is not None:
             out["window_index"] = self.window_index
+        if not (self.secure or _is_secure(self.role, self.subrole)):
+            for key in ("value", "url"):
+                text = getattr(self, key)
+                if text:
+                    out[key] = text[:MAX_AX_TEXT_CHARS]
+                    if getattr(self, key + "_truncated") or len(text) > MAX_AX_TEXT_CHARS:
+                        out[key + "_truncated"] = True
         return out
 
     def to_line(self) -> str:
@@ -507,6 +559,14 @@ class AXNode:
         elif self.label:
             shown = self.label if len(self.label) <= 120 else self.label[:117] + "..."
             parts.append(f'"{shown}"')
+        if not (self.secure or _is_secure(self.role, self.subrole)):
+            for key in ("value", "url"):
+                text = getattr(self, key)
+                if text:
+                    shown = text[:240]
+                    if len(text) > 240 or getattr(self, key + "_truncated"):
+                        shown += "..."
+                    parts.append(f"{key}=" + json.dumps(shown, ensure_ascii=False))
         if self.bounds:
             b = self.bounds
             parts.append(
@@ -771,6 +831,7 @@ def _describe_node(element, depth: int) -> AXNode:
         bounds=None,
         enabled=_enabled(element),
         secure=secure,
+        **_content_attributes(element, role, subrole),
     )
     if (
         role in GENERIC_LABEL_ROLES
@@ -1186,12 +1247,14 @@ class MacOSAccessibilitySkill(BaseSkill):
         for node, element in zip(collected.nodes, collected.elements):
             if filter_mode == "interactive" and not node.is_interactive():
                 continue
-            haystack = node.label.lower()
-            if haystack == needle:
+            texts = [node.label.lower()]
+            if not (node.secure or _is_secure(node.role, node.subrole)):
+                texts.extend((node.value.lower(), node.url.lower()))
+            if needle in texts:
                 rank = 0
-            elif haystack.startswith(needle):
+            elif any(text.startswith(needle) for text in texts):
                 rank = 1
-            elif needle in haystack:
+            elif any(needle in text for text in texts):
                 rank = 2
             elif needle in node.role.lower():
                 rank = 3
@@ -1341,6 +1404,7 @@ class MacOSAccessibilitySkill(BaseSkill):
             "value_settable": self._value_settable(element),
             "attributes": [str(n) for n in (names or [])] if err_names == 0 else [],
             "children": len(_children(element)),
+            **_content_attributes(element, role, subrole),
         })
 
     def _check_permission(self, args: dict) -> dict:
