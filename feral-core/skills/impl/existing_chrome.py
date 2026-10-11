@@ -462,7 +462,7 @@ class ExistingChromeController(BrowserController):
             raise ExistingChromeError("existing_chrome_connection_changed")
         return dict(self._cdp._binding)
 
-    async def initialize(self) -> bool:
+    async def initialize(self, *, launch_isolated: bool = False) -> bool:
         return False
 
     async def capture_view_frame(self, target_id: str) -> dict:

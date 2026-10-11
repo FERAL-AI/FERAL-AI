@@ -16,7 +16,7 @@ import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
 from .catalog_data import bundled_models
-from .model_classes import classify
+from .model_classes import classify, classify_endpoint
 
 logger = logging.getLogger("feral.providers.openai")
 
@@ -122,10 +122,10 @@ class OpenAIProvider(BaseProvider):
         if "reasoning_effort" in kwargs and kwargs["reasoning_effort"]:
             payload["reasoning_effort"] = kwargs["reasoning_effort"]
 
-        responses_route = model in {"gpt-6.1-sol", "gpt-6-luna"}
+        responses_route = classify_endpoint("openai", model) == "responses"
         if responses_route:
             # Reuse the production body contract, including tool flattening and
-            # sampling removal for GPT-6 reasoning. No second adapter schema.
+            # sampling removal for reasoning. No second adapter schema.
             from agents.llm_provider import LLMProvider
             builder = LLMProvider.__new__(LLMProvider)
             builder.provider = "openai"
@@ -137,12 +137,15 @@ class OpenAIProvider(BaseProvider):
             )
             if kwargs.get("reasoning_effort"):
                 effort = kwargs["reasoning_effort"]
-                supported = {"low", "medium", "high", "xhigh", "max"}
-                if model == "gpt-6-luna":
-                    supported.add("none")
-                if effort not in supported:
-                    raise ValueError("Unsupported reasoning effort for selected GPT-6 model")
+                if model in {"gpt-6.1-sol", "gpt-6-luna"}:
+                    supported = {"low", "medium", "high", "xhigh", "max"}
+                    if model == "gpt-6-luna":
+                        supported.add("none")
+                    if effort not in supported:
+                        raise ValueError("Unsupported reasoning effort for selected GPT-6 model")
                 payload["reasoning"]["effort"] = effort
+                from agents.llm_reasoning import apply_responses_param_fork
+                apply_responses_param_fork(model, payload)
         async with httpx.AsyncClient(timeout=60.0) as c:
             r = await c.post(
                 f"{self._base_url}/{'responses' if responses_route else 'chat/completions'}",

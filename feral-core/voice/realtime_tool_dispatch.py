@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from collections import deque
+from contextlib import nullcontext
 from dataclasses import dataclass
 from typing import Awaitable, Callable
 
@@ -104,3 +105,37 @@ class RealtimeToolLane:
         if self._task is not None and not self._cancel_requested:
             self._cancel_requested = True
             self._task.cancel()
+
+
+async def execute_scoped_realtime_tool(
+    orchestrator, executor, name, args, skill, endpoint, session_id,
+):
+    """Carry the existing browser resource admission through direct voice calls.
+
+    This scope pins a selected resource; executor policy still decides permission.
+    A changed resource after an await cannot turn a stale result into success.
+    """
+    from agents.tool_runner import _BrowserResourceError, current_browser_resource_binding
+
+    runner = getattr(orchestrator, "tool_runner", None) if orchestrator is not None else None
+    # Older embeddings and mocks must not invent a resource supplier or scope.
+    scoped = callable(getattr(type(runner), "browser_resource_scope", None))
+    entered = False
+    try:
+        scope = runner.browser_resource_scope(name, session_id) if scoped else nullcontext()
+        with scope:
+            entered = True
+            result = await executor.execute(name, args, skill, endpoint)
+            if scoped:
+                if orchestrator.tool_runner is not runner:
+                    raise _BrowserResourceError("Browser resource issuer changed")
+                current_browser_resource_binding()
+            return result
+    except _BrowserResourceError:
+        return {
+            "success": False, "status_code": 409, "data": None,
+            "error_code": "browser_resource_changed",
+            "error": ("Browser resource changed during execution; inspect the current page before retrying."
+                      if entered else "Browser resource is unavailable or belongs to another session."),
+            "outcome_unknown": entered,
+        }

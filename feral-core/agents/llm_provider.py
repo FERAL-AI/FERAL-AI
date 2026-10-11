@@ -27,6 +27,8 @@ from agents.chat_sanitizer import sanitize_assistant_display_text
 # transcript shaping live in focused sibling modules. They are imported
 # (and re-exported below) so the public API of ``agents.llm_provider``
 # is unchanged for existing callers and tests.
+from agents.responses_continuation import origin_for, replay_items, capture_wire, stream_terminal
+
 from agents.llm_failover import (
     MAX_RETRIES,
     RETRY_DELAYS,
@@ -2072,7 +2074,7 @@ class LLMProvider:
         return str(content)
 
     @staticmethod
-    def _messages_to_responses_input(messages: list[dict]) -> tuple[str, list[dict]]:
+    def _messages_to_responses_input(messages: list[dict], *, continuation_origin=None) -> tuple[str, list[dict]]:
         """Translate OpenAI Chat-Completions ``messages`` into a
         Responses-API ``(instructions, input)`` pair.
 
@@ -2188,6 +2190,11 @@ class LLMProvider:
                     "output": output,
                 })
                 continue
+            if role == "assistant":
+                native_items = replay_items(msg, continuation_origin)
+                if native_items is not None:
+                    input_items.extend(native_items)
+                    continue
             if role == "assistant" and msg.get("tool_calls"):
                 # Assistant message with a tool call request — replay
                 # as function_call items so the model sees the same
@@ -2253,6 +2260,7 @@ class LLMProvider:
         stream: bool,
         force_tool: Optional[str] = None,
         model: Optional[str] = None,
+        continuation_origin=None,
     ) -> dict:
         """Canonical ``/v1/responses`` request body.
 
@@ -2268,7 +2276,7 @@ class LLMProvider:
         live_error = _unsupported_live_error("openai", model)
         if live_error:
             raise ValueError(live_error)
-        instructions, input_items = self._messages_to_responses_input(messages)
+        instructions, input_items = self._messages_to_responses_input(messages, continuation_origin=continuation_origin)
         body: dict = {
             "model": model,
             "input": input_items,
@@ -2325,6 +2333,7 @@ class LLMProvider:
             if body.get("reasoning", {}).get("effort") != "none":
                 for key in ("temperature", "top_p", "top_logprobs"):
                     body.pop(key, None)
+        body["include"] = ["reasoning.encrypted_content"]
         return body
 
     async def _post_responses(
@@ -2337,6 +2346,7 @@ class LLMProvider:
         max_tokens: int,
         *,
         force_tool: Optional[str] = None,
+        provider_name: Optional[str] = None,
         retry_max: Optional[int] = None,
         retry_delays: Optional[list[float]] = None,
     ) -> dict:
@@ -2353,9 +2363,10 @@ class LLMProvider:
         for the candidate's ``base_url`` + ``api_key``, never on
         ``self.client``.
         """
+        continuation_origin = origin_for(messages, self, model, client, provider_name)
         body = self._build_responses_body(
             messages, tools, temperature, max_tokens, stream=False,
-            force_tool=force_tool, model=model,
+            force_tool=force_tool, model=model, continuation_origin=continuation_origin,
         )
 
         async def _do_responses():
@@ -2367,7 +2378,8 @@ class LLMProvider:
         payload = await _retry_llm_call(
             _do_responses, max_retries=retry_max, delays=retry_delays,
         )
-        return self._responses_payload_to_chat_dict(payload)
+        result = self._responses_payload_to_chat_dict(payload)
+        return capture_wire(result, payload, continuation_origin)
 
     async def _responses_chat(
         self,
@@ -2434,7 +2446,7 @@ class LLMProvider:
         """
         result = await self._post_responses(
             client, model, messages, tools, temperature, max_tokens,
-            force_tool=force_tool, retry_max=retry_max, retry_delays=retry_delays,
+            force_tool=force_tool, provider_name=provider_name, retry_max=retry_max, retry_delays=retry_delays,
         )
         if isinstance(result, dict) and result.get("error"):
             raise RuntimeError(
@@ -2569,9 +2581,10 @@ class LLMProvider:
         so the orchestrator's stream loop stays unchanged.
         """
         from observability.metrics import increment
+        continuation_origin = origin_for(messages, self, self.model, self.client)
         body = self._build_responses_body(
             messages, tools, temperature, max_tokens, stream=True,
-            force_tool=force_tool,
+            force_tool=force_tool, continuation_origin=continuation_origin,
         )
         increment("feral.llm.calls_total", attributes={
             "provider": self.provider, "model": self.model, "endpoint": "responses_stream",
@@ -2759,7 +2772,9 @@ class LLMProvider:
                         # The model that actually answered, which can differ
                         # from the configured one after failover.
                         _done["model"] = str(_resp["model"])
-                    yield _done
+                    normalized = self._responses_payload_to_chat_dict(_resp)
+                    trusted = capture_wire(normalized, _resp, continuation_origin)
+                    yield stream_terminal(_done, trusted)
                     return
                 elif event_type == "response.failed":
                     err = chunk.get("response", {}).get("error") or chunk.get("error")
@@ -2873,7 +2888,7 @@ class LLMProvider:
                 events.append({"type": "text_delta", "content": clean})
         for tc in tool_calls:
             events.append({"type": "tool_call_delta", "tool_call": tc})
-        events.append({"type": "done"})
+        events.append(stream_terminal({"type": "done"}, result))
         return events
 
     @_scoped_budget(streaming=True)

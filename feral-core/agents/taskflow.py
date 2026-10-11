@@ -531,11 +531,13 @@ class TaskFlowRuntime:
                 conn = self._conn
                 timeout = int(conn.execute("PRAGMA busy_timeout").fetchone()[0])
                 conn.execute("PRAGMA busy_timeout = 0")
+                transaction_began = False
                 try:
                     # A competing SQLite writer must not hold the mutex while
                     # the active supervisor is trying to inspect ready flows.
                     try:
                         conn.execute("BEGIN IMMEDIATE")
+                        transaction_began = True
                     except sqlite3.OperationalError as exc:
                         if (getattr(exc, "sqlite_errorcode", 0) & 255) != sqlite3.SQLITE_BUSY or time.monotonic() >= retry_deadline:
                             raise
@@ -575,6 +577,18 @@ class TaskFlowRuntime:
                         if _principal_json(source_principal) != source_json:
                             raise TaskFlowHandoffConflict("TaskFlow source identity changed")
                         conn.commit()
+                except sqlite3.OperationalError as exc:
+                    # A read-only receipt snapshot can also block COMMIT.
+                    # Retry only when SQLite proves no commit happened: a
+                    # failed BEGIN or a still-open transaction rolled back.
+                    uncommitted = not transaction_began or conn.in_transaction
+                    conn.rollback()
+                    if (uncommitted and (getattr(exc, "sqlite_errorcode", 0) & 255)
+                            in (sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED)
+                            and time.monotonic() < retry_deadline):
+                        busy = True
+                    else:
+                        raise
                 except BaseException:
                     conn.rollback()
                     raise

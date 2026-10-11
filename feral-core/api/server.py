@@ -179,7 +179,7 @@ class _OwnedNodeVoice:
     MAX_PENDING_BASE64 = 4 * 1024 * 1024
 
     def __init__(self, brain, ws, intake, node_id, session_id, stream_id,
-                 admission_current, failure):
+                 admission_current, failure, source_principal=None):
         self.brain, self.ws, self.intake = brain, ws, intake
         self.node_id, self.session_id, self.stream_id = node_id, session_id, stream_id
         self.router, self.orchestrator, self.memory = brain.voice_router, brain.orchestrator, brain.memory
@@ -191,6 +191,27 @@ class _OwnedNodeVoice:
         self.producer = None
         self.binding = _NodeVoiceBinding(session_id, str(uuid4()), ws,
             self.current, lambda: getattr(ws, "_feral_node_voice", None) is self)
+        from security.approval_ingress import PairedDevicePrincipal
+        self.binding.stream_id = stream_id
+        self.binding.task_handoff = None
+        if type(source_principal) is PairedDevicePrincipal:
+            from voice.task_handoff import VoiceTaskHandoff
+            async def emit_task(kind, payload):
+                self.intake.guard()
+                source_principal.require_current()
+                if not self.owner_current():
+                    raise asyncio.CancelledError("Retired task receipt socket")
+                await self.ws.send_json(hup_frame(kind, payload))
+                self.intake.guard()
+                source_principal.require_current()
+                if not self.owner_current():
+                    raise asyncio.CancelledError("Retired task receipt socket")
+                if kind == "task_result" and self.producer is not None:
+                    queue = getattr(self.producer, "queue_task_report", None)
+                    if callable(queue):
+                        queue(payload, self.binding.current)
+            self.binding.task_handoff = VoiceTaskHandoff(brain, self.binding, source_principal,
+                emit_task, current_state=lambda: state)
         self.lane = RealtimeToolLane(intake.tasks, max_pending=self.MAX_PENDING)
         self.retirement = None
 
@@ -4314,6 +4335,12 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         await ws.close(code=4003, reason="Phone receipt authority changed")
                         raise WebSocketDisconnect(code=4003) from None
                     turn_contract = {"phone_turn_contract": dict(PHONE_TURN_CONTRACT)} if reader is not None else {}
+                    from agents.taskflow import TaskFlowRuntime
+                    from models.protocol import TASK_RESULT_CONTRACT
+                    if (reader is not None and type(phone_principal) is PairedDevicePrincipal
+                            and isinstance(phone_state.taskflows, TaskFlowRuntime)):
+                        phone_principal.require_current()
+                        turn_contract["task_result_contract"] = dict(TASK_RESULT_CONTRACT)
                     await ws.send_json(
                         hup_frame(
                             "node_ack",
@@ -4757,7 +4784,7 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         continue
 
                 voice = _OwnedNodeVoice(phone_state, ws, phone_chats, node_id, session_id, stream_id,
-                    paired_peer_current if phone_principal is not None else None, None)
+                    paired_peer_current if phone_principal is not None else None, None, phone_principal)
 
                 async def failure(message, voice=voice):
                     if voice.current():
@@ -4833,6 +4860,69 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                 # failures keep their historical ordering; slow starts leave
                 # registered receive/control intake immediately available.
                 await asyncio.sleep(0)
+
+            elif msg.type == "task_receipts_get":
+                from voice.task_handoff import VoiceTaskError, read_task_receipts
+                from agents.chat_turns import ChatTurnError, exact_uuid
+                from models.protocol import TaskReceiptsGetPayload
+                try:
+                    if phone_principal is None:
+                        raise VoiceTaskError("task_device_authority_unavailable")
+                    discovery = TaskReceiptsGetPayload.model_validate(raw.get("payload", {}))
+                    recovery_id = exact_uuid(raw.get("msg_id"))
+                    captured_runtime = phone_state.taskflows
+                    def guard_discovery():
+                        phone_chats.guard()
+                        phone_principal.require_current()
+                        if state is not phone_state or phone_state.taskflows is not captured_runtime:
+                            raise asyncio.CancelledError("Retired task discovery socket")
+                    guard_discovery()
+                    receipts = await asyncio.wait_for(asyncio.to_thread(read_task_receipts,
+                        captured_runtime, session_id=discovery.session_id, principal=phone_principal,
+                        guard=guard_discovery, recovery_request_id=recovery_id,
+                        limit=discovery.limit, older_than_task_id=discovery.older_than_task_id), 3.0)
+                    guard_discovery()
+                    await ws.send_json(hup_frame("task_receipts", receipts))
+                    guard_discovery()
+                except (VoiceTaskError, ChatTurnError) as exc:
+                    await _send_protocol_error(ws, 1099, exc.code, name=exc.code)
+                except (TimeoutError, OSError, ValueError):
+                    await _send_protocol_error(ws, 1099, "task_receipt_unavailable")
+
+            elif msg.type == "task_result_get":
+                from voice.task_handoff import VoiceTaskError, read_task_result
+                from agents.chat_turns import ChatTurnError, exact_uuid
+                from models.protocol import TaskResultGetPayload
+                payload_dict = raw.get("payload", {})
+                try:
+                    if phone_principal is None or type(payload_dict.get("contract_version")) is not int or payload_dict.get("contract_version") != 1:
+                        raise VoiceTaskError("task_not_found")
+                    if set(payload_dict) != {"contract_version", "task_id", "request_id", "session_id"}:
+                        raise VoiceTaskError("task_invalid_request")
+                    recovery_id = exact_uuid(raw.get("msg_id"))
+                    recovery = TaskResultGetPayload.model_validate(payload_dict)
+                    recovered_sid = recovery.session_id
+                    if not isinstance(recovered_sid, str) or not 1 <= len(recovered_sid) <= 1024:
+                        raise VoiceTaskError("task_not_found")
+                    recovered_runtime = phone_state.taskflows
+                    def guard_recovery():
+                        phone_chats.guard()
+                        phone_principal.require_current()
+                        if state is not phone_state or phone_state.taskflows is not recovered_runtime:
+                            raise asyncio.CancelledError("Retired task receipt owner")
+                    guard_recovery()
+                    task_receipt = await asyncio.wait_for(asyncio.to_thread(read_task_result,
+                        recovered_runtime, session_id=recovered_sid,
+                        task_id=recovery.task_id, request_id=recovery.request_id,
+                        principal=phone_principal, guard=guard_recovery, replayed=True,
+                        recovery_request_id=recovery_id), 3.0)
+                    guard_recovery()
+                    await ws.send_json(hup_frame("task_result", task_receipt))
+                    guard_recovery()
+                except (VoiceTaskError, ChatTurnError) as exc:
+                    await _send_protocol_error(ws, 1099, exc.code, name=exc.code)
+                except (TimeoutError, OSError, ValueError):
+                    await _send_protocol_error(ws, 1099, "task_receipt_unavailable")
 
             elif msg.type == "voice_interrupt":
                 payload_dict = raw.get("payload", {})

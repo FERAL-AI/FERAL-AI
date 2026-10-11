@@ -7,13 +7,20 @@ This is the single source of truth for all message types.
 """
 
 from __future__ import annotations
-from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictInt, StrictStr, field_validator, model_validator, model_serializer, ValidationInfo
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator, model_serializer, ValidationInfo
 from typing import Optional, Literal, Any, Self, Callable
 from uuid import UUID, uuid4
 from time import time
 import unicodedata
 
 HUP_VERSION = "1.4.0"
+TASK_RESULT_CONTRACT = {
+    "contract_version": 1,
+    "durable_receipts": True,
+    "reconnect_reconciliation": True,
+    "readonly_status": True,
+    "admission_discovery": True,
+}
 
 
 # ─────────────────────────────────────────────
@@ -1849,6 +1856,47 @@ class AudioResponsePayload(VoiceAttemptPayload):
     sample_rate: int = Field(default=24000, ge=1)
     is_final: bool = False
 
+    stream_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_SESSION_ID_LEN)
+    response_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("stream_id", "response_id")
+    @classmethod
+    def exact_audio_identity(cls, value):
+        if value is not None and (value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("Invalid audio producer identity")
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_absent_audio_identity(self, handler: Callable[[object], dict]) -> dict:
+        serialized = super().omit_absent_voice_identity(handler)
+        for name in ("stream_id", "response_id"):
+            if serialized.get(name) is None:
+                serialized.pop(name, None)
+        return serialized
+
+class VoiceResponsePayload(VoiceAttemptPayload):
+    """Actual provider response lifecycle, before identified audio delivery."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    stream_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    response_id: StrictStr = Field(min_length=1, max_length=MAX_ID_LEN)
+    state: Literal["created", "completed", "cancelled", "failed", "incomplete"]
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported voice response contract")
+        return value
+
+    @field_validator("stream_id", "response_id")
+    @classmethod
+    def exact_identity(cls, value):
+        if value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("Invalid voice response identity")
+        return value
+
+
 class VoiceStatusPayload(VoiceAttemptPayload):
     """Brain -> client voice subsystem health update.
 
@@ -1926,6 +1974,18 @@ class PhoneTurnContractPayload(BaseModel):
         return value
 
 
+class TaskResultContractPayload(PhoneTurnContractPayload):
+    """Negotiated durable task recovery, including lost-notice discovery."""
+    admission_discovery: Literal[True]
+
+    @field_validator("admission_discovery", mode="before")
+    @classmethod
+    def exact_discovery(cls, value):
+        if value is not True:
+            raise ValueError("Unsupported task discovery capability")
+        return value
+
+
 class PhoneTurnStatusRequestPayload(BaseModel):
     model_config = ConfigDict(extra="forbid")
     contract_version: Literal[1]
@@ -1969,9 +2029,136 @@ class PhoneTurnStatusPayload(PhoneTurnStatusRequestPayload):
         return self
 
 
+class TaskResultGetPayload(PhoneTurnStatusRequestPayload):
+    """Read-only recovery of an already admitted exact-origin task."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    task_id: StrictStr = Field(min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("task_id")
+    @classmethod
+    def exact_task(cls, value):
+        if value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("Invalid task identity")
+        return value
+
+
+class TaskAcceptedPayload(TaskResultGetPayload):
+    """Committed durable admission; never proof of an external action."""
+    durable: Literal[True]
+    replayed: StrictBool
+    action_outcome: Literal["not_asserted"]
+
+    @field_validator("durable", mode="before")
+    @classmethod
+    def exact_durable(cls, value):
+        if value is not True:
+            raise ValueError("A task receipt requires durable admission")
+        return value
+
+
+class TaskReceiptsGetPayload(BaseModel):
+    """Bounded discovery after a committed admission notice was lost."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    limit: StrictInt = Field(default=16, ge=1, le=16)
+    older_than_task_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_version(value)
+
+    @field_validator("session_id")
+    @classmethod
+    def exact_session(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_session(value)
+
+    @field_validator("older_than_task_id")
+    @classmethod
+    def exact_cursor(cls, value):
+        return TaskResultGetPayload.exact_task(value) if value is not None else None
+
+
+class TaskReceiptsPayload(BaseModel):
+    """Identity-only discovery; it cannot resume or authorize work."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    recovery_request_id: StrictStr = Field(min_length=36, max_length=36)
+    receipts: list[TaskAcceptedPayload] = Field(max_length=16)
+    next_cursor: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_version(value)
+
+    @field_validator("session_id")
+    @classmethod
+    def exact_session(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_session(value)
+
+    @field_validator("recovery_request_id")
+    @classmethod
+    def exact_recovery(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_request(value)
+
+    @field_validator("next_cursor")
+    @classmethod
+    def exact_cursor(cls, value):
+        return TaskResultGetPayload.exact_task(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def exact_origins(self):
+        tasks, requests = set(), set()
+        for receipt in self.receipts:
+            if (receipt.session_id != self.session_id or receipt.replayed is not True
+                    or receipt.task_id in tasks or receipt.request_id in requests):
+                raise ValueError("Task discovery identities must be exact and unique")
+            tasks.add(receipt.task_id)
+            requests.add(receipt.request_id)
+        if self.next_cursor is not None and (not self.receipts or self.next_cursor != self.receipts[-1].task_id):
+            raise ValueError("Task discovery cursor must match the last returned receipt")
+        return self
+
+
+class TaskResultPayload(TaskResultGetPayload):
+    """Exact task terminal report, separate from the current speech response."""
+    delivery_id: StrictStr = Field(min_length=36, max_length=36)
+    processing_outcome: Literal["completed", "failed", "cancelled", "outcome_unknown"]
+    action_outcome: Literal["not_asserted", "unknown"]
+    report: StrictStr = Field(max_length=8192)
+    report_truncated: StrictBool
+    durable: Literal[True]
+    replayed: StrictBool
+    recovery_request_id: StrictStr | None = Field(default=None, min_length=36, max_length=36)
+
+    @field_validator("durable", mode="before")
+    @classmethod
+    def exact_durable(cls, value):
+        if value is not True:
+            raise ValueError("A task receipt requires durable admission")
+        return value
+
+    @field_validator("delivery_id", "recovery_request_id")
+    @classmethod
+    def exact_delivery(cls, value):
+        if value is not None and str(UUID(value)) != value:
+            raise ValueError("A canonical delivery UUID is required")
+        return value
+
+    @model_validator(mode="after")
+    def unknown_action(self):
+        if self.processing_outcome == "outcome_unknown" and self.action_outcome != "unknown":
+            raise ValueError("Unknown processing cannot assert a known action outcome")
+        return self
+
+
 class NodeAckPayload(BaseModel):
     """Brain acknowledges a node_register (HUP_SPEC §5.2)."""
     phone_turn_contract: PhoneTurnContractPayload | None = None
+    task_result_contract: TaskResultContractPayload | None = None
     node_id: str = Field(default="", max_length=MAX_ID_LEN)
     session_token: str = Field(default="", max_length=MAX_TOKEN_LEN)
     hup_version: str = Field(default=HUP_VERSION, max_length=32)
@@ -2201,6 +2388,8 @@ MESSAGE_TYPES = {
     # Client → Brain
     "audio_chunk": AudioChunkPayload,
     "text_command": TextCommandPayload,
+    "task_result_get": TaskResultGetPayload,
+    "task_receipts_get": TaskReceiptsGetPayload,
     "biometric": BiometricPayload,
     "ui_event": UIEventPayload,
     "device_register": DeviceRegisterPayload,
@@ -2222,6 +2411,10 @@ MESSAGE_TYPES = {
     "ambient_digest_request": AmbientDigestRequestPayload,
 
     # Brain → Client
+    "task_accepted": TaskAcceptedPayload,
+    "task_result": TaskResultPayload,
+    "task_receipts": TaskReceiptsPayload,
+    "voice_response": VoiceResponsePayload,
     "transcript": TranscriptPayload,
     # The behavioural policy the agent is currently applying, plus the
     # body state it derived from. Unsolicited: pushed when biometrics

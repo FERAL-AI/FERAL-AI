@@ -435,13 +435,58 @@ class BrowserController:
         self._view_pointer_revision = 0
         self._view_capture_lock = asyncio.Lock()
         self._view_input_lock = asyncio.Lock()
+        self._connection_failure: Optional[dict] = None
 
     @property
     def connected(self) -> bool:
         return self._cdp.connected
 
-    async def initialize(self) -> bool:
-        """Connect to Chrome CDP and optionally Playwright. Auto-launches Chrome if needed.
+    @property
+    def connection_failure(self) -> Optional[dict]:
+        """Inspect an unavailable attachment without granting browser access."""
+        if self._connection_failure:
+            return dict(self._connection_failure)
+        # The selected-session adapter deliberately cannot reinitialize. Expose
+        # its lost connection through the same failure receipt, without probing
+        # another profile/endpoint or changing its resource authorization.
+        binding = getattr(self._cdp, "_binding", None)
+        if (not self.connected and isinstance(binding, dict)
+                and binding.get("target_id") == self._attached_target_id):
+            return self._unavailable_connection_receipt(target_id=self._attached_target_id,
+                launched=False, error_code="existing_chrome_connection_changed")
+        return None
+
+    @staticmethod
+    def _unavailable_connection_receipt(*, target_id: str, launched: bool,
+                                       error_code: str = "") -> dict:
+        return {
+            "success": False,
+            "connected": False,
+            "error_code": error_code or ("browser_target_unavailable" if target_id else "browser_connection_unavailable"),
+            "error": (
+                "Chrome attachment is unavailable. Reconnect and select the intended "
+                "existing Chrome tab, or use the centrally authorized macos_ax and "
+                "gui tools for that Chrome window. Browser access and action approvals "
+                "remain required."
+            ),
+            "browser_launched": launched,
+            "requested_target_id": target_id or None,
+        }
+
+    def _connection_unavailable(self, *, target_id: str, launched: bool) -> bool:
+        self._page = None
+        self._connection_failure = self._unavailable_connection_receipt(target_id=target_id,
+                                                                        launched=launched)
+        logger.warning(self._connection_failure["error"])
+        return False
+
+    async def initialize(self, *, launch_isolated: bool = False) -> bool:
+        """Attach to Chrome CDP; isolated launch requires an explicit opt-in.
+
+        A failed attachment never changes browser mode by default. An intentional
+        isolated-browser caller may pass ``launch_isolated=True``; agent endpoint
+        arguments cannot select this policy. A previously attached tab stays
+        pinned during reconnect, including when an isolated launch was requested.
 
         ``prefer_page=True`` is load-bearing, not a preference. ``connect()``
         defaults to the ``/json/version`` endpoint, which is the BROWSER
@@ -473,15 +518,24 @@ class BrowserController:
         the browser endpoint when Chrome has no page target yet, so a
         freshly launched browser with no tab still connects.
         """
-        cdp_ok = await self._cdp.connect(prefer_page=True)
+        if type(launch_isolated) is not bool:
+            raise ValueError("launch_isolated must be a boolean")
+        self._connection_failure = None
+        target_id = self._attached_target_id
+        cdp_ok = (await self._cdp.connect(prefer_page=True, target_id=target_id)
+                  if target_id else await self._cdp.connect(prefer_page=True))
+        launched = False
         if not cdp_ok:
+            # A removed/closed selected tab cannot be replaced by another tab
+            # or by a new debugging browser, even under isolated launch policy.
+            if not launch_isolated or target_id:
+                return self._connection_unavailable(target_id=target_id, launched=False)
             launched = await self._auto_launch_chrome()
             if launched:
                 await asyncio.sleep(2.0)
                 cdp_ok = await self._cdp.connect(prefer_page=True)
             if not cdp_ok:
-                logger.warning("CDP not available — browser control disabled.")
-                return False
+                return self._connection_unavailable(target_id=target_id, launched=launched)
         if not self._cdp.is_page_target:
             logger.warning(
                 "CDP attached to the browser target, not a tab: Chrome exposes no "
@@ -534,10 +588,11 @@ class BrowserController:
                 if aligned is not None:
                     self._page = aligned
                 else:
-                    logger.debug(
-                        "No Playwright page matches CDP target %s; leaving the "
-                        "Playwright page as-is.", self._attached_target_id,
-                    )
+                    # Selector actions must not land on Playwright's unrelated
+                    # first page when the pinned CDP target has no matching page.
+                    self._page = None
+                    logger.debug("No Playwright page matches CDP target %s; using CDP only.",
+                                 self._attached_target_id)
             # Playwright auto-dismisses every dialog on a page that has no
             # `dialog` listener, and it does so before our CDP handler can
             # look at it. Registering a listener is what hands dialog
@@ -4335,6 +4390,8 @@ class BrowserController:
                     + ", ".join(sorted(self._DISPATCH))
                 ),
             }
+        if not self.connected and self._connection_failure is not None:
+            return dict(self._connection_failure)
         try:
             result = await handler(self, args)
             return await self._with_dialog_events(result)

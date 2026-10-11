@@ -23,6 +23,7 @@ from skills.result_budget import serialize_for_storage
 from voice.transcript_filter import should_commit_user_transcript
 from voice.tool_result_envelope import serialize_realtime_tool_result
 from voice.realtime_tool_dispatch import (
+    execute_scoped_realtime_tool,
     RealtimeToolLane, MAX_PENDING_TOOLS, MAX_TOOL_EVENT_CHARS,
     MAX_TURN_TOOL_IDS, TOOL_FAILURE_SEND_TIMEOUT, REALTIME_SEND_TIMEOUT,
 )
@@ -587,7 +588,9 @@ class GeminiRealtimeProxy:
         on_speech_started: Callable | None = None,
         on_error: Callable | None = None,
     ) -> GeminiRealtimeSession:
+        from voice.task_handoff import VOICE_TASK_GUIDANCE
         _sys_prompt = system_prompt or await self._build_system_prompt(session_id)
+        _sys_prompt += "\n" + VOICE_TASK_GUIDANCE
         _model = model or os.getenv("FERAL_GEMINI_LIVE_MODEL", DEFAULT_MODEL)
         tools = self._get_tools()
 
@@ -799,6 +802,12 @@ class GeminiRealtimeProxy:
             "data_b64": audio_b64, "encoding": AUDIO_FORMAT,
             "sample_rate": OUTPUT_SAMPLE_RATE, "is_final": is_done,
         }
+        owner = _CALLBACK_OWNER.get()
+        attempt = getattr(owner, "_voice_attempt", None)
+        stream_id = getattr(attempt, "stream_id", None)
+        if owner is not None and attempt is current_voice_attempt(session_id) and isinstance(stream_id, str) and stream_id:
+            payload["stream_id"] = stream_id
+
         if gs.node_id.startswith("webclient_") and self._send_to_session:
             from models.protocol import FeralMessage
             msg = FeralMessage(
@@ -1012,6 +1021,29 @@ class GeminiRealtimeProxy:
 
     async def _handle_tool_call(self, session_id: str, call_id: str, name: str, arguments: str) -> str:
         self._assert_callback_owner(session_id)
+        if name == "background_task__start":
+            from voice.task_handoff import VoiceTaskError, VoiceTaskHandoff
+            from agents.chat_turns import ChatTurnError
+            owner = _CALLBACK_OWNER.get()
+            attempt = getattr(owner, "_voice_attempt", None)
+            handoff = getattr(attempt, "task_handoff", None)
+            if type(handoff) is VoiceTaskHandoff:
+                refusal = self._plan_mode_refusal(name, session_id)
+                if refusal is not None:
+                    return json.dumps(refusal)
+                try:
+                    args = json.loads(arguments) if isinstance(arguments, str) else arguments
+                    skill = self._skill_registry.skills.get("background_task") if self._skill_registry else None
+                    endpoint = next((ep for ep in skill.endpoints if ep.id == "start"), None) if skill else None
+                    if skill is None or endpoint is None or self._skill_executor is None:
+                        raise VoiceTaskError("task_runtime_unavailable")
+                    result = await handoff.start(call_id, args, self._skill_executor, skill, endpoint)
+                    self._assert_callback_owner(session_id)
+                    return json.dumps(result)
+                except (VoiceTaskError, ChatTurnError, ValueError, TypeError) as exc:
+                    return json.dumps({"success": False, "error_code": getattr(exc, "code", "task_invalid_request")})
+            return json.dumps({"success": False, "error_code": "task_device_authority_unavailable",
+                "error": "Durable voice background tasks require an authenticated paired device."})
         try:
             async with legacy_context_mutation(self._orchestrator, self._memory, (session_id,), "voice"):
                 self._assert_callback_owner(session_id)
@@ -1069,7 +1101,9 @@ class GeminiRealtimeProxy:
                 tool_name=name,
                 call_id=call_id,
             ):
-                result = await self._skill_executor.execute(name, args, skill, endpoint)
+                result = await execute_scoped_realtime_tool(
+                    self._orchestrator, self._skill_executor, name, args, skill, endpoint, session_id,
+                )
                 self._assert_callback_owner(session_id)
 
         if self._orchestrator is not None:

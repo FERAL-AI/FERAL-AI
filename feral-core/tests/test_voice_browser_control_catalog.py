@@ -25,6 +25,14 @@ REQUIRED_BROWSER_CONTROLS = {
     "browser__snapshot", "browser__find", "browser__click",
     "browser__type_text", "browser__fill_form", "browser__press_key",
 }
+REQUIRED_MAC_CONTROLS = {
+    "macos_ax__check_permission", "macos_ax__snapshot", "macos_ax__find",
+    "macos_ax__list_windows", "macos_ax__click", "macos_ax__activate",
+    "macos_ax__set_value", "macos_ax__perform_action", "screen_capture__capture",
+    "gui_computer_use__mouse_click", "gui_computer_use__type_text",
+    "gui_computer_use__key_press", "gui_computer_use__scroll", "gui_computer_use__window_focus",
+    "background_task__start",
+}
 # A disconnected integration is removed before either realtime provider caps
 # its catalogue. This fixture covers that smaller, still oversized catalogue.
 DISCONNECTED_SKILLS = {
@@ -62,6 +70,7 @@ def test_browser_workflow_survives_cap_without_changing_authority(shipped_tools,
     capped = cap_tools_with_pins(raw)
     kept = {tool_name_from_def(tool) for tool in capped}
     assert REQUIRED_BROWSER_CONTROLS <= kept
+    assert REQUIRED_MAC_CONTROLS <= kept
     assert len(capped) == OPENAI_TOOL_HARD_LIMIT
     assert {skill_id_from_tool_name(tool_name_from_def(tool)) for tool in capped} == {
         skill_id_from_tool_name(tool_name_from_def(tool)) for tool in raw

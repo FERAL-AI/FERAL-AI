@@ -3519,6 +3519,11 @@ class BrainState:
         if not self.browser.connected:
             ok = await self.browser.initialize()
             if not ok:
+                failure = getattr(self.browser, "connection_failure", None)
+                if (isinstance(failure, dict) and failure.get("success") is False
+                        and failure.get("connected") is False
+                        and isinstance(failure.get("error"), str)):
+                    return dict(failure)
                 return {
                     "success": False,
                     "error": (

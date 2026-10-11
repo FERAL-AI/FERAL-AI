@@ -55,6 +55,7 @@ from agents.multimodal_blocks import (
     should_prune_images,
 )
 from agents.llm_provider import LLMProvider
+from agents.responses_continuation import bind_messages, attach_history
 from agents.runtime_context_checkpoint import RuntimeContextCoordinator
 from agents import llm_router
 from agents.genui_generator import GenUIGenerator
@@ -3892,6 +3893,7 @@ class Orchestrator:
             self._note_agent_round(session_id)
             self._maybe_prune_tool_images(session_id)
             messages = self._materialize_tool_images(session_id, messages)
+            messages = bind_messages(messages, self.llm, session_id)
             # Withdraw any tool the precondition guard has written off
             # for this turn. Rebound once per round so every ``tools if
             # tools else None`` below this point sees the same list, and
@@ -4042,7 +4044,7 @@ class Orchestrator:
                         assistant_msg["tool_calls"] = raw_msg["tool_calls"]
 
                 if text_content or tool_calls:
-                    history.append(assistant_msg)
+                    history.append(attach_history(assistant_msg, response, self.llm, session_id))
 
             except OllamaContextRefusal as exc:
                 await self._send_error(session_id, str(exc), code=exc.code)
@@ -4578,6 +4580,7 @@ class Orchestrator:
             self._note_agent_round(session_id)
             self._maybe_prune_tool_images(session_id)
             messages = self._materialize_tool_images(session_id, messages)
+            messages = bind_messages(messages, self.llm, session_id)
             # Withdraw any tool the precondition guard has written off
             # for this turn. Rebound once per round so every ``tools if
             # tools else None`` below this point sees the same list, and
@@ -4618,6 +4621,7 @@ class Orchestrator:
                 _stream_last_flush = time.monotonic()
 
             terminal_received = False
+            continuation_response = None
             try:
                 stream_model = getattr(self.llm, 'model_name', 'llm')
                 await self._send_stream_frame(session_id, FeralMessage(
@@ -4675,6 +4679,7 @@ class Orchestrator:
                         if tc:
                             tool_calls_received.append(tc)
                     elif delta["type"] == "done":
+                        continuation_response = delta
                         terminal_received = True
                         # Flush any buffered prose before the terminal frame.
                         await _flush_stream_prose()
@@ -4822,7 +4827,7 @@ class Orchestrator:
                         }
                         for tc in normalized_tool_calls
                     ]
-                history.append(assistant_msg)
+                history.append(attach_history(assistant_msg, continuation_response, self.llm, session_id))
 
             if normalized_tool_calls:
                 any_tool_ran = True

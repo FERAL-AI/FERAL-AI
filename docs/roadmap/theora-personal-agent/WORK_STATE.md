@@ -31,21 +31,56 @@ does not establish useful computer-control accuracy. The real localhost workflow
 is open in a separate regular Chrome window. Native acceptance will use the
 actual app composer and bundled backend with scratch storage and read-only
 existing credentials. Chrome debugging stays disabled pending explicit consent;
-AX plus bounded scene capture provides the regular Chrome path. No real model
-task outcome or new bundle is yet claimed. Canonical app remains 9.56.
+AX plus bounded scene capture provides the regular Chrome path.
+
+Canonical 9.57/build2026101006 contains runtime 5441740ba78c93862954f9ea62bc9cb6258060e2.
+All 505 packaged Python and 70 WebUI files match that source; strict signatures
+and verified reuse of unchanged native inputs pass. Actual native setup, agent
+readiness, existing accessibility/screen permissions, Chat submission and normal
+Quit were observed in a disposable profile. The synthetic Chrome task failed
+before any action: GPT-5.4 rejected reasoning-enabled tools at Chat Completions.
+The durable receipt records failed processing; the cost ledger records zero
+charged inference. The website remains untouched. This is failed live acceptance.
+
+The next source wave routes GPT-5.4/5.5 through Responses and preserves bounded,
+provider/session/model/endpoint/credential-owned phase and encrypted reasoning
+between tool rounds. Original-source validation passes 216 tests/four live tests
+excluded. The existing-Chrome realtime resource-scope repair is integrated with
+199 passing tests/one skip. Strict durable task delivery and optional audio frame
+identity, response lifecycle and lost-admission discovery pass 128 protocol tests.
+Silent isolated-Chrome launch is removed; original-source browser checks pass
+785 tests/four skips, including a sandbox-blocked socket check rerun successfully
+with the required localhost permission. SQLite creation now retries proven
+uncommitted reader contention without duplicating effects; 174 TaskFlow checks
+pass. The capped voice catalog retains AX observation/input and visual fallback
+alongside durable task admission, with 20 catalog checks. Durable voice
+admission/completion is integrated through actual paired authority and the central
+executor. Accepted TaskFlows outlive speech cancellation; strict terminal receipts
+remain recoverable without replaying work. OpenAI queues completion speech until
+foreground voice is idle; Gemini supports wire receipts. The integrated gate passes
+351 tests. Full CI Ruff passes; configured Mac typing has 780 diagnostics, no new
+errors and eight previously missing yaml-stub diagnostics removed. The corrected
+9.58 assembly source is ready; package and repeat actual Chrome acceptance next.
+The current 9.57 candidate contains none of this new wave.
 
 ### Concurrent iOS and executor handoff
 
-The iOS owner has 600 passing contract assertions for strict tool-success parsing,
-visible failure notices and actual serial audio-session queue cancellation races.
-Follow-up 6aa3ddda is signed and installed in place on the connected phone. FERAL
-Computer audio-session setup now runs off-main and opens the remote stream only
-after exact-owned local preparation. Direct OpenAI setup is outside this correction;
-physical duplex, echo rejection and browser-task retesting remain open.
-Exact installed source: `/private/tmp/theora-ios-session-queue-20261010-source.json`.
-Updated log still contains repeated VPIO render failures. The iOS owner received
-follow-current-task UI, continuous voice/background tasks, interruption and ambient
-pickup requirements; duplex graph changes must be rebased against its 6aa3 source.
+The iOS owner has 637 passing actual Foundation assertions. Follow-up
+5ed664423549ecd4be2091be2dfe5320d8dc1f92 is signed and installed in place.
+Chat follows rendered growth while preserving reading scroll; one capability
+menu replaces three persistent chips. The mic remains usable during processing,
+and typed requests retain independent exact-ID waits. Server speech_started now
+drains playback; manual Stop refuses late audio until fresh speech/new voice.
+Direct OpenAI tool callbacks bind their socket/route and completion speech waits
+for the current user turn. No capture graph/AEC/provider change is made. Physical
+UI, duplex, ambient rejection and full browser outcome acceptance remain open.
+Exact installed source: `/private/tmp/theora-ios-chat-multitask-20261010-source.json`.
+
+The independent existing-Chrome voice dispatch patch is integrated. It reuses
+the existing browser resource scope, with 199 passing tests/one skip and Ruff;
+grants are unchanged. Default auto-debug fallback is removed. Durable voice task
+completion subscription is now integrated and verified separately from physical
+audio acceptance.
 The already-selected local moondream model was absent and is now installed without
 changing saved provider settings. An independent executor receipt repair has 210
 passing tests and is integrated into this Mac source. No competing ASOS

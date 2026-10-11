@@ -48,6 +48,7 @@ against.
 from __future__ import annotations
 
 import re
+import re as _re_endpoint
 from typing import Iterable, Literal, Optional
 
 # ``Literal`` keeps the set enumerable at type-check time. Keep in sync
@@ -488,7 +489,6 @@ __all__ = [
 # adapter picks it up automatically. The flag pattern is regex match
 # (anchored) to support dated snapshots like ``gpt-5-pro-2026-05-08``.
 
-import re as _re_endpoint
 
 _RESPONSES_ONLY_OPENAI: tuple[_re_endpoint.Pattern[str], ...] = (
     # gpt-5-pro / gpt-5.4-pro / gpt-5.5-pro and dated snapshots. The
@@ -497,21 +497,13 @@ _RESPONSES_ONLY_OPENAI: tuple[_re_endpoint.Pattern[str], ...] = (
     _re_endpoint.compile(
         r"^gpt-5(\.[0-9]+)?(-(sol|terra|luna))?-pro(-\d{4}-\d{2}-\d{2})?$"
     ),
-    # The whole gpt-5.6 line, not just its Pro variants. These are reasoning
-    # models, and /v1/chat/completions rejects them outright when a request
-    # carries BOTH function tools and reasoning_effort:
-    #   400 invalid_request_error, param=reasoning_effort: "Function tools
-    #   with reasoning_effort are not supported for gpt-5.6-sol in
-    #   /v1/chat/completions. To use function tools, use /v1/responses or
-    #   set reasoning_effort to 'none'."
-    # FERAL sends tools on essentially every turn, so on chat_completions
-    # this model family cannot complete a single agentic turn. Observed on a
-    # clean 2026.7.31 install the moment the stale gpt-4o-mini default was
-    # removed and the catalog resolved gpt-5.6-sol. Routing to /v1/responses
-    # is what OpenAI's own error text prescribes, and keeps reasoning on
-    # rather than degrading it to 'none'.
+    # GPT-5.4 and later require Responses for tools with reasoning enabled.
+    # FERAL defaults to medium reasoning; preserve that choice instead of
+    # disabling reasoning to fit Chat Completions. Dated snapshots and the
+    # existing mini/nano/sol/terra/luna variants use the same request contract.
+    # https://developers.openai.com/api/docs/guides/migrate-to-responses
     _re_endpoint.compile(
-        r"^gpt-5\.6(-(sol|terra|luna))?(-\d{4}-\d{2}-\d{2})?$"
+        r"^gpt-5\.(4|5|6)(-(mini|nano|sol|terra|luna))?(-\d{4}-\d{2}-\d{2})?$"
     ),
     # gpt-6-astra. OpenAI's model page lists both Chat Completions and
     # Responses as supported, so strictly this is a choice rather than a
@@ -538,8 +530,8 @@ _RESPONSES_ONLY_OPENAI: tuple[_re_endpoint.Pattern[str], ...] = (
 
 def is_responses_only(provider_id: str, model_id: str) -> bool:
     """True iff ``(provider_id, model_id)`` MUST be routed through
-    ``/v1/responses`` to function. False for every model that can be
-    served by ``/v1/chat/completions`` (the legacy adapter path).
+    ``/v1/responses`` to function. This includes dual-stack models whose tool calls require Responses
+    when reasoning is enabled (FERAL defaults to medium).
 
     Today only OpenAI exposes responses-only models. OpenRouter routes
     that wrap them are also responses-only (the OR ``openai/`` prefix
@@ -589,9 +581,8 @@ def classify_endpoint(
       ``computer-use-preview``.
     * ``"chat_completions"`` — route through ``/v1/chat/completions``
       with the OpenAI-compat body shape. Every other reachable model,
-      including non-Pro reasoning models like ``gpt-5.5`` /
-      ``gpt-5.4`` / ``o3`` (which are dual-stack: OpenAI recommends
-      Responses for them but Chat Completions still works).
+      including older reasoning models like ``gpt-5.2`` and ``o3``.
+      GPT-5.4 and later use Responses to retain reasoning with tools.
 
     The chat-completions default is deliberate — we don't want to
     silently re-route models the existing adapter already handles

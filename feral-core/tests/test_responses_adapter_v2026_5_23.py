@@ -71,8 +71,8 @@ class TestClassifyEndpoint:
         # adapter swap doesn't silently reroute traffic that was working.
         from providers.model_classes import classify_endpoint
 
-        assert classify_endpoint("openai", "gpt-5.5") == "chat_completions"
-        assert classify_endpoint("openai", "gpt-5.4") == "chat_completions"
+        assert classify_endpoint("openai", "gpt-5.5") == "responses"
+        assert classify_endpoint("openai", "gpt-5.4") == "responses"
         assert classify_endpoint("openai", "o3") == "chat_completions"
         assert classify_endpoint("openai", "o4-mini") == "chat_completions"
 
@@ -92,8 +92,8 @@ class TestClassifyEndpoint:
     def test_openrouter_openai_non_pro_stays_chat(self):
         from providers.model_classes import classify_endpoint
 
-        assert classify_endpoint("openrouter", "openai/gpt-5.5") == "chat_completions"
-        assert classify_endpoint("openrouter", "openai/gpt-5.5:nitro") == "chat_completions"
+        assert classify_endpoint("openrouter", "openai/gpt-5.5") == "responses"
+        assert classify_endpoint("openrouter", "openai/gpt-5.5:nitro") == "responses"
 
     def test_openrouter_non_openai_never_responses_only(self):
         from providers.model_classes import classify_endpoint
@@ -533,7 +533,7 @@ async def test_probe_uses_responses_endpoint_for_pro_models():
 
 
 @pytest.mark.asyncio
-async def test_probe_uses_chat_completions_endpoint_for_non_pro():
+async def test_probe_uses_responses_endpoint_for_gpt54():
     from agents.llm_provider import LLMProvider
 
     p = LLMProvider.__new__(LLMProvider)
@@ -548,7 +548,7 @@ async def test_probe_uses_chat_completions_endpoint_for_non_pro():
     ok, _ = await p._probe_chat_availability()
     assert ok is True
     called_path = p.client.post.call_args[0][0]
-    assert called_path == "/chat/completions"
+    assert called_path == "/responses"
 
 
 @pytest.mark.asyncio

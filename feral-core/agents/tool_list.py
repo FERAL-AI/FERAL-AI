@@ -48,6 +48,25 @@ PINNED_OPENAI_TOOL_NAMES: tuple[str, ...] = (
     "desktop_control__shell_command",
     "desktop_control__open_app",
     "desktop_control__screenshot",
+    # Durable work must remain available while the foreground voice turn ends.
+    # Exposure preserves the same central task admission and approval policy.
+    "background_task__start",
+    # Regular Mac apps remain operable when Chrome CDP is unavailable.
+    # Keep observation, reference-based input and visual fallback together.
+    "macos_ax__check_permission",
+    "macos_ax__snapshot",
+    "macos_ax__find",
+    "macos_ax__list_windows",
+    "macos_ax__click",
+    "macos_ax__activate",
+    "macos_ax__set_value",
+    "macos_ax__perform_action",
+    "screen_capture__capture",
+    "gui_computer_use__mouse_click",
+    "gui_computer_use__type_text",
+    "gui_computer_use__key_press",
+    "gui_computer_use__scroll",
+    "gui_computer_use__window_focus",
     # Keep a complete text-based web workflow, not just navigation. A
     # late-registered browser otherwise gets only its first endpoint from
     # the coverage pass, leaving voice unable to inspect or fill a page.

@@ -302,6 +302,12 @@ async def browser_init():
     if not state.browser:
         return {"error": "Browser controller not available"}
     ok = await state.browser.initialize()
+    if not ok:
+        failure = getattr(state.browser, "connection_failure", None)
+        if (isinstance(failure, dict) and failure.get("success") is False
+                and failure.get("connected") is False
+                and isinstance(failure.get("error"), str)):
+            return dict(failure)
     return {"connected": ok}
 
 
