@@ -2,13 +2,14 @@
 
 **Current checkpoint (October 10; native live acceptance).**
 
-Native 9.60 has a fresh compile and passes exact-source/signature audits. Its
-actual Chrome workflow reaches validation and capture, then stops on selected
-image cost admission. A distinct native follow-up completes after a long idle
-period without replay. The installed iOS follow-up is local77858a5; physical
+Native9.61 passes exact-source/signature audits with verified unchanged native
+reuse. Its actual Chrome workflow captures the selected window and completes
+capped scene inference, then stops at date/focus verification without saving.
+Numeric AX and verified window-focus repairs pass integrated checks for the next
+9.62 build and actual composer workflow. The installed iOS follow-up is local77858a5; physical
 voice and the normal paired desktop deployment remain open. Current evidence
 and ready work are maintained in [WORK_STATE.md](WORK_STATE.md) and
-[NATIVE_9_60_ACCEPTANCE.md](NATIVE_9_60_ACCEPTANCE.md).
+[NATIVE_9_61_ACCEPTANCE.md](NATIVE_9_61_ACCEPTANCE.md).
 
 **Historical checkpoint (October 10; integrated phone repair).**
 

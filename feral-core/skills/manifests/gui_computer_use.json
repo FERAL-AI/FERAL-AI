@@ -135,20 +135,21 @@
             "read_only_hint": true,
             "method": "PYTHON",
             "url": "",
-            "description": "List the on-screen windows. Each entry has app, title, x, y, width, height, pid, window_id and focused. Backed by CoreGraphics with a System Events fallback; if neither can enumerate, the call FAILS with the real reason instead of reporting an empty desktop.",
+            "description": "List the on-screen windows. Each entry has app, title, x, y, width, height, pid and window_id. app_frontmost is fresh AX foreground-PID evidence; focused is a uniquely verified actual AXFocusedWindow mapped to that row. app_frontmost_known/focused_known distinguish unavailable evidence. Multiple windows in one foreground app are not all focused. Backed by CoreGraphics with a System Events fallback; if neither can enumerate, the call FAILS with the real reason instead of reporting an empty desktop.",
             "params": [],
-            "returns_description": "windows (array of {app, title, x, y, width, height, pid, window_id, focused}), count, source, and the per-backend attempt log",
+            "returns_description": "windows (array of {app, title, x, y, width, height, pid, window_id, focused, focused_known, app_frontmost, app_frontmost_known}), count, source, and the per-backend attempt log",
             "ui_hint": "list"
         },
         {
             "id": "window_focus",
             "method": "PYTHON",
             "url": "",
-            "description": "Bring a window to the front by its title or by its application name. Matches an open window title first (exact, then substring), then falls back to the app name. Returns 404 with the list of candidate apps when nothing matches.",
+            "description": "Bring an observed window to the front by its exact title or by a unique application name. Ambiguous matches refuse; use a fresh window_list title. Resolves a unique actual AX window by observed title or exact bounds in the same PID, so CG and AX title differences are not guessed. When several windows share bounds and CG/AX titles differ, supply optional window_ax_title copied exactly from fresh macos_ax__list_windows. The tool requires a unique observed CG-to-AX title prefix in both inventories plus matching bounds; it never constructs a suffix or ignores ambiguity. Uses exact app/window AX handles and verifies fresh foreground PID plus the same AXFocusedWindow after requesting focus. An accepted request alone is not success. App-only focus for a uniquely running app verifies PID only and reports window_focus_verified=false; it never launches a missing app. Unknown/refused focus must not be followed by global keys or text. A successful receipt is a point-in-time observation; verify foreground again immediately before any global input.",
             "params": [
-                {"name": "title", "type": "string", "required": true, "description": "Window title or application name to focus"}
+                {"name": "title", "type": "string", "required": true, "description": "Window title or application name to focus"},
+                {"name": "window_ax_title", "type": "string", "required": false, "description": "macOS only: exact observed AX window title from a fresh macos_ax__list_windows for the same intended CG window/PID. Resolves differing CG/AX titles with overlapping bounds only when observed title prefixes are unique on both sides. Never invent app/profile suffixes."}
             ],
-            "returns_description": "Confirmation with the app and window title actually focused, and which strategy matched",
+            "returns_description": "Verified foreground PID, selected window_id and actual observed AX title/identity_match when available; foreground_verified and window_focus_verified explicitly identify the verified outcome",
             "ui_hint": "detail_card"
         }
     ],

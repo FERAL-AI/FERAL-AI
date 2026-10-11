@@ -1,6 +1,15 @@
 # Computer and browser vision acceptance, October 10
 
-## Latest actual native 9.60 result
+## Latest actual native9.61 result
+
+Native9.61 captures the exact selected regular Chrome window and completes capped
+GPT-5.4 scene inference through the actual composer. Parent pixels confirm the
+Reference page. The task stops at native date entry and conflicting foreground
+observations, returns an answer and saves no itinerary/draft. Numeric AX and
+verified focus repairs are integrated for9.62; actual saved workflow acceptance
+remains open. [Exact result](NATIVE_9_61_ACCEPTANCE.md).
+
+## Historical native 9.60 result
 
 Freshly compiled 9.60 reaches regular Chrome validation, Reference and screen
 capture through its own composer and tools. Selected GPT-5.4 scene inference

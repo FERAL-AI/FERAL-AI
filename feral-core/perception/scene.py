@@ -63,6 +63,9 @@ Extract ALL readable text from this image. Return a JSON object:
 - "primary_content": the most important text visible (e.g. a sign, document title, screen content)
 - "language": detected language of the text
 
+Copy visible text character-for-character, preserving case and punctuation.
+Do not replace hyphens or straight quotes with typographic alternatives.
+Report unclear characters as uncertain instead of guessing.
 Return ONLY valid JSON."""
 
 MULTI_FRAME_PROMPT = """You are analyzing a sequence of {count} camera frames from smart glasses.
@@ -431,6 +434,9 @@ class SceneAnalyzer:
             return (
                 f"You are the vision system of smart glasses. "
                 f"Answer this question about what you see: {query}\n"
+                "When quoting visible text, copy it character-for-character, "
+                "preserving case and punctuation. Do not beautify hyphens or "
+                "quotes. Report unclear characters as uncertain instead of guessing.\n"
                 f"Return a JSON object with: \"answer\" (your response), "
                 f"\"confidence\" (0.0-1.0), \"detected_objects\" (relevant objects)."
             )

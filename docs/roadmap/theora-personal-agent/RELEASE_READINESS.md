@@ -1,6 +1,21 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 10; native9.60 live acceptance).**
+**Current checkpoint (October 10; native9.61 live acceptance).**
+
+Native9.61/build2026101010 contains exact12b22bee2; all508 Python/70 WebUI
+comparisons, strict signatures and verified54-input native reuse pass. Actual
+composer testing clears selected-window capture and capped image admission,
+then stops on date control and conflicting foreground observations. Its answer
+and durable completed/not_asserted receipt agree; no itinerary/draft saved.
+Numeric AX values, fresh AX foreground and independently verified selected-window
+focus are integrated for9.62. Parent gates pass121 AX checks/14 live skips and109
+GUI checks; full-core Ruff passes and typing adds zero/removes one diagnostic.
+Verbatim scene guidance passes48 focused checks. Build and real saved outcome
+acceptance for9.62 remain next; fixture checks do not certify physical focus.
+Normal personal-profile activation/adoption, physical voice and release remain
+open. [Actual result](NATIVE_9_61_ACCEPTANCE.md), [current work](WORK_STATE.md).
+
+**Historical checkpoint (October 10; native9.60 live acceptance).**
 
 Fresh 54-input native9.60/build2026101009 contains local4c5cf65. Exact507 Python
 and70 WebUI comparisons, strict signatures and bundle audits pass. Its actual

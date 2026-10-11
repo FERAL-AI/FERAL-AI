@@ -7,7 +7,36 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Current native 9.60 result and next integration
+### Current native9.61 actual result and control repair
+
+Native9.61/build2026101010 contains exact12b22bee26df558af55812c2111edc603a1bd9a4.
+Verified54-input native reuse, all508 Python/70 WebUI comparisons and strict
+signatures pass. The actual native composer now verifies Chrome's URL, captures
+the exact selected window and completes selected GPT-5.4 scene inference with
+cost caps active. Parent inspection confirms the correct Reference page.
+The single task stops at native date entry and conflicting frontmost observations,
+returning a visible truthful answer. Independent state has no itinerary/draft;
+the durable receipt is completed/not_asserted, no replay. Cost estimate$0.60313;
+normal Quit exits0. [Exact evidence](NATIVE_9_61_ACCEPTANCE.md).
+
+Numeric AX values/fresh foreground and independently verified GUI focus are now
+integrated. Parent gates pass121 AX checks/14 live skips and109 GUI checks;
+full-core CI Ruff passes. Full typing retains779 existing diagnostics, adds none
+and removes one GUI diagnostic. Generic scene guidance preserves verbatim visible
+punctuation; its48 focused checks pass. These are fixtures, not repaired physical
+focus or saved browser outcome evidence. [Control repair](AX_NUMERIC_AND_FOREGROUND_20261010.md),
+[focus repair](GUI_VERIFIED_FOCUS_20261010.md).
+Root owns live acceptance, checkpoint and packaging; the profile worker remains
+TMP-only. Next freeze/build is9.62/build2026101011, reusing54 unchanged verified
+Swift inputs and offline dependencies. Free space is17,285,120,000 bytes with a
+2GiB new-artifact budget; retain only canonical candidate and9.52 rollback.
+Persistent native profile adoption is also being reviewed so normal Finder/Dock
+launches can use the existing paired profile without resetting or copying data.
+The normal personal profile, physical phone voice and public distribution remain
+unaccepted. The installed legacy app/PyPI remain2026.9.7. Next: integrate proven
+control repairs, finish the saved browser outcome, then accept normal paired use.
+
+### Historical native 9.60 result and integration
 
 Fresh 54-input optimized native 9.60/build2026101009 contains exact local source
 4c5cf65d84cbebce12fa197d12090ff3a93097a9. All507 Python/70 WebUI comparisons,

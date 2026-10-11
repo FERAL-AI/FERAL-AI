@@ -90,6 +90,7 @@ import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from skills.base import BaseSkill
@@ -671,15 +672,45 @@ def _running_apps() -> List[_App]:
     return apps
 
 
-def _frontmost_app() -> Optional[_App]:
-    running = _workspace().frontmostApplication()
-    if running is None:
+def _focused_application_pid() -> Optional[int]:
+    """Observe the current AX focused application without prompting or activating."""
+    try:
+        ax = _ax()
+        if not ax.AXIsProcessTrusted():
+            return None
+        system = ax.AXUIElementCreateSystemWide()
+        err, focused = ax.AXUIElementCopyAttributeValue(
+            system, "AXFocusedApplication", None,
+        )
+        if int(err) != 0 or focused is None:
+            return None
+        err, pid = ax.AXUIElementGetPid(focused, None)
+        if int(err) != 0 or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return None
+        return pid
+    except Exception:  # noqa: BLE001
         return None
-    return _App(
-        name=str(running.localizedName() or ""),
-        pid=int(running.processIdentifier()),
-        bundle_id=str(running.bundleIdentifier() or ""),
-    )
+
+
+def _app_for_pid(pid: int) -> Optional[_App]:
+    """Resolve an observed PID; NSWorkspace frontmost state is not evidence here."""
+    try:
+        from AppKit import NSRunningApplication
+        running = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if running is None or int(running.processIdentifier()) != pid:
+            return None
+        return _App(
+            name=str(running.localizedName() or ""),
+            pid=pid,
+            bundle_id=str(running.bundleIdentifier() or ""),
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _frontmost_app() -> Optional[_App]:
+    pid = _focused_application_pid()
+    return _app_for_pid(pid) if pid is not None else None
 
 
 def _resolve_app(name: Optional[str]) -> Tuple[Optional[_App], str]:
@@ -1418,10 +1449,14 @@ class MacOSAccessibilitySkill(BaseSkill):
                 "or act until the grant is given."
             )
         apps = _running_apps()
+        frontmost = _frontmost_app()
         return _ok({
             "accessibility_trusted": True,
             "running_apps": sorted(a.name for a in apps),
-            "frontmost_app": (_frontmost_app() or _App("", 0, "")).name,
+            "frontmost_app": frontmost.name if frontmost else "",
+            "frontmost_pid": frontmost.pid if frontmost else None,
+            "frontmost_observed": frontmost is not None,
+            "frontmost_source": "AXFocusedApplication" if frontmost else "unavailable",
             "text": (
                 "Accessibility is granted. macos_ax can read and act on "
                 f"{len(apps)} running app(s)."
@@ -1762,8 +1797,35 @@ class MacOSAccessibilitySkill(BaseSkill):
                 status=422,
                 data={"ref": ref, "role": entry.role},
             )
+        native_value: Any = value
+        numeric = False
+        # Native segmented date fields expose NSNumber values. Use that type
+        # only when this exact live incrementor actually exposes it; do not
+        # guess a date format or coerce text-valued controls.
+        if entry.role == "AXIncrementor":
+            observed_error, observed = _attr(element, "AXValue")
+            if observed_error == 0 and type(observed) in (int, float):
+                numeric = True
+                try:
+                    parsed = Decimal(value)
+                    if not parsed.is_finite():
+                        raise ValueError("Non-finite numeric value")
+                    if type(observed) is int:
+                        if parsed != parsed.to_integral_value() or not -(2**63) <= parsed < 2**63:
+                            raise ValueError("Expected a signed 64-bit integer")
+                        native_value = int(parsed)
+                    else:
+                        native_value = float(parsed)
+                        if not math.isfinite(observed) or not math.isfinite(native_value):
+                            raise ValueError("Expected a finite number")
+                except (InvalidOperation, ValueError, OverflowError):
+                    return _fail(
+                        "This incrementor exposes a numeric AXValue. Pass a finite "
+                        "number of the observed type; nothing was changed.",
+                        status=422, data={"ref": ref, "role": entry.role},
+                    )
         try:
-            err = int(_ax().AXUIElementSetAttributeValue(element, "AXValue", value))
+            err = int(_ax().AXUIElementSetAttributeValue(element, "AXValue", native_value))
         except Exception as exc:  # noqa: BLE001
             return _fail(
                 f"Setting AXValue on {ref} raised: {exc}", status=502,
@@ -1777,7 +1839,11 @@ class MacOSAccessibilitySkill(BaseSkill):
                 f"error {err}; the field was not changed.",
                 status=502, data={"ref": ref, "ax_error": err},
             )
-        readback = self._verified_readback(element, value)
+        if numeric:
+            readback, verified = self._verified_numeric_readback(element, native_value)
+        else:
+            readback = self._verified_readback(element, value)
+            verified = readback == value
         return _ok({
             "ref": ref,
             "role": entry.role,
@@ -1785,14 +1851,30 @@ class MacOSAccessibilitySkill(BaseSkill):
             "app": entry.app_name,
             "value": value,
             "readback": readback,
-            "verified": readback == value,
+            "verified": verified,
             "text": (
                 f"Set {entry.role} \"{entry.label}\" to {value!r}"
-                + ("." if readback == value else
+                + ("." if verified else
                    f", but it now reads {readback!r}. The app rewrote or "
                    f"rejected the value.")
             ),
         })
+
+    @staticmethod
+    def _verified_numeric_readback(element, expected: Any) -> Tuple[str, bool]:
+        """Verify native numeric equality; a formatted string is not numeric proof."""
+        readback = ""
+        for attempt in range(3):
+            err, observed = _attr(element, "AXValue")
+            if err == 0 and type(observed) in (int, float) and math.isfinite(observed):
+                readback = str(observed)
+                if observed == expected:
+                    return readback, True
+            else:
+                readback = observed if err == 0 and isinstance(observed, str) else ""
+            if attempt < 2:
+                time.sleep(0.12)
+        return readback, False
 
     @staticmethod
     def _verified_readback(element, expected: str) -> str:
