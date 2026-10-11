@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import base64
+import asyncio
 import io
 import json
 from pathlib import Path
@@ -16,6 +17,7 @@ from voice.tool_result_envelope import (
     MAX_REALTIME_IMAGE_CHARS, MAX_REALTIME_RESULT_CHARS, RealtimeToolResult,
     prepare_realtime_screenshot_result,
 )
+from bridges.client_voice_attempt import VoiceAttemptBinding
 
 
 def screenshot(*, success=True, encoded=None, encoding="png"):
@@ -213,9 +215,9 @@ async def test_policy_change_after_receipt_sends_unseen_notice(monkeypatch):
 
 
 async def test_policy_changed_before_send_preserves_capture_receipt(monkeypatch):
-    prepared = prepare_realtime_screenshot_result("screen_capture__capture", screenshot(), allow_images=True)
-    assert isinstance(prepared, RealtimeToolResult)
     owner, _ = bound(screenshot())
+    prepared = await owner._on_tool_call(owner.session_id, "fixture-capture", "screen_capture__capture", "{}")
+    assert isinstance(prepared, RealtimeToolResult)
     monkeypatch.setenv("FERAL_VLM_PROVIDER", "ollama")
     await owner.send_tool_result("fixture-capture", prepared, continue_response=False)
     assert len(owner._ws.frames) == 1
@@ -224,8 +226,8 @@ async def test_policy_changed_before_send_preserves_capture_receipt(monkeypatch)
 
 
 async def test_queued_result_delivers_image_without_independent_response():
-    prepared = prepare_realtime_screenshot_result("screen_capture__capture", screenshot(), allow_images=True)
     owner, _ = bound(screenshot())
+    prepared = await owner._on_tool_call(owner.session_id, "fixture-capture", "screen_capture__capture", "{}")
     await owner.send_tool_result("fixture-capture", prepared, continue_response=False)
     assert len(owner._ws.frames) == 2
     assert owner._ws.frames[1]["item"]["content"][1]["type"] == "input_image"
@@ -247,3 +249,148 @@ async def test_session_guidance_routes_supported_tools_and_requires_readback():
     instructions = owner._ws.frames[0]["session"]["instructions"]
     assert "browser DOM tools" in instructions and "Accessibility" in instructions
     assert "fresh readback" in instructions and "_image_delivery" in instructions
+
+
+@pytest.mark.parametrize("stage", ["receipt", "image"])
+@pytest.mark.parametrize("retirement", ["active", "lifecycle", "runtime", "credential", "replacement"])
+async def test_captured_voice_attempt_retirement_fences_every_upload_await(stage, retirement):
+    current = {"runtime": True, "credential": True}
+    async def after(frame):
+        matches = (frame.get("item", {}).get("type") == "function_call_output" if stage == "receipt"
+                   else any(part.get("type") == "input_image" for part in frame.get("item", {}).get("content", [])))
+        if matches:
+            if retirement == "active":
+                attempt.active = False
+            elif retirement == "lifecycle":
+                attempt.lifecycle_pending = True
+            elif retirement == "replacement":
+                owner._voice_attempt = VoiceAttemptBinding(owner.session_id, "new-attempt", object(), lambda: True, lambda: True)
+            else:
+                current[retirement] = False
+    owner, _ = bound(screenshot(), after=after)
+    attempt = VoiceAttemptBinding(owner.session_id, "capture-attempt", object(),
+        lambda: current["runtime"], lambda: current["credential"])
+    owner._voice_attempt = attempt
+    await invoke(owner)
+    assert len(owner._ws.frames) == (1 if stage == "receipt" else 2)
+
+
+@pytest.mark.parametrize("drift", ["producer", "session", "call", "response", "epoch", "task", "socket"])
+async def test_image_carrier_cannot_cross_producer_identity(drift):
+    owner, _ = bound(screenshot())
+    prepared = await owner._on_tool_call(owner.session_id, "fixture-capture", "screen_capture__capture", "{}")
+    target, call = owner, "fixture-capture"
+    if drift in {"producer", "session"}:
+        target, _ = bound(screenshot())
+        if drift == "session":
+            target.session_id = "other-session"
+    elif drift == "call":
+        call = "other-capture"
+    elif drift == "response":
+        owner._active_response_id = "replacement-response"
+    elif drift == "epoch":
+        owner._response_epoch += 1
+    elif drift == "socket":
+        owner._ws = Wire()
+    if drift == "task":
+        await asyncio.create_task(target.send_tool_result(call, prepared))
+    else:
+        await target.send_tool_result(call, prepared)
+    assert target._ws.frames == []
+
+
+@pytest.mark.parametrize("drift", ["response", "session", "socket"])
+async def test_carrier_identity_drift_during_receipt_send_stops_upload(drift):
+    async def after(frame):
+        if frame.get("item", {}).get("type") == "function_call_output":
+            if drift == "response":
+                owner._active_response_id = "replacement-response"
+            elif drift == "session":
+                owner.session_id = "replacement-session"
+            else:
+                owner._ws = Wire()
+    owner, _ = bound(screenshot(), after=after)
+    original_wire = owner._ws
+    await invoke(owner)
+    assert len(original_wire.frames) == 1
+    if drift == "socket":
+        assert owner._ws.frames == []
+
+
+@pytest.mark.parametrize("drift", ["attempt", "response", "socket"])
+async def test_identity_change_during_capture_cannot_bind_result_to_replacement(drift):
+    owner, proxy = bound(screenshot())
+    async def change(*args):
+        if drift == "attempt":
+            owner._voice_attempt = VoiceAttemptBinding(owner.session_id, "new-attempt", object(), lambda: True, lambda: True)
+        elif drift == "response":
+            owner._active_response_id = "new-response"
+        else:
+            owner._ws = Wire()
+        return screenshot()
+    proxy._skill_executor.execute = AsyncMock(side_effect=change)
+    with pytest.raises(asyncio.CancelledError):
+        await owner._on_tool_call(owner.session_id, "fixture-capture", "screen_capture__capture", "{}")
+    assert owner._ws.frames == []
+
+
+async def test_unbound_image_carrier_cannot_upload():
+    prepared = prepare_realtime_screenshot_result("screen_capture__capture", screenshot(), allow_images=True)
+    assert isinstance(prepared, RealtimeToolResult)
+    owner, _ = bound(screenshot())
+    await owner.send_tool_result("fixture-capture", prepared)
+    assert owner._ws.frames == []
+
+
+async def test_attempt_revoked_between_scheduling_and_actual_wire_send_is_fenced(monkeypatch):
+    owner, _ = bound(screenshot())
+    attempt = VoiceAttemptBinding(owner.session_id, "capture-attempt", object(), lambda: True, lambda: True)
+    owner._voice_attempt = attempt
+    prepared = await owner._on_tool_call(owner.session_id, "fixture-capture", "screen_capture__capture", "{}")
+    async def retire_then_run(awaitable, timeout):
+        attempt.active = False
+        return await awaitable
+    monkeypatch.setattr("voice.realtime_proxy.asyncio.wait_for", retire_then_run)
+    await owner.send_tool_result("fixture-capture", prepared)
+    assert owner._ws.frames == []
+
+
+async def test_destination_changed_between_scheduling_and_image_wire_send_is_fenced(monkeypatch):
+    owner, _ = bound(screenshot())
+    prepared = await owner._on_tool_call(owner.session_id, "fixture-capture", "screen_capture__capture", "{}")
+    sends = 0
+    async def change_before_image(awaitable, timeout):
+        nonlocal sends
+        sends += 1
+        if sends == 2:
+            monkeypatch.setenv("FERAL_VLM_PROVIDER", "ollama")
+        return await awaitable
+    monkeypatch.setattr("voice.realtime_proxy.asyncio.wait_for", change_before_image)
+    await owner.send_tool_result("fixture-capture", prepared)
+    assert len(owner._ws.frames) == 3
+    assert "input_image" not in json.dumps(owner._ws.frames)
+    assert "NOT seen" in owner._ws.frames[1]["item"]["content"][0]["text"]
+
+
+def test_image_carrier_binding_is_immutable():
+    prepared = prepare_realtime_screenshot_result("screen_capture__capture", screenshot(), allow_images=True)
+    with pytest.raises(AttributeError):
+        prepared.image_url = "replacement-image"
+
+
+@pytest.mark.parametrize("contradiction", [
+    {"status_code": 202}, {"status_code": 403}, {"status_code": 500}, {"status_code": True},
+    {"pending_approval": True}, {"status": "pending_approval"},
+    {"outcome": "outcome_unknown"}, {"outcome_unknown": True},
+    {"verified": False}, {"verified": "true"}, {"error": "Capture denied"},
+    {"error_code": "capture_unavailable"}, {"approval_request_id": "unresolved-review"},
+])
+@pytest.mark.parametrize("layer", ["envelope", "capture"])
+async def test_contradictory_capture_receipt_never_uploads(contradiction, layer):
+    result = screenshot()
+    (result if layer == "envelope" else result["data"]).update(contradiction)
+    owner, _ = bound(result)
+    await invoke(owner)
+    assert len(owner._ws.frames) == 2
+    receipt = json.loads(owner._ws.frames[0]["item"]["output"])
+    assert "NOT seen" in receipt["_image_delivery"]

@@ -365,7 +365,11 @@ class AgenticComputerUseSkill(BaseSkill):
                 if (isinstance(catalog, ProviderCatalog) and isinstance(adapter, OllamaProvider)
                         and httpx.URL(adapter._base_url) == httpx.URL(OllamaProvider.native_base_url(base_url))):
                     inventory = await catalog.list_models(provider, live=False)
-                    if inventory.source == "live" and model not in inventory.models:
+                    # Ollama requests without a tag resolve to :latest. The
+                    # inventory records full tags; another installed tag is
+                    # never evidence that this exact default is available.
+                    installed_name = model if ":" in model.rsplit("/", 1)[-1] else model + ":latest"
+                    if inventory.source == "live" and installed_name not in inventory.models:
                         return self._vision_refusal("vision_model_not_installed", "The selected vision model is absent from the recorded local inventory.")
             key_name = _PROVIDER_REGISTRY.get(provider, ("", ""))[1]
             api_key = ("ollama" if provider == "ollama" else

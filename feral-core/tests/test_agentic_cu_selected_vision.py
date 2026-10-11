@@ -242,6 +242,24 @@ async def test_inventory_at_primary_endpoint_does_not_refuse_other_selected_endp
     assert wired.calls == []  # Presence at the other endpoint remains unverified.
 
 
+@pytest.mark.parametrize("installed,accepted", [("moondream:latest", True),
+                                              ("moondream:2b", False), ("moondream", False)])
+async def test_untagged_local_selection_requires_its_actual_latest_tag(wired, monkeypatch, tmp_path, installed, accepted):
+    select(monkeypatch, model="moondream")
+    descriptor = next(item for item in BUILT_IN_DESCRIPTORS if item.provider_id == "ollama")
+    monkeypatch.setattr(ProviderCatalog, "_bind_builtin_adapters", lambda self: None)
+    catalog = ProviderCatalog(cache_path=tmp_path / "models.json", descriptors=[descriptor])
+    catalog.register_adapter(OllamaProvider(base_url="http://local.invalid:12345/v1"))
+    catalog._models["ollama"] = CachedModelList(models=[installed], last_refresh=0, source="live")
+    wired.state.provider_catalog = catalog
+    result = await wired.skill._get_vlm({})
+    if accepted:
+        assert result.model == "moondream"  # The saved selection is unchanged.
+    else:
+        assert result["error_code"] == "vision_model_not_installed"
+    assert wired.calls == []
+
+
 async def test_different_provider_requires_selected_model_without_speculative_default(wired, monkeypatch):
     monkeypatch.setenv("FERAL_VLM_PROVIDER", "anthropic")
     monkeypatch.setenv("FERAL_VLM_MODEL", "")

@@ -41,6 +41,43 @@ from skills.sandbox_ports import SandboxPort, default_sandbox_port
 
 logger = logging.getLogger("feral.executor")
 
+# Finite metadata from canonical Python backing receipts. Data still uses the
+# endpoint budget; arbitrary extensions/objects never join the public envelope.
+_BACKING_RECEIPT_BOOLS = frozenset({
+    "pending_approval", "outcome_unknown", "verified", "effects_committed",
+    "_truncated", "_image_omitted",
+})
+_BACKING_RECEIPT_STRINGS = {
+    "status": 128, "code": 128, "error_code": 128, "outcome": 128,
+    "processing_state": 128, "approval_request_id": 1024, "request_id": 1024,
+    "tool_name": 256, "session_id": 1024, "_truncation_note": 2000,
+    "_upstream_truncation_note": 2000,
+}
+
+
+def _backing_receipt_fields(result: dict) -> tuple[dict, bool]:
+    fields: dict[str, bool | str | None] = {}
+    invalid = False
+    for key in _BACKING_RECEIPT_BOOLS:
+        if key not in result:
+            continue
+        value = result[key]
+        if type(value) is bool or (key == "verified" and value is None):
+            fields[key] = value
+        else:
+            invalid = True
+    for key, bound in _BACKING_RECEIPT_STRINGS.items():
+        if key not in result:
+            continue
+        value = result[key]
+        if value is None or (isinstance(value, str) and len(value) <= bound
+                and (key.endswith("truncation_note") or not any(ord(char) < 32 for char in value))):
+            fields[key] = value
+        else:
+            invalid = True
+    return fields, invalid
+
+
 # -A12: dangerous runners must not silently fall back to host execution.
 # Keep a hardcoded fallback set so legacy manifests still get protected even
 # before they add explicit `requires_sandbox: true`.
@@ -953,13 +990,28 @@ class SkillExecutor:
                     # upcoming_events"}``. Anything that branches on
                     # status_code rather than on success reads that as
                     # fine.
-                    default_status = 200 if result.get("success") else 500
+                    success = result["success"]
+                    receipt, invalid_receipt = _backing_receipt_fields(result)
+                    default_status = 200 if success is True else 500
+                    status = result.get("status_code", default_status)
+                    invalid = (type(success) is not bool or invalid_receipt
+                               or type(status) is not int or not 100 <= status <= 599
+                               or (result.get("error") is not None and not isinstance(result["error"], str))
+                               or (success is True and (status >= 400 or bool(result.get("error")))))
                     envelope = {
-                        "success": result["success"],
-                        "status_code": result.get("status_code", default_status),
+                        "success": success if not invalid else False,
+                        "status_code": status if not invalid else 500,
                         "data": payload,
-                        "error": result.get("error"),
+                        "error": result.get("error") if not invalid else "Backing skill returned an invalid result receipt; reconcile before retrying.",
+                        **receipt,
                     }
+                    if invalid:
+                        # Backing code already ran. A malformed receipt does
+                        # not establish that its external effects stopped.
+                        for claimed in ("verified", "effects_committed", "processing_state"):
+                            envelope.pop(claimed, None)
+                        envelope.update(error_code="invalid_skill_result", outcome_unknown=True, outcome="unknown")
+
                 else:
                     payload, note = self._sanitize_with_note(result, budget)
                     envelope = {
@@ -972,6 +1024,8 @@ class SkillExecutor:
                     # Say so out loud. A silent cut is the worst outcome:
                     # the model assumes it read the whole file and answers
                     # confidently about code it never saw.
+                    if envelope.get("_truncation_note"):
+                        envelope["_upstream_truncation_note"] = envelope["_truncation_note"]
                     envelope["_truncation_note"] = note
                 return envelope
             except asyncio.TimeoutError:

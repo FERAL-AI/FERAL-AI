@@ -16,27 +16,47 @@ selected local vision model was unavailable and its capped tool catalog omitted
 browser inspection and editing endpoints. Screenshot bytes were also removed
 from realtime tool receipts without an image input reaching the model.
 
-The parent is integrating browser catalog, bounded realtime image delivery and
-explicit selected-cloud scene routing repairs. A live browser acceptance harness
-is being prepared with synthetic local data, isolated runtime storage and the
-existing configured OpenAI provider explicitly selected for that test. Saved
-personal provider settings remain unchanged. Live observation will verify FERAL's
-actions and final website state; unit fixtures alone do not close this gate.
-Phone duplex repair remains under review. Canonical 9.56 does not yet include
-these uncommitted changes; no new bundle or live completion is claimed.
+Browser catalog and selected-cloud scene routing are committed at bd088c8c3.
+The follow-up now retains bounded, contiguous AX references, typed backing-skill
+receipts and exactly owned screenshot carriers. Callback socket identity binds
+before capture; pending or contradictory image receipts cannot upload pixels.
+Exact screenshot primitives require status 200. Local model inventory resolves
+an untagged selection to :latest without switching the selected model/provider.
+
+Frozen integrated verification passes 312 tests with nine existing warnings,
+full-core CI Ruff and whitespace checks. Mac typing retains 788 diagnostics with
+zero additions/removals against the full baseline. A synthetic moondream image
+inference completed, but failed exact reference-code recognition; model execution
+does not establish useful computer-control accuracy. The real localhost workflow
+is open in a separate regular Chrome window. Native acceptance will use the
+actual app composer and bundled backend with scratch storage and read-only
+existing credentials. Chrome debugging stays disabled pending explicit consent;
+AX plus bounded scene capture provides the regular Chrome path. No real model
+task outcome or new bundle is yet claimed. Canonical app remains 9.56.
 
 ### Concurrent iOS and executor handoff
 
-The iOS owner has 586 passing contract assertions for strict tool-success parsing
-and visible bounded failure notices; its next signed build/install is separate.
+The iOS owner has 600 passing contract assertions for strict tool-success parsing,
+visible failure notices and actual serial audio-session queue cancellation races.
+Follow-up 6aa3ddda is signed and installed in place on the connected phone. FERAL
+Computer audio-session setup now runs off-main and opens the remote stream only
+after exact-owned local preparation. Direct OpenAI setup is outside this correction;
+physical duplex, echo rejection and browser-task retesting remain open.
+Exact installed source: `/private/tmp/theora-ios-session-queue-20261010-source.json`.
+Updated log still contains repeated VPIO render failures. The iOS owner received
+follow-current-task UI, continuous voice/background tasks, interruption and ambient
+pickup requirements; duplex graph changes must be rebased against its 6aa3 source.
 The already-selected local moondream model was absent and is now installed without
 changing saved provider settings. An independent executor receipt repair has 210
-passing tests and is frozen TEMP-only for this Mac integrator. No competing ASOS
+passing tests and is integrated into this Mac source. No competing ASOS
 source edits are made. Read the bounded cross-session handoff at
 `/private/tmp/feral-phone-computer-20261010/CROSS_SESSION_HANDOFF.md` before freezing:
 it records exact patch evidence, screenshot-owner/receipt guard counterexamples
 and a separate AX snapshot budget failure. The current Mac parent retains original
 source, live acceptance, checkpoint and publication ownership.
+
+Both read-only capture counterexamples are repaired and reproduced by regression
+tests. All Mac workers released their production files before the final gate.
 
 ### Historical integrated phone voice and control repair
 

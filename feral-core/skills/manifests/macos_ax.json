@@ -125,7 +125,8 @@
       "returns_description": "{app, pid, bundle_id, filter, tree (the text snapshot with [axN] refs), nodes (the same elements as structured records with ref/role/label/bounds/actions), returned, total_matched, offset, next_offset, truncated, elements_visited, window_count, window_titles, elapsed_ms, limits_hit}.",
       "ui_hint": "list",
       "safety_tier": "safe",
-      "read_only_hint": true
+      "read_only_hint": true,
+      "result_budget": "workspace"
     },
     {
       "id": "find",

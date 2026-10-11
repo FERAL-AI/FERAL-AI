@@ -6,7 +6,7 @@ it cannot identify every secret in arbitrary prose. No payload is logged here.
 """
 from __future__ import annotations
 
-from dataclasses import replace
+from dataclasses import dataclass, field, replace
 import base64
 import io
 from itertools import islice
@@ -46,19 +46,71 @@ _UNSEEN_IMAGE = (
 )
 
 
+@dataclass(frozen=True)
+class RealtimeImageBinding:
+    producer: object = field(repr=False)
+    session_id: str
+    call_id: str
+    response_epoch: int
+    response_id: str
+    socket: object = field(repr=False)
+    attempt: Any = field(repr=False)
+    task: Any = field(repr=False)
+
+
 class RealtimeToolResult(str):
     """Text receipt plus one ephemeral image; never stored or replayed."""
 
-    image_url: str
+    _image_url: str
+    _binding: RealtimeImageBinding | None
 
-    def __new__(cls, text: str, image_url: str):
+    def __new__(cls, text: str, image_url: str, binding: RealtimeImageBinding | None = None):
         value = super().__new__(cls, text)
-        value.image_url = image_url
+        object.__setattr__(value, "_image_url", image_url)
+        object.__setattr__(value, "_binding", binding)
         return value
+
+    def __setattr__(self, name, value):
+        raise AttributeError("Realtime image carriers are immutable")
+
+    @property
+    def image_url(self) -> str:
+        return self._image_url
+
+    @property
+    def binding(self) -> RealtimeImageBinding | None:
+        return self._binding
+
+
+def coherent_capture_receipt(result: Any, *, require_status: bool = True,
+                             exact_status: int | None = None) -> bool:
+    """Pixels do not override a denied, pending, failed or uncertain receipt."""
+    if not isinstance(result, dict):
+        return False
+    if (require_status or "success" in result) and result.get("success") is not True:
+        return False
+    if require_status or "status_code" in result:
+        code = result.get("status_code")
+        if (type(code) is not int or not 200 <= code < 300
+                or exact_status is not None and code != exact_status):
+            return False
+    if any(not (result.get(key) is None or isinstance(result.get(key), str) and result[key] == "")
+           for key in ("error", "error_code", "approval_request_id")):
+        return False
+    if any(key in result and result[key] is not False for key in ("pending_approval", "outcome_unknown")):
+        return False
+    if any(key in result and result[key] is not True for key in ("verified", "tool_outcome_verified")):
+        return False
+    if any(key in result and (not isinstance(result[key], str)
+           or result[key] not in {"completed", "success", "executed", "verified", "ok"})
+           for key in ("status", "outcome")):
+        return False
+    return True
 
 
 def prepare_realtime_screenshot_result(tool_name: str, result: Any, *, registry=None,
-                                      allow_images: bool = False) -> str:
+                                      allow_images: bool = False,
+                                      binding: RealtimeImageBinding | None = None) -> str:
     """Lift one validated built-in screenshot without widening text budgets.
 
     Only the direct capture payload is inspected. Arbitrary result branches,
@@ -71,7 +123,10 @@ def prepare_realtime_screenshot_result(tool_name: str, result: Any, *, registry=
             "for image input, or use browser DOM/Accessibility readback."
         )}
     if (not allow_images or tool_name not in _SCREENSHOT_TOOLS or not isinstance(result, dict)
-            or result.get("success") is not True or not isinstance(result.get("data"), dict)
+            # Registered capture primitives return 200 for completed pixels;
+            # accepted/deferred 2xx receipts do not establish a capture.
+            or not coherent_capture_receipt(result, exact_status=200) or not isinstance(result.get("data"), dict)
+            or not coherent_capture_receipt(result["data"], require_status=False, exact_status=200)
             or len(result["data"]) > 50):
         return serialize_realtime_tool_result(tool_name, result, registry=registry)
     data = result["data"]
@@ -121,7 +176,7 @@ def prepare_realtime_screenshot_result(tool_name: str, result: Any, *, registry=
         "Only that image input or returned analysis is evidence of screenshot contents."
     )
     return RealtimeToolResult(serialize_realtime_tool_result(tool_name, projected, registry=registry),
-                              image.data_url)
+                              image.data_url, binding)
 
 
 def withhold_realtime_image(result: str) -> str:
@@ -238,7 +293,7 @@ def serialize_realtime_tool_result(tool_name: str, result: Any, *, registry=None
         key not in payload or decoded.get(key) == payload[key] for key in _RECEIPT_KEYS
     ) and ("data" not in payload or "data" in decoded) and (
         "data" not in payload or bool(payload["data"]) or decoded["data"] == payload["data"]
-    ):
+    ) and not (tool_name == "macos_ax__snapshot" and clipped):
         return encoded
 
     # The generic serializer may fall back to a preview for huge structures.
@@ -253,4 +308,24 @@ def serialize_realtime_tool_result(tool_name: str, result: Any, *, registry=None
     data = data if len(json.dumps(data, allow_nan=False)) <= 256 else None
     receipt.update({"data": data, "_truncated": True,
                     "_truncation_note": "Payload omitted to retain the executor receipt within the realtime limit."})
+    if (tool_name == "macos_ax__snapshot" and coherent_capture_receipt(result)
+            and coherent_capture_receipt(result.get("data"), require_status=False)):
+        # Compact the original executor page, not the bounded node prefix;
+        # only the original pagination can establish contiguous next_offset.
+        from voice.ax_snapshot_receipt import compact_ax_snapshot
+        ceiling = min(budget.max_result_chars, MAX_REALTIME_RESULT_CHARS)
+        receipt["data"] = None
+        receipt["_truncation_note"] = "Accessibility snapshot compacted into a contiguous page; use next_offset for remaining references."
+        room = ceiling - len(json.dumps(receipt, allow_nan=False)) + len("null")
+        try:
+            compact = compact_ax_snapshot(result.get("data"), room, _redact_text)
+        except Exception:
+            compact = None
+        if compact:
+            receipt["data"] = compact
+            compact_encoded = json.dumps(receipt, allow_nan=False)
+            if len(compact_encoded) <= ceiling:
+                return compact_encoded
+        receipt["data"] = None
+        receipt["_truncation_note"] = "Payload omitted to retain the executor receipt within the realtime limit."
     return json.dumps(receipt, allow_nan=False)
