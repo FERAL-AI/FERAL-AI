@@ -35,9 +35,11 @@ class TestGeminiRealtimeProxy:
             proxy = GeminiRealtimeProxy()
         async def fake_connect(self_inner):
             self_inner._ws = MagicMock()
+            self_inner._connected = True
         with patch.object(GeminiRealtimeSession, "connect", fake_connect):
             sess = await proxy.start_session("sess-a", "node-a")
         assert isinstance(sess, GeminiRealtimeSession)
+        assert sess.connected
         assert proxy.has_session("sess-a")
         assert proxy._node_to_session.get("node-a") == "sess-a"
 

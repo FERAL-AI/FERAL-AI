@@ -147,7 +147,7 @@ export default function Chat() {
   const { state } = useConnectionStatus();
   const thread = useChatThread();
   const [localMessages, setLocalMessages] = useState([
-    { id: 'hello', role: 'assistant', text: 'FERAL v2 is listening. What do you need?' },
+    { id: 'hello', role: 'assistant', text: 'How can I help?' },
   ]);
   const messages = thread?.messages || localMessages;
   const setMessages = thread?.setMessages || setLocalMessages;

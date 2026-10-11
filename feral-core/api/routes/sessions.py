@@ -53,6 +53,19 @@ def _transcript_for_session(session_id: str, limit: int, since_ms: int) -> dict:
     except Exception as exc:
         return {"session_id": session_id, "messages": [], "error": f"history read failed: {exc}"}
 
+    # Rows restored from the on-disk snapshot at boot are context for the
+    # model, not turns a client missed. This endpoint exists to recover
+    # messages emitted while a socket was down, and both clients merge
+    # whatever it returns into the open thread. Serving restored rows made
+    # a July 30 exchange ("What date should I schedule it for...") appear
+    # as a brand-new message after every restart, in 21 threads: the
+    # primary session receives no new turns, so the snapshot was re-saved
+    # unchanged each shutdown and replayed each boot. Matched by object
+    # identity, not text, so a live turn that happens to repeat an old
+    # sentence is still delivered.
+    restored = getattr(state, "restored_history_rows", None) or {}
+    restored_ids = {id(r) for r in (restored.get(session_id) or [])}
+
     # The orchestrator stores OpenAI-shaped dicts: `{role, content, ...}`.
     # Filter to user / assistant turns only — tool calls + system
     # prompts aren't useful to the client. Position-based ts_ms lets
@@ -61,6 +74,10 @@ def _transcript_for_session(session_id: str, limit: int, since_ms: int) -> dict:
     for idx, entry in enumerate(raw_history):
         role = entry.get("role") if isinstance(entry, dict) else None
         if role not in ("user", "assistant"):
+            continue
+        # Skipped after the position is fixed by `idx`, so `ts_ms` and
+        # `since_ms` keep meaning the same thing for every other row.
+        if id(entry) in restored_ids:
             continue
         content = entry.get("content")
         if isinstance(content, list):

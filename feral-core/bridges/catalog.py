@@ -160,6 +160,10 @@ def external_agent_settings(settings: Optional[dict] = None) -> dict[str, Any]:
     ``external_agents.opencode_bin``, ``external_agents.opencode_version``,
     ``external_agents.permission_timeout_seconds`` and
     ``external_agents.env_jail``.
+
+    ``FERAL_OPENCODE_BIN`` takes precedence over the persisted binary
+    setting. An invalid explicit override fails closed in discovery;
+    it must not silently choose a different executable from PATH.
     """
     if settings is None:
         try:
@@ -179,7 +183,7 @@ def external_agent_settings(settings: Optional[dict] = None) -> dict[str, Any]:
 
     return {
         "default_agent": str(block.get("default_agent") or "opencode"),
-        "opencode_bin": str(block.get("opencode_bin") or ""),
+        "opencode_bin": str(os.environ.get("FERAL_OPENCODE_BIN") or block.get("opencode_bin") or ""),
         "opencode_version": str(
             block.get("opencode_version") or DEFAULT_OPENCODE_VERSION
         ),

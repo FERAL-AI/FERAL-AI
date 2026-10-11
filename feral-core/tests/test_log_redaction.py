@@ -100,6 +100,30 @@ def test_filter_leaves_non_string_args_intact(capture):
     assert "synced 42 ops in 1.5s for {'peer': 'p1'}" in stream.getvalue()
 
 
+@pytest.mark.parametrize("path", ["/health", f"/api/check?token={FAKE_API_KEY}",
+                                  f"/bot{FAKE_BOT_TOKEN}/getMe"])
+def test_real_uvicorn_access_formatter_retains_structure_and_redacts(path, capsys):
+    from uvicorn.logging import AccessFormatter
+
+    stream = io.StringIO()
+    handler = logging.StreamHandler(stream)
+    handler.setFormatter(AccessFormatter('%(client_addr)s - "%(request_line)s" %(status_code)s', use_colors=False))
+    handler.addFilter(SecretRedactingFilter())
+    record = logging.LogRecord("uvicorn.access", logging.INFO, __file__, 1,
+                               '%s - "%s %s HTTP/%s" %d',
+                               ("127.0.0.1:9000", "GET", path, "1.1", 200), None)
+    # The same record may encounter redaction on multiple handlers.
+    SecretRedactingFilter().filter(record)
+    handler.handle(record)
+    text = stream.getvalue()
+    assert "GET " in text and "200 OK" in text
+    assert FAKE_API_KEY not in text and FAKE_BOT_TOKEN not in text
+    if path != "/health":
+        assert REDACTED in text
+    assert "Logging error" not in capsys.readouterr().err
+    assert isinstance(record.args, tuple) and len(record.args) == 5
+
+
 def test_filter_survives_mismatched_args(capture):
     logger, stream = capture
     # logging reports this on stderr through handleError; the filter must

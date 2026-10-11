@@ -105,7 +105,8 @@ test('a healthy brain gets no strip and no reserved space', async ({ page }) => 
   await expect(page.locator('.v2-sysbar')).toBeVisible();
   // Wait for a dashboard-fed vital so we know the payload landed and
   // this is not just "the poll has not answered yet".
-  await expect(page.locator('.v2-ext[aria-label*="Autonomy"]')).toBeVisible();
+  await expect(page.locator('.v2-ext[aria-label*="Autonomy"]')).toHaveCount(1);
+  await expect(page.locator('.v2-status-details')).not.toHaveAttribute('open');
 
   await expect(page.locator('[data-testid="runtime-notice"]')).toHaveCount(0);
 

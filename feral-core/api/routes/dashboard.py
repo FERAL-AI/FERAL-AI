@@ -159,7 +159,29 @@ async def context_live():
 async def health():
     """Health check endpoint for Docker HEALTHCHECK and load balancers."""
     boot_data = state._boot_report.to_dict() if hasattr(state, '_boot_report') else {}
-    return {"status": "ok", "version": __version__, "boot": boot_data}
+    # Passive object state only: never open a vault, query the OS keychain,
+    # initialise memory or start deferred jobs from a health probe.
+    coordinator = getattr(state, "vault_coordinator", None)
+    vault = {"state": "not_deferred", "code": "not_deferred", "credentials_available": None, "in_flight": False}
+    if coordinator is not None:
+        try:
+            observed = coordinator.status()
+            if (not isinstance(observed, dict) or observed.get("state") not in {"locked", "unlocking", "unavailable", "ready"}
+                    or type(observed.get("credentials_available")) is not bool
+                    or type(observed.get("in_flight")) is not bool):
+                raise ValueError("Unverified passive vault status")
+            vault = {key: observed[key] for key in ("state", "code", "credentials_available", "in_flight") if key in observed}
+        except Exception:
+            vault = {"state": "unavailable", "code": "status_unavailable", "credentials_available": False, "in_flight": False}
+    memory_available = getattr(state, "memory", None) is not None
+    bootstrap_required = getattr(state, "_native_bootstrap_required", False) is True
+    orchestrator_available = getattr(state, "orchestrator", None) is not None
+    agent_ready = memory_available and orchestrator_available and not bootstrap_required
+    status = "ok" if agent_ready else "locked" if not memory_available and vault["state"] in {"locked", "unlocking"} else "degraded"
+    return {"status": status, "version": __version__, "boot": boot_data,
+            "service_reachable": True, "memory_available": memory_available,
+            "bootstrap_required": bootstrap_required, "orchestrator_available": orchestrator_available,
+            "agent_ready": agent_ready, "vault": vault}
 
 
 @router.get("/api/boot-report")

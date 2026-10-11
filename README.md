@@ -49,6 +49,20 @@ What's inside:
 
 It ships as `feral-core` (the brain runtime), `feral-client-v2` (web control surface), and `feral-nodes` (device and hardware bridges).
 
+### Native macOS development
+
+The SwiftUI/AppKit application in [desktop-native](desktop-native/README.md)
+uses the existing brain and bundled coding engine. Its native feature coverage
+and real acceptance evidence are tracked in the
+[parity inventory](desktop-native/FEATURE_PARITY.md). It remains an isolated
+development build until migration, enabled integrations and signed installation
+pass their release gates. Existing web/desktop clients remain available.
+
+The [full-product release roadmap](docs/roadmap/theora-personal-agent/RELEASE_READINESS.md)
+tracks native experience, glasses/iOS handoff, shared memory, voice, messaging,
+commerce, collaboration and distribution with verifiable acceptance requirements.
+Contributors and coding agents should read [AGENTS.md](AGENTS.md).
+
 ### About that memory
 
 Every agent claims persistent memory, so the phrase says nothing on its own. For most, it means a profile file capped at a few thousand characters plus keyword search over old transcripts: miss the exact word and you miss the memory, nothing is ever forgotten so trivia competes with what matters, and none of it leaves the machine it was written on.

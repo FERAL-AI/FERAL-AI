@@ -35,6 +35,7 @@ def instantiate_pack(
     session_id: str | None = None,
     title: str | None = None,
     context: dict | None = None,
+    origin_surface: str = "http_api",
 ) -> dict:
     """Materialise a workflow pack into a live TaskFlow row.
 
@@ -65,6 +66,7 @@ def instantiate_pack(
         title=resolved_title,
         steps=steps,
         context=resolved_context,
+        origin_surface=origin_surface,
     )
 
 

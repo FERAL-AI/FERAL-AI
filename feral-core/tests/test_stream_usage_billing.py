@@ -420,10 +420,18 @@ async def chat_capped_budget(tmp_path):
     """Real ``CostBudget`` on an isolated SQLite file with a $0.05/hour
     chat cap. Async fixture so ``close()`` runs on the test's loop."""
     from cost.budget import CostBudget
+    from cost.pricing import ModelPricing
+    import json
+
+    catalog = tmp_path / "fixture-pricing.json"
+    catalog.write_text(json.dumps({"providers": {"fixture": {"pricing": {
+        "gpt-test": {"input": 0.005, "output": 0.025},
+    }}}}))
 
     budget = CostBudget(
         settings={"cost": {"enabled": True, "chat": {"per_hour_usd": 0.05}}},
         db_path=str(tmp_path / "cost.db"),
+        pricing=ModelPricing(catalog),
     )
     try:
         yield budget

@@ -1,7 +1,7 @@
 {
   "name": "feral-desktop",
   "private": true,
-"version": "2026.9.7",
+  "version": "2026.9.7",
   "type": "module",
   "scripts": {
     "sync:tokens": "bash scripts/sync_tokens.sh",
@@ -13,8 +13,9 @@
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
     "tauri:build": "tauri build",
-    "build:dmg": "tauri build --target universal-apple-darwin",
-    "stage:bundle": "bash scripts/stage_bundle.sh"
+    "build:dmg": "tauri build --bundles app,dmg",
+    "stage:bundle": "bash scripts/stage_bundle.sh",
+    "test:bridge": "node --test src/folderPicker.test.js"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0"

@@ -250,6 +250,6 @@ def test_real_sdk_heart_rate_device_event_reaches_perception(wired_server):
         s[1].get("ppg_heart_rate") == 78 for s in wired_server["sensors"]
     ), "heart_rate device_event should populate perception.update_sensors"
     assert any(
-        mid == "hr_resting" and val == 78.0
+        mid == "hr" and val == 78.0
         for mid, val, _cat in wired_server["baseline"]
-    ), "heart_rate device_event should record into baseline as hr_resting"
+    ), "heart_rate device_event should record into baseline as hr"

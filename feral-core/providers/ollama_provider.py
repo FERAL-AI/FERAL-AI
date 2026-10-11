@@ -8,6 +8,7 @@ from typing import Any, Optional
 import httpx
 
 from .base import BaseProvider, ChatMessage, ChatResponse
+from agents.context_manager import verify_ollama_request_context
 
 logger = logging.getLogger("feral.providers.ollama")
 
@@ -29,7 +30,13 @@ class OllamaProvider(BaseProvider):
     _capabilities = {"streaming", "tool_calling"}
 
     def __init__(self, base_url: Optional[str] = None) -> None:
-        self._base_url = (base_url or "http://localhost:11434").rstrip("/")
+        self._base_url = self.native_base_url(base_url)
+
+    @staticmethod
+    def native_base_url(base_url: Optional[str] = None) -> str:
+        """Translate only the terminal OpenAI API suffix, retaining proxy paths."""
+        root = (base_url or "http://localhost:11434").rstrip("/")
+        return root[:-3] if root.endswith("/v1") else root
 
     async def chat(
         self,
@@ -46,17 +53,20 @@ class OllamaProvider(BaseProvider):
             "messages": [{"role": m.role, "content": m.content} for m in messages],
             "stream": False,
         }
-        if max_tokens is not None or temperature is not None:
-            options: dict[str, Any] = {}
-            if max_tokens is not None:
-                options["num_predict"] = max_tokens
-            if temperature is not None:
-                options["temperature"] = temperature
-            payload["options"] = options
+        # An omitted output limit must not defeat the reserved-output check.
+        output_limit = max_tokens if max_tokens is not None else 1024
+        options: dict[str, Any] = {"num_predict": output_limit}
+        if temperature is not None:
+            options["temperature"] = temperature
+        payload["options"] = options
         if tools:
             payload["tools"] = tools
 
-        async with httpx.AsyncClient(timeout=120.0) as c:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=120.0) as c:
+            await verify_ollama_request_context(c, {
+                "model": model, "messages": payload["messages"],
+                "tools": tools or [], "max_tokens": output_limit,
+            })
             r = await c.post(f"{self._base_url}/api/chat", json=payload)
             r.raise_for_status()
             data = r.json()
@@ -77,7 +87,14 @@ class OllamaProvider(BaseProvider):
         async with httpx.AsyncClient(timeout=10.0) as c:
             r = await c.get(f"{self._base_url}/api/tags")
             r.raise_for_status()
-        ids = [m["name"] for m in r.json().get("models", []) if m.get("name")]
+        payload = r.json()
+        if not isinstance(payload, dict) or payload.get("error") is not None or not isinstance(payload.get("models"), list):
+            raise ValueError("Ollama returned an invalid model inventory")
+        ids: list[str] = []
+        for item in payload["models"]:
+            if not isinstance(item, dict) or not isinstance(item.get("name"), str) or not item["name"].strip():
+                raise ValueError("Ollama returned an invalid model inventory entry")
+            ids.append(item["name"])
         # Trust /api/tags as the source of truth — including the empty
         # case. The previous behaviour preserved a stale ``self._models``
         # list when the server returned no models, so the picker kept

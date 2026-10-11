@@ -130,16 +130,46 @@ class Learner:
         delegate to the KG. One extraction surface, one prompt,
         entity types preserved, F1-LWW sync on every relation.
         """
-        recent = self.memory.working_get(session_id, limit=10)
+        # Managed sessions learn from the persisted committed snapshot. Mutable
+        # working rows may include a turn whose checkpoint has not committed.
+        # ABSENT retains the legacy explicit operator-ingress contract; role
+        # labels alone are not a new authentication mechanism.
+        from memory.store import MemoryStore
+        from memory.runtime_session_checkpoint import CheckpointStatus
+        if isinstance(self.memory, MemoryStore):
+            try:
+                checkpoint = await self.memory.runtime_checkpoint_read(session_id)
+                if checkpoint.status == CheckpointStatus.READY:
+                    if checkpoint.record is None or checkpoint.record.context is None:
+                        return
+                    recent = checkpoint.record.context.working()[-10:]
+                elif checkpoint.status == CheckpointStatus.ABSENT:
+                    recent = self.memory.working_get(session_id, limit=10)
+                else:
+                    return
+            except Exception:
+                logger.warning("[%s] Learner skipped unavailable committed context", session_id[:8])
+                return
+        else:
+            recent = self.memory.working_get(session_id, limit=10)
         if not recent:
             return
 
         conversation_text = ""
         for entry in recent:
-            role = entry.get("role", "?")
+            # Generated answers and tool/ambient text are separate evidence.
+            if (entry.get("role") != "user" or entry.get("committed") is False
+                    or entry.get("authenticated") is False):
+                continue
+            if entry.get("source") not in (None, "user", "operator", "user_command", "user_assertion"):
+                continue
+            if entry.get("event_type") in {
+                "ambient_conversation", "sensor_observation", "tool_result", "assistant_message", "assistant_reply",
+            }:
+                continue
             text = entry.get("text", entry.get("summary", ""))
-            if text:
-                conversation_text += f"{role}: {text}\n"
+            if isinstance(text, str) and text:
+                conversation_text += f"user: {text}\n"
 
         if len(conversation_text) < 20:
             return
@@ -161,7 +191,9 @@ class Learner:
             return
 
         try:
-            stored = await kg.extract_and_store(conversation_text.strip(), self.llm)
+            stored = await kg.extract_and_store(
+                conversation_text.strip(), self.llm, source="user_assertion",
+            )
             if stored:
                 logger.info(
                     "[%s] Learner extracted %d KG triples via extract_and_store",

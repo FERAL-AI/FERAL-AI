@@ -1,8 +1,13 @@
 import { invoke } from '@tauri-apps/api/core';
 import { listen } from '@tauri-apps/api/event';
+import { registerFolderPicker } from './folderPicker';
+import { brainFrameOrigin, registerVoiceActivation } from './voiceShortcut';
+
+const feralLogoURL = new URL('./feralLogo.png', import.meta.url).href;
 
 const appEl = document.getElementById('app');
 const CONFIG_KEY = 'feral_desktop_config';
+let brainFrame = null;
 
 // How long the splash is allowed to claim the brain is "initializing" before
 // it has to admit it is not coming up. `start_brain` returning Ok only means
@@ -48,52 +53,6 @@ const sleep = (ms) => new Promise((resolve) => { window.setTimeout(resolve, ms);
 // The three gradients are kept as gradients. The v2 system is one accent plus
 // neutrals, so each pair now runs accent-to-neutral instead of the old
 // indigo-to-violet, which preserves the designed depth without a second hue.
-const BRAIN_SVG = `
-<svg viewBox="0 0 88 88" fill="none" xmlns="http://www.w3.org/2000/svg">
-  <!-- Neural brain icon with sparkle accents -->
-  <defs>
-    <linearGradient id="bg" x1="0" y1="0" x2="88" y2="88" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" style="stop-color: var(--v2-accent); stop-opacity: .15"/>
-      <stop offset="100%" style="stop-color: var(--v2-text-primary); stop-opacity: .08"/>
-    </linearGradient>
-    <linearGradient id="stroke" x1="20" y1="18" x2="68" y2="72" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" style="stop-color: var(--v2-accent)"/>
-      <stop offset="100%" style="stop-color: var(--v2-text-primary)"/>
-    </linearGradient>
-    <linearGradient id="sparkle" x1="0" y1="0" x2="1" y2="1">
-      <stop offset="0%" style="stop-color: var(--v2-text-primary)"/>
-      <stop offset="100%" style="stop-color: var(--v2-accent)"/>
-    </linearGradient>
-  </defs>
-  <circle cx="44" cy="44" r="40" fill="url(#bg)"/>
-  <!-- Left hemisphere -->
-  <path d="M44 24c-8 0-14 3-17 8s-4 11-2 17c1.5 4.5 5 8.5 10 11.5 3 1.8 6 3 9 3.5"
-        stroke="url(#stroke)" stroke-width="2.2" stroke-linecap="round" fill="none"/>
-  <!-- Right hemisphere -->
-  <path d="M44 24c8 0 14 3 17 8s4 11 2 17c-1.5 4.5-5 8.5-10 11.5-3 1.8-6 3-9 3.5"
-        stroke="url(#stroke)" stroke-width="2.2" stroke-linecap="round" fill="none"/>
-  <!-- Central fissure -->
-  <line x1="44" y1="24" x2="44" y2="64" stroke="url(#stroke)" stroke-width="1.5" stroke-dasharray="3 3" opacity=".5"/>
-  <!-- Neural connections -->
-  <circle cx="36" cy="36" r="2" style="fill: var(--v2-accent)" opacity=".8"/>
-  <circle cx="52" cy="36" r="2" style="fill: var(--v2-accent)" opacity=".8"/>
-  <circle cx="44" cy="44" r="2.5" style="fill: var(--v2-text-primary)"/>
-  <circle cx="36" cy="52" r="2" style="fill: var(--v2-accent)" opacity=".8"/>
-  <circle cx="52" cy="52" r="2" style="fill: var(--v2-accent)" opacity=".8"/>
-  <line x1="36" y1="36" x2="44" y2="44" style="stroke: var(--v2-accent)" stroke-width="1" opacity=".4"/>
-  <line x1="52" y1="36" x2="44" y2="44" style="stroke: var(--v2-accent)" stroke-width="1" opacity=".4"/>
-  <line x1="36" y1="52" x2="44" y2="44" style="stroke: var(--v2-accent)" stroke-width="1" opacity=".4"/>
-  <line x1="52" y1="52" x2="44" y2="44" style="stroke: var(--v2-accent)" stroke-width="1" opacity=".4"/>
-  <!-- Sparkle top-right -->
-  <g transform="translate(64,18)" opacity=".9">
-    <path d="M4 0L5 3.5 8 4 5 5 4 8 3 5 0 4 3 3.5Z" fill="url(#sparkle)"/>
-  </g>
-  <!-- Sparkle bottom-left -->
-  <g transform="translate(14,62)" opacity=".6">
-    <path d="M3 0L3.8 2.5 6 3 3.8 3.5 3 6 2.2 3.5 0 3 2.2 2.5Z" fill="url(#sparkle)"/>
-  </g>
-</svg>`;
-
 const ERROR_SVG = `
 <svg class="error-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
   <circle cx="12" cy="12" r="10"/>
@@ -112,7 +71,7 @@ function showStarting(url) {
         <div class="glow-ring"></div>
         <div class="glow-ring"></div>
         <div class="glow-ring"></div>
-        <img src="/icons/128x128.png" alt="FERAL" style="width: 96px; height: 96px; border-radius: 16px; box-shadow: 0 4px 24px var(--glow);" />
+        <img src="${feralLogoURL}" alt="FERAL logo" style="width: 96px; height: 96px; border-radius: 16px; box-shadow: 0 4px 24px var(--glow);" />
       </div>
       <div class="splash-title">FERAL</div>
       <div class="splash-subtitle">One brain. Every device.</div>
@@ -145,51 +104,10 @@ function showBrain(url) {
   frame.src = url;
   frame.title = 'FERAL';
   frame.className = 'frame';
-  frame.setAttribute('allow', 'clipboard-read; clipboard-write');
+  const origin = brainFrameOrigin(frame);
+  frame.setAttribute('allow', `clipboard-read; clipboard-write${origin ? `; microphone ${origin}` : ''}`);
   appEl.appendChild(frame);
-}
-
-// First run. This used to be a two-field form ("Brain URL", "API Key") whose
-// values were written to localStorage and read back only to re-fill the same
-// form. Nothing else consumed either one, and nothing could have:
-// `start_brain`, `check_brain_health` and `get_brain_url` in src-tauri take no
-// parameters, the brain URL comes solely from FERAL_PUBLIC_BASE_URL /
-// FERAL_BRAIN_URL read in the Rust process, no Tauri command anywhere accepts
-// a key, and the app's CSP allows framing and connecting to localhost and
-// 127.0.0.1 only. The desktop shell spawns and owns a local brain, so the
-// fields are gone and the screen states what is actually true, including the
-// URL that was really resolved and the environment variables that really
-// change it.
-function showWelcome(url, onContinue) {
-  appEl.innerHTML = `
-    <div class="splash" style="justify-content: center;">
-      <div class="splash-logo">
-        <div class="glow-ring"></div>
-        <div class="glow-ring"></div>
-        <img src="/icons/128x128.png" alt="FERAL" style="width:80px;height:80px;border-radius:14px;box-shadow:0 4px 24px var(--glow);" />
-      </div>
-      <div class="splash-title" style="margin-bottom:0.3rem;">Welcome to FERAL</div>
-      <div class="splash-subtitle" style="margin-bottom:1.25rem;">
-        This app runs its own brain on this machine, using the Python runtime
-        and the copy of <code>feral-core</code> bundled inside it.
-      </div>
-      <div class="detail-block" id="welcome-detail"></div>
-      <div class="hint">
-        There is nothing to configure here. To point at a different brain, set
-        <code>FERAL_BRAIN_URL</code> before launching; <code>FERAL_CORE_DIR</code>
-        and <code>FERAL_PYTHON</code> select the brain source and the interpreter
-        (which must have SQLite FTS5).
-      </div>
-      <button class="btn" type="button" id="setup-go" style="width:100%;max-width:380px;">Start FERAL</button>
-    </div>
-  `;
-  document.getElementById('welcome-detail').textContent =
-    `brain url: ${url || 'UNRESOLVED'}`;
-
-  document.getElementById('setup-go').onclick = () => {
-    saveConfig({ setupDone: true });
-    onContinue();
-  };
+  brainFrame = frame;
 }
 
 function showError(title, detail) {
@@ -308,13 +226,8 @@ async function resolveBrainUrl() {
 // ---------------------------------------------------------------------------
 
 async function boot() {
-  const cfg = pruneLegacyConfig(loadConfig());
+  pruneLegacyConfig(loadConfig());
   const url = await resolveBrainUrl();
-
-  if (!cfg.setupDone) {
-    showWelcome(url, () => { void boot(); });
-    return;
-  }
 
   showStarting(url);
 
@@ -348,9 +261,7 @@ async function boot() {
 }
 
 void (async () => {
-  await listen('voice-activation', () => {
-    window.dispatchEvent(new CustomEvent('feral-voice-activation'));
-    console.log('[FERAL] Voice shortcut (Cmd/Ctrl+Shift+T)');
-  });
+  registerFolderPicker(invoke, () => brainFrame);
+  await registerVoiceActivation(listen, () => brainFrame);
   await boot();
 })();

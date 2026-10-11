@@ -532,7 +532,22 @@ class OAuthManager:
             except Exception:
                 pass
 
+    def _require_deferred_mutation_ready(self):
+        from security.vault import native_vault_deferred, get_vault
+        from security.vault_coordinator import DeferredBootVaultFacade
+        if isinstance(self._vault, DeferredBootVaultFacade):
+            self._vault.coordinator.require_ready()
+        elif native_vault_deferred():
+            get_vault()  # coordinator-backed; never opens another keychain
+
     def _save_token(self, provider_id: str, token_data: dict):
+        self._require_deferred_mutation_ready()
+        from security.vault import native_vault_deferred
+        if native_vault_deferred():
+            # Publish cache only after encrypted persistence succeeds.
+            self._vault.store(f"oauth_{provider_id}", json.dumps(token_data), stored_by="oauth_manager")
+            self._tokens[provider_id] = token_data
+            return
         self._tokens[provider_id] = token_data
         if self._vault:
             self._vault.store(
@@ -561,6 +576,8 @@ class OAuthManager:
     # ─────────────────────────────────────────────────────────────────
 
     def _persist_pending_state(self, state: str, pending: dict) -> None:
+        self._require_deferred_mutation_ready()
+        from security.vault import native_vault_deferred
         if self._vault:
             try:
                 self._vault.store(
@@ -570,6 +587,8 @@ class OAuthManager:
                 )
                 return
             except Exception as exc:
+                if native_vault_deferred():
+                    raise
                 logger.warning("oauth: vault store of pending state failed: %s",
                                exc)
         try:
@@ -587,6 +606,11 @@ class OAuthManager:
             logger.warning("oauth: pending-state file persist failed: %s", exc)
 
     def _drop_pending_state(self, state: str) -> None:
+        self._require_deferred_mutation_ready()
+        from security.vault import native_vault_deferred
+        if native_vault_deferred():
+            self._vault.remove(f"{PENDING_VAULT_PREFIX}{state}", removed_by="oauth_manager")
+            return
         if self._vault:
             try:
                 self._vault.remove(
@@ -700,6 +724,7 @@ class OAuthManager:
         Failure: ``{success: False, provider, error, reason,
                     setup_status, setup_doc_url, setup_doc_summary}``
         """
+        self._require_deferred_mutation_ready()
         provider = self._providers.get(provider_id)
         if not provider:
             return {
@@ -766,8 +791,13 @@ class OAuthManager:
             params["code_challenge_method"] = "S256"
             pending["code_verifier"] = code_verifier
 
-        self._pending_states[state] = pending
-        self._persist_pending_state(state, pending)
+        from security.vault import native_vault_deferred
+        if native_vault_deferred():
+            self._persist_pending_state(state, pending)
+            self._pending_states[state] = pending
+        else:
+            self._pending_states[state] = pending
+            self._persist_pending_state(state, pending)
 
         url = f"{provider.auth_url}?{urlencode(params)}"
         logger.info(f"OAuth authorize URL generated for {provider_id}")
@@ -788,6 +818,7 @@ class OAuthManager:
         check immediately rather than waiting for the integration's
         own ``connected`` property to be polled.
         """
+        self._require_deferred_mutation_ready()
         pending = self._pending_states.pop(state, None)
         if pending is None:
             # Could be a state we persisted but haven't restored yet —
@@ -957,6 +988,7 @@ class OAuthManager:
         operator-facing UI will show "Connection expired — reconnect"
         and the integration's ``connected`` property will go ``False``.
         """
+        self._require_deferred_mutation_ready()
         token_data = self._tokens.get(provider_id, {})
         refresh_token = token_data.get("refresh_token")
         if not refresh_token:
@@ -1022,6 +1054,7 @@ class OAuthManager:
         :meth:`_load_providers` already reads. Providers are reloaded so
         the change takes effect without a restart.
         """
+        self._require_deferred_mutation_ready()
         provider = self._providers.get(provider_id)
         if provider is None:
             raise ValueError(f"Unknown OAuth provider: {provider_id}")
@@ -1098,6 +1131,7 @@ class OAuthManager:
         logger.info(f"API token stored for {provider_id}")
 
     def revoke_token(self, provider_id: str):
+        self._require_deferred_mutation_ready()
         self._tokens.pop(provider_id, None)
         if self._vault:
             self._vault.remove(f"oauth_{provider_id}", removed_by="oauth_manager")

@@ -8,12 +8,59 @@ and converts skills to LLM tool definitions.
 from __future__ import annotations
 import json
 import logging
+import asyncio
+import importlib.util
+import inspect
+import re
+import sys
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
+from collections.abc import Callable
+from uuid import uuid4
 
 from config.loader import feral_home
 from models.skill_manifest import SkillManifest, WEATHER_SKILL
+from skills.base import BaseSkill
 
 logger = logging.getLogger("feral.skills")
+
+
+class ReloadPreparationError(ValueError):
+    """Bounded public failure; plugin exceptions/source never become API text."""
+
+    def __init__(self, code: str, reason: str):
+        super().__init__(reason)
+        self.code = code
+
+
+@dataclass
+class ReloadCandidate:
+    registry: SkillRegistry
+    skill_id: str
+    manifest: SkillManifest
+    tools: list[dict]
+    implementation: BaseSkill | None
+    replace_implementation: bool
+    module: ModuleType | None
+    source_terms: tuple[tuple[Path, bytes | None], ...]
+    source_path: Path
+    first_party: bool
+    generation: int
+    previous_manifest: SkillManifest | None
+    previous_tools: list[dict] | None
+    previous_implementation: BaseSkill | None
+    previous_module: ModuleType | None
+    previous_manifest_terms: str | None
+    consumed: bool = False
+
+    def discard(self) -> None:
+        """Remove only this candidate's private staging module."""
+        if self.consumed:
+            return
+        if self.module is not None and sys.modules.get(self.module.__name__) is self.module:
+            sys.modules.pop(self.module.__name__, None)
+        self.consumed = True
 
 
 class SkillRegistry:
@@ -32,6 +79,9 @@ class SkillRegistry:
         # permanently rejected as ``unknown_endpoint`` even though it was
         # present in ``self.skills``.
         self._generation = 0
+        self._reload_metadata: dict[str, dict[str, str | bool]] = {}
+        self._lazy_attempted: set[str] = set()
+        self._reload_preparations: set[asyncio.Task[ReloadCandidate]] = set()
 
     @property
     def generation(self) -> int:
@@ -82,53 +132,29 @@ class SkillRegistry:
         if not skills_dir.exists():
             return
 
-        from skills.package import SkillPackage
         count = 0
-        for d in sorted(skills_dir.iterdir()):
-            if d.is_dir() and (d / "manifest.json").exists():
-                try:
-                    pkg = SkillPackage(d)
-                    if pkg.load() and pkg.manifest:
-                        self.register(pkg.manifest)
-                        self._try_load_dynamic_impl(d, pkg.manifest.skill_id)
-                        count += 1
-                except Exception as e:
-                    logger.warning(f"Failed to load marketplace skill from {d}: {e}")
-
+        for directory in sorted(skills_dir.iterdir()):
+            if directory.is_dir() and directory.name != "generated":
+                ok, _code, _reason = self.reload_skill_detail(directory.name)
+                count += int(ok)
+                if not ok:
+                    logger.warning("Marketplace package was not activated (%s)", _code)
         if count:
-            logger.info(f"Loaded {count} marketplace skills from {skills_dir}")
+            logger.info("Loaded %s marketplace skills", count)
 
-    @staticmethod
-    def _try_load_dynamic_impl(skill_dir: Path, skill_id: str):
-        """Dynamically load impl.py from a skill directory and register the implementation."""
-        impl_path = skill_dir / "impl.py"
-        if not impl_path.exists():
-            return
-        try:
-            import importlib.util
-            spec = importlib.util.spec_from_file_location(f"feral_skill_{skill_id}", str(impl_path))
-            if not spec or not spec.loader:
-                return
-            mod = importlib.util.module_from_spec(spec)
-            spec.loader.exec_module(mod)
-
-            from skills.base import BaseSkill
-            from skills.impl import register_instance
-            for attr_name in dir(mod):
-                obj = getattr(mod, attr_name)
-                if isinstance(obj, type) and issubclass(obj, BaseSkill) and obj is not BaseSkill:
-                    instance = obj()
-                    register_instance(skill_id, instance)
-                    logger.info(f"Loaded dynamic implementation for {skill_id} from {impl_path}")
-                    return
-        except Exception as e:
-            logger.warning(f"Failed to load impl.py for {skill_id}: {e}")
+    def _try_load_dynamic_impl(self, skill_dir: Path, skill_id: str) -> bool:
+        """Compatibility entry point using the same truthful staging contract."""
+        selected, first_party = self._select_source(skill_id)
+        if first_party or selected != skill_dir.resolve():
+            return False
+        return self.reload_skill(skill_id)
 
     def register(self, manifest: SkillManifest):
         """Register a skill manifest."""
         self.skills[manifest.skill_id] = manifest
         self._tool_cache[manifest.skill_id] = self._manifest_to_tools(manifest)
         self._generation += 1
+        self._lazy_attempted.discard(manifest.skill_id)
         logger.info(f"Registered skill: {manifest.brand.name} ({manifest.skill_id})")
         self._auto_create_routines(manifest)
 
@@ -285,7 +311,7 @@ class SkillRegistry:
                 with open(path) as fh:
                     declared = json.load(fh).get("skill_id")
             except Exception as exc:
-                logger.warning("manifest %s could not be read while resolving %s: %s", path, skill_id, exc)
+                logger.warning("manifest could not be read while resolving %s (%s)", skill_id, type(exc).__name__)
                 continue
             if declared == skill_id:
                 return path
@@ -300,113 +326,240 @@ class SkillRegistry:
         ok, _code, _reason = self.reload_skill_detail(skill_id)
         return ok
 
-    def reload_skill_detail(self, skill_id: str) -> tuple[bool, str, str]:
-        """Re-load a skill from disk, returning ``(ok, code, reason)``.
+    @staticmethod
+    def _validate_skill_id(skill_id: str) -> None:
+        if not isinstance(skill_id, str) or not re.fullmatch(r"[a-zA-Z0-9_][a-zA-Z0-9_.-]{0,127}", skill_id):
+            raise ReloadPreparationError("invalid_id", "skill_id must be a bounded identifier without path separators")
 
-        Looks for the manifest + optional impl.py under:
-          1. ``~/.feral/skills/<skill_id>/``  (marketplace-installed / promoted)
-          2. ``~/.feral/skills/generated/<skill_id>/`` (Tool Genesis output)
-          3. the shipped ``skills/manifests/`` entry declaring this skill id
-
-        Registers the manifest, invalidates the tool cache for this skill id,
-        and if an ``impl.py`` is present alongside the manifest, re-imports it
-        via ``importlib.util`` so the in-process LLM tool list picks up the
-        new definition without a restart.
-
-        ``code`` is ``""`` on success, ``"unloadable"`` when a source was
-        found but could not be read, and ``"no_source"`` when this skill id
-        has nothing on disk to reload (a manifest defined in Python, such
-        as ``weather_current``, is the honest example: there is no file to
-        re-read, and saying so beats reporting a reload that did nothing).
-        """
-        from skills.package import SkillPackage
-
-        candidates: list[Path] = []
-        home = feral_home()
-        candidates.append(home / "skills" / skill_id)
-        candidates.append(home / "skills" / "generated" / skill_id)
-
-        firstparty = self._first_party_manifest(skill_id)
-        if firstparty is not None:
-            candidates.append(firstparty)
-
-        failures: list[str] = []
-        for candidate in candidates:
-            try:
-                if candidate.is_file() and candidate.suffix == ".json":
-                    self.load_from_file(candidate)
-                    logger.info("reload_skill(%s): loaded first-party manifest %s", skill_id, candidate)
-                    return True, "", ""
-                if candidate.is_dir() and (candidate / "manifest.json").exists():
-                    pkg = SkillPackage(candidate)
-                    if not (pkg.load() and pkg.manifest):
-                        failures.append(f"{candidate}: {'; '.join(pkg.errors) or 'manifest did not load'}")
-                        continue
-                    self.skills.pop(skill_id, None)
-                    self._tool_cache.pop(skill_id, None)
-                    self.register(pkg.manifest)
-                    self._reimport_dynamic_impl(candidate, skill_id)
-                    logger.info("reload_skill(%s): hot-reloaded from %s", skill_id, candidate)
-                    return True, "", ""
-            except Exception as exc:
-                logger.warning("reload_skill(%s) from %s failed: %s", skill_id, candidate, exc)
-                failures.append(f"{candidate}: {exc}")
-
-        if failures:
-            reason = f"found a source for '{skill_id}' but could not load it: " + " | ".join(failures)
-            logger.warning("reload_skill(%s): %s", skill_id, reason)
-            return False, "unloadable", reason
-
-        reason = (
-            f"nothing on disk to reload for '{skill_id}': no package under "
-            f"{home / 'skills'} or {home / 'skills' / 'generated'}, and no shipped "
-            f"manifest declares that skill id"
-        )
-        logger.warning("reload_skill(%s): %s", skill_id, reason)
-        return False, "no_source", reason
+    def _select_source(self, skill_id: str) -> tuple[Path, bool]:
+        self._validate_skill_id(skill_id)
+        # Canonicalize the caller-selected home once, including macOS /var
+        # aliases. Reject redirects beneath that root, not the root alias.
+        home = feral_home().resolve()
+        for directory in (home / "skills" / skill_id, home / "skills/generated" / skill_id):
+            if directory.exists() or directory.is_symlink():
+                if directory.resolve() != directory.absolute() or not directory.is_dir():
+                    raise ReloadPreparationError("unloadable", "Selected package directory is redirected or invalid")
+                return directory, False
+        first_party = self._first_party_manifest(skill_id)
+        if first_party is not None:
+            return first_party, True
+        raise ReloadPreparationError("no_source", f"nothing on disk to reload for '{skill_id}': no package or shipped manifest declares that skill id")
 
     @staticmethod
-    def _reimport_dynamic_impl(skill_dir: Path, skill_id: str):
-        """Force re-import of impl.py for the given skill, replacing the cached instance."""
-        impl_path = skill_dir / "impl.py"
-        if not impl_path.exists():
-            return
+    def _source_bytes(path: Path, limit: int, *, optional: bool = False) -> bytes | None:
         try:
-            import importlib.util
-            import sys as _sys
-            module_name = f"feral_skill_{skill_id}"
-            # If previously imported, drop it so we get the new source.
-            _sys.modules.pop(module_name, None)
-            spec = importlib.util.spec_from_file_location(module_name, str(impl_path))
-            if not spec or not spec.loader:
-                return
-            mod = importlib.util.module_from_spec(spec)
-            _sys.modules[module_name] = mod
-            spec.loader.exec_module(mod)
+            if path.resolve() != path.absolute() or path.is_symlink():
+                raise ReloadPreparationError("unloadable", "Selected package source is redirected")
+            if not path.exists() and optional:
+                return None
+            if not path.is_file() or path.stat().st_size > limit:
+                raise ReloadPreparationError("unloadable", "Selected package source is missing, invalid or exceeds its read bound")
+            data = path.read_bytes()
+        except OSError as exc:
+            raise ReloadPreparationError("unloadable", "Selected package source could not be read") from exc
+        if len(data) > limit:
+            raise ReloadPreparationError("unloadable", "Selected package source exceeds its read bound")
+        return data
 
-            from skills.base import BaseSkill
-            from skills.impl import register_instance
-            for attr_name in dir(mod):
-                obj = getattr(mod, attr_name)
-                if isinstance(obj, type) and issubclass(obj, BaseSkill) and obj is not BaseSkill:
-                    register_instance(skill_id, obj())
-                    logger.info("reload_skill(%s): reimported impl from %s", skill_id, impl_path)
-                    return
+    def prepare_reload(self, skill_id: str) -> ReloadCandidate:
+        """Prepare trusted code off-thread; never mutate live registry entries.
+
+        Imports may have arbitrary trusted-code effects. Only helper-mediated
+        implementation publication is staged, and exceptions are redacted.
+        """
+        from skills.impl import capture_registrations, get_implementation
+
+        self._validate_skill_id(skill_id)
+        previous_manifest = self.skills.get(skill_id)
+        previous_tools = self._tool_cache.get(skill_id)
+        previous_implementation = get_implementation(skill_id)
+        previous_module = sys.modules.get(f"feral_skill_{skill_id}")
+        generation = self.generation
+        previous_terms = previous_manifest.model_dump_json() if previous_manifest is not None else None
+        source_path, first_party = self._select_source(skill_id)
+        manifest_path = source_path if first_party else source_path / "manifest.json"
+        manifest_bytes = self._source_bytes(manifest_path, 1024 * 1024)
+        if manifest_bytes is None:
+            raise ReloadPreparationError("unloadable", "Selected manifest is absent")
+        try:
+            manifest = SkillManifest.model_validate_json(manifest_bytes)
         except Exception as exc:
-            logger.warning("reload_skill(%s): impl reimport failed: %s", skill_id, exc)
+            raise ReloadPreparationError("unloadable", f"Selected manifest for '{skill_id}' is invalid") from exc
+        if manifest.skill_id != skill_id:
+            raise ReloadPreparationError("identity_mismatch", "Requested ID and selected manifest ID differ")
+        tools = self._manifest_to_tools(manifest)
+        implementation = previous_implementation if first_party else None
+        if first_party and implementation is not None and implementation.skill_id != skill_id:
+            raise ReloadPreparationError("identity_mismatch", "Wired implementation has a different skill ID")
+        terms: tuple[tuple[Path, bytes | None], ...] = ((manifest_path, manifest_bytes),)
+        module = None
+        if not first_party:
+            impl_path = source_path / "impl.py"
+            impl_bytes = self._source_bytes(impl_path, 2 * 1024 * 1024, optional=True)
+            terms += ((impl_path, impl_bytes),)
+            if impl_bytes is None:
+                if any(endpoint.method == "PYTHON" for endpoint in manifest.endpoints):
+                    raise ReloadPreparationError("missing_implementation", "Python package requires an explicit BaseSkill implementation")
+            else:
+                name = "_feral_skill_staging_" + uuid4().hex
+                spec = importlib.util.spec_from_file_location(name, impl_path)
+                if spec is None:
+                    raise ReloadPreparationError("unloadable", "Selected implementation cannot be imported")
+                module = importlib.util.module_from_spec(spec)
+                sys.modules[name] = module
+                try:
+                    with capture_registrations(skill_id) as captured:
+                        # Captured source avoids stale timestamp-based pyc loads.
+                        exec(compile(impl_bytes, str(impl_path), "exec"), module.__dict__)
+                        exported: dict[type[BaseSkill], Callable[[], BaseSkill]] = {}
+                        for attribute, value in vars(module).items():
+                            if isinstance(value, type) and issubclass(value, BaseSkill) and value is not BaseSkill:
+                                exported[value] = module.__dict__[attribute]
+                        if len(exported) != 1:
+                            raise ReloadPreparationError("invalid_implementation", "Package must export one unique BaseSkill class")
+                        skill_class = next(iter(exported))
+                        implementation = captured.instances.get(skill_id)
+                        if implementation is None:
+                            implementation = exported[skill_class]()
+                        elif type(implementation) is not skill_class:
+                            raise ReloadPreparationError("invalid_implementation", "Exported class and staged implementation differ")
+                        if not isinstance(implementation, BaseSkill) or implementation.skill_id != skill_id:
+                            raise ReloadPreparationError("identity_mismatch", "Requested ID and implementation ID differ")
+                        if skill_class.execute is BaseSkill.execute or not inspect.iscoroutinefunction(implementation.execute):
+                            raise ReloadPreparationError("invalid_implementation", "Implementation must define async execute")
+                        staged = captured.instances.get(skill_id)
+                        if staged is not None and staged is not implementation:
+                            raise ReloadPreparationError("invalid_implementation", "Constructor registered a different implementation")
+                except BaseException as exc:
+                    if sys.modules.get(name) is module:
+                        sys.modules.pop(name, None)
+                    if isinstance(exc, ReloadPreparationError):
+                        raise
+                    if isinstance(exc, Exception):
+                        raise ReloadPreparationError("implementation_failed", "Selected Python implementation failed to load or construct") from exc
+                    raise
+        return ReloadCandidate(self, skill_id, manifest, tools, implementation, not first_party,
+                               module, terms, source_path, first_party, generation,
+                               previous_manifest, previous_tools, previous_implementation,
+                               previous_module, previous_terms)
 
-    def get_skill(self, skill_id: str):
-        """Return the executable BaseSkill implementation for a given skill_id, or None."""
+    def publish_reload(self, candidate: ReloadCandidate) -> tuple[bool, str, str]:
+        """Compare-and-publish in one no-await section on the owning loop.
+
+        This does not make arbitrary thread readers or plugin import effects
+        transactional, nor does it bind existing reviews to a code hash.
+        """
+        from skills.impl import SKILL_IMPLEMENTATIONS, get_implementation
+
+        skill_id = candidate.skill_id
+        try:
+            if candidate.registry is not self or candidate.consumed:
+                raise ReloadPreparationError("conflict", "Reload candidate has already been consumed")
+            current_manifest = self.skills.get(skill_id)
+            current_terms = current_manifest.model_dump_json() if current_manifest is not None else None
+            if (self.generation != candidate.generation or current_manifest is not candidate.previous_manifest
+                    or current_terms != candidate.previous_manifest_terms
+                    or self._tool_cache.get(skill_id) is not candidate.previous_tools
+                    or get_implementation(skill_id) is not candidate.previous_implementation
+                    or sys.modules.get(f"feral_skill_{skill_id}") is not candidate.previous_module):
+                raise ReloadPreparationError("conflict", "Live registry changed while replacement was being prepared")
+            selected, first_party = self._select_source(skill_id)
+            if (selected, first_party) != (candidate.source_path, candidate.first_party):
+                raise ReloadPreparationError("conflict", "Selected package source changed during preparation")
+            for path, data in candidate.source_terms:
+                limit = 1024 * 1024 if path.suffix == ".json" else 2 * 1024 * 1024
+                if self._source_bytes(path, limit, optional=data is None) != data:
+                    raise ReloadPreparationError("conflict", "Selected package bytes changed during preparation")
+        except ReloadPreparationError as exc:
+            candidate.discard()
+            return False, exc.code, str(exc)
+        if candidate.replace_implementation:
+            if candidate.implementation is None:
+                SKILL_IMPLEMENTATIONS.pop(skill_id, None)
+            else:
+                SKILL_IMPLEMENTATIONS[skill_id] = candidate.implementation
+            stable = f"feral_skill_{skill_id}"
+            previous = candidate.previous_module
+            if candidate.module is None:
+                sys.modules.pop(stable, None)
+            else:
+                sys.modules[stable] = candidate.module
+            if (previous is not None and previous.__name__.startswith("_feral_skill_staging_")
+                    and sys.modules.get(previous.__name__) is previous):
+                sys.modules.pop(previous.__name__, None)
+        self.skills[skill_id] = candidate.manifest
+        self._tool_cache[skill_id] = candidate.tools
+        self._generation += 1
+        self._reload_metadata[skill_id] = {
+            "refresh_kind": "manifest_inventory" if candidate.first_party else "package",
+            "implementation_ready": (candidate.implementation is not None
+                                     and type(candidate.implementation).execute is not BaseSkill.execute
+                                     and inspect.iscoroutinefunction(candidate.implementation.execute)),
+        }
+        candidate.consumed = True
+        self._auto_create_routines(candidate.manifest)
+        return True, "", ""
+
+    def reload_skill_detail(self, skill_id: str) -> tuple[bool, str, str]:
+        try:
+            candidate = self.prepare_reload(skill_id)
+        except ReloadPreparationError as exc:
+            return False, exc.code, str(exc)
+        except Exception:
+            return False, "unloadable", "Selected replacement could not be prepared"
+        return self.publish_reload(candidate)
+
+    async def reload_skill_detail_async(
+        self, skill_id: str, *, publish_guard: Callable[[], bool] | None = None,
+    ) -> tuple[bool, str, str]:
+        """Cancellation cannot publish a worker-thread candidate that finishes late."""
+        preparation = asyncio.create_task(asyncio.to_thread(self.prepare_reload, skill_id))
+        self._reload_preparations.add(preparation)
+        preparation.add_done_callback(self._reload_preparations.discard)
+        try:
+            candidate = await asyncio.shield(preparation)
+        except asyncio.CancelledError:
+            def discard_late(task: asyncio.Task[ReloadCandidate]) -> None:
+                if not task.cancelled():
+                    try:
+                        task.result().discard()
+                    except Exception as exc:
+                        logger.warning("Cancelled reload preparation failed (%s)", type(exc).__name__)
+            preparation.add_done_callback(discard_late)
+            raise
+        except ReloadPreparationError as exc:
+            return False, exc.code, str(exc)
+        except Exception:
+            return False, "unloadable", "Selected replacement could not be prepared"
+        if publish_guard is not None:
+            try:
+                owner_matches = publish_guard() is True
+            except Exception as exc:
+                logger.warning("Reload owner check failed (%s)", type(exc).__name__)
+                owner_matches = False
+            if not owner_matches:
+                candidate.discard()
+                return False, "conflict", "Live skill registry changed during preparation"
+        return self.publish_reload(candidate)
+
+    def _reimport_dynamic_impl(self, skill_dir: Path, skill_id: str) -> bool:
+        return self._try_load_dynamic_impl(skill_dir, skill_id)
+
+    def get_skill(self, skill_id: str) -> BaseSkill | None:
+        """Return backing only for a registered manifest; lazy loads use staging."""
         from skills.impl import get_implementation
         if skill_id not in self.skills:
             return None
-        impl = get_implementation(skill_id)
-        if impl:
-            return impl
-        # Try loading dynamic implementation from marketplace
-        skills_dir = feral_home() / "skills" / skill_id
-        if skills_dir.is_dir():
-            self._try_load_dynamic_impl(skills_dir, skill_id)
+        implementation = get_implementation(skill_id)
+        if implementation is not None:
+            return implementation
+        if skill_id in self._lazy_attempted:
+            return None
+        self._lazy_attempted.add(skill_id)
+        directory = feral_home() / "skills" / skill_id
+        if directory.is_dir():
+            self._try_load_dynamic_impl(directory, skill_id)
             return get_implementation(skill_id)
         return None
 

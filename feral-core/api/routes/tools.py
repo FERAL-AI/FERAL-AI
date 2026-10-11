@@ -12,10 +12,14 @@ Endpoints:
                                    surface="http_api" safety policy.
 """
 
+from contextlib import nullcontext
+from typing import Any
+
 from fastapi import APIRouter
 
 from api.state import state
-from skills.call_context import bind_context
+from memory.runtime_session_checkpoint import CheckpointValidationError, validate_session_id
+from skills.call_context import bind_context, context_enabled, current_context
 
 router = APIRouter(tags=["tools"])
 
@@ -60,6 +64,7 @@ async def execute_tool(body: dict):
       * ``skill_id`` + ``endpoint`` (alias ``endpoint_id``)
       * ``args``: object passed to the endpoint
       * ``confirm``: bool — required to run a CONFIRM-tier tool over REST
+      * ``session_id``: canonical caller session; required except for trusted reads
     """
     if state.skill_registry is None or state.skill_executor is None:
         return {"success": False, "status_code": 503, "error": "Skill subsystem not ready"}
@@ -110,6 +115,31 @@ async def execute_tool(body: dict):
             "policy": decision.to_dict(),
         }
 
+    # Anonymous reads retain their legacy contract. Mutation and approval
+    # dispatch must have the caller's real identity before reaching the executor.
+    from security.safety_resolver import LEVEL_AUTO, is_read_only
+
+    anonymous_read = (decision is not None and decision.level == LEVEL_AUTO
+                      and is_read_only(canonical, registry=state.skill_registry, strict=True))
+    _session_id: Any = body.get("session_id")
+    if "session_id" in body or not anonymous_read:
+        try:
+            validate_session_id(_session_id)
+        except CheckpointValidationError:
+            return {
+                "success": False, "status_code": 422,
+                "error_code": "context_invalid_session",
+                "error": "Supply the exact caller session_id before dispatching this tool.",
+            }
+    else:
+        _session_id = ""
+    if not anonymous_read and not context_enabled():
+        return {
+            "success": False, "status_code": 409,
+            "error_code": "context_binding_disabled",
+            "error": "Session identity binding is disabled. Enable it before dispatching this tool.",
+        }
+
     # Bind session identity before dispatch. The executor's plan-mode and
     # approval gates read the session from the ToolCallContext contextvar,
     # so without this the route is invisible to plan mode: a live probe
@@ -119,13 +149,30 @@ async def execute_tool(body: dict):
     #
     # surface is "http_api" to match the policy decision computed above, so
     # a refusal names the same surface the caller was judged on.
-    _session_id = str(body.get("session_id") or "").strip()
     with bind_context(
         session_id=_session_id,
         surface="http_api",
         tool_name=canonical,
     ):
-        result = await state.skill_executor.execute(canonical, args, manifest, endpoint)
+        if not anonymous_read and current_context().session_id != _session_id:
+            return {
+                "success": False, "status_code": 409,
+                "error_code": "context_binding_unavailable",
+                "error": "The caller session could not be bound. No tool was dispatched.",
+            }
+        from agents.tool_runner import _BrowserResourceError
+        runner = getattr(state.orchestrator, "tool_runner", None)
+        scope = (runner.browser_resource_scope(canonical, _session_id)
+                 if runner is not None and callable(getattr(type(runner), "browser_resource_scope", None)) else nullcontext())
+        try:
+            with scope:
+                result = await state.skill_executor.execute(canonical, args, manifest, endpoint)
+        except _BrowserResourceError:
+            return {
+                "success": False, "status_code": 409,
+                "error_code": "browser_resource_changed",
+                "error": "Browser admission changed. Inspect the connection and exact action before retrying.",
+            }
     out = {"tool_name": canonical}
     if isinstance(result, dict):
         out.update(result)

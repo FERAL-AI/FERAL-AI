@@ -144,7 +144,7 @@ async def try_send_sdui(
         elif cleaned.startswith("```"):
             cleaned = cleaned[3:-3].strip()
         sdui = json.loads(cleaned)
-        if "type" in sdui:
+        if isinstance(sdui, dict) and "type" in sdui:
             await orchestrator.send(
                 session_id,
                 FeralMessage(

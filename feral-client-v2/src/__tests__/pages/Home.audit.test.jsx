@@ -315,10 +315,15 @@ describe('Home: stale heart rate is marked stale (defect 4)', () => {
       return el;
     });
     expect(tile.textContent).toContain('88');
-    const sub = container.querySelector('[data-testid="v2-home-hr-sub"]');
-    expect(sub).toBeTruthy();
-    expect(sub.textContent).toContain('last known');
-    expect(sub.textContent).toContain('veepoo_wristband');
+    // The shared somatic store can render 88 before Home's effect
+    // mirrors the dashboard health metadata. Wait for that metadata,
+    // retaining the freshness and source assertions inside the wait.
+    await waitFor(() => {
+      const sub = container.querySelector('[data-testid="v2-home-hr-sub"]');
+      expect(sub).toBeTruthy();
+      expect(sub.textContent).toContain('last known');
+      expect(sub.textContent).toContain('veepoo_wristband');
+    });
   });
 
   it('does not mark a fresh reading stale', async () => {

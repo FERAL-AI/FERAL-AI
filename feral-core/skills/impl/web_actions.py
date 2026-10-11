@@ -4,8 +4,8 @@ FERAL Web Actions Skill
 Higher-level browser automation for real-world tasks:
 purchases, reservations, bookings, price comparison.
 
-Key principle: ALWAYS stop before financial commitment
-and show a confirmation card via GenUI/SDUI.
+Purchase support is a read-only price preview, not checkout or payment.
+All flows stop before financial commitment.
 """
 
 from __future__ import annotations
@@ -17,6 +17,9 @@ from typing import Any
 from uuid import uuid4
 
 from skills.base import BaseSkill
+from security.commerce import (
+    PurchaseAudit, evaluate, load_caps, merchant_from_url, parse_money,
+)
 from skills.impl import register_skill
 
 logger = logging.getLogger("feral.skills.web_actions")
@@ -60,6 +63,17 @@ def _build_confirmation_card(
         ]}
     )
     return {"type": "Card", "corner_radius": 16, "padding": 16, "children": children}
+
+
+_AUDIT: PurchaseAudit | None = None
+
+
+def _purchase_audit() -> PurchaseAudit:
+    """Process-wide append-only purchase trail, opened on first use."""
+    global _AUDIT
+    if _AUDIT is None:
+        _AUDIT = PurchaseAudit()
+    return _AUDIT
 
 
 @register_skill
@@ -171,7 +185,7 @@ class WebActionsSkill(BaseSkill):
         }
 
     async def make_purchase(self, url: str, item_description: str = "", **_kw: Any) -> dict:
-        """Navigate, add to cart, extract total — returns SDUI card, does NOT complete."""
+        """Preview an unverified observed price; checkout is unavailable."""
         browser = await self._ensure_browser()
 
         nav = await browser.navigate(url)
@@ -203,27 +217,82 @@ class WebActionsSkill(BaseSkill):
         except (json.JSONDecodeError, TypeError):
             pass
 
-        total_display = raw_prices[0] if raw_prices else "Price not found"
+        observed_price_display = raw_prices[0] if raw_prices else "Price not found"
+
+        # The amount exists for the first time HERE. make_purchase takes
+        # no price: it scrapes one. Keep the existing spend-cap screen
+        # before showing a preview, without claiming this observed price
+        # is a cart total or creating authorization to spend.
+        #
+        # No default currency is passed: a bare "24.00" with no symbol is
+        # an unknown currency, and guessing the operator's own is exactly
+        # the assumption this module refuses to make elsewhere.
+        caps = load_caps()
+        money = parse_money(observed_price_display)
+        merchant = merchant_from_url(page_info.get("url", url) or url)
+        audit = _purchase_audit()
+        verdict = evaluate(money, merchant, caps, audit=audit)
+        if not verdict.allowed:
+            audit.record(
+                outcome="refused_cap", merchant=merchant, money=money,
+                tool="web_actions__make_purchase", reason=verdict.code,
+            )
+            return {
+                "purchased": False,
+                "awaiting_confirmation": False,
+                "refused": True,
+                "reason": verdict.code,
+                "error": verdict.reason,
+                "merchant": merchant,
+                "observed_price_display": observed_price_display,
+                "price_verified": False,
+                "page_title": page_title,
+            }
+        audit.record(
+            outcome="offered", merchant=merchant, money=money,
+            tool="web_actions__make_purchase", reason=verdict.code,
+        )
 
         screenshot = await browser.screenshot()
 
-        confirmation_card = _build_confirmation_card(
-            title="Confirm Purchase",
-            items=[
-                {"label": "Item", "value": item_description or page_title},
-                {"label": "Store", "value": page_info.get("url", url)},
+        # No checkout or registered approval exists for this preview. A
+        # generated Confirm/Cancel button would have no action to resolve.
+        preview_card = {
+            "type": "Card", "corner_radius": 16, "padding": 16,
+            "children": [
+                {"type": "Text", "value": "Product Preview", "style": "headline"},
+                {"type": "Text", "style": "body", "value": (
+                    "Preview only. No purchase has been made. Checkout is unavailable in this tool."
+                )},
+                {"type": "Divider"},
+                {"type": "Text", "value": item_description or page_title, "style": "subtitle"},
+                {"type": "Text", "value": page_info.get("url", url), "style": "caption"},
+                {"type": "HStack", "children": [
+                    {"type": "Text", "value": "Observed price (unverified)", "style": "body"},
+                    {"type": "Text", "value": observed_price_display, "style": "subtitle"},
+                ]},
+                {"type": "Text", "style": "caption", "value": (
+                    "This page price is not a verified checkout total. Items, variants, "
+                    "taxes and shipping have not been verified."
+                )},
             ],
-            total=total_display,
-            extra_text="Review the details above. FERAL will NOT complete this purchase without your confirmation.",
-        )
+        }
 
         return {
             "purchased": False,
-            "awaiting_confirmation": True,
+            "awaiting_confirmation": False,
+            "preview_only": True,
+            "checkout_available": False,
             "page_title": page_title,
             "detected_prices": raw_prices,
-            "total_display": total_display,
-            "sdui_card": confirmation_card,
+            "observed_price_display": observed_price_display,
+            "price_verified": False,
+            # Parsed observed price for display/cap screening, never an
+            # authorized or verified checkout amount.
+            "merchant": merchant,
+            "amount": str(money.amount) if money else "",
+            "currency": money.currency if money else "",
+            "sdui_card": preview_card,
             "screenshot_b64": screenshot.get("image_b64"),
         }
 
@@ -295,7 +364,7 @@ def get_web_actions_manifest() -> dict:
     return {
         "skill_id": "web_actions",
         "name": "Web Actions",
-        "description": "Higher-level browser automation for purchases, bookings, price comparison, and data extraction",
+        "description": "Higher-level browser automation for product previews, booking form preparation, price comparison, and data extraction",
         "safety_level": "CONFIRM",
         "endpoints": [
             {
@@ -316,7 +385,7 @@ def get_web_actions_manifest() -> dict:
             },
             {
                 "id": "make_purchase",
-                "description": "Navigate to product page, extract price — returns SDUI confirmation card, does NOT complete purchase",
+                "description": "Preview an unverified observed product-page price with spend-cap screening. Returns a read-only SDUI card. Checkout/payment is unavailable; no purchase or approval is created.",
                 "params": [
                     {"name": "url", "type": "string", "required": True, "description": "Product or checkout URL"},
                     {"name": "item_description", "type": "string", "required": False, "description": "Human-readable item description"},

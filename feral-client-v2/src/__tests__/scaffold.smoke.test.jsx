@@ -3,7 +3,7 @@ import { renderV2 } from './_helpers/renderV2';
 import App from '../App';
 
 describe('v2 scaffold', () => {
-  it('renders the Dashboard marker on /', () => {
+  it('renders the Chat marker on /', () => {
     const { getByTestId } = renderV2(<App />, { route: '/' });
     expect(getByTestId('v2-marker')).toBeInTheDocument();
   });

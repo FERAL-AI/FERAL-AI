@@ -1,5 +1,9 @@
 # CLAUDE.md — FERAL / ASOS
 
+Read [AGENTS.md](AGENTS.md) for shared contributor, authorization, evidence and
+publication rules. Current product release gates are tracked in
+[release readiness](docs/roadmap/theora-personal-agent/RELEASE_READINESS.md).
+
 Context for agents working in this repo. Read `AUDIT-FIXES.md` next if you were sent here to fix defects.
 
 ## What this is

@@ -217,7 +217,7 @@ class TestRidesApp:
         orchestrator = MagicMock()
         orchestrator._send_text = AsyncMock()
         orchestrator.handle_command = AsyncMock()
-        orchestrator.send = AsyncMock()
+        orchestrator.send = AsyncMock(return_value=True)
         orchestrator._execute_tool_call = AsyncMock()
         orchestrator._pending_confirmations = {}
         mock_state = MagicMock()

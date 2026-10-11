@@ -61,7 +61,7 @@ async function stubBrain(page, reload: { status: number; body: object }) {
 }
 
 async function openLauncher(page) {
-  await page.goto('/');
+  await page.goto('/home');
   await page.getByRole('button', { name: /view all/i }).first().click();
   await expect(page.getByRole('dialog', { name: /all skills/i })).toBeVisible();
 }

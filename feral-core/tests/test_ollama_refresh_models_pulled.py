@@ -55,16 +55,22 @@ async def test_refresh_models_returns_empty_when_no_models_pulled():
 
 
 @pytest.mark.asyncio
-async def test_refresh_models_skips_entries_without_name():
-    """Defensive: an Ollama build that returns ``[{"name": ""}, ...]``
-    must not yield empty ids that fail downstream validation."""
-    client = _mock_client(
-        {"models": [{"name": ""}, {"name": "llama3.1"}, {}]}
-    )
+@pytest.mark.parametrize("models", [
+    [{"name": ""}, {"name": "llama3.1"}, {}],
+    [{"name": "llama3.1"}, {}],
+    [{}],
+])
+async def test_refresh_models_refuses_malformed_inventory_without_replacing_prior_ids(models):
+    """A partial or malformed read cannot certify removals or new model IDs."""
+    client = _mock_client({"models": [{"name": "installed-before:7b"}]})
     with patch("providers.ollama_provider.httpx.AsyncClient", return_value=client):
         p = OllamaProvider()
-        out = await p.refresh_models()
-    assert out == ["llama3.1"]
+        assert await p.refresh_models() == ["installed-before:7b"]
+        client.get.return_value.json.return_value = {"models": models}
+        with pytest.raises(ValueError, match="invalid model inventory entry"):
+            await p.refresh_models()
+    assert p.list_models() == ["installed-before:7b"]
+    assert client.get.await_count == 2
 
 
 def test_default_models_are_empty():

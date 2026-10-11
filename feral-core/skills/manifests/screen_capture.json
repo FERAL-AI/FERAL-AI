@@ -1,6 +1,6 @@
 {
     "skill_id": "screen_capture",
-    "version": "1.0.0",
+    "version": "1.1.0",
     "author": "feral-core",
     "brand": {
         "name": "Screen Capture",
@@ -26,7 +26,7 @@
             "id": "capture",
             "method": "PYTHON",
             "url": "",
-            "description": "Capture a desktop screenshot and optionally describe it with a vision model. Returns the file path plus base64 image bytes. Setting analyze or query needs a configured VLM; when none is configured the image still comes back and analysis_error says so, so do not describe the screen from imagination.",
+            "description": "Capture a desktop screenshot and optionally analyze it with the selected vision model. For background/multitasking macOS work, copy window_id, window_pid and exact window_title from a fresh gui_computer_use__window_list row to capture only that window without activation. The tool checks identity before and after capture; stale selection returns no pixels or analysis. Optional window_app adds an exact app check. Without window_id, capture observes the foreground desktop, including other apps; region does not bind an application. Window capture cannot be combined with region. Window capture does not make global keystrokes background-safe. When analysis_error is present, the screen has not been interpreted.",
             "params": [
                 {
                     "name": "path",
@@ -38,7 +38,31 @@
                     "name": "region",
                     "type": "string",
                     "required": false,
-                    "description": "macOS only: x,y,width,height capture region. Ignored on Linux, which always captures the whole root window."
+                    "description": "macOS only: x,y,width,height capture region. Ignored on Linux, which always captures the whole root window. Desktop coordinates do not identify an app. Cannot be combined with window_id."
+                },
+                {
+                    "name": "window_id",
+                    "type": "integer",
+                    "required": false,
+                    "description": "macOS only: positive CGWindowID from a fresh gui_computer_use__window_list row. Requires window_pid and exact window_title; cannot combine with region. Never inferred from coordinates."
+                },
+                {
+                    "name": "window_pid",
+                    "type": "integer",
+                    "required": false,
+                    "description": "Exact positive PID from the same window_list row; required with window_id to reject stale/recycled window identity."
+                },
+                {
+                    "name": "window_title",
+                    "type": "string",
+                    "required": false,
+                    "description": "Exact title from the same window_list row; required with window_id. Preserve an explicitly empty title if the row has one."
+                },
+                {
+                    "name": "window_app",
+                    "type": "string",
+                    "required": false,
+                    "description": "Optional exact app name from the same window_list row; mismatches refuse capture."
                 },
                 {
                     "name": "analyze",
@@ -59,7 +83,7 @@
                     "description": "Include base64 image in response (default true)"
                 }
             ],
-            "returns_description": "Screenshot metadata, optional base64 image, and optional scene analysis",
+            "returns_description": "Screenshot metadata, optional base64 image and optional scene analysis; scoped window capture includes capture_source=macos_window and verified window_id/pid/app/title, with no pixels on stale identity.",
             "ui_hint": "detail_card"
         }
     ],

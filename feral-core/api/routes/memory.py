@@ -3,6 +3,7 @@
 import importlib.util
 import json
 import logging
+import time
 
 from fastapi import APIRouter, File, Form, HTTPException, UploadFile
 
@@ -334,17 +335,30 @@ async def memory_compact(session_id: str | None = None):
     else:
         sessions = list(state.orchestrator.conversation_history.keys())
 
+    from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
+    try:
+        async with legacy_context_mutation(state.orchestrator, state.memory, tuple(sessions), "compact"):
+            return await _memory_compact_legacy(sessions)
+    except RuntimeContextError as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": "Managed runtime compaction is unavailable."}) from None
+
+
+async def _memory_compact_legacy(sessions: list[str]):
+    store, orchestrator = state.memory, state.orchestrator
+    if store is None or orchestrator is None:
+        raise HTTPException(status_code=503, detail="memory or orchestrator not initialized")
+
     out: list[dict] = []
     for sid in sessions:
-        history = state.orchestrator.conversation_history.get(sid, [])
+        history = orchestrator.conversation_history.get(sid, [])
         if not history:
             out.append({"session_id": sid, "compacted": False, "reason": "empty"})
             continue
-        result = await state.memory.compact_session(
-            sid, history, llm=state.orchestrator.llm,
+        result = await store.compact_session(
+            sid, history, llm=orchestrator.llm,
         )
         if result.get("compacted") and result.get("history"):
-            state.orchestrator.conversation_history[sid] = result["history"]
+            orchestrator.conversation_history[sid] = result["history"]
         result["session_id"] = sid
         out.append(result)
     return {"results": out, "count": len(out)}
@@ -898,12 +912,17 @@ async def wiki_ingest_text(body: dict):
         return {"error": str(e)}
 
 
+from fastapi import Request as WikiRequest
+
+
 @router.post("/api/wiki/ingest/pdf")
 async def wiki_ingest_pdf(
+    request: WikiRequest,
     file: UploadFile | None = File(default=None),
     upload_id: str | None = Form(default=None),
     path: str | None = Form(default=None),
     compile_after: bool = Form(default=True),
+    expected_sha256: str | None = Form(default=None),
     body: dict | None = None,
 ):
     """Ingest a PDF into the memory wiki.
@@ -927,6 +946,9 @@ async def wiki_ingest_pdf(
         raise HTTPException(status_code=503, detail="Memory store not initialized")
 
     chosen_path: str | None = None
+    chosen_filename: str | None = None
+    trusted_hash: str | None = None
+    from memory.ingest import MAX_PDF_BYTES
 
     if file is not None and file.filename:
         # multipart upload — stream bytes into the upload store so we
@@ -935,17 +957,27 @@ async def wiki_ingest_pdf(
         if store is None:
             raise HTTPException(status_code=503, detail="Upload store not initialised")
         try:
-            data = await file.read()
+            data = await file.read(MAX_PDF_BYTES + 1)
         except Exception as exc:
             raise HTTPException(status_code=400, detail=f"failed to read upload: {exc}") from exc
         if not data:
             raise HTTPException(status_code=400, detail="empty file")
+        if len(data) > MAX_PDF_BYTES:
+            raise HTTPException(status_code=413, detail="PDF exceeds the byte limit")
+        if not file.filename.lower().endswith(".pdf") or not data.startswith(b"%PDF-"):
+            raise HTTPException(status_code=400, detail="A PDF file is required")
+        if expected_sha256 is not None:
+            import hashlib
+            if expected_sha256 != hashlib.sha256(data).hexdigest():
+                raise HTTPException(status_code=409, detail="Reviewed PDF hash no longer matches")
         record = store.store(
             data=data,
             filename=file.filename,
             content_type=file.content_type or "application/pdf",
         )
         chosen_path = record.path
+        chosen_filename = file.filename
+        trusted_hash = record.sha256
 
     elif upload_id:
         store = getattr(state, "uploads", None)
@@ -955,12 +987,28 @@ async def wiki_ingest_pdf(
         if record is None:
             raise HTTPException(status_code=404, detail=f"unknown upload_id: {upload_id}")
         chosen_path = record.path
+        chosen_filename = record.filename
+        trusted_hash = record.sha256
+        if expected_sha256 is not None and expected_sha256 != trusted_hash:
+            raise HTTPException(status_code=409, detail="Reviewed upload hash no longer matches")
 
     elif path:
         chosen_path = path
 
     else:
         # Last resort: JSON body (legacy)
+        if request.headers.get("content-type", "").split(";", 1)[0].strip() == "application/json":
+            try:
+                body = await request.json()
+            except Exception:
+                raise HTTPException(status_code=400, detail="Malformed PDF request")
+            if not isinstance(body, dict):
+                raise HTTPException(status_code=400, detail="Malformed PDF request")
+            expected_sha256 = body.get("expected_sha256")
+            if "compile_after" in body:
+                if not isinstance(body["compile_after"], bool):
+                    raise HTTPException(status_code=400, detail="compile_after must be a boolean")
+                compile_after = body["compile_after"]
         body = body or {}
         legacy_path = (body or {}).get("path", "")
         if legacy_path:
@@ -980,15 +1028,20 @@ async def wiki_ingest_pdf(
         return await ingestor.ingest_pdf(
             path=chosen_path,
             compile_after=bool(compile_after),
+            expected_sha256=trusted_hash or expected_sha256,
+            filename=chosen_filename,
         )
     except Exception as exc:
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        # Partial notes can already exist if a store write failed. Never echo private paths/content.
+        raise HTTPException(status_code=400, detail="PDF import failed or exceeded its bounds. Notes may already have been stored; inspect memory before retrying.") from exc
 
 
 @router.post("/api/wiki/ingest/repo")
 async def wiki_ingest_repo(body: dict):
     if not state.memory:
         return {"error": "Memory store not initialized"}
+    if "compile_after" in body and not isinstance(body["compile_after"], bool):
+        return {"error": "compile_after must be a boolean"}
     raw_extensions = (body or {}).get("extensions_filter", [])
     if isinstance(raw_extensions, str):
         ext_list = [e.strip() for e in raw_extensions.split(",") if e.strip()]
@@ -1003,7 +1056,115 @@ async def wiki_ingest_repo(body: dict):
             path=(body or {}).get("path", ""),
             extensions_filter=ext_list or None,
             compile_after=bool((body or {}).get("compile_after", True)),
-            max_files=int((body or {}).get("max_files", 300)),
+            max_files=(body or {}).get("max_files", 100),
+            expected_files=(body or {}).get("expected_files"),
         )
-    except Exception as e:
-        return {"error": str(e)}
+    except Exception:
+        return {"error": "Folder import failed or exceeded its bounds. Notes may already have been stored; inspect memory before retrying."}
+
+
+# ── Recent memory digest (phone-readable) ───────────────────────────
+
+#: Conversation only. Screen-capture episodes are about 90% of a day's
+#: rows and would drown the digest in window titles.
+_RECENT_SUMMARY_TYPES = ("user_command", "assistant_reply", "ambient_conversation")
+_RECENT_SUMMARY_TTL_S = 900.0
+_RECENT_SUMMARY_MAX_INPUT_CHARS = 8000
+_recent_summary_cache: dict[int, dict] = {}
+_recent_summary_logger = logging.getLogger("feral.memory.recent_summary")
+
+_RECENT_SUMMARY_PROMPT = (
+    "Write a short recap of what the user did with their assistant recently, "
+    "across every device (phone chat, voice, web). Cover the main topics, "
+    "requests, and any open follow-ups in 3 to 6 plain sentences or bullet "
+    "points. Use only what is in the log below and do not invent details. "
+    "Leave out timestamps and session ids. Stay under 600 characters.\n\n"
+    "Log:\n"
+)
+
+
+@router.get("/api/memory/recent_summary")
+async def memory_recent_summary(hours: int = 24):
+    """A short model-written digest of recent conversation across sessions.
+
+    Built for the phone, which otherwise rebuilt one from
+    ``/api/sessions/primary/transcript`` and so only ever saw the primary
+    thread, never voice or other chat threads.
+
+    Cheap by construction: no model call when the window holds no
+    conversation, and one cached call per window until a newer episode
+    lands or 15 minutes pass. A failed generation is reported in
+    ``error`` and not cached, so the next request retries.
+    """
+    if not state.memory:
+        raise HTTPException(status_code=503, detail="memory not initialized")
+    hours = max(1, min(int(hours or 24), 72))
+    now = time.time()
+    since = now - hours * 3600
+    episodes = await state.memory.episode_recent(
+        limit=200, event_types=_RECENT_SUMMARY_TYPES, since=since,
+    ) or []
+    base = {
+        "hours": hours,
+        "since": since,
+        "episode_count": len(episodes),
+        "sessions": len({e.get("session_id") for e in episodes if e.get("session_id")}),
+    }
+    if not episodes:
+        return {**base, "summary": "", "generated_at": now, "cached": False}
+
+    newest = str(episodes[0].get("id") or "")
+    hit = _recent_summary_cache.get(hours)
+    if (
+        hit
+        and hit["newest"] == newest
+        and hit["count"] == len(episodes)
+        and now - hit["generated_at"] < _RECENT_SUMMARY_TTL_S
+    ):
+        return {
+            **base, "summary": hit["summary"],
+            "generated_at": hit["generated_at"], "cached": True,
+        }
+
+    llm = getattr(state.orchestrator, "llm", None) if state.orchestrator else None
+    if llm is None:
+        return {
+            **base, "summary": "", "generated_at": now, "cached": False,
+            "error": "no language model is available to write the summary",
+        }
+
+    lines: list[str] = []
+    for ep in reversed(episodes):  # oldest first, so the model reads in order
+        text = str(ep.get("summary") or "").strip()
+        if not text:
+            continue
+        who = "assistant" if ep.get("event_type") == "assistant_reply" else "user"
+        lines.append(f"{who}: {text}")
+    log = "\n".join(lines)
+    if len(log) > _RECENT_SUMMARY_MAX_INPUT_CHARS:
+        # Keep the newest end: a recap of the last day matters most at its end.
+        log = log[-_RECENT_SUMMARY_MAX_INPUT_CHARS:]
+
+    try:
+        response = await llm.chat(
+            [{"role": "user", "content": _RECENT_SUMMARY_PROMPT + log}], tools=None,
+        )
+        summary, _ = llm.extract_response(response)
+        summary = (summary or "").strip()
+    except Exception as exc:
+        _recent_summary_logger.warning("recent_summary generation failed: %s", exc)
+        return {
+            **base, "summary": "", "generated_at": now, "cached": False,
+            "error": f"summary generation failed ({exc.__class__.__name__})",
+        }
+    if not summary:
+        return {
+            **base, "summary": "", "generated_at": now, "cached": False,
+            "error": "the model returned no text",
+        }
+
+    _recent_summary_cache[hours] = {
+        "summary": summary, "newest": newest,
+        "count": len(episodes), "generated_at": now,
+    }
+    return {**base, "summary": summary, "generated_at": now, "cached": False}

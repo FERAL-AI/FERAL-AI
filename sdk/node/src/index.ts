@@ -10,8 +10,10 @@
  * ```
  */
 
-export { FeralClient } from './client';
-export { definePlugin, type PluginDefinition, type ToolDefinition } from './plugin';
+export { FeralClient, ChatTurnError, ChatTurnTimeout, FeralHTTPError,
+  type FeralClientOptions, type ChatOptions, type SkillInvocationOptions } from './client';
+export { definePlugin, type PluginDefinition, type ToolDefinition, type ToolParameter, type DefinedPlugin } from './plugin';
+export { startPluginHost, type PluginHost, type PluginHostOptions } from './plugin_host';
 export { FeralNode, type NodeConfig } from './node';
 export type {
   FeralMessage,
@@ -24,4 +26,6 @@ export type {
   HUPTelemetry,
   DashboardData,
   SystemInfo,
+  ChatTurnReceipt,
+  TurnProcessingOutcome,
 } from './types';

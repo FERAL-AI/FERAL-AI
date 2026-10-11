@@ -1,6 +1,6 @@
 [package]
 name = "feral-desktop"
-version = "1.0.0"
+version = "2026.9.7"
 description = "FERAL Desktop — One brain for every device you own"
 edition = "2021"
 
@@ -11,6 +11,7 @@ tauri-build = { version = "2", features = [] }
 tauri = { version = "2", features = ["tray-icon"] }
 tauri-plugin-global-shortcut = "2"
 tauri-plugin-autostart = "2"
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 reqwest = { version = "0.12", features = ["blocking"] }
@@ -18,3 +19,12 @@ reqwest = { version = "0.12", features = ["blocking"] }
 [features]
 default = ["custom-protocol"]
 custom-protocol = ["tauri/custom-protocol"]
+
+# Rust 1.96's implicit debuginfo stripping produces misaligned proc-macro
+# dylibs rejected by macOS 27. Retain symbols until that toolchain is upgraded:
+# https://github.com/rust-lang/rust/issues/157750
+[profile.release]
+strip = "none"
+
+[profile.release.build-override]
+strip = "none"

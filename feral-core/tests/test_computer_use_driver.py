@@ -19,7 +19,6 @@ We cover:
 
 from __future__ import annotations
 
-import asyncio
 import sys
 from pathlib import Path
 
@@ -36,6 +35,31 @@ from agents.computer_use_driver import (  # noqa: E402
     gui_args_for,
     normalize_action,
 )
+
+
+def _wire_reviewed_gui(monkeypatch, gui):
+    """Routing fixtures use the registered central interface, never fallback."""
+    from types import SimpleNamespace
+    from skills.call_context import bind_context
+
+    class Executor:
+        async def execute(self, tool_name, args, manifest, endpoint):
+            return await gui.execute(endpoint.id, args, {})
+
+    manifest = SimpleNamespace(endpoints=[SimpleNamespace(id=x) for x in GUI_ENDPOINT_FOR.values()])
+    executor = Executor()
+
+    async def dispatch(session_id, call, skills, *, surface):
+        endpoint = next(ep for ep in manifest.endpoints if ep.id == call["name"].split("__", 1)[1])
+        with bind_context(tool_name=call["name"]):
+            return await executor.execute(call["name"], call["args"], manifest, endpoint)
+
+    runner = SimpleNamespace(enforce_plan_mode=lambda *a: None, enforce_safety=lambda *a: None)
+    runner.execute_tool_call_for_llm = dispatch
+    state = SimpleNamespace(skill_executor=executor, tool_runner=runner,
+                            skill_registry=SimpleNamespace(skills={"gui_computer_use": manifest}))
+    monkeypatch.setitem(sys.modules, "api.state", SimpleNamespace(state=state))
+    return bind_context(session_id="computer-driver-fixture", surface="websocket")
 
 
 # ── Action normalization ──────────────────────────────────────────────
@@ -233,7 +257,8 @@ async def test_agentic_routes_click_to_gui_computer_use(monkeypatch):
     register_instance("gui_computer_use", FakeGUI())
 
     skill = AgenticComputerUseSkill()
-    msg = await skill._execute_action({"type": "left_click", "coordinate": [123, 456]})
+    with _wire_reviewed_gui(monkeypatch, FakeGUI()):
+        msg = await skill._execute_action({"type": "left_click", "coordinate": [123, 456]})
     assert calls == [("mouse_click", {"x": 123, "y": 456})]
     assert "mouse_click" in msg
 
@@ -253,7 +278,8 @@ async def test_agentic_routes_openai_keypress_to_gui_key_press(monkeypatch):
     register_instance("gui_computer_use", FakeGUI())
 
     skill = AgenticComputerUseSkill()
-    await skill._execute_action({"type": "keypress", "keys": ["CTRL", "X"]})
+    with _wire_reviewed_gui(monkeypatch, FakeGUI()):
+        await skill._execute_action({"type": "keypress", "keys": ["CTRL", "X"]})
     assert calls == [("key_press", {"keys": "ctrl+x"})]
 
 
@@ -321,8 +347,7 @@ async def test_agentic_reports_missing_gui_skill_truthfully(monkeypatch):
 
     skill = AgenticComputerUseSkill()
     msg = await skill._execute_action({"type": "click", "x": 1, "y": 2})
-    assert "gui_computer_use" in msg
-    assert "not registered" in msg or "cannot execute" in msg
+    assert "cannot execute" in msg
 
 
 # ── desktop_automation shim is honest about delegation ──

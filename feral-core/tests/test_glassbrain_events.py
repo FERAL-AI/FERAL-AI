@@ -152,6 +152,9 @@ async def test_openai_voice_proxy_emits_voice_session_start():
     proxy._voice_personality.current_time_of_day = MagicMock(return_value="morning")
     proxy._voice_personality.get_voice_instructions = MagicMock(return_value="test")
     proxy._memory = None
+    # This synthetic proxy bypasses the constructor, whose optional runtime
+    # collaborator is also inspected by the managed-context activation guard.
+    proxy._orchestrator = None
     proxy._perception = None
     proxy._skill_registry = None
     proxy._skill_executor = None

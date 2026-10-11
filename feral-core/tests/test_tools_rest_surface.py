@@ -135,7 +135,7 @@ async def test_execute_confirm_requires_flag(env):
     assert res["status_code"] == 412
     assert env["confirm"].calls == []
 
-    ok = await tools.execute_tool({"tool_name": "rest_confirm__act", "confirm": True}) 
+    ok = await tools.execute_tool({"tool_name": "rest_confirm__act", "confirm": True, "session_id": "rest-owner"})
     assert ok["success"] is True
     assert env["confirm"].calls == [("act", {})]
 
@@ -145,3 +145,79 @@ async def test_execute_missing_params(env):
     res = await tools.execute_tool({"args": {}})
     assert res["success"] is False
     assert res["status_code"] == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("identity", [None, "", " ", " owner", "owner ", 12, False, [], {}, "owner\x00", "x" * 1025])
+async def test_invalid_explicit_session_never_dispatches(env, identity):
+    from unittest.mock import AsyncMock
+
+    executor = tools.state.skill_executor
+    executor.execute = AsyncMock()
+    for name in ("rest_confirm__act", f"{_SAFE_SKILL_ID}__ping"):
+        result = await tools.execute_tool({"tool_name": name, "confirm": True, "session_id": identity})
+        assert result["error_code"] == "context_invalid_session"
+        assert result["status_code"] == 422
+    executor.execute.assert_not_awaited()
+    assert env["confirm"].calls == env["safe"].calls == []
+
+
+@pytest.mark.asyncio
+async def test_missing_mutating_session_never_dispatches(env):
+    from unittest.mock import AsyncMock
+
+    executor = tools.state.skill_executor
+    executor.execute = AsyncMock()
+    result = await tools.execute_tool({"tool_name": "rest_confirm__act", "confirm": True})
+    assert result["error_code"] == "context_invalid_session"
+    executor.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("switch", ["off", "0", "false", "no"])
+async def test_disabled_binding_refuses_mutation_but_keeps_trusted_reads(env, monkeypatch, switch):
+    from unittest.mock import AsyncMock
+
+    executor = tools.state.skill_executor
+    execute = AsyncMock(return_value={"success": True})
+    executor.execute = execute
+    with monkeypatch.context() as scoped:
+        scoped.setenv("FERAL_TOOL_CALL_CONTEXT", switch)
+        result = await tools.execute_tool({"tool_name": "rest_confirm__act", "confirm": True, "session_id": "caller"})
+        assert result["error_code"] == "context_binding_disabled"
+        execute.assert_not_awaited()
+        result = await tools.execute_tool({"tool_name": f"{_SAFE_SKILL_ID}__ping"})
+        assert result["success"] is True
+        execute.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_mutation_verifies_effective_bound_session_before_dispatch(env, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    executor = tools.state.skill_executor
+    executor.execute = AsyncMock()
+    monkeypatch.setattr(tools, "current_context", lambda: SimpleNamespace(session_id="foreign"))
+    result = await tools.execute_tool({"tool_name": "rest_confirm__act", "confirm": True, "session_id": "caller"})
+    assert result["error_code"] == "context_binding_unavailable"
+    executor.execute.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_declared_read_escalated_by_policy_requires_real_session(env, monkeypatch):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    import security.safety_resolver as resolver
+
+    executor = tools.state.skill_executor
+    executor.execute = AsyncMock(return_value={"success": True})
+    assert resolver.is_read_only(f"{_SAFE_SKILL_ID}__ping", registry=env["reg"], strict=True)
+    monkeypatch.setattr(resolver, "resolve_policy", lambda *args, **kwargs: SimpleNamespace(level=resolver.LEVEL_CONFIRM))
+    result = await tools.execute_tool({"tool_name": f"{_SAFE_SKILL_ID}__ping", "confirm": True})
+    assert result["error_code"] == "context_invalid_session"
+    executor.execute.assert_not_awaited()
+    result = await tools.execute_tool({"tool_name": f"{_SAFE_SKILL_ID}__ping", "confirm": True, "session_id": "read-review-owner"})
+    assert result["success"] is True
+    executor.execute.assert_awaited_once()

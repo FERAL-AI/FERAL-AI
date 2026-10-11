@@ -44,14 +44,22 @@ from models.skill_manifest import BrandProfile, SkillEndpoint, SkillManifest
 
 def _skill(skill_id: str, triggers: list[str]) -> SkillManifest:
     return SkillManifest(
-        skill_id=skill_id, version="1.0.0", author="test",
-        brand=BrandProfile(name=skill_id, primary_color="#000", logo_url="", icon_set="sf_symbols"),
+        skill_id=skill_id,
+        version="1.0.0",
+        author="test",
+        brand=BrandProfile(
+            name=skill_id, primary_color="#000", logo_url="", icon_set="sf_symbols"
+        ),
         description=f"{skill_id} skill",
         trigger_phrases=triggers,
         endpoints=[
             SkillEndpoint(
-                id="default", method="POST", url=f"https://x/{skill_id}",
-                description="x", returns_description="x", ui_hint="detail_card",
+                id="default",
+                method="POST",
+                url=f"https://x/{skill_id}",
+                description="x",
+                returns_description="x",
+                ui_hint="detail_card",
             )
         ],
     )
@@ -64,6 +72,48 @@ SKILLS = {
 }
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler_name", ["handle_command", "handle_command_stream"])
+async def test_attachment_turn_reaches_model_with_multi_agent_default_enabled(
+    handler_name,
+):
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = True
+    orch._multi_agent = MagicMock()
+    orch._multi_agent.run = AsyncMock(return_value="ungrounded multi-agent reply")
+    captured = []
+
+    async def buffered(messages, **kwargs):
+        captured.extend(messages)
+        return {
+            "choices": [
+                {"message": {"role": "assistant", "content": "violet maple 47"}}
+            ]
+        }
+
+    async def streaming(messages, **kwargs):
+        captured.extend(messages)
+        yield {"type": "text_delta", "content": "violet maple 47"}
+        yield {"type": "done"}
+
+    orch.llm.chat_with_failover = buffered
+    orch.llm.chat_stream = streaming
+    orch.llm.extract_response = MagicMock(return_value=("violet maple 47", []))
+    _capture_sends(orch)
+    await getattr(orch, handler_name)(
+        session_id="attachment-fixture",
+        text="Read the file",
+        context={
+            "_attachment_model_data": "\n[ATTACHMENT_DATA fixture: violet maple 47]"
+        },
+    )
+    orch._multi_agent.run.assert_not_awaited()
+    users = [message for message in captured if message.get("role") == "user"]
+    assert users and "violet maple 47" in json.dumps(users[-1])
+    assert orch._route_prompt.await_args.args[0] == "Read the file"
+
+
 def _make_orchestrator() -> Orchestrator:
     reg = MagicMock()
     reg.skills = SKILLS
@@ -71,13 +121,22 @@ def _make_orchestrator() -> Orchestrator:
     reg.get_tools_for_skills = lambda skills: [
         {
             "type": "function",
-            "function": {"name": f"{s.skill_id}__default", "description": "", "parameters": {}},
+            "function": {
+                "name": f"{s.skill_id}__default",
+                "description": "",
+                "parameters": {},
+            },
         }
         for s in skills
     ]
     orch = Orchestrator(
-        skill_registry=reg, send_to_client=AsyncMock(), daemons={},
-        memory=None, vision_buffer=None, perception=None, learner=None,
+        skill_registry=reg,
+        send_to_client=AsyncMock(),
+        daemons={},
+        memory=None,
+        vision_buffer=None,
+        perception=None,
+        learner=None,
     )
     # Pin the streaming gate. ``Orchestrator`` reads FERAL_STREAMING at
     # construction and the config loader exports it from
@@ -112,11 +171,13 @@ def _capture_sends(orch: Orchestrator) -> list[dict]:
             dumped = msg.model_dump()
         else:
             dumped = dict(msg)
-        captured.append({
-            "type": dumped.get("type") or getattr(msg, "type", None),
-            "payload": dumped.get("payload") or {},
-            "session_id": dumped.get("session_id", session_id),
-        })
+        captured.append(
+            {
+                "type": dumped.get("type") or getattr(msg, "type", None),
+                "payload": dumped.get("payload") or {},
+                "session_id": dumped.get("session_id", session_id),
+            }
+        )
 
     orch.send = _send
     return captured
@@ -179,8 +240,13 @@ def _make_default_gate_orchestrator() -> Orchestrator:
     reg.find_skills_for_query = lambda q, top_k=5: []
     reg.get_tools_for_skills = lambda skills: []
     orch = Orchestrator(
-        skill_registry=reg, send_to_client=AsyncMock(), daemons={},
-        memory=None, vision_buffer=None, perception=None, learner=None,
+        skill_registry=reg,
+        send_to_client=AsyncMock(),
+        daemons={},
+        memory=None,
+        vision_buffer=None,
+        perception=None,
+        learner=None,
     )
     orch.llm = MagicMock()
     orch.llm.available = True
@@ -192,9 +258,13 @@ def _make_default_gate_orchestrator() -> Orchestrator:
         yield {"type": "done"}
 
     orch.llm.chat_stream = _stream
-    orch.llm.chat_with_failover = AsyncMock(return_value={
-        "choices": [{"message": {"role": "assistant", "content": "buffered reply"}}],
-    })
+    orch.llm.chat_with_failover = AsyncMock(
+        return_value={
+            "choices": [
+                {"message": {"role": "assistant", "content": "buffered reply"}}
+            ],
+        }
+    )
     orch.llm.extract_response = MagicMock(return_value=("buffered reply", []))
     orch._route_prompt = AsyncMock(return_value=[])
     orch._ensure_core_skills = lambda x: x
@@ -245,7 +315,11 @@ class TestParityChatOnlyTurn:
         async def stream_canonical(messages, tools=None, **kwargs):
             # Fragment the canonical text into deltas — the stream
             # path's ``accumulated_text`` must end up == canonical.
-            for piece in [canonical_text[:10], canonical_text[10:30], canonical_text[30:]]:
+            for piece in [
+                canonical_text[:10],
+                canonical_text[10:30],
+                canonical_text[30:],
+            ]:
                 yield {"type": "text_delta", "content": piece}
             yield {"type": "done"}
 
@@ -259,14 +333,20 @@ class TestParityChatOnlyTurn:
         orch_b.memory = memory_b
 
         sends_b = _capture_sends(orch_b)
-        await orch_b.handle_command_stream(session_id="s-bbb", text="What did I do yesterday?")
+        await orch_b.handle_command_stream(
+            session_id="s-bbb", text="What did I do yesterday?"
+        )
 
         # ── Parity contract 1: same final assistant text ────────
         # Non-stream emits exactly one ``text_response`` carrying the
         # full answer. Stream emits N ``stream_delta`` frames whose
         # concatenation == the same answer.
         non_stream_text = next(
-            (f["payload"].get("text", "") for f in sends_a if f["type"] == "text_response"),
+            (
+                f["payload"].get("text", "")
+                for f in sends_a
+                if f["type"] == "text_response"
+            ),
             None,
         )
         assert non_stream_text == canonical_text
@@ -274,8 +354,7 @@ class TestParityChatOnlyTurn:
         stream_deltas = [
             f["payload"].get("delta", "")
             for f in sends_b
-            if f["type"] == "stream_delta"
-            and not f["payload"].get("is_final", False)
+            if f["type"] == "stream_delta" and not f["payload"].get("is_final", False)
         ]
         stream_text = "".join(stream_deltas)
         assert stream_text == canonical_text
@@ -285,15 +364,19 @@ class TestParityChatOnlyTurn:
         # Both paths working_push the assistant turn with role=assistant
         # and the same text payload (clipped to 300 chars).
         non_stream_assistant_pushes = [
-            call.args[1] for call in memory_a.working_push.call_args_list
+            call.args[1]
+            for call in memory_a.working_push.call_args_list
             if call.args[1].get("role") == "assistant"
         ]
         stream_assistant_pushes = [
-            call.args[1] for call in memory_b.working_push.call_args_list
+            call.args[1]
+            for call in memory_b.working_push.call_args_list
             if call.args[1].get("role") == "assistant"
         ]
         assert non_stream_assistant_pushes == stream_assistant_pushes
-        assert non_stream_assistant_pushes == [{"role": "assistant", "text": canonical_text[:300]}]
+        assert non_stream_assistant_pushes == [
+            {"role": "assistant", "text": canonical_text[:300]}
+        ]
 
 
 class TestParityToolDispatch:
@@ -305,7 +388,11 @@ class TestParityToolDispatch:
     async def test_tool_dispatch_order_matches(self):
         tool_calls = [
             {"id": "tc-1", "name": "notes_memory__default", "args": {"q": "yesterday"}},
-            {"id": "tc-2", "name": "calendar_google__default", "args": {"day": "yesterday"}},
+            {
+                "id": "tc-2",
+                "name": "calendar_google__default",
+                "args": {"day": "yesterday"},
+            },
         ]
 
         async def fake_tool_run(session_id, tc, available_skills):
@@ -319,22 +406,27 @@ class TestParityToolDispatch:
         orch_a.llm.model_name = "test-model"
         responses = [
             {
-                "choices": [{
-                    "message": {
-                        "role": "assistant", "content": "",
-                        "tool_calls": [
-                            {"id": tc["id"], "type": "function",
-                             "function": {"name": tc["name"], "arguments": json.dumps(tc["args"])}}
-                            for tc in tool_calls
-                        ],
-                    }
-                }]
-            },
-            {
                 "choices": [
-                    {"message": {"role": "assistant", "content": "Done."}}
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "",
+                            "tool_calls": [
+                                {
+                                    "id": tc["id"],
+                                    "type": "function",
+                                    "function": {
+                                        "name": tc["name"],
+                                        "arguments": json.dumps(tc["args"]),
+                                    },
+                                }
+                                for tc in tool_calls
+                            ],
+                        }
+                    }
                 ]
             },
+            {"choices": [{"message": {"role": "assistant", "content": "Done."}}]},
         ]
         orch_a.llm.chat_with_failover = AsyncMock(side_effect=responses)
         # The LLM's extract_response mirrors how the orchestrator
@@ -386,7 +478,9 @@ class TestParityToolDispatch:
         orch_b.memory.episode_save = AsyncMock(return_value={})
 
         sends_b = _capture_sends(orch_b)
-        await orch_b.handle_command_stream(session_id="s-bbb", text="What did I do yesterday?")
+        await orch_b.handle_command_stream(
+            session_id="s-bbb", text="What did I do yesterday?"
+        )
 
         # ── Parity: same tool calls in same order ───────────────
         non_stream_tool_order = [
@@ -398,7 +492,10 @@ class TestParityToolDispatch:
             for call in orch_b._execute_tool_call_for_llm.call_args_list
         ]
         assert non_stream_tool_order == stream_tool_order
-        assert non_stream_tool_order == ["notes_memory__default", "calendar_google__default"]
+        assert non_stream_tool_order == [
+            "notes_memory__default",
+            "calendar_google__default",
+        ]
 
         # ── Parity: tool_start / tool_result frame order ────────
         def _tool_frame_seq(sends):
@@ -445,7 +542,8 @@ class TestParityPausedThoughts:
         orch_a._ensure_core_skills = lambda x: x
 
         orch_a.register_paused_thought(
-            session_id="s-aaa", thought_id="t-1",
+            session_id="s-aaa",
+            thought_id="t-1",
             text="I was about to say the project is on track",
         )
         await orch_a.handle_command(session_id="s-aaa", text="continue please")
@@ -453,7 +551,8 @@ class TestParityPausedThoughts:
         assert captured_messages_a, "no LLM call recorded"
         history_a = captured_messages_a[0]
         assert any(
-            m.get("role") == "assistant" and "[RESUMED THOUGHT]" in (m.get("content") or "")
+            m.get("role") == "assistant"
+            and "[RESUMED THOUGHT]" in (m.get("content") or "")
             for m in history_a
         ), "non-stream did not re-thread the paused thought"
 
@@ -474,7 +573,8 @@ class TestParityPausedThoughts:
         orch_b._ensure_core_skills = lambda x: x
 
         orch_b.register_paused_thought(
-            session_id="s-bbb", thought_id="t-1",
+            session_id="s-bbb",
+            thought_id="t-1",
             text="I was about to say the project is on track",
         )
         await orch_b.handle_command_stream(session_id="s-bbb", text="continue please")
@@ -482,7 +582,8 @@ class TestParityPausedThoughts:
         assert captured_messages_b, "no stream LLM call recorded"
         history_b = captured_messages_b[0]
         assert any(
-            m.get("role") == "assistant" and "[RESUMED THOUGHT]" in (m.get("content") or "")
+            m.get("role") == "assistant"
+            and "[RESUMED THOUGHT]" in (m.get("content") or "")
             for m in history_b
         ), "stream did not re-thread the paused thought"
 
@@ -507,11 +608,16 @@ class TestParityMultiAgentPrePath:
             orch._multi_agent = ma
             # Ensure single-agent path would never be reached: if it
             # were, this AsyncMock raises.
-            orch.llm.chat_with_failover = AsyncMock(side_effect=AssertionError(
-                "single-agent path triggered in multi-agent mode"))
+            orch.llm.chat_with_failover = AsyncMock(
+                side_effect=AssertionError(
+                    "single-agent path triggered in multi-agent mode"
+                )
+            )
 
             async def stream_should_not_be_called(*a, **kw):
-                raise AssertionError("single-agent stream path triggered in multi-agent mode")
+                raise AssertionError(
+                    "single-agent stream path triggered in multi-agent mode"
+                )
                 yield
 
             orch.llm.chat_stream = stream_should_not_be_called
@@ -519,7 +625,9 @@ class TestParityMultiAgentPrePath:
             orch.memory.working_push = MagicMock()
             orch.memory.episode_save = AsyncMock(return_value={})
 
-            _capture_sends(orch)  # records to orch._captured_sends; we don't read it here
+            _capture_sends(
+                orch
+            )  # records to orch._captured_sends; we don't read it here
             handler = getattr(orch, handler_name)
             await handler(session_id=f"s-{handler_name}", text="anything")
 
@@ -527,9 +635,204 @@ class TestParityMultiAgentPrePath:
             # working_push got the assistant turn from the multi-agent
             # output — same shape as the single-agent path.
             assistant_pushes = [
-                call.args[1] for call in orch.memory.working_push.call_args_list
+                call.args[1]
+                for call in orch.memory.working_push.call_args_list
                 if call.args[1].get("role") == "assistant"
             ]
             assert assistant_pushes == [
                 {"role": "assistant", "text": multi_agent_text[:300]}
             ], f"{handler_name} did not write assistant turn from multi-agent output"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", ["closed", "missing", "terminal"])
+async def test_stream_delivery_loss_never_replays_command(failure):
+    from agents.orchestrator import SessionDeliveryLost
+
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = False
+    fallback = AsyncMock()
+    orch._handle_command_impl = fallback
+    calls = []
+
+    async def sender(sid, msg):
+        calls.append(msg)
+        if msg.type == "stream_delta":
+            if failure == "missing":
+                return False
+            if failure != "terminal" or msg.payload.get("is_final"):
+                raise RuntimeError(
+                    "Unexpected ASGI message 'websocket.send', after sending 'websocket.close'"
+                )
+        return True
+
+    orch.send = sender
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream("delivery-fixture", "29+13")
+    fallback.assert_not_awaited()
+    orch.llm.chat_with_failover.assert_not_awaited()
+    assert any(msg.type == "stream_delta" for msg in calls)
+
+
+@pytest.mark.asyncio
+async def test_stream_delivery_missing_before_inference_does_not_call_provider():
+    from agents.orchestrator import SessionDeliveryLost
+
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = False
+    invoked = []
+
+    async def stream(*a, **k):
+        invoked.append(True)
+        yield {"type": "text_delta", "content": "42"}
+
+    orch.llm.chat_stream = stream
+    orch.send = AsyncMock(return_value=False)
+    orch._handle_command_impl = AsyncMock()
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream("delivery-fixture", "29+13")
+    assert invoked == []
+    orch._handle_command_impl.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_interruption_after_tool_instructions_never_replays():
+    from agents.orchestrator import SessionDeliveryLost
+
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = False
+
+    async def stream(*a, **k):
+        yield {
+            "type": "tool_call_delta",
+            "tool_call": {"name": "fixture__write", "args": {}},
+        }
+        raise RuntimeError("upstream disconnected")
+
+    orch.llm.chat_stream = stream
+    orch.send = AsyncMock(return_value=True)
+    orch._handle_command_impl = AsyncMock()
+    orch._execute_tool_call_for_llm = AsyncMock()
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream("delivery-fixture", "write requested file")
+    orch._handle_command_impl.assert_not_awaited()
+    orch._execute_tool_call_for_llm.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_provider_failure_next_round_does_not_repeat_already_dispatched_tool():
+    from agents.orchestrator import SessionDeliveryLost
+
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = False
+    rounds = []
+
+    async def stream(*a, **k):
+        rounds.append(True)
+        if len(rounds) == 1:
+            yield {
+                "type": "tool_call_delta",
+                "tool_call": {
+                    "name": "notes_memory__default",
+                    "args": {},
+                    "id": "once",
+                },
+            }
+            yield {"type": "done"}
+        else:
+            raise RuntimeError("provider failed before next chunk")
+
+    orch.llm.chat_stream = stream
+    orch.send = AsyncMock(return_value=True)
+    orch._handle_command_impl = AsyncMock()
+    orch._execute_tool_call_for_llm = AsyncMock(
+        return_value={"success": True, "data": {"written": True}}
+    )
+    with pytest.raises(SessionDeliveryLost):
+        await orch.handle_command_stream("delivery-fixture", "write requested note")
+    assert len(rounds) == 2
+    orch._handle_command_impl.assert_not_awaited()
+    orch._execute_tool_call_for_llm.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", ["handle_command", "handle_command_stream"])
+@pytest.mark.parametrize("failure", ["closed", "missing", "sdui"])
+async def test_multiagent_response_delivery_loss_never_runs_single_agent(
+    handler, failure
+):
+    from agents.orchestrator import SessionDeliveryLost
+
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = True
+    reply = '{"type":"Text","text":"42"}' if failure == "sdui" else "42"
+    orch._multi_agent = MagicMock()
+    orch._multi_agent.run = AsyncMock(return_value=reply)
+
+    async def sender(*args):
+        if failure == "missing":
+            return False
+        raise RuntimeError("closed websocket transport")
+
+    orch.send = sender
+    with pytest.raises(SessionDeliveryLost):
+        await getattr(orch, handler)("delivery-fixture", "29+13")
+    orch._multi_agent.run.assert_awaited_once()
+    orch._route_prompt.assert_not_awaited()
+    orch.llm.chat_with_failover.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("handler", ["handle_command", "handle_command_stream"])
+@pytest.mark.parametrize("outcome", ["empty", "exception"])
+async def test_entered_multiagent_unknown_outcome_has_no_implicit_command_replay(
+    handler, outcome
+):
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = True
+    orch._multi_agent = MagicMock()
+    orch._multi_agent.run = (
+        AsyncMock(return_value="")
+        if outcome == "empty"
+        else AsyncMock(side_effect=RuntimeError("unknown prior effects"))
+    )
+    frames = []
+
+    async def send(sid, msg):
+        frames.append(msg)
+        return True
+
+    orch.send = send
+    assert await getattr(orch, handler)("delivery-fixture", "write file") is None
+    orch._route_prompt.assert_not_awaited()
+    orch.llm.chat_with_failover.assert_not_awaited()
+    errors = [f for f in frames if f.type == "error"]
+    assert len(errors) == 1 and errors[0].payload["code"].startswith("multi_agent_")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reply", ["42", "null", "true", "[1,2]", '"hello"'])
+async def test_multiagent_scalar_or_list_json_answer_delivers_as_plain_text(reply):
+    orch = _make_default_gate_orchestrator()
+    orch._streaming_enabled = True
+    orch._multi_agent_enabled = True
+    orch._multi_agent = MagicMock()
+    orch._multi_agent.run = AsyncMock(return_value=reply)
+    frames = []
+
+    async def send(sid, msg):
+        frames.append(msg)
+        return True
+
+    orch.send = send
+    assert await orch.handle_command_stream("delivery-fixture", "answer") == reply
+    texts = [f.payload["text"] for f in frames if f.type == "text_response"]
+    assert texts == [reply]
+    assert not [f for f in frames if f.type == "error"]
+    orch._route_prompt.assert_not_awaited()

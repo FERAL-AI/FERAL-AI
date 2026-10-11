@@ -190,19 +190,32 @@ def test_raw_dict_handler_returns_empty_string_when_neither_present() -> None:
 
 def test_server_handler_uses_same_defensive_lookup() -> None:
     """Read ``api/server.py`` and confirm the ``sensor_telemetry``
-    branch literally contains the defensive ``.get("sensor") or
-    .get("sensor_type", "")`` expression. If a future refactor splits
+    branch contains the exact defensive fallback, independently of source
+    formatting. If a future refactor splits
     this into a helper, update both this assertion and the docstring
     above."""
     from pathlib import Path
+    import ast
 
     server_src = (
         Path(__file__).resolve().parents[1] / "api" / "server.py"
     ).read_text()
-    needle = (
-        'payload_dict.get("sensor") or payload_dict.get("sensor_type", "")'
-    )
-    assert needle in server_src, (
+    expected = ast.parse(
+        'payload_dict.get("sensor") or payload_dict.get("sensor_type", "")', mode="eval"
+    ).body
+    branch_test = ast.parse('msg.type == "sensor_telemetry"', mode="eval").body
+    branches = [
+        node for node in ast.walk(ast.parse(server_src))
+        if isinstance(node, ast.If) and ast.dump(node.test) == ast.dump(branch_test)
+    ]
+    assert len(branches) == 1
+    assignments = [
+        node for statement in branches[0].body for node in ast.walk(statement)
+        if isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "sensor_name" for target in node.targets)
+        and ast.dump(node.value) == ast.dump(expected)
+    ]
+    assert len(assignments) == 1, (
         "api/server.py sensor_telemetry branch no longer reads both "
         "'sensor' and 'sensor_type' from the raw payload dict. The "
         "alias on SensorTelemetryPayload covers parse_message-based "
@@ -210,3 +223,12 @@ def test_server_handler_uses_same_defensive_lookup() -> None:
         "needs the same tolerance until the iOS App Store update "
         "ships."
     )
+    expression = compile(ast.Expression(assignments[0].value), "<sensor fallback>", "eval")
+    for payload, sensor in [
+        ({"sensor": "heart_rate"}, "heart_rate"),
+        ({"sensor_type": "spo2"}, "spo2"),
+        ({"sensor": "heart_rate", "sensor_type": "spo2"}, "heart_rate"),
+        ({"sensor": "", "sensor_type": "spo2"}, "spo2"),
+        ({}, ""),
+    ]:
+        assert eval(expression, {"__builtins__": {}}, {"payload_dict": payload}) == sensor

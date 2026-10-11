@@ -20,11 +20,16 @@ pytestmark = pytest.mark.no_auto_feral_home
 
 
 @pytest.fixture(autouse=True)
-def _clean_feral_env(monkeypatch):
+def _clean_feral_env(monkeypatch, tmp_path):
     """Remove all FERAL_* env vars so config tests control their own state."""
     for key in list(os.environ):
         if key.startswith("FERAL_") or key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "GOOGLE_API_KEY"):
             monkeypatch.delenv(key, raising=False)
+    # Credential migration also writes an audit trail. Clearing ambient settings
+    # must not remove the disposable runtime identity and select the real home.
+    user_home = tmp_path / ".feral"
+    monkeypatch.setenv("FERAL_HOME", str(user_home))
+    monkeypatch.setenv("FERAL_AUDIT_LOG_PATH", str(user_home / "audit.log"))
 
 
 @pytest.fixture
@@ -398,5 +403,6 @@ class TestXDGPaths:
         assert feral_home() == tmp_path / "xdg" / "feral"
 
     def test_feral_data_home_xdg(self, monkeypatch, tmp_path):
+        monkeypatch.delenv("FERAL_HOME", raising=False)
         monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
         assert feral_data_home() == tmp_path / "data" / "feral"

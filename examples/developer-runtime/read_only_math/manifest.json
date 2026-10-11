@@ -1,0 +1,31 @@
+{
+  "skill_id": "developer_math",
+  "version": "1.0.0",
+  "author": "FERAL developer example",
+  "brand": {"name": "Developer Math", "primary_color": "#4974B8"},
+  "description": "Add two bounded integers locally without filesystem, network or account access.",
+  "trigger_phrases": ["calculate an integer sum"],
+  "categories": ["developer", "calculation"],
+  "auth": {"type": "none"},
+  "endpoints": [{
+    "id": "calculate",
+    "method": "PYTHON",
+    "url": "",
+    "description": "Return the sum of two integers, each between -1000000 and 1000000.",
+    "params": [
+      {"name": "a", "type": "integer", "required": true, "description": "First bounded integer."},
+      {"name": "b", "type": "integer", "required": true, "description": "Second bounded integer."}
+    ],
+    "returns_description": "An envelope whose data contains sum and the bound caller session_id.",
+    "read_only_hint": true,
+    "safety_tier": "confirm",
+    "requires_user_approval": true,
+    "ui_hint": "metric"
+  }],
+  "permissions": [],
+  "flows": [],
+  "crons": [],
+  "triggers": [],
+  "requires_daemon": false,
+  "max_calls_per_hour": 100
+}

@@ -132,10 +132,21 @@ class ScreenTransitionDetector:
 
 # ── Screen Capture Helpers ──────────────────────────────────────────
 
+def ambient_screen_capture_allowed() -> bool:
+    """Check access without opening a privacy prompt on background startup."""
+    if platform.system().lower() != "darwin":
+        return True
+    from security.macos_permissions import check_screen_recording
+    return check_screen_recording().status == "granted"
+
+
 async def _capture_screenshot(save_path: Path) -> bool:
     """Platform-aware screenshot to *save_path*. Returns True on success."""
     system = platform.system().lower()
     if system == "darwin":
+        if not ambient_screen_capture_allowed():
+            logger.info("Ambient screen capture requires an existing Screen Recording grant")
+            return False
         cmd = ["screencapture", "-x", str(save_path)]
     elif system == "linux":
         import shutil

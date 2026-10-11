@@ -43,13 +43,15 @@
     "@types/react": "^18.2.66",
     "@types/react-dom": "^18.2.22",
     "@vitejs/plugin-react": "^4.7.0",
-    "@vitest/coverage-v8": "^4.1.4",
+    "@vitest/coverage-v8": "^4.1.11",
     "jsdom": "^29.0.2",
     "vite": "^6.4.2",
-    "vitest": "^4.1.4"
+    "vitest": "^4.1.11"
   },
   "overrides": {
-    "undici": "^7.29.0",
+    "browserslist": "^4.28.7",
+    "baseline-browser-mapping": "^2.11.0",
+    "undici": "^7.29.1",
     "postcss": "^8.5.23",
     "nanoid": "^3.3.18"
   }

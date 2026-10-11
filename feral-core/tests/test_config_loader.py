@@ -27,7 +27,7 @@ pytestmark = pytest.mark.no_auto_feral_home
 
 
 @pytest.fixture(autouse=True)
-def _clean_feral_env(monkeypatch):
+def _clean_feral_env(monkeypatch, tmp_path):
     """Strip ambient provider keys and FERAL_* env vars so each test
     asserts on a predictable baseline."""
     for key in list(os.environ):
@@ -39,6 +39,11 @@ def _clean_feral_env(monkeypatch):
             "GEMINI_API_KEY",
         ):
             monkeypatch.delenv(key, raising=False)
+    # Match the credential file/vault identity used below and keep its required
+    # audit writes in the same disposable profile after the ambient env reset.
+    user_home = tmp_path / ".feral"
+    monkeypatch.setenv("FERAL_HOME", str(user_home))
+    monkeypatch.setenv("FERAL_AUDIT_LOG_PATH", str(user_home / "audit.log"))
 
 
 class TestCredentialFileLoading:

@@ -494,13 +494,14 @@ def _safety_from_manifest(endpoint, skill_id: str = "") -> Optional[str]:
         return None
 
     # ── escalation: anyone may ask for more friction ──────────────────
-    if endpoint.requires_user_approval:
-        return LEVEL_CONFIRM
     tier = (getattr(endpoint, "safety_tier", None) or "").strip().lower()
-    if tier == "confirm":
-        return LEVEL_CONFIRM
+    # An explicit refusal cannot be weakened by an additional approval flag.
     if tier == "deny":
         return LEVEL_DENY
+    if endpoint.requires_user_approval:
+        return LEVEL_CONFIRM
+    if tier == "confirm":
+        return LEVEL_CONFIRM
 
     # ── de-escalation: first-party manifests only ─────────────────────
     claims_auto = tier == "safe" or bool(getattr(endpoint, "read_only_hint", False))

@@ -35,6 +35,13 @@ if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
 from skills.impl.agentic_computer_use import AgenticComputerUseSkill  # noqa: E402
+from skills.call_context import bind_context  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def caller_session():
+    with bind_context(session_id="agentic-gate-fixture", surface="websocket"):
+        yield
 
 
 class _Action:
@@ -79,10 +86,8 @@ class _Manifest:
 def _wire_state(monkeypatch, *, executor=None, gui=None):
     """Install a fake `api.state` the dispatcher can find.
 
-    The registry has to resolve for real: if `_resolve_gui_endpoint`
-    cannot find the manifest it falls back to the direct path by design,
-    so a MagicMock registry would make this test pass for the wrong
-    reason and prove nothing about gating.
+    The registry resolves a concrete endpoint and the runner forwards the
+    reviewed call. Full actual-runner regressions live in the authority suite.
     """
     state_mod = MagicMock()
     state_obj = MagicMock()
@@ -90,6 +95,11 @@ def _wire_state(monkeypatch, *, executor=None, gui=None):
     registry = MagicMock()
     registry.skills = {"gui_computer_use": _Manifest()}
     state_obj.skill_registry = registry
+    async def dispatch(session_id, call, skills, *, surface):
+        manifest = registry.skills["gui_computer_use"]
+        endpoint = next(ep for ep in manifest.endpoints if ep.id == call["name"].split("__", 1)[1])
+        return await executor.execute(call["name"], call["args"], manifest, endpoint)
+    state_obj.tool_runner.execute_tool_call_for_llm = dispatch
     state_mod.state = state_obj
     monkeypatch.setitem(sys.modules, "api.state", state_mod)
 
@@ -146,14 +156,8 @@ async def test_a_refused_inner_action_is_not_executed(skill, monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_it_still_works_with_no_brain_attached(skill, monkeypatch):
-    """Offline tooling, tests and the CLI have no `api.state`.
-
-    `SkillExecutor._gate` fails open for exactly this reason and says so.
-    Refusing here would break those callers without making a live
-    session any safer, so the direct path remains the fallback, not the
-    default.
-    """
+async def test_no_brain_refuses_autonomous_effects(skill, monkeypatch):
+    """Offline parsing is available, but raw autonomous input is not."""
     monkeypatch.delitem(sys.modules, "api.state", raising=False)
     raw_gui = MagicMock()
     raw_gui.execute = AsyncMock(return_value={
@@ -166,10 +170,8 @@ async def test_it_still_works_with_no_brain_attached(skill, monkeypatch):
 
     message = await skill._dispatch_via_gui(_Action())
 
-    assert raw_gui.execute.await_count == 1, (
-        "with no brain attached the dispatcher should still act"
-    )
-    assert "clicked" in str(message)
+    raw_gui.execute.assert_not_awaited()
+    assert "central executor" in str(message)
 
 
 @pytest.mark.asyncio
@@ -180,11 +182,11 @@ async def test_a_missing_gui_skill_is_reported_not_crashed(skill, monkeypatch):
         impl_pkg, "get_implementation", lambda name: None, raising=False,
     )
     message = await skill._dispatch_via_gui(_Action())
-    assert "not registered" in str(message)
+    assert "cannot execute" in str(message)
 
 
 def test_the_dispatcher_does_not_reach_for_the_raw_instance_first():
-    """Pin the ordering: executor first, raw instance only as fallback."""
+    """Autonomous effects require the existing central executor."""
     src = (ROOT / "skills" / "impl" / "agentic_computer_use.py").read_text()
     assert "skill_executor" in src, (
         "agentic_computer_use never mentions skill_executor; its inner loop "

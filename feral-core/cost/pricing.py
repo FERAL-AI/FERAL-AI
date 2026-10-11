@@ -53,6 +53,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 import threading
 from pathlib import Path
@@ -123,9 +124,11 @@ def _merge_pricing_blob(target: dict[str, dict[str, float]], pricing: dict[str, 
         # a 0/0 rate makes budget routing think every call is free,
         # which is the opposite of safe behaviour for a cost gate.
         try:
-            inp = float(rates.get("input", 0.0))
-            out = float(rates.get("output", 0.0))
-        except (TypeError, ValueError):
+            inp = float(rates["input"])
+            out = float(rates["output"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if not all(math.isfinite(value) and value >= 0 for value in (inp, out)):
             continue
         entry: dict[str, float] = {"input": inp, "output": out}
         # Prompt-cache rates are optional (see the module docstring). A
@@ -142,7 +145,7 @@ def _merge_pricing_blob(target: dict[str, dict[str, float]], pricing: dict[str, 
                 value = float(raw)
             except (TypeError, ValueError):
                 continue
-            if value < 0.0:
+            if not math.isfinite(value) or value < 0.0:
                 continue
             entry[cache_key] = value
         target[model_id] = entry
@@ -199,6 +202,35 @@ class ModelPricing:
 
         logger.debug("no catalog pricing for model %r; using fallback", model)
         return dict(_FALLBACK_PER_1K)
+
+    def lookup_known(self, model: str) -> dict[str, float] | None:
+        """Published catalog basis for admission, separate from estimated fallback.
+
+        An unrelated prefix match is not authority for a hard configured cap.
+        Explicit dated variants of a catalog model retain its pricing basis.
+        """
+        self.reload()
+        norm = _normalize_model_id(model)
+        for key in (model, norm):
+            if key in self._by_model and key != "__default__":
+                return dict(self._by_model[key])
+        for key, rates in self._by_model.items():
+            if key != "__default__" and re.fullmatch(re.escape(key) + r"-\d{4}-\d{2}-\d{2}", norm):
+                return dict(rates)
+        return None
+
+    def same_known_basis(self, requested: str, reported: str) -> bool:
+        """Recognize an exact name or its explicitly dated catalog variant.
+
+        Equal prices alone are not model identity. This deliberately excludes
+        arbitrary prefix matches and unrelated models with coincident rates.
+        """
+        left, right = _normalize_model_id(requested), _normalize_model_id(reported)
+        related = left == right or any(
+            re.fullmatch(re.escape(base) + r"-\d{4}-\d{2}-\d{2}", variant)
+            for base, variant in ((left, right), (right, left)))
+        rates = self.lookup_known(requested)
+        return bool(related and rates is not None and rates == self.lookup_known(reported))
 
 
 def compute_token_cost(

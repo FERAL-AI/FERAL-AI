@@ -41,6 +41,43 @@ from skills.sandbox_ports import SandboxPort, default_sandbox_port
 
 logger = logging.getLogger("feral.executor")
 
+# Finite metadata from canonical Python backing receipts. Data still uses the
+# endpoint budget; arbitrary extensions/objects never join the public envelope.
+_BACKING_RECEIPT_BOOLS = frozenset({
+    "pending_approval", "outcome_unknown", "verified", "effects_committed",
+    "_truncated", "_image_omitted",
+})
+_BACKING_RECEIPT_STRINGS = {
+    "status": 128, "code": 128, "error_code": 128, "outcome": 128,
+    "processing_state": 128, "approval_request_id": 1024, "request_id": 1024,
+    "tool_name": 256, "session_id": 1024, "_truncation_note": 2000,
+    "_upstream_truncation_note": 2000,
+}
+
+
+def _backing_receipt_fields(result: dict) -> tuple[dict, bool]:
+    fields: dict[str, bool | str | None] = {}
+    invalid = False
+    for key in _BACKING_RECEIPT_BOOLS:
+        if key not in result:
+            continue
+        value = result[key]
+        if type(value) is bool or (key == "verified" and value is None):
+            fields[key] = value
+        else:
+            invalid = True
+    for key, bound in _BACKING_RECEIPT_STRINGS.items():
+        if key not in result:
+            continue
+        value = result[key]
+        if value is None or (isinstance(value, str) and len(value) <= bound
+                and (key.endswith("truncation_note") or not any(ord(char) < 32 for char in value))):
+            fields[key] = value
+        else:
+            invalid = True
+    return fields, invalid
+
+
 # -A12: dangerous runners must not silently fall back to host execution.
 # Keep a hardcoded fallback set so legacy manifests still get protected even
 # before they add explicit `requires_sandbox: true`.
@@ -370,6 +407,29 @@ class SkillExecutor:
             return False, "Docker sandbox is not healthy"
         return True, "ok"
 
+    def _vault_for(self, skill_id: str) -> dict[str, str]:
+        """The vault view a backing implementation is handed.
+
+        ``_vault`` is a process cache. A key stored through
+        :meth:`store_key` also lives in the encrypted vault, and after a
+        restart that is the ONLY place it lives, so passing the bare
+        cache meant a persisted key never reached the skill: the keys
+        route reported ``has_key`` true while the skill reported having
+        none, and the operator had done everything right.
+
+        Resolving through :meth:`_get_key` here makes "saved" and
+        "usable" the same state.
+        """
+        view = dict(self._vault)
+        try:
+            key = self._get_key(skill_id)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.debug("vault view resolution failed for %s: %s", skill_id, exc)
+            key = None
+        if key:
+            view[skill_id] = key
+        return view
+
     def _get_key(self, skill_id: str) -> Optional[str]:
         """Resolve a skill's API key.
 
@@ -495,9 +555,12 @@ class SkillExecutor:
         except Exception:
             session_id = ""
 
+        # Current ToolRunner carries a one-use, task-bound executor admission
+        # for an already reviewed call. Older embeddings retain their gate.
+        safety_gate = "enforce_executor_safety" if callable(getattr(type(runner), "enforce_executor_safety", None)) else "enforce_safety"
         for gate_name, gate_args in (
             ("enforce_plan_mode", (tool_name, session_id)),
-            ("enforce_safety", (tool_name, args, session_id)),
+            (safety_gate, (tool_name, args, session_id)),
         ):
             gate = getattr(runner, gate_name, None)
             if not callable(gate):
@@ -506,7 +569,9 @@ class SkillExecutor:
                 refusal = gate(*gate_args)
             except Exception:
                 logger.exception("executor %s check failed for %s", gate_name, tool_name)
-                continue
+                # A revoked dispatch lease or failed policy evaluator cannot
+                # become permission to execute. Preserve the failure for callers.
+                raise
             # Must be a real refusal envelope, not merely non-None. A
             # MagicMock runner returns a MagicMock from every call, which
             # is truthy, so a None check alone blocks every tool call in
@@ -870,6 +935,27 @@ class SkillExecutor:
                 # Let backing implementations know host fallback is forbidden.
                 exec_args["_feral_require_sandbox"] = True
             time_budget = tool_budget_seconds(skill, endpoint, exec_args)
+            # Admission is captured in the executor entry task, then bound only
+            # inside the exact wait_for backing task, not arbitrary context copies.
+            import sys
+            _brain_state = getattr(sys.modules.get("api.state"), "state", None)
+            runner = getattr(getattr(_brain_state, "orchestrator", None), "tool_runner", None)
+            transfer = runner.approved_backing_transfer(tool_name, args) if runner is not None and callable(
+                getattr(type(runner), "approved_backing_transfer", None)) else None
+            from api.job_chrome_grants import bind_backing_transfer, capture_backing_transfer
+            browser_job_transfer = capture_backing_transfer() if tool_name.startswith(("browser__", "web_actions__")) else None
+
+            async def invoke_backing():
+                # wait_for schedules a child task after admission. Revalidate
+                # inherited ingress ownership immediately before new effects.
+                from security.agent_turn_lease import guard_agent_dispatch
+                guard_agent_dispatch()
+                with bind_backing_transfer(browser_job_transfer):
+                    if transfer is None:
+                        return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
+                    from agents.chat_turns import bind_task_origin_transfer
+                    with bind_task_origin_transfer(transfer):
+                        return await impl.execute(endpoint.id, exec_args, self._vault_for(skill.skill_id))
             try:
                 # Bounded. ``wait_for`` cancels the coroutine when the
                 # budget expires and the caller gets a 504 envelope
@@ -880,7 +966,7 @@ class SkillExecutor:
                 # which is why integrations/email.py moved its IMAP work
                 # to ``asyncio.to_thread`` in the same change.
                 result = await asyncio.wait_for(
-                    impl.execute(endpoint.id, exec_args, self._vault),
+                    invoke_backing(),
                     timeout=time_budget,
                 )
                 # The budget is declared by the manifest for THIS endpoint
@@ -904,13 +990,28 @@ class SkillExecutor:
                     # upcoming_events"}``. Anything that branches on
                     # status_code rather than on success reads that as
                     # fine.
-                    default_status = 200 if result.get("success") else 500
+                    success = result["success"]
+                    receipt, invalid_receipt = _backing_receipt_fields(result)
+                    default_status = 200 if success is True else 500
+                    status = result.get("status_code", default_status)
+                    invalid = (type(success) is not bool or invalid_receipt
+                               or type(status) is not int or not 100 <= status <= 599
+                               or (result.get("error") is not None and not isinstance(result["error"], str))
+                               or (success is True and (status >= 400 or bool(result.get("error")))))
                     envelope = {
-                        "success": result["success"],
-                        "status_code": result.get("status_code", default_status),
+                        "success": success if not invalid else False,
+                        "status_code": status if not invalid else 500,
                         "data": payload,
-                        "error": result.get("error"),
+                        "error": result.get("error") if not invalid else "Backing skill returned an invalid result receipt; reconcile before retrying.",
+                        **receipt,
                     }
+                    if invalid:
+                        # Backing code already ran. A malformed receipt does
+                        # not establish that its external effects stopped.
+                        for claimed in ("verified", "effects_committed", "processing_state"):
+                            envelope.pop(claimed, None)
+                        envelope.update(error_code="invalid_skill_result", outcome_unknown=True, outcome="unknown")
+
                 else:
                     payload, note = self._sanitize_with_note(result, budget)
                     envelope = {
@@ -923,6 +1024,8 @@ class SkillExecutor:
                     # Say so out loud. A silent cut is the worst outcome:
                     # the model assumes it read the whole file and answers
                     # confidently about code it never saw.
+                    if envelope.get("_truncation_note"):
+                        envelope["_upstream_truncation_note"] = envelope["_truncation_note"]
                     envelope["_truncation_note"] = note
                 return envelope
             except asyncio.TimeoutError:
@@ -1142,6 +1245,14 @@ class SkillExecutor:
 
         from security.sandbox_policy import SandboxPolicy
 
+        def run_guarded(*args, **kwargs):
+            # to_thread copies the dispatch context, but queued work can start
+            # after its owner is revoked. Cancellation cannot recall a started
+            # subprocess; this check fences only work not yet dispatched.
+            from security.agent_turn_lease import guard_agent_dispatch
+            guard_agent_dispatch()
+            return subprocess.run(*args, **kwargs)
+
         if not command:
             return {"success": False, "status_code": 400, "data": None, "error": "No command or script provided"}
 
@@ -1152,7 +1263,7 @@ class SkillExecutor:
                 return {"success": False, "status_code": 403, "data": None, "error": reason}
             try:
                 proc = await asyncio.to_thread(
-                    subprocess.run,
+                    run_guarded,
                     ["osascript", "-e", command],
                     capture_output=True, text=True, timeout=15,
                 )
@@ -1179,7 +1290,7 @@ class SkillExecutor:
 
             try:
                 proc = await asyncio.to_thread(
-                    subprocess.run,
+                    run_guarded,
                     argv,
                     shell=False,
                     capture_output=True, text=True, timeout=15,

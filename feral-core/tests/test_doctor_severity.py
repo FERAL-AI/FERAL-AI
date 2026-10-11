@@ -508,6 +508,46 @@ def doctor_clean_env(monkeypatch, tmp_path):
 
     monkeypatch.setattr("urllib.request.urlopen", _fake_urlopen)
 
+    # A fresh-install fixture must not query the developer's running
+    # daemons. Under load a real Tailscale status timeout correctly
+    # emits a warning, but that is not the healthy host modelled here.
+    # Keep the real doctor classification and replace only CLI responses.
+    import shutil
+    import subprocess
+    from integrations import tailscale as tailscale_module
+
+    real_which = shutil.which
+
+    def _fixture_which(command, *args, **kwargs):
+        if command == "tailscale":
+            return "/fixture/bin/tailscale"
+        if command in ("node", "cua-driver"):
+            return None  # Optional software absent on this fresh install.
+        return real_which(command, *args, **kwargs)
+
+    def _fake_tailscale_run(args, **_kwargs):
+        if args == ["status", "--json"]:
+            output = '{"BackendState":"Running","Self":{"DNSName":"fixture.example.ts.net"}}'
+        elif args == ["funnel", "status", "--json"]:
+            output = '{}'
+        else:
+            raise AssertionError(f"unexpected doctor Tailscale probe: {args}")
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
+
+    monkeypatch.setattr(shutil, "which", _fixture_which)
+    monkeypatch.setattr(tailscale_module, "_run", _fake_tailscale_run)
+
+    # OS permissions belong to the launching process, not FERAL_HOME.
+    # Model a healthy host without reading or prompting for real TCC
+    # grants. Denied/restricted states retain their production warnings.
+    from security.macos_permissions import TCCStatus
+
+    monkeypatch.setattr(
+        "security.macos_permissions.all_gui_permission_statuses",
+        lambda: [TCCStatus(permission=name, status="granted", api="fixture", setup_step="")
+                 for name in ("accessibility", "accessibility_osascript", "screen_recording")],
+    )
+
     # Lane 07 () — doctor now drives everything off
     # ``security.probe.probe()``; the fresh-install behaviour test
     # therefore needs deterministic probe results. We model the

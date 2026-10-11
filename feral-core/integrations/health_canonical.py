@@ -123,6 +123,16 @@ CANONICAL_METRICS: dict[str, MetricSpec] = {
     "body_temp": _spec(
         "body_temp", "Body Temperature", "°C", 1, "vitals", "instant",
     ),
+    # Blood pressure is TWO numbers that are only meaningful together,
+    # and the store is one value per row, so it is two metrics with a
+    # shared timestamp and source. Readers pair them by ts; never quote
+    # one without the other.
+    "bp_systolic": _spec(
+        "bp_systolic", "Blood Pressure (systolic)", "mmHg", 0, "vitals", "instant",
+    ),
+    "bp_diastolic": _spec(
+        "bp_diastolic", "Blood Pressure (diastolic)", "mmHg", 0, "vitals", "instant",
+    ),
     # ---- daily derived scores (cloud wearables) ---------------------
     "resting_hr": _spec(
         "resting_hr", "Resting Heart Rate", "bpm", 0, "vitals", "daily",
@@ -233,8 +243,46 @@ def build_reading(
         "precision": spec.precision,
         "category": spec.category,
         "source": str(source or ""),
+        # The id is what code matches on; the name is what a person
+        # hears. Emitted together so a caller never has to title-case an
+        # internal identifier and call a vendor SDK a product.
+        "source_name": source_display_name(str(source or "")),
         "ts": float(ts) if isinstance(ts, (int, float)) and ts else time.time(),
     }
+
+
+# ── What a sensor is CALLED, versus what it is keyed on ──────────────
+#
+# ``jw_health_glasses`` is the canonical source id. It is written on
+# every stored sample (2,709 of them on the operator's install), matched
+# on by perception.fusion, and must never change: renaming it would
+# orphan the history.
+#
+# It is also what the model reads, and the model renders an id it does
+# not recognise by title-casing it. Asked on 2026-09-12 which sensors
+# stream into it, the agent answered "JW Health Glasses", naming the BLE
+# vendor's SDK rather than the product, hours before that answer was due
+# to be recorded. The id stays; what a person hears is mapped here.
+# The same applies to the name the hardware reports for itself. The
+# operator's store holds `attrs.device_name = "W300"` on three rows:
+# that is the engineering part number of the board inside the product,
+# it is kept because BLE matching needs the literal string, and it is
+# not what the product is called.
+_SOURCE_DISPLAY_NAMES = {
+    "jw_health_glasses": "Theora glasses",
+    "theora_w300": "Theora glasses",
+    "glasses": "Theora glasses",
+    "w300": "Theora glasses",
+    "veepoo_wristband": "VITRO wristband",
+    "vitro": "VITRO wristband",
+}
+
+
+def source_display_name(source: str) -> str:
+    """The human name for a source id. Unknown ids pass through."""
+    if not source:
+        return source
+    return _SOURCE_DISPLAY_NAMES.get(str(source).strip().lower(), source)
 
 
 def build_series(
@@ -279,6 +327,10 @@ def build_series(
         "precision": spec.precision,
         "category": spec.category,
         "source": str(source or ""),
+        # The id is what code matches on; the name is what a person
+        # hears. Emitted together so a caller never has to title-case an
+        # internal identifier and call a vendor SDK a product.
+        "source_name": source_display_name(str(source or "")),
         "points": out_points,
     }
 
@@ -314,6 +366,7 @@ def build_health_update_frame(
         resolved_sources = sorted(str(s) for s in collected)
     else:
         resolved_sources = [str(s) for s in sources if s]
+    resolved_source_names = [source_display_name(s) for s in resolved_sources]
     return {
         "hup_version": HUP_VERSION,
         "type": HEALTH_UPDATE_TYPE,
@@ -324,6 +377,7 @@ def build_health_update_frame(
             "ts": stamp,
             "data": {
                 "sources": resolved_sources,
+                "source_names": resolved_source_names,
                 "window_days": int(window_days or 0),
                 "note": str(note or ""),
                 "readings": clean_readings,

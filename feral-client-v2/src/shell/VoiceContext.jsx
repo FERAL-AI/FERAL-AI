@@ -1,10 +1,12 @@
 import React, { createContext, useContext, useEffect, useMemo, useRef, useState } from 'react';
 import { useVoiceMode } from '../hooks/useVoiceMode';
+import { installDesktopVoiceShortcut } from '../lib/desktopVoiceShortcut';
 
 const VoiceContext = createContext(null);
 
 export function VoiceProvider({ children }) {
   const mode = useVoiceMode();
+  useEffect(() => installDesktopVoiceShortcut(() => { void mode.start(); }), [mode.start]);
 
   /*
    * Whether a composer voice lane is mounted right now.
