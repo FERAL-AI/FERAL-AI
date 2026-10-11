@@ -1,6 +1,16 @@
 # FERAL app completion: executable plan
 
-**Current checkpoint (October 10; native9.62 actual acceptance).**
+**Current checkpoint (October 10; native9.63 profile adoption).**
+
+Fresh55-input candidate9.63 contains exact2cab48e5, with509 Python/70 WebUI
+equality and strict signatures. Actual reviewed save/Quit/ordinary-reopen retains
+the existing paired profile without launch overrides. Exact bundled ownership,
+existing vault unlock and packaged guard-only writer refusal/release pass.
+Continue packaged lifecycle and sensor freshness integration; full saved Chrome
+goal awaits funded inference, and physical glasses voice awaits phone availability.
+[Evidence](NATIVE_9_63_ACCEPTANCE.md), [current work](WORK_STATE.md).
+
+**Historical checkpoint (October 10; native9.62 actual acceptance).**
 
 Exact16c2cf029 native9.62 passes assembly/source/signature audits. Actual composer
 testing reaches selected scene inference, then a no-credit provider error ends

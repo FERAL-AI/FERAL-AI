@@ -27,9 +27,12 @@ groups, plus 39 desktop and five error-presentation assertions. Actual modified
 model/runtime/views compile in that gate; preferences, metadata and HTTP are
 inert fixtures. Existing Swift 5 asynchronous NSLock warnings remain.
 
-This is not actual GUI persistence or a universal profile-writer lease. Candidate
-9.63 requires a fresh 55-input optimized compile and live save/Quit/ordinary-reopen
-verification. Early cooperating backend writer exclusion is separate pending
-integration. Legacy and offline writers, phone reconnection, vault/TCC behavior,
-distribution signing and clean-machine installation require their own evidence.
-No profile was copied, reset or migrated by these fixtures.
+Candidate9.63 now passes a fresh55-input optimized compile and actual native UI
+save/Quit/ordinary-reopen verification. The saved existing personal choice survives
+ordinary activation without a launch environment override. Exact bundled child
+and9090 ownership, existing vault unlock, packaged guard-only duplicate refusal
+and lock release after normal Quit pass. [Exact acceptance](NATIVE_9_63_ACCEPTANCE.md).
+Early cooperating writer exclusion is integrated; it is not universal exclusion
+of older and offline writers. Phone reconnection, full provider/browser outcome,
+distribution signing and clean-machine installation retain separate gates.
+No profile was copied, reset or migrated by these checks.

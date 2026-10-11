@@ -1,6 +1,24 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 10; native9.62 and profile integration).**
+**Current checkpoint (October 10; native9.63 profile adoption).**
+
+Native9.63 now contains exact2cab48e5 with fresh55-input compilation,509 Python/
+70 WebUI equality and strict signatures. Actual reviewed choice survives ordinary
+Quit/reopen, activating the existing paired profile without an environment
+override. Exact child/9090 identity, existing vault unlock, packaged guard-only
+duplicate refusal and lock release after normal Quit pass. This does not replace
+the installed legacy app or publish a distribution. [Evidence](NATIVE_9_63_ACCEPTANCE.md).
+
+The actual regular-Chrome saved goal remains unfinished after the provider-credit
+failure. No new inference or replay is claimed. The signed iOS historical-wire
+repair is installed at local4a6b9d9; cached-vitals forwarding is separately under
+review. Phone unavailable/zero registered nodes means live glasses voice,
+interruptions, ambient rejection and concurrent task/results remain unaccepted.
+Durable phone health history and personal baseline acceptance remain required.
+Remote79cb09e3 CI has18 successful checks/four skips; latest candidate-source CI
+and PyPI/distribution release remain open.
+
+**Historical checkpoint (October 10; native9.62 and profile integration).**
 
 The current native candidate9.62 contains exact16c2cf02915bca599bd4178bd3e88b075811d56d
 with508 Python/70 WebUI equality and strict signatures verified. Actual native

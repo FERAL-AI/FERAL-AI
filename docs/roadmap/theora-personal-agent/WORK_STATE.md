@@ -7,7 +7,34 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Profile integration and next candidate
+### Native9.63 actual profile adoption
+
+Native9.63/build2026101012 is assembled from exact2cab48e5f62c6c7bb0f1b8e42b8c5dc29f54c34a.
+Fresh55-input optimized compilation,509 Python/70 WebUI equality, imports and
+strict deep signatures pass. Actual Settings review/save fences old preview
+admission until Quit. Ordinary activation then retains the saved existing profile
+without FERAL_HOME override. Exact native70604/bundled child70611/9090 metadata,
+listener and instance header pass; existing vault unlock reports ready.
+Guard-only packaged duplicate admission on the same root/different port refuses
+before api.state/server/keys import. Normal Quit removes both processes/listener;
+packaged lock reacquisition/release passes without state/vault import or inode
+replacement. Immediate socket preflight refused errno48; a later read-only
+preflight passed without weakening it. A further ordinary activation is running.
+[Exact evidence and limits](NATIVE_9_63_ACCEPTANCE.md).
+
+Remote PR310 at79cb09e3ef56c0dc8bdb2545d451da3e69037031 is fully settled with18
+successful checks/four conditional skips/no failures. Candidate2cab48e5 remains
+local pending this acceptance publication; its new CI run remains required.
+The installed iOS historical-wire repair remains local4a6b9d9. A TMP vitals
+receipt proposal repairs cache restamping; parent review requires an additional
+generation check for Swift callbacks queued across disconnect/reconnect before
+integration/build/install. No physical voice or new sensor sample is claimed.
+Phone remains unavailable with zero registered nodes; selected provider funding
+and Mirroring user authentication remain pending. Continue independent packaged
+lifecycle acceptance and guarded sensor integration. Full saved browser task,
+physical duplex voice, durable health history/baseline and public release are open.
+
+### Historical profile integration checkpoint
 
 The persisted native profile choice is integrated from a hash-verified ten-file
 handoff. It resolves one immutable layout for the backend, recovery journal and
@@ -17,7 +44,7 @@ new admission, and the old runtime retains its final conversation save. Existing
 voice/chat/coding work blocks selection. Worker fixtures pass 87 layout checks,
 61 selection checks and 23 linked assertions; the parent affected gate passes the
 same assertions within30 model wire groups, plus39 desktop/five error checks.
-Ordinary-launch preference persistence and actual UI acceptance remain open.
+At this checkpoint ordinary-launch preference persistence and UI acceptance were open.
 
 Before activation, an early backend runtime-writer guard is integrated to
 exclude cooperating servers before profile initialization/migration, including
@@ -26,7 +53,7 @@ Parent checks pass38 tests/six warnings and full-core CI Ruff; full Mac typing
 retains779 diagnostics with no additions/removals. [Scope and evidence](RUNTIME_WRITER_GUARD_20261010.md).
 Legacy and offline writers remain a separate boundary. Candidate9.63/build2026101012
 is prepared for a fresh55-input native compile from this frozen integration.
-No9.63 app has been assembled or accepted yet.
+At this checkpoint no9.63 app had been assembled or accepted.
 
 Normal9.62 launch on the existing paired profile was observed with exact native
 parent/child ownership and9090 listener identity. Existing vault unlock succeeded
