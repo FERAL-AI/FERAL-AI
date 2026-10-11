@@ -45,6 +45,26 @@ Devices showed the phone unavailable and zero registered nodes. Peripheral
 readiness labels do not establish a connected phone, new sensor readings or
 physical commands. No phone interaction or live microphone test is claimed.
 
+## Actual disposable packaged lifecycle
+
+The unmodified packaged launcher also ran under a bounded instrumentation wrapper
+with exclusive temporary config/data/HOME/cache, deferred vault and an inert local
+provider. First full serverPID73469/port57906 reached exact-instance health and
+fresh setup. A second full launcherPID73478/port57907 exited73 RuntimeProfileBusy
+before api.state, api.server, api.keys, memory.store or security.vault imports,
+and never listened. The first exact listener, lock and health instance remained
+unchanged. Closing only its lifeline produced exit-15 and released the listener;
+no fallback termination was needed. A packaged guard process then acquired and
+released twice without those imports. Every owned disposable child exited.
+
+Candidate pins remained unchanged; no personal profile or native UI was accessed
+by this separate probe. Child Python socket auditing refused non-loopback egress;
+zero such attempts were observed, but native-extension egress was not instrumented.
+The retained result SHA-256 is
+`04c28a17a33e662570c1f35f099cea4192a0b27678d3c2522923f3fe7071f58e`.
+The combined startup-and-duplicate duration is not an isolated startup-latency
+claim. This establishes actual packaged lifecycle, not physical voice or inference.
+
 ## Remaining acceptance
 
 The previous actual regular-Chrome model workflow reached selected scene

@@ -1,6 +1,6 @@
 # FERAL completion checkpoint
 
-Updated October 10, 2026. Parent/integrator owns this file. Reconcile it with actual
+Updated October 11, 2026. Parent/integrator owns this file. Reconcile it with actual
 Git, CI and processes after resuming; it is a checkpoint, not a live process lock.
 See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 [all user requirements](REQUEST_COVERAGE.md).
@@ -15,6 +15,10 @@ strict deep signatures pass. Actual Settings review/save fences old preview
 admission until Quit. Ordinary activation then retains the saved existing profile
 without FERAL_HOME override. Exact native70604/bundled child70611/9090 metadata,
 listener and instance header pass; existing vault unlock reports ready.
+Separate actual packaged disposable startup/second full-launcher refusal before
+state/server/keys/store/vault imports/lifeline listener release/repeated guard
+reacquisition pass; all owned children exit without fallback cleanup. No new
+inference or physical device interaction is claimed.
 Guard-only packaged duplicate admission on the same root/different port refuses
 before api.state/server/keys import. Normal Quit removes both processes/listener;
 packaged lock reacquisition/release passes without state/vault import or inode
@@ -23,15 +27,26 @@ preflight passed without weakening it. A further ordinary activation is running.
 [Exact evidence and limits](NATIVE_9_63_ACCEPTANCE.md).
 
 Remote PR310 at79cb09e3ef56c0dc8bdb2545d451da3e69037031 is fully settled with18
-successful checks/four conditional skips/no failures. Candidate2cab48e5 remains
-local pending this acceptance publication; its new CI run remains required.
-The installed iOS historical-wire repair remains local4a6b9d9. A TMP vitals
-receipt proposal repairs cache restamping; parent review requires an additional
-generation check for Swift callbacks queued across disconnect/reconnect before
-integration/build/install. No physical voice or new sensor sample is claimed.
+successful checks/four conditional skips/no failures. Candidate source2cab48e5
+is published within9ea20101ccd241457b991b4e550ff6f097901bb3. Its new CI is running;
+the completed previous-head result does not certify this newer head.
+The installed signed iOS app is now localcdc2bda729d26f2acc8c8347830106ad2a0448d9.
+Six reviewed paths preserve per-metric callback receipt epochs and monotonic reset
+generations, rejecting queued callbacks across reconnect. Bounded idle chat
+following repairs the final-update/deceleration gap while preserving user scroll-up.
+Parent counterexamples reproduce both earlier sensor failures and the original
+scroll failure. Actual-source fixtures pass13 callback rows/10 dated frames,
+10 selected-Swift scroll assertions and31 historical-wire assertions. One full
+signed device build, strict signatures, preservation checks and in-place install
+pass. iOS source remains unpushed; no physical voice/sample/gesture acceptance is
+claimed. [Exact scope](IOS_VITALS_CHAT_FOLLOW_20261010.md).
 Phone remains unavailable with zero registered nodes; selected provider funding
-and Mirroring user authentication remain pending. Continue independent packaged
-lifecycle acceptance and guarded sensor integration. Full saved browser task,
+and Mirroring user authentication remain pending. New9ea20101c CI is settled with17
+successes/four conditional skips and a failed native-contract job. Backend pytest
+passes. The failure is the real archive-ownership step, after passing native
+typecheck/feature checks; its diagnostic artifact is under TMP-only review. Previous
+fully green79cb checks do not certify this head. Continue that correction and
+physical/provider acceptance when prerequisites are available. Full saved browser task,
 physical duplex voice, durable health history/baseline and public release are open.
 
 ### Historical profile integration checkpoint

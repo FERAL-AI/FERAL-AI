@@ -11,8 +11,10 @@ the installed legacy app or publish a distribution. [Evidence](NATIVE_9_63_ACCEP
 
 The actual regular-Chrome saved goal remains unfinished after the provider-credit
 failure. No new inference or replay is claimed. The signed iOS historical-wire
-repair is installed at local4a6b9d9; cached-vitals forwarding is separately under
-review. Phone unavailable/zero registered nodes means live glasses voice,
+repair is included in localcdc2bda, now signed and installed with per-metric
+receipt/generation fencing and bounded final-update chat following. Actual-source
+synthetics/build/signatures pass; [physical acceptance remains open](IOS_VITALS_CHAT_FOLLOW_20261010.md).
+Phone unavailable/zero registered nodes means live glasses voice,
 interruptions, ambient rejection and concurrent task/results remain unaccepted.
 Durable phone health history and personal baseline acceptance remain required.
 Remote79cb09e3 CI has18 successful checks/four skips; latest candidate-source CI

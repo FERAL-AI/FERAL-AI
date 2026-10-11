@@ -29,5 +29,11 @@ importers and offline setup/key/migration/archive utilities do not participate.
 Native prechild log/directory creation and service-install artifacts remain outside
 the lease. No universal zero-filesystem-write or offline-writer claim is made.
 Old runtimes must be retired through their reviewed lifecycle before adoption.
-Actual packaged startup/duplicate denial/normal Quit and ordinary persisted-profile
-relaunch remain required candidate acceptance.
+Candidate9.63 now passes actual packaged startup and duplicate full-launcher
+refusal before state/server/keys/store/vault imports on an exclusive disposable
+profile. The first listener/lock/health instance stays owned. Lifeline shutdown
+releases the listener and permits repeated guard-only reacquisition, with no
+fallback cleanup. Separate actual native save/Quit/ordinary-reopen, existing vault
+unlock and lock release on the existing paired profile pass.
+[Exact evidence and limits](NATIVE_9_63_ACCEPTANCE.md). Physical phone/inference and
+distribution acceptance remain separate.

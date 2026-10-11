@@ -7,7 +7,7 @@ Candidate9.63/build2026101012 contains exact2cab48e5. Fresh55-input compilation,
 save/Quit/ordinary-reopen persists the reviewed existing profile with no launch
 override. Exact bundled child/9090 ownership and existing vault unlock pass.
 Packaged guard-only duplicate refusal and lock release after normal Quit pass;
-full disposable packaged startup/lifeline acceptance is in progress. No universal
+full disposable packaged startup/duplicate refusal/lifeline release also pass. No universal
 legacy/offline writer exclusion or public distribution acceptance is claimed.
 Remote79cb09e3 CI has18 successes/four conditional skips; new candidate-source
 CI remains required. [Exact evidence](NATIVE_9_63_ACCEPTANCE.md).
@@ -15,7 +15,12 @@ CI remains required. [Exact evidence](NATIVE_9_63_ACCEPTANCE.md).
 Phone remains unavailable; funded inference, live glasses voice, sensor freshness,
 durable health history/baseline and full saved browser outcome remain open. The
 historical iOS sample-time repair is signed and installed at local4a6b9d9; the
-separate cached-vitals receipt proposal is still under parent review.
+separate cached-vitals and idle chat-following fixes are signed and installed at
+localcdc2bda. Actual-source synthetic fixtures and the full build/signatures pass;
+physical supported samples, UIKit following and voice remain unaccepted.
+[Scope](IOS_VITALS_CHAT_FOLLOW_20261010.md). The new9ea20101c remote native-contract
+archive-ownership step failed and is under review. Backend pytest passes;
+the settled head has17 successes/four conditional skips/one failed native job.
 
 **Historical checkpoint (October 10; guarded profile integration for9.63).**
 
