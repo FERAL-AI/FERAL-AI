@@ -35,8 +35,10 @@ with zero registered nodes; physical glasses voice remains unverified.
 Published PR310 head00f46a8c08620686a12eb59264890cf51fd20235 has17 successful
 checks/four conditional skips and one failed Brain pytest job: a guarded-send test
 double lacks the new guard argument. The job reports15,254 passes,87 skips and
-77.30% coverage. A focused fixture correction is being reviewed; current CI is
-not all green.
+77.30% coverage. The correction is integrated: it captures socket.send while
+retaining the real production guard and verifies continuation suppression after
+response-epoch invalidation. Parent verification passes68 checks/six warnings
+and Ruff. A new published-head CI run is still required; current CI is not all green.
 
 The bounded iOS health correction is released for parent review, not integrated:
 historical BP/HRV carries sample_ts instead of colliding with envelope send-time

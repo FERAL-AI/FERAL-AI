@@ -23,7 +23,8 @@ Health history transfer, per-sample freshness and baseline acceptance are open.
 A bounded historical sample-time correction is under parent review.
 
 PR310 head00f46a8c0 is published with17 successful checks/four conditional skips;
-one backend test double fails on the new guarded-send argument and is being fixed.
+one backend test double fails on the new guarded-send argument. Its correction
+is integrated with68 parent checks and Ruff passing; new-head CI is pending.
 No passing full CI, PyPI release or complete-product acceptance is claimed.
 [Current checkpoint](WORK_STATE.md), [live acceptance](NATIVE_9_62_ACCEPTANCE.md).
 
