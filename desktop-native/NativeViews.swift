@@ -165,7 +165,7 @@ struct NativeRootView: View {
                             }
                         }.padding(.horizontal, 14).padding(.top, 18)
                         HStack(spacing: 10) {
-                            NativeAvatar(choice: model.avatarChoice, importedPath: model.importedAvatarPath, size: 32)
+                            NativeAvatar(choice: model.avatarChoice, importedPath: model.activeImportedAvatarPath, size: 32)
                             Text(model.displayName.isEmpty ? "Your companion" : "Here for \(model.displayName)")
                                 .font(.caption).foregroundStyle(.secondary).lineLimit(2)
                         }.padding(.horizontal, 14)
@@ -377,7 +377,7 @@ private struct NativeAvatarPicker: View {
             Button { importPresented = true } label: {
                 VStack(spacing: 10) {
                     if model.avatarChoice == "imported" {
-                        NativeAvatar(choice: "imported", importedPath: model.importedAvatarPath, size: compact ? 62 : 100)
+                        NativeAvatar(choice: "imported", importedPath: model.activeImportedAvatarPath, size: compact ? 62 : 100)
                     } else {
                         Image(systemName: "person.crop.circle.badge.plus").font(.system(size: compact ? 34 : 44, weight: .light))
                             .foregroundStyle(.secondary).frame(width: compact ? 62 : 100, height: compact ? 62 : 100)
@@ -412,6 +412,47 @@ private struct NativeAvatarPicker: View {
     }
 }
 
+private struct NativeRuntimeProfileView: View {
+    @ObservedObject var model: NativeModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Runtime profile").font(.headline)
+            Text(model.activeProfileSource).font(.caption).foregroundStyle(.secondary)
+            NativeSelectableText(verbatim: model.activeProfileRoot?.path ?? "No valid profile selected")
+                .font(.caption)
+            Text("All local memory, credentials, pairing and conversations use this agent profile. A saved change applies after Quit and reopen; no data is migrated.")
+                .font(.caption).foregroundStyle(.secondary)
+            HStack {
+                Button("Review existing FERAL profile…") { model.prepareProfileSelection(.personal) }
+                Button("Review preview profile…") { model.prepareProfileSelection(.preview) }
+            }.disabled(!model.canReviewProfileSelection)
+            if model.activeProfileSource == NativeProfileSource.environment.label {
+                Text("FERAL_HOME overrides the saved choice for this launch.").font(.caption)
+            }
+            if let notice = model.profileSelectionNotice { Text(notice).font(.caption).foregroundStyle(.orange) }
+            if let error = model.profileSelectionError { Text(error).font(.caption).foregroundStyle(.red) }
+        }
+        .sheet(item: Binding(get: { model.profileSelectionReview }, set: { value in
+            if value == nil, let review = model.profileSelectionReview { model.cancelProfileSelection(review) }
+        })) { review in
+            VStack(alignment: .leading, spacing: 16) {
+                NativeReviewSummaryView(review: NativeReviewSummary(action: "Use this profile on the next launch?",
+                    effect: "Saves a native preference only. The active agent does not switch.",
+                    materialScope: ["Quit and reopen explicitly. Stop other writers before activation.", "Existing credentials require their separate unlock review. No migration, reset or task replay."],
+                    targets: [.init(label: "Current profile", value: review.activeRoot?.path ?? "Unavailable"),
+                              .init(label: "Next-launch profile", value: review.targetRoot.path)],
+                    details: NativeProfileSelectionReview.disclosure))
+                HStack {
+                    Button("Cancel") { model.cancelProfileSelection(review) }
+                    Spacer()
+                    Button("Save next-launch choice") { _ = model.confirmProfileSelection(review) }
+                        .buttonStyle(.borderedProminent).disabled(!model.canReviewProfileSelection)
+                }
+            }.padding(24).frame(width: 620)
+        }
+    }
+}
+
 private struct NativeOnboardingView: View {
     @ObservedObject var model: NativeModel
 
@@ -424,12 +465,14 @@ private struct NativeOnboardingView: View {
                 Text("Make it yours").font(.callout).foregroundStyle(.secondary)
             }.padding(28)
             Spacer(minLength: 24)
+            ScrollView {
             VStack(spacing: 24) {
                 VStack(spacing: 10) {
                     Text("Choose your companion").font(.system(size: 34, weight: .semibold, design: .rounded))
                     Text("A familiar face for every conversation.").font(.title3).foregroundStyle(.secondary)
                 }
-                NativeAvatarPicker(model: model)
+                NativeAvatarPicker(model: model).disabled(model.effectsPaused)
+                NativeRuntimeProfileView(model: model).frame(maxWidth: 540)
                 VStack(alignment: .leading, spacing: 8) {
                     Text("What should FERAL call you?").font(.callout)
                     TextField("Your name (optional)", text: $model.displayName).textFieldStyle(.roundedBorder)
@@ -440,7 +483,8 @@ private struct NativeOnboardingView: View {
                 }.buttonStyle(.borderedProminent).controlSize(.large)
                     .disabled(!model.canAdvanceProfileOnboarding)
                     .keyboardShortcut(.defaultAction)
-            }.padding(.horizontal, 32)
+            }.padding(.horizontal, 32).padding(.vertical, 8)
+            }
             Spacer(minLength: 24)
             Text("Native Preview · Some FERAL features are not available here yet.").font(.caption).foregroundStyle(.secondary).padding(24)
         }.frame(maxWidth: .infinity, maxHeight: .infinity)
@@ -489,7 +533,7 @@ private struct NativeChatView: View {
             if let error = model.attachmentError, !error.isEmpty { NativeErrorBanner(text: error) }
             if model.messages.isEmpty {
                 Spacer()
-                NativeAvatar(choice: model.avatarChoice, importedPath: model.importedAvatarPath, size: 104)
+                NativeAvatar(choice: model.avatarChoice, importedPath: model.activeImportedAvatarPath, size: 104)
                 Text(model.displayName.isEmpty ? "How can I help?" : "How can I help, \(model.displayName)?")
                     .font(.system(size: 28, weight: .semibold, design: .rounded)).padding(.top, 20)
                 Text("Bring an idea, ask a question, or start something together.")
@@ -504,7 +548,7 @@ private struct NativeChatView: View {
                                     if message.role == "user" {
                                         Image(systemName: "person.crop.circle.fill").font(.system(size: 30)).foregroundStyle(.secondary)
                                     } else {
-                                        NativeAvatar(choice: model.avatarChoice, importedPath: model.importedAvatarPath, size: 32)
+                                        NativeAvatar(choice: model.avatarChoice, importedPath: model.activeImportedAvatarPath, size: 32)
                                     }
                                     VStack(alignment: .leading, spacing: 6) {
                                         Text(message.role == "user" ? (model.displayName.isEmpty ? "You" : model.displayName) : message.role == "assistant" ? "FERAL" : message.role.capitalized)
@@ -903,6 +947,8 @@ private struct NativeSettingsView: View {
                     }.disabled(!model.ready || model.effectsPaused)
                     Divider()
                     NativeDesktopExperienceView(experience: desktop).disabled(model.effectsPaused)
+                    Divider()
+                    NativeRuntimeProfileView(model: model)
                     Divider()
                     NativeProfileArchiveView(model: model, archive: model.profileArchive)
                     Divider()

@@ -2,7 +2,7 @@
 set -euo pipefail
 cd "$(dirname "$0")"
 test_cache=/private/tmp/theora-native-feature-tests-cache
-all_features=(Health Memory Oversight Configuration Providers Conversation ContextCheckpoint Attachment Operations Security Connections Voice ManagedVoice Identity Capabilities Workflow TaskResult ChatTools ChatTurn VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery PreferenceArchive ProfileArchive ProfileLayout SurfaceUpdate HealthHistory RuntimeHealth RuntimePort Vault VaultSetup Hardware OnboardingSetup ReviewSummary SelectableText LocalActionGate BrowserView)
+all_features=(Health Memory Oversight Configuration Providers Conversation ContextCheckpoint Attachment Operations Security Connections Voice ManagedVoice Identity Capabilities Workflow TaskResult ChatTools ChatTurn VoiceConfiguration Integration RichChat Ambient Agent Knowledge MemoryContext Automation AppSurface AppConfirmation ProviderRouting SessionRecovery PreferenceArchive ProfileArchive ProfileLayout ProfileSelection SurfaceUpdate HealthHistory RuntimeHealth RuntimePort Vault VaultSetup Hardware OnboardingSetup ReviewSummary SelectableText LocalActionGate BrowserView)
 features=("${all_features[@]}")
 if [[ $# -gt 0 ]]; then
   features=("$@")
@@ -23,7 +23,8 @@ for feature in "${features[@]}"; do
   if [[ "$feature" == "Voice" ]]; then feature_sources+=(NativeChatTurnFeature.swift); fi
   if [[ "$feature" == "ManagedVoice" ]]; then feature_sources+=(NativeChatTurnFeature.swift); main_source=NativeVoiceFeature.swift; test_source=tests/NativeManagedVoiceTests.swift; fi
   if [[ "$feature" == "ContextCheckpoint" ]]; then feature_sources=(); fi
-  if [[ "$feature" == "ProfileLayout" ]]; then feature_sources=(); fi
+  if [[ "$feature" == "ProfileLayout" ]]; then feature_sources=(NativeProfileSelectionFeature.swift); fi
+  if [[ "$feature" == "ProfileSelection" ]]; then feature_sources=(NativeProfileLayoutFeature.swift); fi
   if [[ "$feature" == "RuntimePort" ]]; then feature_sources=(); fi
   if [[ "$feature" == "LocalActionGate" ]]; then feature_sources=(NativeRichText.swift NativePlainTextEditor.swift NativeReviewSummary.swift NativeAgentFeature.swift NativeContextCheckpointFeature.swift); main_source=NativeLocalActionGate.swift; test_source=tests/NativeLocalActionGateTests.swift; fi
   if [[ "$feature" == "Conversation" ]]; then feature_sources+=(NativeContextCheckpointFeature.swift); fi
@@ -46,7 +47,7 @@ done
 model_binary=/private/tmp/theora-native-model-wire-tests
 xcrun swiftc -swift-version 5 -target arm64-apple-macosx13.0 \
   -module-cache-path "$test_cache" -parse-as-library \
-  BrainRuntime.swift NativeRuntimePortFeature.swift NativeProfileLayoutFeature.swift NativeLocalActionGate.swift APIModel.swift NativeViews.swift NativeErrorPresentation.swift NativeChatTurnFeature.swift \
+  BrainRuntime.swift NativeRuntimePortFeature.swift NativeProfileLayoutFeature.swift NativeProfileSelectionFeature.swift NativeLocalActionGate.swift APIModel.swift NativeViews.swift NativeErrorPresentation.swift NativeChatTurnFeature.swift \
   NativeHealthFeature.swift NativeHealthHistoryFeature.swift NativeRuntimeHealthFeature.swift NativeMemoryFeature.swift NativeOversightFeature.swift \
   NativeConfigurationFeature.swift NativeProvidersFeature.swift NativeConversationFeature.swift NativeContextCheckpointFeature.swift \
   NativeAttachmentFeature.swift NativeRichText.swift NativePlainTextEditor.swift NativeReviewSummary.swift \

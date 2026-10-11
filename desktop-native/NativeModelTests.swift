@@ -90,7 +90,91 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
     func shutdown() {}
 }
 
+private final class ProfileMemoryDefaults: UserDefaults {
+    var rows: [String: Any] = [:]
+    var corruptChoiceOnWrite = false
+    override func object(forKey key: String) -> Any? { rows[key] }
+    override func string(forKey key: String) -> String? { rows[key] as? String }
+    override func bool(forKey key: String) -> Bool { (rows[key] as? Bool) ?? false }
+    override func set(_ value: Any?, forKey key: String) {
+        if corruptChoiceOnWrite && key == NativeSavedProfileChoice.key { rows[key] = NativeSavedProfileChoice.encode(.preview) }
+        else { rows[key] = value }
+    }
+    override func set(_ value: Bool, forKey key: String) { rows[key] = value }
+    override func removeObject(forKey key: String) { rows[key] = nil }
+    override func dictionaryRepresentation() -> [String: Any] { rows }
+}
+
 @main struct NativeModelTests {
+    @MainActor static func profileSelectionTests() async throws {
+        let prefs = ProfileMemoryDefaults()
+        let home = URL(fileURLWithPath: "/private/tmp/native-profile-selection-linked-user", isDirectory: true)
+        let preview = home.appendingPathComponent(".feral-native-preview", isDirectory: true)
+        let personal = home.appendingPathComponent(".feral", isDirectory: true)
+        let config = URLSessionConfiguration.ephemeral; config.protocolClasses = [WireProtocol.self]
+        let session = URLSession(configuration: config)
+        func make(_ environment: [String: String] = [:]) -> NativeModel {
+            NativeModel(session: session, preferences: prefs, preferenceSuite: "inert.fixture.domain",
+                profileEnvironment: environment, profileUserHome: home,
+                profileInspector: { _ in .directory },
+                profileSnapshot: { _ in .init(exists: true, device: 10, inode: 11, owner: 42) })
+        }
+        WireProtocol.reset()
+        let initial = make()
+        try expect(initial.activeProfileRoot == preview && initial.activeProfileAvatarDirectory == preview.appendingPathComponent("avatars", isDirectory: true), "model initial avatar/backend roots differ")
+        try expect(initial.activeProfileRecoveryJournalURL == preview.appendingPathComponent("native-context-recovery.json"), "model initial recovery/backend roots differ")
+        try expect(initial.canReviewProfileSelection, "idle first-start review unavailable")
+        initial.prepareProfileSelection(.personal)
+        guard let cancelled = initial.profileSelectionReview else { throw AssertionFailure(description: "profile review absent") }
+        initial.cancelProfileSelection(cancelled)
+        try expect(prefs.rows[NativeSavedProfileChoice.key] == nil && !initial.profileSelectionRequiresRestart && WireProtocol.bodies("/api/conversations/save").isEmpty, "cancel wrote choice, saved chat or required restart")
+        initial.isSending = true
+        initial.prepareProfileSelection(.personal)
+        try expect(initial.profileSelectionReview == nil && prefs.rows[NativeSavedProfileChoice.key] == nil, "active chat allowed profile choice")
+        initial.isSending = false
+        initial.coding.status = "running"
+        try expect(!initial.canReviewProfileSelection, "running coding allowed choice")
+        initial.coding.status = ""
+        initial.ready = true
+        try initial.restoreThread(["id": "old-profile-thread", "messages": [["id": "row", "role": "user", "text": "synthetic old-profile text"]]])
+        initial.prepareProfileSelection(.personal)
+        guard let accepted = initial.profileSelectionReview else { throw AssertionFailure(description: "idle existing-profile review absent") }
+        try expect(initial.confirmProfileSelection(accepted), "exact profile choice rejected")
+        let stored = try NativeSavedProfileChoice.decode(prefs.rows[NativeSavedProfileChoice.key])
+        try expect(stored == .personal && initial.profileSelectionRequiresRestart && initial.effectsPaused && initial.featureBaseURL == nil, "confirmed choice missing or new admission remains open")
+        try expect(initial.activeProfileRoot == preview && initial.activeProfileRecoveryJournalURL == preview.appendingPathComponent("native-context-recovery.json") && initial.activeProfileAvatarDirectory == preview.appendingPathComponent("avatars", isDirectory: true), "confirmation hot swapped root/journal/avatar")
+        try expect(!initial.confirmProfileSelection(accepted), "used choice review replayed")
+        try expect(!initial.canPrepareProfileArchive, "next-launch fence admitted a new profile archive")
+        let avatarBefore = initial.importedAvatarPath, avatarErrorBefore = initial.error
+        initial.importAvatar(URL(fileURLWithPath: "/private/tmp/inert-profile-admission-image-does-not-exist.png"))
+        try expect(initial.importedAvatarPath == avatarBefore && initial.error == avatarErrorBefore && prefs.rows["importedAvatarPath"] == nil, "next-launch fence entered avatar import or wrote its preference")
+        let saved = await initial.flushConversationForShutdown()
+        try expect(saved && WireProtocol.bodies("/api/conversations/save").last?["id"] as? String == "old-profile-thread", "next-launch fence prevented old-profile final save")
+        prefs.rows["importedAvatarPath"] = preview.appendingPathComponent("avatars/fixture.png").path
+        let fresh = make()
+        try expect(fresh.activeProfileRoot == personal && fresh.activeProfileRecoveryJournalURL == personal.appendingPathComponent("native-context-recovery.json") && fresh.activeProfileAvatarDirectory == personal.appendingPathComponent("avatars", isDirectory: true), "fresh launch failed saved root consistency")
+        try expect(fresh.messages.isEmpty && fresh.activeConversationID.isEmpty && !fresh.profileSelectionRequiresRestart, "fresh profile inherited old visible conversation or restart fence")
+        try expect(fresh.activeImportedAvatarPath == nil && prefs.rows["importedAvatarPath"] as? String == preview.appendingPathComponent("avatars/fixture.png").path, "new profile displayed prior avatar or rewrote its preference")
+        fresh.importedAvatarPath = personal.appendingPathComponent("avatars/fixture.png").path
+        try expect(fresh.activeImportedAvatarPath == fresh.importedAvatarPath, "current-profile imported avatar path was rejected")
+        prefs.rows[NativeSavedProfileChoice.key] = ["schema_version": 99, "kind": "personal"]
+        let malformed = make()
+        try expect(malformed.activeProfileRoot == nil && !malformed.canAdvanceProfileOnboarding, "malformed saved choice fell back")
+        await malformed.start()
+        try expect(!malformed.ready && !malformed.serviceReachable && WireProtocol.bodies("/api/llm/config").isEmpty, "malformed choice admitted startup/network")
+        let explicit = make(["FERAL_HOME": "/private/tmp/explicit-native-profile"])
+        try expect(explicit.activeProfileRoot?.path == "/private/tmp/explicit-native-profile" && !explicit.canReviewProfileSelection, "environment precedence or selection fencing failed")
+        try expect(prefs.rows["native.profileSelection.v1"] as? [String: Any] != nil && !fresh.ready, "fixture unexpectedly activated runtime")
+        prefs.rows[NativeSavedProfileChoice.key] = nil
+        let uncertain = make()
+        uncertain.prepareProfileSelection(.personal)
+        guard let uncertainReview = uncertain.profileSelectionReview else { throw AssertionFailure(description: "uncertain-write review absent") }
+        prefs.corruptChoiceOnWrite = true
+        try expect(!uncertain.confirmProfileSelection(uncertainReview) && uncertain.profileSelectionRequiresRestart && uncertain.effectsPaused && uncertain.activeProfileRoot == preview, "uncertain preference write did not fence admission or changed active root")
+        try expect(!uncertain.confirmProfileSelection(uncertainReview), "uncertain preference write was replayed")
+        print("PASS persisted profile selection: 23 linked assertions, inert preferences/HTTP, one frozen root, next-launch only, old final save preserved, uncertain write fenced")
+    }
+
     #if FERAL_NATIVE_SOCKET_FIXTURE
     @MainActor static func socketLifecycleTests() async throws {
         WireProtocol.reset()
@@ -1234,6 +1318,7 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             dying.observeRuntimeHealth(NativeRuntimeHealthEvent(ownership: staleHealthOwner, phase: .limited, reason: "Memory unavailable; use Security.", requiresExplicitRestart: false, reconnectVerifiedSession: false, availableForActions: false, serviceReachable: true))
             try expect(!dying.ready && dying.serviceReachable && dying.securityBaseURL != nil && dying.featureBaseURL == nil, "limited memory readiness exposes Security only and never full agent features")
             print("PASS owned runtime events, stale callback rejection, partial preservation and no replay")
+            try await profileSelectionTests()
             try await sharedConversationSwitchTests()
             try await managedVoiceRequestBarrierTests()
             try await passiveRuntimeSuspensionTests()
@@ -1244,9 +1329,9 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             try await contextCheckpointTests()
             try await contextRecoveryTests()
             #if FERAL_NATIVE_SOCKET_FIXTURE
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 30 groups; mocked HTTP/wire only, no engine/model execution")
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 31 groups; mocked HTTP/wire only, no engine/model execution")
             #else
-            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 29 groups; mocked HTTP/wire only, no engine/model execution")
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 30 groups; mocked HTTP/wire only, no engine/model execution")
             #endif
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)

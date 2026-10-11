@@ -27,7 +27,7 @@ import uuid
 NATIVE = Path(__file__).resolve().parents[1]
 TEST = NATIVE / "tests/NativeArchiveRuntimeOwnershipTests.swift"
 SOURCES = [NATIVE / name for name in (
-    "BrainRuntime.swift", "NativeProfileLayoutFeature.swift", "NativeRuntimePortFeature.swift", "NativeRuntimeHealthFeature.swift",
+    "BrainRuntime.swift", "NativeProfileLayoutFeature.swift", "NativeProfileSelectionFeature.swift", "NativeRuntimePortFeature.swift", "NativeRuntimeHealthFeature.swift",
 )] + [TEST]
 LAUNCHER = NATIVE / "native_backend_launcher.py"
 ASSEMBLER = NATIVE / "assemble.py"

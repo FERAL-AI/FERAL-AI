@@ -2,6 +2,12 @@ import Foundation
 import Darwin
 
 @MainActor final class BrainRuntime {
+    let profileLayout: Result<NativeProfileLayout, NativeProfileLayoutFailure>
+    init(profileLayout: Result<NativeProfileLayout, NativeProfileLayoutFailure>? = nil) {
+        self.profileLayout = profileLayout ?? NativeProfileSelectionMetadata.resolve(
+            environment: ProcessInfo.processInfo.environment,
+            userHome: FileManager.default.homeDirectoryForCurrentUser, storedChoice: nil)
+    }
     private var child: Process?
     private var logHandle: FileHandle?
     private var lifeline: Pipe?
@@ -98,10 +104,9 @@ import Darwin
         guard FileManager.default.isExecutableFile(atPath: python.path), FileManager.default.fileExists(atPath: core.appendingPathComponent("api/server.py").path) else {
             throw NativeFailure("The bundled backend is missing. Reinstall the complete app.")
         }
-        let layout = try NativeProfileLayoutFeature.resolve(
-            environment: ProcessInfo.processInfo.environment,
-            userHome: FileManager.default.homeDirectoryForCurrentUser,
-            inspect: nativeProfilePathKind)
+        let layout = try profileLayout.get()
+        try NativeProfileLayoutFeature.validateForUse(layout, inspect: NativeProfileSelectionMetadata.kind,
+            ownedDirectory: NativeProfileSelectionMetadata.ownedDirectory)
         var env = layout.backendEnvironment
         let home = layout.configRoot
         profileConfigRoot = layout.configRoot

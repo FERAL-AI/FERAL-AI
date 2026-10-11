@@ -45,7 +45,29 @@ import CoreFoundation
     // This is presentation state, separate from the backend's setup receipt.
     @Published var showProviderSetup = false
     @Published private(set) var providerSetupRevision = UUID()
-    private let runtime = BrainRuntime()
+    private let runtime: BrainRuntime
+    let resolvedProfile: Result<NativeProfileLayout, NativeProfileLayoutFailure>
+    private var profileSelectionController: NativeProfileSelectionController?
+    @Published private(set) var profileSelectionReview: NativeProfileSelectionReview?
+    @Published private(set) var profileSelectionNotice: String?
+    @Published private(set) var profileSelectionError: String?
+    @Published private(set) var profileSelectionRequiresRestart = false
+    private let profileEnvironment: [String: String]
+    var activeProfileRoot: URL? { try? resolvedProfile.get().configRoot }
+    var activeProfileSource: String { (try? resolvedProfile.get().source.label) ?? "Profile unavailable" }
+    var activeProfileRecoveryJournalURL: URL? { contextRecoveryJournalURL }
+    var activeProfileAvatarDirectory: URL? { try? resolvedProfile.get().avatarDirectory }
+    // App preferences survive a profile choice. Display only an imported image
+    // lexically owned by the frozen active profile; never rewrite the saved path.
+    var activeImportedAvatarPath: String? {
+        guard let path = importedAvatarPath, path.hasPrefix("/"), path.utf8.count <= NativeProfileLayoutFeature.maximumPathBytes,
+              !path.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }),
+              let directory = activeProfileAvatarDirectory else { return nil }
+        let url = URL(fileURLWithPath: path).standardizedFileURL
+        guard url.deletingLastPathComponent() == directory else { return nil }
+        return url.path
+    }
+
     private var socket: URLSessionWebSocketTask?
     private var receiveTask: Task<Void, Never>?
     private var codingPoll: Task<Void, Never>?
@@ -179,7 +201,7 @@ import CoreFoundation
             try await NativeProfileArchiveProcessExecutor.bundled().execute(command)
         })
     var canPrepareProfileArchive: Bool {
-        !preferencesUnavailable && preferenceSuiteName != nil && ready && !busy && !connecting
+        !preferencesUnavailable && !effectsPaused && preferenceSuiteName != nil && ready && !busy && !connecting
             && !chatMutationBusy && !codingBusy && !contextSetupPending && contextState.canSaveDisplay
             && runtime.ownership != nil
             && !profileArchivePaused && !profileArchive.busy
@@ -248,8 +270,8 @@ import CoreFoundation
         }
     }
 
-    var effectsPaused: Bool { shuttingDown || profileArchivePaused }
-    var canAdvanceProfileOnboarding: Bool { !preferencesUnavailable && !effectsPaused && !onboarded }
+    var effectsPaused: Bool { shuttingDown || profileArchivePaused || profileSelectionRequiresRestart }
+    var canAdvanceProfileOnboarding: Bool { !preferencesUnavailable && activeProfileRoot != nil && !effectsPaused && !onboarded }
     var localRuntimeGeneration: UUID { runtimeRevision }
     var featureBaseURL: URL? { !preferencesUnavailable && !effectsPaused && !runtimeAdmissionSuspended && ready ? runtime.baseURL : nil }
     var securityBaseURL: URL? { !preferencesUnavailable && !effectsPaused && !runtimeAdmissionSuspended && (serviceReachable || ready) ? runtime.baseURL : nil }
@@ -288,19 +310,15 @@ import CoreFoundation
 
     init(session injectedSession: URLSession? = nil, preferences: UserDefaults? = nil, recoveryJournalURL: URL? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil,
          preferencesResolver: (() -> UserDefaults?)? = nil, chatSender: (([String:Any]) async throws -> Void)? = nil,
-         preferenceSuite: String? = nil, voiceAudio: NativeVoiceAudioIO? = nil) {
+         preferenceSuite: String? = nil, voiceAudio: NativeVoiceAudioIO? = nil,
+         profileEnvironment: [String: String]? = nil, profileUserHome: URL? = nil,
+         profileInspector: ((URL) throws -> NativeProfilePathKind)? = nil,
+         profileSnapshot: ((URL) throws -> NativeProfileDirectorySnapshot)? = nil) {
         injectedRuntimeOwner = runtimeOwner
         injectedChatSender = chatSender
         injectedVoiceAudio = voiceAudio
         preferenceSuiteName = preferenceSuite ?? ((preferences != nil || preferencesResolver != nil) ? nil :
             (ProcessInfo.processInfo.environment["FERAL_NATIVE_PREFS_SUITE"] ?? "ai.feral.native.preview"))
-        if let recoveryJournalURL { contextRecoveryJournalURL = recoveryJournalURL }
-        else if preferences != nil || preferencesResolver != nil { contextRecoveryJournalURL = nil }
-        else {
-            let home = ProcessInfo.processInfo.environment["FERAL_HOME"].map { URL(fileURLWithPath: $0) }
-                ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".feral-native-preview")
-            contextRecoveryJournalURL = home.appendingPathComponent("native-context-recovery.json")
-        }
         let resolved: UserDefaults?
         if let preferences { resolved = preferences }
         else if let preferencesResolver { resolved = preferencesResolver() }
@@ -312,6 +330,34 @@ import CoreFoundation
         // Failure never reads or writes this placeholder domain. It keeps the
         // recovery dependency initialized while startup/profile effects are fenced.
         prefs = resolved ?? .standard
+        let environment = profileEnvironment ?? ProcessInfo.processInfo.environment
+        self.profileEnvironment = environment
+        let userHome = profileUserHome ?? FileManager.default.homeDirectoryForCurrentUser
+        let inspect = profileInspector ?? NativeProfileSelectionMetadata.kind
+        let snapshot = profileSnapshot ?? NativeProfileSelectionMetadata.snapshot
+        let layoutResult: Result<NativeProfileLayout, NativeProfileLayoutFailure>
+        if resolved == nil { layoutResult = .failure(.uninspectablePath) }
+        else {
+            do {
+                layoutResult = .success(try NativeProfileLayoutFeature.resolve(environment: environment, userHome: userHome,
+                    storedChoice: resolved?.object(forKey: NativeSavedProfileChoice.key), inspect: inspect,
+                    ownedDirectory: { try snapshot($0).exists }))
+            } catch let failure as NativeProfileLayoutFailure { layoutResult = .failure(failure) }
+            catch { layoutResult = .failure(.uninspectablePath) }
+        }
+        resolvedProfile = layoutResult
+        if case .failure(let failure) = layoutResult { profileSelectionError = failure.localizedDescription }
+        runtime = BrainRuntime(profileLayout: layoutResult)
+        if let recoveryJournalURL { contextRecoveryJournalURL = recoveryJournalURL }
+        else if (preferences != nil || preferencesResolver != nil) && profileUserHome == nil { contextRecoveryJournalURL = nil }
+        else { contextRecoveryJournalURL = try? layoutResult.get().recoveryJournalURL }
+        if let resolved, let domain = preferenceSuiteName {
+            profileSelectionController = NativeProfileSelectionController(environment: environment, userHome: userHome,
+                domain: domain, activeRoot: try? layoutResult.get().configRoot,
+                read: { resolved.object(forKey: NativeSavedProfileChoice.key) },
+                write: { resolved.set($0, forKey: NativeSavedProfileChoice.key) },
+                inspect: inspect, snapshot: snapshot)
+        }
         if let resolved {
             displayName = resolved.string(forKey: "displayName") ?? ""
             avatarChoice = resolved.string(forKey: "avatarChoice") ?? "photo"
@@ -358,11 +404,16 @@ import CoreFoundation
     }
 
     private func preferencesPermitEffects() -> Bool {
-        guard preferencesUnavailable else { return true }
-        error = "Local preferences are unavailable. Your saved profile has not been changed. Quit and reopen FERAL; no reset is required."
-        startupStatus = "Local preferences are unavailable. Startup is paused."
-        ready = false
-        return false
+        if preferencesUnavailable {
+            error = "Local preferences are unavailable. Your saved profile has not been changed. Quit and reopen FERAL; no reset is required."
+            startupStatus = "Local preferences are unavailable. Startup is paused."
+            ready = false; return false
+        }
+        if case .failure(let failure) = resolvedProfile {
+            error = failure.localizedDescription; startupStatus = "Native profile selection is unavailable. Startup is paused."
+            ready = false; return false
+        }
+        return true
     }
 
     // Exact-owner events only. Fixtures inject ownership; production uses BrainRuntime.
@@ -485,7 +536,7 @@ import CoreFoundation
 
     func start() async {
         guard preferencesPermitEffects() else { return }
-        guard !shuttingDown && !connecting && !ready else { return }
+        guard !shuttingDown && !connecting && !ready && !profileSelectionRequiresRestart else { return }
         let priorID = conversationID, priorRecords = messages.map(\.savedRecord)
         connecting = true; busy = true; error = nil
         defer { connecting = false; busy = false }
@@ -1406,6 +1457,52 @@ import CoreFoundation
         showProviderSetup = false
         return true
     }
+    var canReviewProfileSelection: Bool {
+        !preferencesUnavailable && activeProfileRoot != nil && profileSelectionController != nil && profileEnvironment["FERAL_HOME"] == nil
+            && !effectsPaused && !busy && !connecting && !chatMutationBusy && !codingBusy
+            && !["running", "awaiting_permission"].contains(coding.status)
+            && unresolvedChatRequest == nil && !contextSetupPending && !checkingChatStatus
+            && pendingContextCreationSID == nil && contextState.canSaveDisplay
+            && !profileArchive.busy && profileArchive.review == nil && profileArchive.applyReview == nil
+    }
+    func prepareProfileSelection(_ kind: NativeSavedProfileKind) {
+        profileSelectionError = nil
+        do {
+            guard let controller = profileSelectionController else { throw NativeProfileSelectionFailure.unavailable }
+            profileSelectionReview = try controller.prepare(kind, idle: canReviewProfileSelection)
+        } catch { profileSelectionError = error.localizedDescription }
+    }
+    func cancelProfileSelection(_ review: NativeProfileSelectionReview) {
+        profileSelectionController?.cancel(review)
+        if profileSelectionReview == review { profileSelectionReview = nil }
+    }
+    @discardableResult func confirmProfileSelection(_ review: NativeProfileSelectionReview) -> Bool {
+        profileSelectionError = nil
+        do {
+            guard let controller = profileSelectionController, profileSelectionReview == review else {
+                throw NativeProfileSelectionFailure.changed
+            }
+            try controller.confirm(review, idle: canReviewProfileSelection)
+            profileSelectionReview = nil; profileSelectionRequiresRestart = true
+            if ready {
+                do { try NativeLocalActionGate.shared.pause(origin: runtime.baseURL) }
+                catch { profileSelectionError = "The choice was saved, but local admission closure was not confirmed. Quit before another action." }
+            }
+            profileSelectionNotice = "Saved for the next normal launch. The current profile remains " + (activeProfileRoot?.path ?? "unavailable") + ". Quit and reopen explicitly; no data was moved or task replayed."
+            return true
+        } catch {
+            profileSelectionReview = nil; profileSelectionError = error.localizedDescription
+            if (error as? NativeProfileSelectionFailure) == .unconfirmed {
+                profileSelectionRequiresRestart = true
+                profileSelectionNotice = "The next-launch write is uncertain. Quit and inspect the saved choice before more work; no other profile was started."
+                if ready {
+                    do { try NativeLocalActionGate.shared.pause(origin: runtime.baseURL) }
+                    catch { profileSelectionError = "The choice write and local admission closure were not confirmed. Quit before another action." }
+                }
+            }
+            return false
+        }
+    }
     func saveProfile() {
         guard preferencesPermitEffects(), !effectsPaused else { return }
         prefs.set(displayName, forKey: "displayName"); prefs.set(avatarChoice, forKey: "avatarChoice"); prefs.set(importedAvatarPath, forKey: "importedAvatarPath")
@@ -1415,8 +1512,10 @@ import CoreFoundation
         let scoped = url.startAccessingSecurityScopedResource(); defer { if scoped { url.stopAccessingSecurityScopedResource() } }
         do {
             guard NSImage(contentsOf: url) != nil else { throw NativeFailure("Choose a supported image file.") }
-            let base = ProcessInfo.processInfo.environment["FERAL_HOME"].map { URL(fileURLWithPath: $0) } ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".feral-native-preview")
-            let folder = base.appendingPathComponent("avatars"); try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let layout = try resolvedProfile.get()
+            try NativeProfileLayoutFeature.validateForUse(layout, inspect: NativeProfileSelectionMetadata.kind,
+                ownedDirectory: NativeProfileSelectionMetadata.ownedDirectory)
+            let folder = layout.avatarDirectory; try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
             let dest = folder.appendingPathComponent(UUID().uuidString + "." + url.pathExtension)
             try FileManager.default.copyItem(at: url, to: dest)
             importedAvatarPath = dest.path; avatarChoice = "imported"; saveProfile()

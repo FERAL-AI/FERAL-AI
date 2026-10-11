@@ -1,10 +1,14 @@
 import Foundation
 
 enum NativeProfileLayoutFailure: String, LocalizedError {
-    case invalidEnvironment, conflictingDataRoot, unsupportedPath, uninspectablePath
+    case invalidEnvironment, conflictingDataRoot, unsupportedPath, uninspectablePath, invalidStoredChoice, personalProfileUnavailable
 
     var errorDescription: String? {
         switch self {
+        case .invalidStoredChoice:
+            return "The saved native profile choice is unsupported. Startup is paused; no other profile was selected."
+        case .personalProfileUnavailable:
+            return "The selected existing FERAL profile must be an owned directory. No profile was created or migrated."
         case .invalidEnvironment:
             return "The native profile path must be a nonempty, bounded absolute file path."
         case .conflictingDataRoot:
@@ -18,7 +22,7 @@ enum NativeProfileLayoutFailure: String, LocalizedError {
 }
 
 /// A trusted caller supplies metadata only, without exposing profile contents.
-enum NativeProfilePathKind {
+enum NativeProfilePathKind: Equatable {
     case missing, directory, symbolicLink, other, unavailable
 }
 
@@ -27,6 +31,9 @@ struct NativeProfileLayout: Equatable {
     let dataRoot: URL
     let backendEnvironment: [String: String]
     let usesDefaultHome: Bool
+    let source: NativeProfileSource
+    var recoveryJournalURL: URL { configRoot.appendingPathComponent("native-context-recovery.json") }
+    var avatarDirectory: URL { configRoot.appendingPathComponent("avatars", isDirectory: true) }
 }
 
 /// Pure selection matching config.loader's FERAL_HOME precedence.
@@ -38,17 +45,24 @@ enum NativeProfileLayoutFeature {
     static let defaultDirectoryName = ".feral-native-preview"
 
     static func resolve(environment: [String: String], userHome: URL,
-                        inspect: (URL) throws -> NativeProfilePathKind) throws -> NativeProfileLayout {
-        let usesDefault = environment["FERAL_HOME"] == nil
+                        storedChoice: Any? = nil,
+                        inspect: (URL) throws -> NativeProfilePathKind,
+                        ownedDirectory: (URL) throws -> Bool = { _ in false }) throws -> NativeProfileLayout {
         let selected: String
+        let source: NativeProfileSource
         if let explicit = environment["FERAL_HOME"] {
             selected = try lexicalPath(explicit)
+            source = .environment
         } else {
             guard userHome.isFileURL, userHome.host == nil || userHome.host == "" else {
                 throw NativeProfileLayoutFailure.invalidEnvironment
             }
             let base = try lexicalPath(userHome.path)
-            selected = try lexicalPath(base + "/" + defaultDirectoryName)
+            let choice: NativeSavedProfileKind?
+            do { choice = try NativeSavedProfileChoice.decode(storedChoice) }
+            catch { throw NativeProfileLayoutFailure.invalidStoredChoice }
+            selected = try lexicalPath(base + "/" + (choice == .personal ? ".feral" : defaultDirectoryName))
+            source = choice == .personal ? .savedPersonal : (choice == .preview ? .savedPreview : .previewDefault)
         }
         if let explicitData = environment["FERAL_DATA_HOME"] {
             guard try lexicalPath(explicitData) == selected else {
@@ -59,11 +73,32 @@ enum NativeProfileLayoutFeature {
         // Do not use standardizedFileURL or resolvingSymlinksInPath: either can
         // adopt an alias such as /private/tmp versus /tmp without review.
         let root = URL(fileURLWithPath: selected, isDirectory: true)
+        if source == .savedPersonal {
+            guard try inspect(root) == .directory, try ownedDirectory(root) else {
+                throw NativeProfileLayoutFailure.personalProfileUnavailable
+            }
+        }
         var childEnvironment = environment
         childEnvironment["FERAL_HOME"] = selected
         childEnvironment["FERAL_DATA_HOME"] = selected
         return NativeProfileLayout(configRoot: root, dataRoot: root,
-                                   backendEnvironment: childEnvironment, usesDefaultHome: usesDefault)
+                                   backendEnvironment: childEnvironment, usesDefaultHome: source == .previewDefault, source: source)
+    }
+
+    static func validateForUse(_ layout: NativeProfileLayout,
+                               inspect: (URL) throws -> NativeProfilePathKind,
+                               ownedDirectory: (URL) throws -> Bool = { _ in false }) throws {
+        try verifyAncestors(layout.configRoot.path, inspect: inspect)
+        guard layout.configRoot == layout.dataRoot,
+              layout.backendEnvironment["FERAL_HOME"] == layout.configRoot.path,
+              layout.backendEnvironment["FERAL_DATA_HOME"] == layout.configRoot.path else {
+            throw NativeProfileLayoutFailure.conflictingDataRoot
+        }
+        if layout.source == .savedPersonal {
+            guard try inspect(layout.configRoot) == .directory, try ownedDirectory(layout.configRoot) else {
+                throw NativeProfileLayoutFailure.personalProfileUnavailable
+            }
+        }
     }
 
     private static func lexicalPath(_ raw: String) throws -> String {

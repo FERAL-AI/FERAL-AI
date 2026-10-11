@@ -7,6 +7,44 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
+### Profile integration and next candidate
+
+The persisted native profile choice is integrated from a hash-verified ten-file
+handoff. It resolves one immutable layout for the backend, recovery journal and
+avatar storage. Reviewed personal/preview selection applies only after explicit
+Quit/reopen; cancellation writes nothing, uncertain preference readback fences
+new admission, and the old runtime retains its final conversation save. Existing
+voice/chat/coding work blocks selection. Worker fixtures pass 87 layout checks,
+61 selection checks and 23 linked assertions; the parent affected gate passes the
+same assertions within30 model wire groups, plus39 desktop/five error checks.
+Ordinary-launch preference persistence and actual UI acceptance remain open.
+
+Before activation, an early backend runtime-writer guard is being prepared to
+exclude cooperating servers before profile initialization/migration, including
+different ports on the same root. A port preflight alone is not writer exclusion.
+Legacy and offline writers remain a separate boundary. Candidate9.63/build2026101012
+is prepared for a fresh55-input native compile after guarded startup integration.
+No9.63 app has been assembled or accepted yet.
+
+Normal9.62 launch on the existing paired profile was observed with exact native
+parent/child ownership and9090 listener identity. Existing vault unlock succeeded
+without resetting credentials or copying data; normal Quit exited0. This proves
+that activation, not persistent Finder/Dock adoption. The phone was unavailable
+with zero registered nodes; physical glasses voice remains unverified.
+
+Published PR310 head00f46a8c08620686a12eb59264890cf51fd20235 has17 successful
+checks/four conditional skips and one failed Brain pytest job: a guarded-send test
+double lacks the new guard argument. The job reports15,254 passes,87 skips and
+77.30% coverage. A focused fixture correction is being reviewed; current CI is
+not all green.
+
+The bounded iOS health correction is released for parent review, not integrated:
+historical BP/HRV carries sample_ts instead of colliding with envelope send-time
+ts and rejects invalid/future epochs. Actual selected Swift sender/encoder to Mac
+decoder fixtures pass31 assertions. Full app/device acceptance is pending. Durable
+phone-history transfer, canonical ingestion and snapshot measurement timestamps
+remain separate required work; stored source labels do not prove fresh samples.
+
 ### Current native9.62 actual result and provider blocker
 
 Native9.62/build2026101011 contains exact16c2cf02915bca599bd4178bd3e88b075811d56d.
@@ -19,8 +57,8 @@ A separate actual FERAL focus-only probe verifies the intended Chrome window,
 its AX handle and fresh foreground PID despite overlapping geometry; no model
 calls, keyboard or form edits occur. Normal Quit exits0. [Exact acceptance](NATIVE_9_62_ACCEPTANCE.md).
 Numeric date/model-driven saved outcome remains open until inference is funded.
-The user has been asked which existing funded provider to use or to restore
-selected OpenAI credit; no provider/key/billing/profile setting was changed.
+Funded provider selection or restored selected OpenAI credit remains pending;
+no provider/key/billing setting was changed.
 Continue independent persistent profile review/integration, normal paired
 deployment and publication; do not replay this terminal task automatically.
 

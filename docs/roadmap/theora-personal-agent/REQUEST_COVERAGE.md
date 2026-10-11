@@ -1,6 +1,33 @@
 # User request coverage and next implementation work
 
-**Current checkpoint (October 10; integrated phone repair).**
+**Current checkpoint (October 10; native9.62 and profile integration).**
+
+The current native candidate9.62 contains exact16c2cf02915bca599bd4178bd3e88b075811d56d
+with508 Python/70 WebUI equality and strict signatures verified. Actual native
+composer testing reaches the intended regular Chrome Reference page and selected
+scene inference, then fails visibly because the selected provider has no credit.
+No itinerary/draft was saved. Separate actual FERAL focus verifies the intended
+window and fresh foreground; this does not prove the full model-driven goal.
+
+Normal launch with the existing paired profile, exact9090 runtime ownership,
+existing vault unlock and normal Quit pass. Persisted normal-launch profile choice
+is integrated, with next-launch semantics and fixture checks; a fresh9.63 build,
+early startup writer exclusion and actual preference persistence remain pending.
+The installed legacy app/public distribution are not replaced by these checks.
+
+The installed iOS follow-up is local77858a5ca6135fc5851d147204d51120c20a7e1d,
+with733 Foundation assertions and signed device build/install evidence. Physical
+HFP voice, interruption, concurrent speech/tasks and result reporting are open.
+The normal Mac observed zero registered phones; Mirroring remains locked.
+Health history transfer, per-sample freshness and baseline acceptance are open.
+A bounded historical sample-time correction is under parent review.
+
+PR310 head00f46a8c0 is published with17 successful checks/four conditional skips;
+one backend test double fails on the new guarded-send argument and is being fixed.
+No passing full CI, PyPI release or complete-product acceptance is claimed.
+[Current checkpoint](WORK_STATE.md), [live acceptance](NATIVE_9_62_ACCEPTANCE.md).
+
+**Historical checkpoint (October 10; integrated phone repair).**
 
 The repaired iOS development app is installed in place on the connected iPhone
 17 Pro Max from local commit `5749babc52087698de21aec96e0926650a823f37`.
