@@ -59,9 +59,14 @@ executor. Accepted TaskFlows outlive speech cancellation; strict terminal receip
 remain recoverable without replaying work. OpenAI queues completion speech until
 foreground voice is idle; Gemini supports wire receipts. The integrated gate passes
 351 tests. Full CI Ruff passes; configured Mac typing has 780 diagnostics, no new
-errors and eight previously missing yaml-stub diagnostics removed. The corrected
-9.58 assembly source is ready; package and repeat actual Chrome acceptance next.
-The current 9.57 candidate contains none of this new wave.
+errors and eight previously missing yaml-stub diagnostics removed. Canonical 9.58/build2026101007 now contains runtime9035531d6441df8d14b4800f1d9d82eae704899b.
+All507 Python/70 WebUI files match; strict signatures and verified unchanged
+54-input native reuse pass. Offline assembly took39.58s, with19,370,192,896
+bytes free before and19,289,460,736 after, within the2GiB budget. Known-good
+9.52 is retained. The post-typing-fix gate passes99 tests/one skip. Actual new
+Chrome acceptance is held because concurrent desktop input is changing Chrome;
+no repaired-candidate live task has been submitted. Phone Mirroring remains
+locked by TouchID; no new physical voice result is claimed.
 
 ### Concurrent iOS and executor handoff
 
@@ -1777,3 +1782,20 @@ build was blocked by Swift macro sandbox; the escalated build is separate.
 - This aligns discovery and readiness presentation. Credential storage remains
   deliberately reviewed separately from activation; successful setup still does
   not claim provider inference until a real or controlled provider probe is run.
+
+The supplied log was saved at00:02UTC, before the02:19UTC installed5ed update.
+The ambient score repair is already in that update: signed robust deviation stays
+local, uncalibrated wire confidence is zero. Fourteen Swift analyzer/serializer
+and six Mac schema/filter counterchecks pass without new source changes. A
+fresh exact-build phone run is required to evaluate current voice behavior.
+
+
+Authenticated phone-bearer Realtime sessions now select near-field input
+denoising on their exact captured producer and paired principal. Desktop, legacy
+shared-key nodes, Gemini, saved preferences and VAD timing retain existing
+behavior. Original-source integration passes94 focused tests, CI Ruff and
+configured Mac typing retains780 diagnostics with zero additions/removals.
+Provider-side denoising does not establish addressee selection or physical
+acoustic effectiveness. The field follows the official GA Realtime schema:
+https://developers.openai.com/api/reference/resources/realtime/client-events.
+The9.59 assembly source is ready to include this bounded follow-up.

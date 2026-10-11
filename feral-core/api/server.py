@@ -179,7 +179,7 @@ class _OwnedNodeVoice:
     MAX_PENDING_BASE64 = 4 * 1024 * 1024
 
     def __init__(self, brain, ws, intake, node_id, session_id, stream_id,
-                 admission_current, failure, source_principal=None):
+                 admission_current, failure, source_principal=None, *, paired_phone_audio=False):
         self.brain, self.ws, self.intake = brain, ws, intake
         self.node_id, self.session_id, self.stream_id = node_id, session_id, stream_id
         self.router, self.orchestrator, self.memory = brain.voice_router, brain.orchestrator, brain.memory
@@ -194,6 +194,12 @@ class _OwnedNodeVoice:
         from security.approval_ingress import PairedDevicePrincipal
         self.binding.stream_id = stream_id
         self.binding.task_handoff = None
+        # Runtime-only close-talk DSP selection, admitted by the actual
+        # phone credential route; never a client-provided profile or grant.
+        self.binding._close_talk_principal = None
+        if paired_phone_audio is True and type(source_principal) is PairedDevicePrincipal:
+            source_principal.require_current()
+            self.binding._close_talk_principal = source_principal
         if type(source_principal) is PairedDevicePrincipal:
             from voice.task_handoff import VoiceTaskHandoff
             async def emit_task(kind, payload):
@@ -4784,7 +4790,8 @@ async def daemon_session(ws: WebSocket, api_key: str = Query(default=None)):
                         continue
 
                 voice = _OwnedNodeVoice(phone_state, ws, phone_chats, node_id, session_id, stream_id,
-                    paired_peer_current if phone_principal is not None else None, None, phone_principal)
+                    paired_peer_current if phone_principal is not None else None, None, phone_principal,
+                    paired_phone_audio=bearer_kind == "phone_bearer" and node_kind in _PHONE_NODE_TYPES)
 
                 async def failure(message, voice=voice):
                     if voice.current():

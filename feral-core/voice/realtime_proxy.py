@@ -260,6 +260,9 @@ class RealtimeSession:
         self._retired = False
         self._callback_guard: Callable[[], bool] | None = None
         self._voice_attempt = current_voice_attempt(session_id)
+        from security.approval_ingress import PairedDevicePrincipal
+        principal = getattr(self._voice_attempt, "_close_talk_principal", None)
+        self._close_talk_principal = principal if type(principal) is PairedDevicePrincipal else None
         self._callback_tasks: set[asyncio.Task] = set()
         self._tool_lane = RealtimeToolLane(self._callback_tasks)
         self._tool_failure_lane = RealtimeToolLane(self._callback_tasks)
@@ -461,7 +464,22 @@ class RealtimeSession:
             max_output_tokens=4096,
         )
 
-        await self._send(session_update)
+        if self._close_talk_principal is not None:
+            principal, attempt = self._close_talk_principal, self._voice_attempt
+
+            def close_talk_current():
+                principal.require_current()
+                return (self._voice_attempt is attempt and self._close_talk_principal is principal
+                        and self._owns_callbacks())
+
+            if not close_talk_current():
+                return
+            # GA input noise reduction runs before VAD. Preserve the existing
+            # turn detection and interruption settings for this exact producer.
+            session_update["session"]["audio"]["input"]["noise_reduction"] = {"type": "near_field"}
+            await self._send(session_update, guard=close_talk_current)
+        else:
+            await self._send(session_update)
         logger.info(
             "Realtime session configured (GA): %d tools (from %d raw), voice=%s%s",
             len(openai_tools),

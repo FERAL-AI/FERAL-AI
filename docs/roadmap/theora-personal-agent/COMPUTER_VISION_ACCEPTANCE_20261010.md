@@ -140,3 +140,37 @@ required Veepoo symbols. Safe correction requires a compatible vendor rebuild
 with a prefixed database class and one shared JL implementation; neither binary
 renaming nor removal of a required framework is accepted. The warnings do not
 establish the code-9 termination cause.
+
+
+## Repaired native 9.58 assembly
+
+Canonical9.58/build2026101007 packages exact runtime9035531d6441df8d14b4800f1d9d82eae704899b.
+507 Python and70 dashboard source comparisons, strict signatures and verified
+reuse of54 unchanged Swift inputs pass. NativeSHA256:
+`6bc8db5374dd3b7096318ed7d48773ba32c45c9b4b2abcf444b250b7e531fdf6`.
+ManifestSHA256:
+`8e9a292cac856de506a45fffe716ed39f1b4d060bc0c8ae1784b068619884d8b`.
+Offline assembly took39.58s. Free bytes before19,370,192,896 and after19,289,460,736
+remain within the2GiB incremental budget;9.52 remains the sole rollback.
+The post-annotation/override gate passes99 tests/one skip.
+
+Concurrent desktop input changed Chrome during preparation, so no new live
+control goal was submitted. The physical phone surface remains TouchID locked.
+Neither successful assembly nor these checks establishes browser completion or
+HFP duplex operation. A fresh exact-build phone run is also necessary: the
+supplied log predates the02:19UTC installation of5ed by more than two hours.
+Its negative ambient score is already repaired in current source; actual Swift
+analyzer-to-mapper JSON and Mac schema/filter counterchecks pass14+6 assertions.
+Wire confidence remains zero because signed physiology deviation is uncalibrated;
+physiology moments consequently do not enter reaction inference.
+
+
+Authenticated phone-bearer Realtime sessions now select near-field input
+denoising on their exact captured producer and paired principal. Desktop, legacy
+shared-key nodes, Gemini, saved preferences and VAD timing retain existing
+behavior. Original-source integration passes94 focused tests, CI Ruff and
+configured Mac typing retains780 diagnostics with zero additions/removals.
+Provider-side denoising does not establish addressee selection or physical
+acoustic effectiveness. The field follows the official GA Realtime schema:
+https://developers.openai.com/api/reference/resources/realtime/client-events.
+The9.59 assembly source is ready to include this bounded follow-up.
