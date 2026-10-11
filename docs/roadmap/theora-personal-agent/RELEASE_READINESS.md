@@ -1,6 +1,26 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 10; integrated phone repair).**
+**Current checkpoint (October 10; live browser acceptance).**
+
+Local Mac candidate 9.59 / build 2026101008 contains be8173f05b51d7fad5796bdf6f476d1e88a4c7e7.
+Its strict signatures and exact 507 Python / 70 WebUI source comparisons pass.
+Actual native-composer testing reaches Responses tool execution and ordinary
+Chrome controls. The first workflow stopped on a benchmark window-index rule;
+no itinerary or draft saved. A follow-up exposed stale socket readiness and
+failed status reads. Reopening the exact conversation restored passive recovery
+without replay. Native socket and bounded tool-card display repairs are integrated, with 30
+original-source native model groups plus 15 rich-chat fixture groups and ten new
+display assertions passing. Fresh 9.60 assembly remains next; it is not yet built.
+
+The iOS follow-up at local 77858a5ca6135fc5851d147204d51120c20a7e1d is signed,
+strictly verified and installed in place. Its 733 Foundation assertions do not
+establish physical glasses voice, interruption or ambient rejection. TouchID
+currently prevents Phone Mirroring interaction. No all-feature release claim is
+made. Public PyPI remains 2026.9.7; these local repair commits are unreleased.
+
+[Exact current state](WORK_STATE.md), [live control evidence](COMPUTER_VISION_ACCEPTANCE_20261010.md).
+
+**Historical checkpoint (October 10; integrated phone repair).**
 
 The repaired iOS development app is installed in place on the connected iPhone
 17 Pro Max from local commit `5749babc52087698de21aec96e0926650a823f37`.

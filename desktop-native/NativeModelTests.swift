@@ -91,6 +91,87 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
 }
 
 @main struct NativeModelTests {
+    #if FERAL_NATIVE_SOCKET_FIXTURE
+    @MainActor static func socketLifecycleTests() async throws {
+        WireProtocol.reset()
+        let wire = TrackedChatFrames(), subject = try await trackedModel(wire)
+        await negotiate(subject)
+        let firstSent = await subject.sendChat("First synthetic request")
+        try expect(firstSent, "first fixture turn was not submitted")
+        let first = subject.trackedChatReference!, turn = UUID().uuidString.lowercased()
+        await subject.consume(receipt(first, type: "chat_turn_accepted", turn: turn))
+        await subject.consume(receipt(first, type: "chat_turn_terminal", turn: turn))
+        try expect(subject.chatCanSend && wire.commands.count == 1, "first durable completion did not leave idle receipt readiness")
+        let session = URLSession(configuration: .ephemeral)
+        defer { session.invalidateAndCancel() }
+        let closed = session.webSocketTask(with: URL(string: "ws://127.0.0.1:1/inert-unresumed")!)
+        subject.fixtureAttachChatSocket(closed)
+        subject.fixtureSocketClosed(closed)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try expect(!subject.chatReceiptReady && !subject.chatCanSend, "closed exact socket left stale receipt readiness after first terminal")
+        try expect(subject.unresolvedChatRequest == nil && wire.commands.count == 1, "idle close fabricated an unresolved action or replayed the first prompt")
+        await subject.reconnectVerifiedChat(); await negotiate(subject)
+        let freshConnection = subject.chatConnectionID
+        subject.fixtureSocketClosed(closed)
+        subject.fixtureSocketCompleted(closed)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try expect(subject.chatConnectionID == freshConnection && subject.chatCanSend, "late old socket callback retired fresh receipt negotiation")
+        let secondSent = await subject.sendChat("Second distinct synthetic request")
+        try expect(secondSent, "new explicit request refused after fresh negotiation")
+        let second = subject.trackedChatReference!
+        try expect(second.requestID != first.requestID && wire.commands.count == 2, "second explicit request reused or replayed the first request")
+        let failed = session.webSocketTask(with: URL(string: "ws://127.0.0.1:1/inert-unresumed")!)
+        subject.fixtureAttachChatSocket(failed)
+        subject.fixtureHTTPCompleted(session.dataTask(with: URL(string: "http://127.0.0.1:1/inert-unresumed")!))
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try expect(subject.chatReceiptReady && subject.trackedChatReference?.requestID == second.requestID && subject.trackedChatReference?.sessionID == second.sessionID, "ordinary HTTP completion retired the current WebSocket")
+        subject.fixtureSocketCompleted(failed)
+        try await Task.sleep(nanoseconds: 20_000_000)
+        try expect(!subject.chatReceiptReady && subject.unresolvedChatRequest?.requestID == second.requestID && subject.chatRecoveryBlocked, "WebSocket completion lost exact unknown request or retained stale capability")
+        await subject.checkChatStatus()
+        try expect(wire.commands.count == 2 && !subject.chatReceiptReady, "status reconnection replayed a command or claimed capability before negotiation")
+        await negotiate(subject)
+        let status = wire.frames.last { $0["method"] as? String == "chat.status" }!
+        try expect((status["params"] as? [String: Any])?["request_id"] as? String == second.requestID && wire.commands.count == 2, "reconnected status lookup changed request identity or replayed a prompt")
+        await subject.consume(["type": "res", "id": status["id"]!, "ok": true, "payload": ["found": false, "receipt": NSNull()]])
+        try expect(subject.chatRecoveryBlocked && wire.commands.count == 2, "missing receipt certified no action or replayed an unknown request")
+        await subject.shutdown()
+        for statusOnly in [false, true] {
+            WireProtocol.reset()
+            let racing = model()
+            racing.fixturePrepareChatSocket(session.webSocketTask(with: URL(string: "ws://127.0.0.1:1/inert-unresumed")!))
+            await negotiate(racing)
+            if statusOnly {
+                racing.fixtureRestoreUnknownReference(NativeTurnReference(sessionID: "fixture-thread", requestID: UUID().uuidString.lowercased()))
+            }
+            WireProtocol.delay("/api/conversations/save")
+            let paused = Task { @MainActor in
+                if statusOnly { await racing.checkChatStatus(); return false }
+                return await racing.sendChat("Must never move to the replacement conversation")
+            }
+            try await Task.sleep(nanoseconds: 40_000_000)
+            racing.conversationDeleted("fixture-thread")
+            try racing.restoreThread(["id": "replacement-thread", "messages": [[String: Any]]()])
+            let result = await paused.value
+            try expect(!result && racing.messages.isEmpty && racing.activeConversationID == "replacement-thread", "transport preflight await moved an old prompt or status lookup into a replacement conversation")
+            try expect(racing.chatCapabilityFrame == nil && racing.unresolvedChatRequest == nil, "old recovery negotiated capability or carried request identity into a replacement conversation")
+            await racing.shutdown()
+        }
+        WireProtocol.reset()
+        let attached = model()
+        attached.fixturePrepareChatSocket(session.webSocketTask(with: URL(string: "ws://127.0.0.1:1/inert-unresumed")!))
+        await negotiate(attached)
+        WireProtocol.delay("/api/conversations/save")
+        let pending = Task { @MainActor in await attached.sendChat("Old authorization does not include a newly selected file") }
+        try await Task.sleep(nanoseconds: 40_000_000)
+        attached.pendingAttachments = [NativeAttachmentRef(id: "new-attachment", filename: "synthetic.txt", contentType: "text/plain", sizeBytes: 7, sha256: String(repeating: "a", count: 64))]
+        let dispatched = await pending.value
+        try expect(!dispatched && attached.messages.isEmpty && attached.pendingAttachments.count == 1 && attached.chatCapabilityFrame == nil, "preflight await added an unreviewed attachment or silently renegotiated an old command")
+        await attached.shutdown()
+        print("PASS exact socket close/completion, stale callback refusal, HTTP isolation, fresh explicit turn and read-only exact-request status recovery")
+    }
+    #endif
+
     @MainActor static func model(preferences injectedPreferences: UserDefaults? = nil, runtimeOwner: (() -> NativeRuntimeOwnership?)? = nil) -> NativeModel {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [WireProtocol.self]
@@ -1156,10 +1237,17 @@ private func expect(_ condition: @autoclosure () -> Bool, _ message: String) thr
             try await sharedConversationSwitchTests()
             try await managedVoiceRequestBarrierTests()
             try await passiveRuntimeSuspensionTests()
+            #if FERAL_NATIVE_SOCKET_FIXTURE
+            try await socketLifecycleTests()
+            #endif
             try await trackedChatTests()
             try await contextCheckpointTests()
             try await contextRecoveryTests()
+            #if FERAL_NATIVE_SOCKET_FIXTURE
+            print("NATIVE_MODEL_WIRE_TESTS_PASSED: 30 groups; mocked HTTP/wire only, no engine/model execution")
+            #else
             print("NATIVE_MODEL_WIRE_TESTS_PASSED: 29 groups; mocked HTTP/wire only, no engine/model execution")
+            #endif
         } catch {
             fputs("NATIVE_MODEL_WIRE_TESTS_FAILED: \(error)\n", stderr)
             exit(1)

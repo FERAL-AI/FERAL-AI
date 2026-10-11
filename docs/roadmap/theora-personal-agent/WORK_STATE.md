@@ -7,7 +7,53 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Active live browser and vision acceptance repair
+### Current candidate and actual live follow-up failure
+
+Canonical 9.59 / build 2026101008 contains runtime be8173f05b51d7fad5796bdf6f476d1e88a4c7e7.
+All 507 packaged Python and 70 WebUI files match; strict deep signatures pass.
+Unchanged 54 Swift inputs were verified and reused; this was not a fresh compile.
+Assembly took 49.36s, with 19,249,721,344 bytes free before and 18,072,141,824 after.
+The simultaneous iOS build prevents attributing total disk growth to Mac alone.
+Only canonical 9.59 and known-good 9.52 are retained.
+
+Actual native-composer testing with its bundled backend and disposable storage
+now reaches GPT-5.4 Responses tool execution and ordinary Chrome AX controls.
+The first task stopped when the benchmark incorrectly treated a transient
+Chrome omnibox window index as document identity; no itinerary or draft saved.
+The first durable receipt records completed processing with action outcome
+not asserted. Twelve inference events total approximately $0.178895.
+The refined follow-up failed before confirmed admission; the UI could not read
+status on the same stale connection. Reopening the exact saved conversation
+restored passive status negotiation without replay. The durable store contains
+only the first task. The narrowed socket-lifecycle repair is integrated: a real loopback
+fixture reproduces the shared resource-deadline failure class, and the frozen
+original-source native gate passes 30 model groups. Bounded known Card/Text
+display is also integrated; its original-source rich-chat gate passes 15 existing
+groups and ten new assertions. No full browser outcome is claimed.
+
+The iOS follow-up is locally committed at 77858a5ca6135fc5851d147204d51120c20a7e1d.
+The real signed device build, strict signature verification and in-place device
+installation pass. Its 733 Foundation assertions include actual receive-body
+counterexamples for exact terminal identity and storage failure. Existing project
+and vendor edits were preserved. Physical UI, glasses duplex, interruption,
+ambient rejection and task completion speech remain open; Phone Mirroring is
+locked by TouchID. The separate capture-graph proposal remains held.
+
+Read-only installation reconciliation finds no listener on the normal paired
+port 9090; the recorded personal runtime PID 71793 is absent. Candidate 9.59 was
+actually exercised with disposable storage on port 61117, then quit normally
+before rebuilding. A tested local bundle is not proof that the phone is using
+its repaired runtime. Normal paired-profile launch/installation and physical
+end-to-end acceptance remain required; no personal settings or data were changed.
+
+Native 9.60 source is frozen for fresh compilation after the socket and display
+repairs. The first integrated native compile was sandbox-blocked by SwiftUI
+macro expansion; the approved outside-sandbox rerun passes 30 model groups.
+Explicit Send can retain a draft while reconnect capability negotiation is
+pending; no prompt is queued or replayed. [Exact repair and checks](NATIVE_CHAT_SOCKET_LIFECYCLE_20261010.md). Repeat the complex browser workflow through FERAL's own composer/tools,
+observe it live, and verify independently saved results before publication.
+
+### Historical browser and vision repair checkpoints
 
 New physical evidence supersedes the unlaunched-device statement below: the
 installed phone was exercised, but repeated VoiceProcessingIO render failures
@@ -60,7 +106,7 @@ remain recoverable without replaying work. OpenAI queues completion speech until
 foreground voice is idle; Gemini supports wire receipts. The integrated gate passes
 351 tests. Full CI Ruff passes; configured Mac typing has 780 diagnostics, no new
 errors and eight previously missing yaml-stub diagnostics removed. Canonical 9.58/build2026101007 now contains runtime9035531d6441df8d14b4800f1d9d82eae704899b.
-All507 Python/70 WebUI files match; strict signatures and verified unchanged
+All 507 Python/70 WebUI files match; strict signatures and verified unchanged
 54-input native reuse pass. Offline assembly took39.58s, with19,370,192,896
 bytes free before and19,289,460,736 after, within the2GiB budget. Known-good
 9.52 is retained. The post-typing-fix gate passes99 tests/one skip. Actual new
@@ -68,7 +114,7 @@ Chrome acceptance is held because concurrent desktop input is changing Chrome;
 no repaired-candidate live task has been submitted. Phone Mirroring remains
 locked by TouchID; no new physical voice result is claimed.
 
-### Concurrent iOS and executor handoff
+### Historical iOS and executor handoff
 
 The iOS owner has 637 passing actual Foundation assertions. Follow-up
 5ed664423549ecd4be2091be2dfe5320d8dc1f92 is signed and installed in place.

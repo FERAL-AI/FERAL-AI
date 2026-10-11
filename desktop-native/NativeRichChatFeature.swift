@@ -6,6 +6,27 @@ import CoreFoundation
 private func richJSON(_ value:Any)->String { if let text = value as? String { return text }; guard JSONSerialization.isValidJSONObject(value),let data = try? JSONSerialization.data(withJSONObject:value,options:[.sortedKeys,.prettyPrinted]) else { return String(describing:value) }; return String(decoding:data,as:UTF8.self) }
 private func richResetDate(_ value:Any?)->String { guard let n=value as? NSNumber,n.doubleValue.isFinite else{return "unknown"};return Date(timeIntervalSince1970:n.doubleValue).formatted() }
 private func richBool(_ value:Any?)->Bool? { guard let n = value as? NSNumber,CFGetTypeID(n)==CFBooleanGetTypeID() else { return nil }; return n.boolValue }
+/// Display-only summary of known backend Card/Text trees. Unknown widgets,
+/// action fields and resource URLs remain available only in exact metadata.
+private func richStructuredText(_ payload:[String:Any])->String {
+ guard let root=payload["root"] as? [String:Any] else{return ""}
+ var parts:[String]=[],remaining=8192,nodes=0
+ func visit(_ node:[String:Any],depth:Int) {
+  guard depth<=16,nodes<256,remaining>0 else{return};nodes+=1
+  let type=node["type"] as? String ?? ""
+  if type=="Text",let value=node["value"] as? String {
+   let text=value.trimmingCharacters(in:.whitespacesAndNewlines)
+   guard !text.isEmpty else{return}
+   if !parts.isEmpty {remaining-=1}
+   guard remaining>0 else{return}
+   let excerpt=String(text.prefix(remaining));parts.append(excerpt);remaining-=excerpt.count
+  }else if ["Card","VStack","HStack"].contains(type),let children=node["children"] as? [[String:Any]] {
+   for child in children.prefix(256){visit(child,depth:depth+1)}
+  }
+ }
+ visit(root,depth:0)
+ return parts.joined(separator:"\n")
+}
 private func richCorrelation(_ value:String)->String {switch value{case "single_pending_no_call_id":return "Matched the single pending tool without a call ID; identity is inferred.";case "ambiguous_no_call_id":return "Missing call ID and multiple pending calls; identity/outcome pairing is unresolved.";case "unmatched_no_call_id":return "Backend omitted a call ID; no exact correlation is available.";default:return ""}}
 enum NativeRichPath {
  /// Mirrors Path.expanduser().resolve(strict=False) without assuming the
@@ -123,7 +144,7 @@ private struct RichFailure:LocalizedError { let message:String; var errorDescrip
   if type=="plan_mode" {guard payload["session_id"] as? String==sid,richBool(payload["plan_mode"]) != nil else{return false};plan=payload;return true}
   if type=="budget_exceeded" || broadcastBudget {let data = broadcastBudget ? frame["data"] as? [String:Any] ?? [:] : payload; let site = data["call_site"] as? String ?? "unknown"; budgets[site]=data;return true}
   if type=="budget_reset" {if let site = payload["call_site"] as? String ?? frame["call_site"] as? String {budgets[site]=nil};return true}
-  if ["refusal","error","brain_event","skill_proposal","timeline","sdui","sdui_patch"].contains(type) { let title = type=="refusal" ? "Request declined" : type=="error" ? "Agent error" : type=="sdui" || type=="sdui_patch" ? "Structured content — inspection only" : type=="timeline" ? "Timeline" : type=="skill_proposal" ? "Skill proposal — not installed" : ((payload["event"] as? String ?? "Agent event").replacingOccurrences(of:"_",with:" ")); addEvent(type,title:title,text:payload["reason"] as? String ?? payload["message"] as? String ?? payload["text"] as? String ?? payload["summary"] as? String ?? payload["status"] as? String ?? "",raw:frame); return type != "error" }
+  if ["refusal","error","brain_event","skill_proposal","timeline","sdui","sdui_patch"].contains(type) { let title = type=="refusal" ? "Request declined" : type=="error" ? "Agent error" : type=="sdui" || type=="sdui_patch" ? "Structured content — inspection only" : type=="timeline" ? "Timeline" : type=="skill_proposal" ? "Skill proposal — not installed" : ((payload["event"] as? String ?? "Agent event").replacingOccurrences(of:"_",with:" ")); addEvent(type,title:title,text:payload["reason"] as? String ?? payload["message"] as? String ?? payload["text"] as? String ?? payload["summary"] as? String ?? payload["status"] as? String ?? (type=="sdui" ? richStructuredText(payload) : ""),raw:frame); return type != "error" }
   return false
  }
  private func addEvent(_ kind:String,title:String,text:String,raw:[String:Any]) {events.append(NativeRichEvent(id:UUID().uuidString,kind:kind,title:title,text:text,raw:raw));if events.count>100 {events.removeFirst(events.count-100)}}

@@ -145,7 +145,7 @@ establish the code-9 termination cause.
 ## Repaired native 9.58 assembly
 
 Canonical9.58/build2026101007 packages exact runtime9035531d6441df8d14b4800f1d9d82eae704899b.
-507 Python and70 dashboard source comparisons, strict signatures and verified
+507 Python and 70 dashboard source comparisons, strict signatures and verified
 reuse of54 unchanged Swift inputs pass. NativeSHA256:
 `6bc8db5374dd3b7096318ed7d48773ba32c45c9b4b2abcf444b250b7e531fdf6`.
 ManifestSHA256:
@@ -174,3 +174,18 @@ Provider-side denoising does not establish addressee selection or physical
 acoustic effectiveness. The field follows the official GA Realtime schema:
 https://developers.openai.com/api/reference/resources/realtime/client-events.
 The9.59 assembly source is ready to include this bounded follow-up.
+
+## Actual 9.59 native follow-up
+
+The bundled be8173f05 runtime reaches actual GPT-5.4 Responses tool rounds through
+the native composer. The first localhost task stopped on an over-strict test
+rule when Chrome's own omnibox shifted AX window indices. No itinerary or draft
+was saved. Processing completion did not assert an action outcome.
+
+A refined second submission exposed stale native socket readiness: submission
+and passive status failed, while the backend remained healthy and only the first
+durable receipt existed. Reopening the exact saved conversation restored passive
+status negotiation without replaying work. A real loopback URLSession fixture
+reproduces the shared short HTTP resource-lifetime failure class; the precise
+trigger in this particular candidate is not yet proven. Fresh socket-lifecycle
+repair and another actual FERAL-controlled browser run remain required.

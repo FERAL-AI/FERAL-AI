@@ -148,6 +148,7 @@ import CoreFoundation
     private let contextRecoveryJournalURL: URL?
     private let preferencesUnavailable: Bool
     private let session: URLSession
+    private let chatSession: URLSession
     private let transportDelegate = NativeLocalSessionDelegate()
     lazy var voice: NativeVoiceEngine = NativeVoiceEngine(sendFrame: { [weak self] frame in
         guard let self else { throw NativeFailure("Voice is disconnected.") }
@@ -325,6 +326,12 @@ import CoreFoundation
         configuration.timeoutIntervalForRequest = 60
         configuration.timeoutIntervalForResource = 300
         session = injectedSession ?? URLSession(configuration: configuration, delegate: transportDelegate, delegateQueue: nil)
+        // A WebSocket spans many turns. Keep the bounded HTTP resource
+        // deadline off this long-lived channel, using Foundation's default
+        // resource lifetime and the same no-redirect delegate.
+        let chatConfiguration = URLSessionConfiguration.ephemeral
+        chatConfiguration.timeoutIntervalForRequest = 60
+        chatSession = injectedSession ?? URLSession(configuration: chatConfiguration, delegate: transportDelegate, delegateQueue: nil)
         runtime.onHealthEvent = { [weak self] event in self?.observeRuntimeHealth(event) }
         if injectedSession == nil {
             let center = NSWorkspace.shared.notificationCenter
@@ -345,7 +352,7 @@ import CoreFoundation
         transportDelegate.onSocketClose = { [weak self] socket in
             Task { @MainActor in
                 guard let self, self.socket === socket else { return }
-                self.voice.configureConnection(sessionID: self.conversationID, connected: false)
+                await self.retireChatConnection(self.socketGeneration)
             }
         }
     }
@@ -692,7 +699,7 @@ import CoreFoundation
         var components = URLComponents(url: runtime.baseURL, resolvingAgainstBaseURL: false)!
         components.scheme = "ws"; components.path = "/v1/session"
         components.queryItems = NativeContextCheckpointWire.sessionQuery(conversationID, required: contextManaged || contextSetupPending)
-        let ws = session.webSocketTask(with: components.url!)
+        let ws = chatSession.webSocketTask(with: components.url!)
         socket = ws; ws.resume()
         receiveTask = Task { [weak self] in
             while !Task.isCancelled {
@@ -709,23 +716,9 @@ import CoreFoundation
                     if let sid = frame["session_id"] as? String, sid != self.conversationID { continue }
                     await self.consume(frame)
                 } catch {
-                    if !Task.isCancelled, self?.socketGeneration == generation {
-                        self?.voice.configureConnection(sessionID: self?.conversationID, connected: false)
-                        self?.richChat.configure(sessionID: nil, connectionID: nil)
-                        self?.taskResults.configure(sessionID: self?.taskResults.sessionID, connectionID: nil)
-                        if let self, let id = self.streamMessageID, let index = self.messages.firstIndex(where: { $0.id == id }) {
-                            self.messages[index].metadata["responseIncomplete"] = true
-                            self.messages[index].metadata["deliveryError"] = "Chat disconnected before this reply completed."
-                        }
-                        self?.socket = nil
-                        if let self {
-                            if self.chatTurns.isTracked { self.markTrackedUnknown("Chat disconnected before the request receipt arrived. Check status; it has not been retried.") }
-                            else { self.recordChatFailure("Chat disconnected. Reconnect explicitly.");self.finishResponse() }
-                            self.chatTurns.configure(sessionID:nil,connectionID:nil);self.checkingChatStatus = false
-                            self.configureContext(sessionID: self.conversationID, connectionID: nil, required: self.contextManaged, requestID: nil)
-                            self.contextStatus = self.contextState.message
-                            await self.persistConversation()
-                        }
+                    if !Task.isCancelled, let self, self.socket === ws,
+                       self.socketGeneration == generation {
+                        await self.retireChatConnection(generation)
                     }
                     break
                 }
@@ -733,6 +726,42 @@ import CoreFoundation
         }
         do { if let frame = chatTurns.capabilitiesFrame { try await sendChatFrame(frame) } }
         catch { recordChatFailure("Chat capability verification failed. No task was sent.") }
+    }
+
+    private func retireChatConnection(_ generation: UUID) async {
+        guard socketGeneration == generation, !shuttingDown,
+              socket != nil || chatTurns.ready || chatTurns.isTracked else { return }
+        // Revoke readiness before any persistence await. Old socket callbacks
+        // cannot retire a replacement channel or its receipt negotiation.
+        socketGeneration = UUID()
+        let retired = socket
+        socket = nil
+        receiveTask?.cancel(); receiveTask = nil
+        retired?.cancel(with: .goingAway, reason: nil)
+        voice.configureConnection(sessionID: conversationID, connected: false)
+        richChat.configure(sessionID: nil, connectionID: nil)
+        taskResults.configure(sessionID: taskResults.sessionID, connectionID: nil)
+        if let id = streamMessageID, let index = messages.firstIndex(where: { $0.id == id }) {
+            messages[index].metadata["responseIncomplete"] = true
+            messages[index].metadata["deliveryError"] = "Chat disconnected before this reply completed."
+        }
+        if chatTurns.isTracked {
+            markTrackedUnknown("Chat disconnected before the request receipt arrived. Check status; it has not been retried.")
+        } else {
+            recordChatFailure("Chat disconnected. Reconnect explicitly."); finishResponse()
+        }
+        chatTurns.configure(sessionID: nil, connectionID: nil)
+        checkingChatStatus = false
+        capabilityDeadline?.cancel(); statusDeadline?.cancel(); contextDeadline?.cancel()
+        configureContext(sessionID: conversationID, connectionID: nil, required: contextManaged, requestID: nil)
+        contextStatus = contextState.message
+        await persistConversation()
+    }
+
+    private func preflightChatTransport() async {
+        guard injectedChatSender == nil, chatTurns.ready,
+              socket == nil || socket?.state != .running else { return }
+        await retireChatConnection(socketGeneration)
     }
 
     // The injected transport is a fixture seam; production always sends through
@@ -805,9 +834,17 @@ import CoreFoundation
         let managedStop = voice.matchesStopDispatch(frame)
         guard !runtimeAdmissionSuspended || passiveControl || managedStop else { throw NativeFailure("New local actions are paused until the owned runtime is reverified.") }
         if let injectedChatSender { try await injectedChatSender(frame);return }
-        guard let socket,socket.state == .running else { throw NativeFailure("Chat is disconnected.") }
+        guard let socket, socket.state == .running else {
+            await retireChatConnection(socketGeneration)
+            throw NativeFailure("Chat is disconnected.")
+        }
         let data = try JSONSerialization.data(withJSONObject:frame)
-        try await socket.send(.string(String(decoding:data,as:UTF8.self)))
+        let generation = socketGeneration
+        do { try await socket.send(.string(String(decoding:data,as:UTF8.self))) }
+        catch {
+            if self.socket === socket, socketGeneration == generation { await retireChatConnection(generation) }
+            throw error
+        }
     }
     private func recoverSavedChatRequest() {
         unresolvedChatRequest = nil;chatRecoveryBlocked = false;checkingChatStatus = false
@@ -842,7 +879,14 @@ import CoreFoundation
     }
     func checkChatStatus() async {
         guard ready,!shuttingDown,!checkingChatStatus,let reference = unresolvedChatRequest else { return }
-        if !chatTurns.ready { await connectChat();return }
+        let selection = conversationRevision, runtimeOwner = runtimeRevision
+        let admission = runtimeAdmissionRevision
+        await preflightChatTransport()
+        guard ready, !shuttingDown, conversationRevision == selection, runtimeRevision == runtimeOwner,
+              runtimeAdmissionRevision == admission, conversationID == reference.sessionID,
+              unresolvedChatRequest?.requestID == reference.requestID else { return }
+        if !chatTurns.ready { await connectChat(); return }
+
         guard let frame = chatTurns.statusFrame(reference) else { return }
         let connection = socketGeneration
         checkingChatStatus = true
@@ -854,7 +898,18 @@ import CoreFoundation
             self.checkingChatStatus = false;self.recordChatFailure("Status read timed out. Earlier effects remain unknown; no task was retried.")
         }
         do { try await sendChatFrame(frame) }
-        catch { if connection == socketGeneration { chatTurns.expireStatus(statusID);statusDeadline?.cancel();checkingChatStatus = false;recordChatFailure("Status could not be read. The earlier task has not been retried.") } }
+        catch {
+            if !chatTurns.ready, unresolvedChatRequest?.requestID == reference.requestID,
+               conversationID == reference.sessionID, conversationRevision == selection,
+               runtimeRevision == runtimeOwner, runtimeAdmissionRevision == admission, ready, !shuttingDown {
+                // This explicit status action may replace a failed transport,
+                // negotiate capability, then read the same stored reference.
+                await connectChat()
+            } else if connection == socketGeneration {
+                chatTurns.expireStatus(statusID); statusDeadline?.cancel(); checkingChatStatus = false
+                recordChatFailure("Status could not be read. The earlier task has not been retried.")
+            }
+        }
     }
     private func applyChatTerminal(_ terminal:NativeTurnTerminal) async {
         guard terminal.reference.sessionID == conversationID else { return }
@@ -1104,7 +1159,19 @@ import CoreFoundation
             return false
         }
         guard !chatRecoveryBlocked,unresolvedChatRequest == nil else { recordChatFailure("Check the earlier request's status or choose a new conversation. It has not been retried.");return false }
+        let intendedSID = conversationID, intendedSelection = conversationRevision
+        let intendedRuntime = runtimeRevision, intendedAdmission = runtimeAdmissionRevision
+        let intendedAttachmentIDs = pendingAttachments.map(\.id)
+        await preflightChatTransport()
+        guard conversationID == intendedSID, conversationRevision == intendedSelection,
+              runtimeRevision == intendedRuntime, runtimeAdmissionRevision == intendedAdmission,
+              pendingAttachments.map(\.id) == intendedAttachmentIDs,
+              ready, !shuttingDown, !Task.isCancelled else { return false }
         if !chatTurns.ready { await connectChat() }
+        guard conversationID == intendedSID, conversationRevision == intendedSelection,
+              runtimeRevision == intendedRuntime, runtimeAdmissionRevision == intendedAdmission,
+              pendingAttachments.map(\.id) == intendedAttachmentIDs,
+              ready, !shuttingDown, !Task.isCancelled else { return false }
         guard chatCanSend,let reference = chatTurns.beginRequest() else { recordChatFailure("Verified chat capability negotiation is not ready. No task was sent.");return false }
         let connection = socketGeneration,revision = conversationRevision,admission = runtimeAdmissionRevision
         archiveRichTurn(); richChat.clearTurnPresentation()
@@ -1511,7 +1578,7 @@ import CoreFoundation
         richChat.configure(sessionID: nil, connectionID: nil)
         responseDeadline?.cancel(); codingPoll?.cancel(); receiveTask?.cancel(); socket?.cancel(with: .goingAway, reason: nil)
         contextDeadline?.cancel()
-        await runtime.stop(); runtimeRevision = UUID(); recovery.configure(baseURL: nil, connectionID: nil); session.invalidateAndCancel(); ready = false; serviceReachable = false
+        await runtime.stop(); runtimeRevision = UUID(); recovery.configure(baseURL: nil, connectionID: nil); chatSession.invalidateAndCancel(); session.invalidateAndCancel(); ready = false; serviceReachable = false
         capabilityDeadline?.cancel();statusDeadline?.cancel()
     }
 }

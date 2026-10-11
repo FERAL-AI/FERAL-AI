@@ -12,6 +12,11 @@ final class NativeLocalSessionDelegate: NSObject, URLSessionTaskDelegate, URLSes
     func urlSession(_ session: URLSession, webSocketTask: URLSessionWebSocketTask, didCloseWith closeCode: URLSessionWebSocketTask.CloseCode, reason: Data?) {
         onSocketClose?(webSocketTask)
     }
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        // Only a WebSocket completion retires chat. An ordinary HTTP request
+        // finishing on this delegate cannot revoke a live socket.
+        if let socket = task as? URLSessionWebSocketTask { onSocketClose?(socket) }
+    }
     func urlSession(_ session: URLSession, task: URLSessionTask, willPerformHTTPRedirection response: HTTPURLResponse,
                     newRequest request: URLRequest, completionHandler: @escaping (URLRequest?) -> Void) {
         // The owned loopback API has no redirect contract. Never forward selected files or credentials elsewhere.
