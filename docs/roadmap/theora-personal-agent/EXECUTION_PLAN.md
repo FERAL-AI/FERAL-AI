@@ -1,6 +1,15 @@
 # FERAL app completion: executable plan
 
-**Current checkpoint (October 10; native live acceptance).**
+**Current checkpoint (October 10; native9.62 actual acceptance).**
+
+Exact16c2cf029 native9.62 passes assembly/source/signature audits. Actual composer
+testing reaches selected scene inference, then a no-credit provider error ends
+the task with a visible error and durable failed/not_asserted receipt, no replay
+or saves. A separate actual FERAL primitive verifies exact Chrome window focus.
+Continue independent profile/installation work; full saved workflow awaits
+funded inference. [Evidence](NATIVE_9_62_ACCEPTANCE.md), [current work](WORK_STATE.md).
+
+**Historical checkpoint (October 10; native9.61 live acceptance).**
 
 Native9.61 passes exact-source/signature audits with verified unchanged native
 reuse. Its actual Chrome workflow captures the selected window and completes

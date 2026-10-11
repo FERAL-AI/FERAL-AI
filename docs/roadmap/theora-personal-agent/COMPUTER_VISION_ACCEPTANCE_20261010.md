@@ -1,6 +1,15 @@
 # Computer and browser vision acceptance, October 10
 
-## Latest actual native9.61 result
+## Latest actual native9.62 result
+
+Native9.62 reaches selected scene inference through the actual composer, then
+the next OpenAI request fails with no remaining credits. The app displays the
+provider error; no itinerary/draft saves or replay occur. A separate actual
+FERAL focus-only endpoint probe verifies the intended Chrome window and fresh
+foreground PID without keyboard/form edits. Saved model-driven workflow and
+numeric date acceptance remain open. [Exact result](NATIVE_9_62_ACCEPTANCE.md).
+
+## Historical native9.61 result
 
 Native9.61 captures the exact selected regular Chrome window and completes capped
 GPT-5.4 scene inference through the actual composer. Parent pixels confirm the

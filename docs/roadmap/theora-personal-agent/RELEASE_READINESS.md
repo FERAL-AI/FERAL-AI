@@ -1,6 +1,18 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 10; native9.61 live acceptance).**
+**Current checkpoint (October 10; native9.62 actual acceptance).**
+
+Exact16c2cf029 native9.62 passes508 Python/70 WebUI equality, strict signatures
+and verified native reuse. The actual composer reaches selected scene inference,
+then OpenAI reports no remaining credits. The app displays the error and the
+durable failed/not_asserted receipt agrees with no saved itinerary/draft.
+A separate actual FERAL focus-only probe verifies the intended Chrome window
+and fresh foreground PID with no model/form/keyboard actions. Normal Quit exits0.
+Full saved workflow/numeric date acceptance awaits a funded provider; normal
+profile adoption, physical voice and release gates remain open.
+[Exact evidence](NATIVE_9_62_ACCEPTANCE.md), [current work](WORK_STATE.md).
+
+**Historical checkpoint (October 10; native9.61 live acceptance).**
 
 Native9.61/build2026101010 contains exact12b22bee2; all508 Python/70 WebUI
 comparisons, strict signatures and verified54-input native reuse pass. Actual

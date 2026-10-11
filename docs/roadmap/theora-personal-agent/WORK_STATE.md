@@ -7,7 +7,24 @@ See [resume procedure](RESUME_WORK.md), [execution plan](EXECUTION_PLAN.md) and
 
 ## Current execution checkpoint, October 10
 
-### Current native9.61 actual result and control repair
+### Current native9.62 actual result and provider blocker
+
+Native9.62/build2026101011 contains exact16c2cf02915bca599bd4178bd3e88b075811d56d.
+Verified54-input native reuse,508 Python/70 WebUI equality, imports and strict
+signatures pass. Actual composer testing observes validation, Reference and
+selected scene inference, then the next OpenAI request fails with no remaining
+credits. The app displays the error; durable failed/not_asserted and independent
+no itinerary/draft state agree, with no replay. Estimated settled cost$0.18445.
+A separate actual FERAL focus-only probe verifies the intended Chrome window,
+its AX handle and fresh foreground PID despite overlapping geometry; no model
+calls, keyboard or form edits occur. Normal Quit exits0. [Exact acceptance](NATIVE_9_62_ACCEPTANCE.md).
+Numeric date/model-driven saved outcome remains open until inference is funded.
+The user has been asked which existing funded provider to use or to restore
+selected OpenAI credit; no provider/key/billing/profile setting was changed.
+Continue independent persistent profile review/integration, normal paired
+deployment and publication; do not replay this terminal task automatically.
+
+### Historical native9.61 actual result and control repair
 
 Native9.61/build2026101010 contains exact12b22bee26df558af55812c2111edc603a1bd9a4.
 Verified54-input native reuse, all508 Python/70 WebUI comparisons and strict
