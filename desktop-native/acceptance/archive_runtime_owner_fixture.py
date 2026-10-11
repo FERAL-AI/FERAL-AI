@@ -30,6 +30,11 @@ SOURCES = [NATIVE / name for name in (
     "BrainRuntime.swift", "NativeProfileLayoutFeature.swift", "NativeProfileSelectionFeature.swift", "NativeRuntimePortFeature.swift", "NativeRuntimeHealthFeature.swift",
 )] + [TEST]
 LAUNCHER = NATIVE / "native_backend_launcher.py"
+RUNTIME_ADMISSION_ROOT = NATIVE.parent / "feral-core"
+RUNTIME_ADMISSION_FILES = (
+    "security/__init__.py", "security/profile_writer.py",
+    "config/__init__.py", "config/loader.py", "config/runtime.py",
+)
 ASSEMBLER = NATIVE / "assemble.py"
 DIAGNOSTIC_FILES = ("manifest.json", "evidence.json", "failure.json", "phases.json",
                     "stdout.log", "stderr.log", "compile.log", "fixture-owned-processes.json",
@@ -240,6 +245,24 @@ def export_diagnostics(root: Path, destination: Path) -> None:
     os.chmod(destination / "diagnostics.json", 0o600)
 
 
+def stage_runtime_admission(core: Path) -> dict[str, str]:
+    """Copy the unchanged stdlib-only launcher admission dependency closure."""
+    expected = {relative: digest(RUNTIME_ADMISSION_ROOT / relative) for relative in RUNTIME_ADMISSION_FILES}
+    for relative in RUNTIME_ADMISSION_FILES:
+        destination = core / relative
+        destination.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        shutil.copyfile(RUNTIME_ADMISSION_ROOT / relative, destination)
+    verify_runtime_admission(core, expected)
+    return expected
+
+
+def verify_runtime_admission(core: Path, expected: dict[str, str]) -> None:
+    if (set(expected) != set(RUNTIME_ADMISSION_FILES)
+            or any(digest(RUNTIME_ADMISSION_ROOT / relative) != expected[relative]
+                   or digest(core / relative) != expected[relative] for relative in RUNTIME_ADMISSION_FILES)):
+        raise ValueError("Fixture runtime admission sources changed")
+
+
 def stage(root: Path, interpreter: Path) -> tuple[Path, dict]:
     if (not str(root).startswith("/private/tmp/feral-native-archive-owner-")
             or root.resolve() != root or not root.is_dir() or any(root.iterdir())):
@@ -261,6 +284,7 @@ def stage(root: Path, interpreter: Path) -> tuple[Path, dict]:
     os.chmod(settings, 0o600)
     (resources / "python/bin/python3").symlink_to(python)
     shutil.copyfile(LAUNCHER, resources / LAUNCHER.name)
+    admission_sources = stage_runtime_admission(resources / "feral-core")
     (resources / "feral-core/api/__init__.py").write_text("")
     (resources / "feral-core/api/server.py").write_text(SERVER)
     (contents / "Info.plist").write_bytes(plistlib.dumps({
@@ -275,6 +299,7 @@ def stage(root: Path, interpreter: Path) -> tuple[Path, dict]:
     if architecture not in {"arm64", "x86_64"}:
         raise ValueError("Unsupported native fixture architecture")
     manifest = {"saved_port": saved_port, "source_sha256": {path.name: digest(path) for path in SOURCES},
+                "runtime_admission_source_sha256": admission_sources,
                 "launcher_sha256": digest(LAUNCHER), "python_sha256": digest(python),
                 "python_version": version, "fixture_server_sha256": digest(resources / "feral-core/api/server.py"),
                 "assembler_sha256": digest(ASSEMBLER), "local_network_policy": local_network_policy(),
@@ -291,6 +316,7 @@ def stage(root: Path, interpreter: Path) -> tuple[Path, dict]:
         raise ValueError("The copied production launcher differs from its reviewed source")
     if digest(ASSEMBLER) != manifest["assembler_sha256"]:
         raise ValueError("The reviewed app-info source changed during fixture preparation")
+    verify_runtime_admission(resources / "feral-core", admission_sources)
     manifest["executable_sha256"] = digest(binary)
     (root / "manifest.json").write_text(json.dumps(manifest, sort_keys=True, indent=2) + "\n")
     return binary, manifest
@@ -361,6 +387,7 @@ def main() -> int:
             raise ValueError("Fixture inputs changed during execution")
         if digest(ASSEMBLER) != manifest["assembler_sha256"]:
             raise ValueError("The reviewed app-info source changed during execution")
+        verify_runtime_admission(binary.parent.parent / "Resources/feral-core", manifest["runtime_admission_source_sha256"])
         (root / "evidence.json").write_text(json.dumps(evidence, sort_keys=True, indent=2) + "\n")
         print(json.dumps({"status": "passed", "fixture_root": str(root), "assertions": evidence["assertions"],
                           "production_sources": manifest["source_sha256"], "launcher_sha256": manifest["launcher_sha256"],

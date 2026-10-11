@@ -37,3 +37,9 @@ fallback cleanup. Separate actual native save/Quit/ordinary-reopen, existing vau
 unlock and lock release on the existing paired profile pass.
 [Exact evidence and limits](NATIVE_9_63_ACCEPTANCE.md). Physical phone/inference and
 distribution acceptance remain separate.
+
+The later archive-ownership CI fixture initially omitted security/config modules
+required by the unchanged launcher. Its repair stages/hashes those five actual
+stdlib files instead of bypassing admission. Real duplicate refusal, release and
+hash-drift proof pass; parent actual native Process ownership passes30 assertions
+and exact quiescence. This is a fixture packaging correction, not a guard change.

@@ -86,4 +86,15 @@ Startup writer fixtures pass38 tests; expanded disposable CLI/WebSocket checks
 pass26 with one skip. Full-core CI Ruff passes; Mac typing retains779 diagnostics
 with zero additions/removals. Remote PR310 at79cb09e3 has18 successful checks and
 four conditional skips; new2cab48e5 candidate source is not yet represented by
-that completed CI run.
+that completed CI run. Subsequent9ea20101c CI passes backend pytest and native
+typecheck/feature checks, but its archive-ownership fixture fails before execution
+with ModuleNotFoundError for security. The tiny fixture staged only a synthetic
+health server, omitting the new production admission dependency closure.
+
+The fixture-only correction stages and hashes the five unchanged security/config
+files and refuses both source and copy drift. Parent actual native Process
+acceptance passes30 assertions and exact quiescence; CI-rule Ruff passes. This
+compiles the unchanged runtime/profile/health sources and uses the unchanged
+launcher against synthetic loopback health. It does not prove the live native
+model archive hook or signed distribution. Production candidate inputs remain
+unchanged and do not require rebuilding. Fresh corrected-head CI remains required.

@@ -44,8 +44,14 @@ Phone remains unavailable with zero registered nodes; selected provider funding
 and Mirroring user authentication remain pending. New9ea20101c CI is settled with17
 successes/four conditional skips and a failed native-contract job. Backend pytest
 passes. The failure is the real archive-ownership step, after passing native
-typecheck/feature checks; its diagnostic artifact is under TMP-only review. Previous
-fully green79cb checks do not certify this head. Continue that correction and
+typecheck/feature checks. Its artifact identifies a fixture-only missing security
+module: the tiny archive bundle omitted the newly required production admission
+dependency closure. Five unchanged security/config files are now staged and hashed,
+with source/copy drift refusal. Parent actual native Process fixture passes30
+assertions/exact quiescence and CI Ruff; real exclusion/release/hash drift proof
+also passes. Production guard/native sources and candidate2cab remain unchanged;
+no app rebuild is needed. A fresh corrected-head CI run is required. Previous
+fully green79cb checks do not certify this newer integration. Continue publication and
 physical/provider acceptance when prerequisites are available. Full saved browser task,
 physical duplex voice, durable health history/baseline and public release are open.
 

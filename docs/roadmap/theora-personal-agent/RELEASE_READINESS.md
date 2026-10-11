@@ -19,8 +19,12 @@ separate cached-vitals and idle chat-following fixes are signed and installed at
 localcdc2bda. Actual-source synthetic fixtures and the full build/signatures pass;
 physical supported samples, UIKit following and voice remain unaccepted.
 [Scope](IOS_VITALS_CHAT_FOLLOW_20261010.md). The new9ea20101c remote native-contract
-archive-ownership step failed and is under review. Backend pytest passes;
-the settled head has17 successes/four conditional skips/one failed native job.
+archive-ownership step failed because its tiny fixture omitted the production
+guard dependencies. The fixture-only correction stages/hashes five unchanged
+files; parent native Process acceptance passes30 assertions/exact quiescence and
+Ruff. Production app inputs remain unchanged; no rebuild is needed. Backend pytest
+passes at9ea20101c; its settled17 successes/four skips/one failure are historical
+once the corrected source is published. Fresh corrected-head CI remains required.
 
 **Historical checkpoint (October 10; guarded profile integration for9.63).**
 
