@@ -7,6 +7,12 @@ MCP clients (Claude, Cursor) connect via JSON-RPC.
 Channels (Telegram, Discord, Slack) bridge messaging platforms.
 """
 
+from security.profile_writer import acquire_runtime_profile
+
+# Before importing global state, vaults, stores, keys or route modules.
+# Keep this exact admission alive through shutdown persistence/process exit.
+_RUNTIME_PROFILE_LEASE = acquire_runtime_profile()
+
 import asyncio
 import collections
 import logging
@@ -2147,6 +2153,11 @@ async def refresh_provider_catalog_once(catalog, consecutive_failures: int) -> i
 
 @app.on_event("startup")
 async def startup():
+    _RUNTIME_PROFILE_LEASE.assert_owner()
+    # Repeated same-process lifespan/test imports can retain other roots; all
+    # roots still receive exclusion before migrations or current-env writes.
+    global _RUNTIME_STARTUP_PROFILE_LEASE
+    _RUNTIME_STARTUP_PROFILE_LEASE = acquire_runtime_profile()
     check_local_bypass_safety()
 
     # uvicorn.run installs its own non-propagating handlers on the

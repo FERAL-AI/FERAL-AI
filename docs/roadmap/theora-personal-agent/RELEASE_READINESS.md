@@ -1,6 +1,22 @@
 # Theora / FERAL full-product release readiness
 
-**Current checkpoint (October 10; native9.62 actual acceptance).**
+**Current checkpoint (October 10; guarded profile integration for9.63).**
+
+Persisted next-launch personal/preview selection is integrated with one frozen
+backend/journal/avatar layout. Parent gates pass87 layout/61 selection assertions
+and23 linked assertions within30 model wire groups. Early cooperating runtime
+writer exclusion is integrated with38 parent tests, full-core CI Ruff and zero
+added Mac typing diagnostics (779 retained). Fresh55-input candidate9.63 assembly
+and actual ordinary-launch persistence/packaged denial remain pending. Legacy,
+offline writers and native prechild log creation remain outside the guard.
+
+The bounded historical sample-time correction is installed on the development
+iPhone from local4a6b9d9:31 wire assertions, full signed device build and strict
+signing/source preservation pass. Physical sample/audio/reconnect acceptance and
+durable history transfer remain open. The provider credit issue still prevents
+finishing the actual saved browser goal; no alternate provider was silently chosen.
+
+**Native9.62 actual acceptance.**
 
 Exact16c2cf029 native9.62 passes508 Python/70 WebUI equality, strict signatures
 and verified native reuse. The actual composer reaches selected scene inference,

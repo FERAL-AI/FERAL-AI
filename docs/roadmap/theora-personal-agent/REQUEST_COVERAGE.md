@@ -20,7 +20,9 @@ with733 Foundation assertions and signed device build/install evidence. Physical
 HFP voice, interruption, concurrent speech/tasks and result reporting are open.
 The normal Mac observed zero registered phones; Mirroring remains locked.
 Health history transfer, per-sample freshness and baseline acceptance are open.
-A bounded historical sample-time correction is under parent review.
+A bounded historical sample-time correction is integrated at local4a6b9d9, with
+31 wire checks, full signed device build and in-place installation passing.
+Physical sample/reconnect/audio acceptance remains open.
 
 PR310 head00f46a8c0 is published with17 successful checks/four conditional skips;
 one backend test double fails on the new guarded-send argument. Its correction

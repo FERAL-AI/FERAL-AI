@@ -19,11 +19,13 @@ voice/chat/coding work blocks selection. Worker fixtures pass 87 layout checks,
 same assertions within30 model wire groups, plus39 desktop/five error checks.
 Ordinary-launch preference persistence and actual UI acceptance remain open.
 
-Before activation, an early backend runtime-writer guard is being prepared to
+Before activation, an early backend runtime-writer guard is integrated to
 exclude cooperating servers before profile initialization/migration, including
 different ports on the same root. A port preflight alone is not writer exclusion.
+Parent checks pass38 tests/six warnings and full-core CI Ruff; full Mac typing
+retains779 diagnostics with no additions/removals. [Scope and evidence](RUNTIME_WRITER_GUARD_20261010.md).
 Legacy and offline writers remain a separate boundary. Candidate9.63/build2026101012
-is prepared for a fresh55-input native compile after guarded startup integration.
+is prepared for a fresh55-input native compile from this frozen integration.
 No9.63 app has been assembled or accepted yet.
 
 Normal9.62 launch on the existing paired profile was observed with exact native
@@ -40,10 +42,12 @@ retaining the real production guard and verifies continuation suppression after
 response-epoch invalidation. Parent verification passes68 checks/six warnings
 and Ruff. A new published-head CI run is still required; current CI is not all green.
 
-The bounded iOS health correction is released for parent review, not integrated:
+The bounded iOS health correction is integrated at local4a6b9d9cc8769b76714dd76519f8d39de6383a9a:
 historical BP/HRV carries sample_ts instead of colliding with envelope send-time
 ts and rejects invalid/future epochs. Actual selected Swift sender/encoder to Mac
-decoder fixtures pass31 assertions. Full app/device acceptance is pending. Durable
+decoder fixtures pass31 assertions. Full signed device build, strict signing,
+source/project/vendor preservation and in-place installation pass; physical
+sample/reconnect/audio acceptance is pending. [Evidence](IOS_HEALTH_SAMPLE_TIME_20261010.md). Durable
 phone-history transfer, canonical ingestion and snapshot measurement timestamps
 remain separate required work; stored source labels do not prove fresh samples.
 

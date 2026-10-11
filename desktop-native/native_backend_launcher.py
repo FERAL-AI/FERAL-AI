@@ -31,6 +31,8 @@ if __name__ == '__main__':
     # First chat must not silently download an embedding model. Cached local
     # models remain usable; a reviewed model installation can opt in separately.
     os.environ.setdefault("FERAL_EMBED_MODEL_CACHE_ONLY", "1")
+    from security.profile_writer import acquire_runtime_profile
+    _runtime_profile_lease = acquire_runtime_profile()
     prepare_native_child()
     print('Native backend process group:', os.getpid(), os.getpgrp(), flush=True)
     runpy.run_module('api.server', run_name='__main__')
