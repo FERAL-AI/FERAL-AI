@@ -75,7 +75,7 @@ async def test_body_carries_no_parameter_openai_rejects(monkeypatch):
     assert "style" not in body
     assert set(body) == {"model", "prompt", "n", "size"}
     assert body["n"] == 1, "the skill returns one image; extra ones would only be billed"
-    assert body["model"] == image_gen._DEFAULT_MODEL
+    assert body["model"] == "gpt-image-2.6-sunburst"
     assert body["model"].startswith("gpt-image-"), (
         "dall-e-3 is the model whose request shape the endpoint stopped accepting"
     )
