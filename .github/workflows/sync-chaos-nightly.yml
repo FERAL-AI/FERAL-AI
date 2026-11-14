@@ -1,11 +1,14 @@
-name: Sync chaos (nightly)
+name: Sync chaos (weekly)
 
 on:
   schedule:
-    # 05:00 UTC daily — runs after the regular CI window has settled
-    # so a flaky chaos run never blocks an in-flight PR.
-    - cron: "0 5 * * *"
+    # Tuesday 05:17 UTC; keep extended fault injection off the daily path.
+    - cron: "17 5 * * 2"
   workflow_dispatch:
+
+concurrency:
+  group: sync-chaos-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   chaos:
@@ -28,6 +31,10 @@ jobs:
     # collected outcomes into the job's exit status, so the run is red
     # exactly when the chaos suite found something.
     timeout-minutes: 20
+    env:
+      # Sync/recovery assertions do not exercise semantic embeddings. Avoid
+      # incidental model downloads and outbound calls in these offline tests.
+      FERAL_EMBED_PROVIDER: hash
     defaults:
       run:
         working-directory: feral-core
@@ -40,7 +47,7 @@ jobs:
           cache: pip
 
       - name: Install dependencies
-        run: pip install -e ".[all,dev]"
+        run: pip install --constraint requirements.lock -e ".[all,dev]"
 
       - name: Run chaos pytest suite
         id: pytest
@@ -60,6 +67,7 @@ jobs:
             --tb=short \
             tests/test_memory_sync_chaos.py \
             tests/test_memory_recovery.py \
+            tests/test_sync_kill_cli.py \
             2>&1 | tee artifacts/pytest-chaos.log
         # Kept so a failure here still lets the sync_kill leg and the
         # forensics collection run. The job's status comes from the
@@ -88,14 +96,14 @@ jobs:
       - name: Collect /tmp/feral-chaos-* run dirs (forensics)
         if: always()
         run: |
-          mkdir -p feral-core/artifacts/runs
+          mkdir -p artifacts/runs
           # Best-effort copy of any chaos tmpdirs the runner left behind.
           for d in /tmp/feral-chaos-*; do
             if [ -d "$d" ]; then
-              cp -R "$d" feral-core/artifacts/runs/ || true
+              cp -R "$d" artifacts/runs/ || true
             fi
           done
-          ls -la feral-core/artifacts/ || true
+          ls -la artifacts/ || true
         continue-on-error: true
 
       - name: Upload chaos artifacts
@@ -105,7 +113,7 @@ jobs:
           name: chaos-logs-${{ github.run_id }}
           path: feral-core/artifacts/
           if-no-files-found: warn
-          retention-days: 14
+          retention-days: 7
 
       - name: Summarize results
         if: always()
