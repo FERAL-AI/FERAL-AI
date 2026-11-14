@@ -26,6 +26,7 @@ Layout (per run):
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
 import os
 import pathlib
@@ -152,12 +153,11 @@ def _kill(proc: subprocess.Popen, grace: float, log_fh) -> None:
 def _final_state_hash(wal_path: str) -> tuple[int, str]:
     """Read the WAL via SyncEngine and return (op_count, state_hash)."""
     sys.path.insert(0, str(FERAL_CORE))
-    from memory.store import MemoryStore  # type: ignore
     from memory.sync import SyncEngine, _parse_hlc  # type: ignore
 
-    db = wal_path.replace("_wal", "_db")
-    store = MemoryStore(db_path=db)
-    engine = SyncEngine(node_id="reconciler", memory_store=store, db_path=wal_path)
+    # This reads only the WAL; opening an unused memory store would create
+    # embedding/background resources unrelated to the durable state check.
+    engine = SyncEngine(node_id="reconciler", db_path=wal_path)
     ops = engine.get_changes_since("0:0:")
     state = {}
     for op in ops:
@@ -173,7 +173,7 @@ def _final_state_hash(wal_path: str) -> tuple[int, str]:
     return len(state), hashlib.sha256(canonical.encode()).hexdigest()
 
 
-def _final_sync(wal_a: str, wal_b: str, log_fh) -> None:
+async def _final_sync(wal_a: str, wal_b: str, log_fh) -> None:
     """Bidirectional reconciliation across the two on-disk WALs."""
     sys.path.insert(0, str(FERAL_CORE))
     from memory.store import MemoryStore  # type: ignore
@@ -186,11 +186,18 @@ def _final_sync(wal_a: str, wal_b: str, log_fh) -> None:
     engine_a = SyncEngine(node_id="node-a", memory_store=store_a, db_path=wal_a)
     engine_b = SyncEngine(node_id="node-b", memory_store=store_b, db_path=wal_b)
 
-    ops_a = engine_a.get_changes_since("0:0:")
-    ops_b = engine_b.get_changes_since("0:0:")
-    log_fh.write(f"  reconciliation: A has {len(ops_a)} ops, B has {len(ops_b)} ops\n")
-    engine_b.apply_remote_changes(ops_a)
-    engine_a.apply_remote_changes(ops_b)
+    try:
+        ops_a = engine_a.get_changes_since("0:0:")
+        ops_b = engine_b.get_changes_since("0:0:")
+        log_fh.write(f"  reconciliation: A has {len(ops_a)} ops, B has {len(ops_b)} ops\n")
+        await engine_b.apply_remote_changes(ops_a)
+        await engine_a.apply_remote_changes(ops_b)
+    finally:
+        # Close pools on their owning event loop before asyncio.run exits.
+        try:
+            await store_a.aclose()
+        finally:
+            await store_b.aclose()
 
 
 def run(iterations: int, ops_per_cycle: int, kill_grace: float, seed: int) -> int:
@@ -255,7 +262,7 @@ def run(iterations: int, ops_per_cycle: int, kill_grace: float, seed: int) -> in
         # Final reconciliation.
         log_fh.write("\n=== final reconciliation ===\n")
         log_fh.flush()
-        _final_sync(wal_a, wal_b, log_fh)
+        asyncio.run(_final_sync(wal_a, wal_b, log_fh))
 
         count_a, hash_a = _final_state_hash(wal_a)
         count_b, hash_b = _final_state_hash(wal_b)

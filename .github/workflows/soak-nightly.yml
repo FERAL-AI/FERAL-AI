@@ -1,4 +1,4 @@
-name: Soak — nightly
+name: Soak — weekly
 
 # voice + channel soak. The voice soak runs against
 # in-process fake WS peers and is fully self-contained. The channel soak
@@ -57,13 +57,32 @@ name: Soak — nightly
 
 on:
   schedule:
-    - cron: "0 4 * * *"
+    # Monday 04:13 UTC. Keep full voice coverage without daily hour-long jobs.
+    - cron: "13 4 * * 1"
   workflow_dispatch:
     inputs:
       duration-min:
-        description: "Soak duration in minutes, per test (overrides default)"
+        description: "Voice soak duration in minutes, per test"
+        type: choice
+        options: ["10", "30", "60"]
         required: false
         default: "60"
+      run-channels:
+        description: "Run channel soaks using the configured live-service secrets"
+        type: boolean
+        default: false
+      channel-duration-min:
+        description: "Channel soak duration in minutes, per test (manual only)"
+        type: choice
+        options: ["30", "60", "300"]
+        default: "60"
+
+concurrency:
+  group: soak-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
 
 jobs:
   voice-soak:
@@ -113,9 +132,12 @@ jobs:
           name: voice-soak-logs-${{ matrix.test }}
           path: soak-artifacts/voice-soak-${{ matrix.test }}.log
           if-no-files-found: warn
+          retention-days: 7
 
   channels-soak:
     name: Channels soak (env-gated) — ${{ matrix.test }}
+    # Live-service soaks can take five hours per channel. Never run them on a timer.
+    if: github.event_name == 'workflow_dispatch' && inputs.run-channels
     runs-on: ubuntu-latest
     # No continue-on-error: see the header. These tests skip cleanly when
     # their FERAL_SOAK_*_TOKEN secrets are absent, which is the correct
@@ -152,7 +174,7 @@ jobs:
       run:
         working-directory: feral-core
     env:
-      FERAL_SOAK_DURATION_MIN: ${{ github.event.inputs.duration-min || '300' }}
+      FERAL_SOAK_DURATION_MIN: ${{ inputs.channel-duration-min || '60' }}
       FERAL_SOAK_INTERVAL_SEC: "30"
       FERAL_SOAK_TELEGRAM_TOKEN: ${{ secrets.FERAL_SOAK_TELEGRAM_TOKEN }}
       FERAL_SOAK_TELEGRAM_CHAT_ID: ${{ secrets.FERAL_SOAK_TELEGRAM_CHAT_ID }}
@@ -185,3 +207,4 @@ jobs:
           name: channels-soak-logs-${{ matrix.test }}
           path: soak-artifacts/channels-soak-${{ matrix.test }}.log
           if-no-files-found: warn
+          retention-days: 7

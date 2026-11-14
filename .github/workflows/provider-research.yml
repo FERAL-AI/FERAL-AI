@@ -12,21 +12,20 @@ name: Provider Research
 # Fireworks, Bedrock, Ollama, LM Studio. See CURATED_ONLY in
 # scripts/research_providers.py for the per-provider reason.
 #
-# 2026-04-24 (Roadmap §3.5 P0): the daily cron was OFF since
+# 2026-04-24 (Roadmap §3.5 P0): the original daily cron was OFF since
 # 2026.4.18-dev because most adapters were still stubs. The user-visible
 # fallout was the "Settings → Providers shows GPT-4o-mini, no GPT-5.5"
 # bug from Appendix A.1. With the catalog pruned of stale literals and
 # the in-Brain ProviderCatalog.refresh_async landing in the same PR,
-# the daily schedule is the right complement: GitHub Actions handles
+# the weekly schedule complements it: GitHub Actions handles
 # the bundled fallback list (so a fresh clone has current models even
 # offline), while the in-process refresher keeps every running Brain
 # instance current without waiting for the next pull.
 on:
   schedule:
- # 09:00 UTC daily. Picks up new model launches within ~24h of
- # provider announcement; the create-pull-request action is no-op
- # when the catalog file is byte-identical so off-days cost nothing.
-    - cron: "0 9 * * *"
+    # Thursday 09:23 UTC; manual refresh remains available between weekly runs.
+    # A no-change refresh still uses a runner, even when no PR is created.
+    - cron: "23 9 * * 4"
   workflow_dispatch:
 
 permissions:
@@ -40,6 +39,7 @@ concurrency:
 jobs:
   research:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -125,13 +125,13 @@ jobs:
         uses: peter-evans/create-pull-request@v7
         with:
           token: ${{ secrets.GITHUB_TOKEN }}
-          commit-message: "chore(providers): daily model catalog refresh"
-          title: "chore(providers): daily model catalog refresh"
+          commit-message: "chore(providers): refresh model catalog"
+          title: "chore(providers): refresh model catalog"
           body: |
             Automated update of `feral-core/providers/model_catalog.json`.
 
             This PR is opened by `.github/workflows/provider-research.yml`
-            after the daily scheduled run finds a delta between what each
+            after a scheduled or manual run finds a delta between what each
             provider's `/v1/models` returns and what's checked in.
 
             Merge after a quick sanity check.
