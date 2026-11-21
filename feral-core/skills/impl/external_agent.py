@@ -37,6 +37,10 @@ agent crash, an idle sweep or a FERAL restart. When the agent can
 reattach it does; when it cannot, the replacement session is briefed with
 the previous turn's record and the payload says so rather than pretending
 the agent remembers.
+
+ToolRunner's bound call context supplies the conversation identity. Tool
+arguments cannot select a different owner. Legacy unbound local callers
+continue only unscoped sessions; scoped callers never silently adopt one.
 """
 
 from __future__ import annotations
@@ -47,6 +51,7 @@ import sys
 from typing import Any, Dict
 
 from skills.base import BaseSkill
+from skills.call_context import current_context
 from skills.impl import register_skill
 
 logger = logging.getLogger("feral.skills.external_agent")
@@ -85,6 +90,44 @@ def _clamp_wait(raw: Any) -> float:
     return max(1.0, min(MAX_WAIT_SECONDS, value))
 
 
+class _SessionIdentityError(ValueError):
+    def __init__(self, message: str, status: int):
+        super().__init__(message)
+        self.status = status
+
+
+def _caller_identity(args: Dict[str, Any]) -> str:
+    """Only dispatcher-bound context can select a scoped conversation.
+
+    Legacy direct local calls remain unscoped. A supplied model argument
+    cannot confer ownership, even when call-context binding is disabled.
+    """
+    identity = current_context().session_id
+    supplied = str(args.get("conversation_id") or "").strip()
+    if supplied and not identity:
+        raise _SessionIdentityError(
+            "conversation_id requires a dispatcher-bound session", 400
+        )
+    if supplied and supplied != identity:
+        raise _SessionIdentityError(
+            "conversation_id conflicts with the calling session", 409
+        )
+    return identity
+
+
+def _owns_session(session, identity: str) -> bool:
+    # Equality deliberately excludes adoption of an old unscoped handle by
+    # a new scoped caller, and excludes scoped handles from legacy calls.
+    return session.conversation_id == identity
+
+
+def _check_session(session, identity: str) -> None:
+    if session is not None and not _owns_session(session, identity):
+        raise _SessionIdentityError(
+            "coding session does not belong to the calling session", 403
+        )
+
+
 class ExternalAgentSkill(BaseSkill):
     """Drives an external ACP coding agent as a subprocess."""
 
@@ -105,7 +148,10 @@ class ExternalAgentSkill(BaseSkill):
         if handler is None:
             return _err(f"unknown endpoint {endpoint_id!r}", status=404)
         try:
+            _caller_identity(args or {})
             return await handler(args or {})
+        except _SessionIdentityError as exc:
+            return _err(str(exc), status=exc.status)
         except Exception as exc:
             logger.exception("external_agent.%s failed", endpoint_id)
             return _err(f"{type(exc).__name__}: {exc}", status=500)
@@ -116,13 +162,15 @@ class ExternalAgentSkill(BaseSkill):
         from bridges import catalog
 
         conf = catalog.external_agent_settings()
+        identity = _caller_identity(args)
         agents = [resolved.to_dict() for resolved in catalog.resolve_all()]
         return _ok(
             {
                 "default_agent": conf["default_agent"],
                 "agents": agents,
                 "hermes": catalog.detect_hermes(),
-                "live_sessions": [m.to_dict() for m in _registry().list()],
+                "live_sessions": [m.to_dict() for m in _registry().list()
+                                  if _owns_session(m, identity)],
             }
         )
 
@@ -137,26 +185,17 @@ class ExternalAgentSkill(BaseSkill):
 
         wait = _clamp_wait(args.get("wait_seconds", DEFAULT_WAIT_SECONDS))
         handle = str(args.get("session_handle") or "").strip()
-        conversation_id = str(args.get("conversation_id") or "").strip()
+        conversation_id = _caller_identity(args)
         registry = _registry()
         continuity: Dict[str, Any] = {"reattached": False, "mechanism": "live"}
         record = None
 
         if handle:
             managed = registry.get(handle)
-            if managed is not None and managed.turn_running:
-                return _err(
-                    "a turn is already running on that session; wait for it or "
-                    "close the session",
-                    status=409,
-                )
-            if managed is not None and not managed.alive:
-                # The subprocess died between turns. Drop the corpse but
-                # keep the pointer, then fall through to the reattach.
-                await registry.close(handle, forget=False)
-                managed = None
+            record = registry.index.get(handle)
+            _check_session(managed, conversation_id)
+            _check_session(record, conversation_id)
             if managed is None:
-                record = registry.index.get(handle)
                 if record is None:
                     return _err(
                         f"unknown session handle {handle!r}; it was never opened "
@@ -175,15 +214,30 @@ class ExternalAgentSkill(BaseSkill):
             if not os.path.isdir(workspace):
                 return _err(f"workspace_dir does not exist: {workspace}")
             if not args.get("fresh_session"):
-                # No handle, but this may still be a follow-up: the chat
-                # surface does not hand skills a conversation id, so the
-                # fallback key is (agent, workspace), which is what a
-                # user means by "keep going on that repo".
-                record = registry.find_persisted(
-                    conversation_id=conversation_id,
-                    agent_id=agent_id,
-                    cwd=workspace,
+                # The index's empty conversation filter is a wildcard.
+                # Match exact ownership here, including empty legacy scope,
+                # instead of letting a repo fallback pick another chat.
+                want_cwd = os.path.abspath(os.path.expanduser(workspace))
+                record = next((r for r in registry.index.list()
+                               if _owns_session(r, conversation_id)
+                               and r.agent_id == agent_id
+                               and os.path.abspath(r.cwd) == want_cwd), None)
+                if record is not None:
+                    managed = registry.get(record.handle)
+                    _check_session(managed, conversation_id)
+
+        if managed is not None:
+            if managed.turn_running:
+                return _err(
+                    "a turn is already running on that session; wait for it or "
+                    "close the session", status=409,
                 )
+            if not managed.alive:
+                # Ownership was checked before closing the dead process.
+                # Preserve its pointer and reattach under the same scope.
+                record = record or managed.to_record()
+                await registry.close(managed.handle, forget=False)
+                managed = None
 
         if managed is None:
             resolved = catalog.resolve(agent_id)
@@ -300,6 +354,9 @@ class ExternalAgentSkill(BaseSkill):
             return _err(
                 f"no pending permission request {request_id!r}", status=404
             )
+        identity = _caller_identity(args)
+        _check_session(managed, identity)
+        _check_session(registry.index.get(managed.handle), identity)
 
         pending = next(
             (r for r in managed.pending_permissions() if r.request_id == request_id),
@@ -338,6 +395,9 @@ class ExternalAgentSkill(BaseSkill):
             return _err("session_handle is required")
         registry = _registry()
         managed = registry.get(handle)
+        identity = _caller_identity(args)
+        _check_session(managed, identity)
+        _check_session(registry.index.get(handle), identity)
         if managed is None:
             # Not live, but it may still have a persisted pointer from a
             # previous process. Closing that is a real action, not a 404.
@@ -402,10 +462,13 @@ class ExternalAgentSkill(BaseSkill):
             "to": window["to"],
             "label": window["label"],
         }
-        result["live_sessions"] = [m.to_dict() for m in _registry().list()]
+        identity = _caller_identity(args)
+        result["live_sessions"] = [m.to_dict() for m in _registry().list()
+                                   if _owns_session(m, identity)]
         result["resumable_sessions"] = [
-            r.to_dict() for r in _registry().index.list()[:20]
-        ]
+            r.to_dict() for r in _registry().index.list()
+            if _owns_session(r, identity)
+        ][:20]
         return _ok(result)
 
     # ------------------------------------------------------------------
@@ -486,7 +549,14 @@ class ExternalAgentSkill(BaseSkill):
         }
 
         if state == "completed" and managed.turn is not None:
-            error = managed.turn.exception() if not managed.turn.cancelled() else None
+            # Task cancellation is a terminal protocol outcome, not a result
+            # that can be read via Future.result() (which would raise again).
+            if managed.turn.cancelled():
+                payload.update(status="failed", error_code="agent_turn_cancelled",
+                               error="The coding turn was cancelled. Already-started actions may have an unknown outcome.",
+                               stop_reason="cancelled", tool_outcome_verified=False)
+                return payload
+            error = managed.turn.exception()
             if error is not None:
                 payload["status"] = "failed"
                 payload["error"] = f"{type(error).__name__}: {error}"
@@ -494,6 +564,14 @@ class ExternalAgentSkill(BaseSkill):
             else:
                 result = managed.turn.result()
                 payload["stop_reason"] = getattr(result, "stop_reason", "")
+                # ACP end_turn proves only the prompt request ended. OpenCode
+                # can emit it with usage metadata and no answer/tool activity.
+                # Never publish that as a completed coding result or retry a
+                # potentially mutating task automatically.
+                if not payload["text"].strip() and not payload["tool_calls"]:
+                    payload.update(status="failed", error_code="empty_agent_turn",
+                                   error="The coding agent ended the turn without an answer or tool activity. No execution evidence was received.",
+                                   tool_outcome_verified=False)
         return payload
 
 

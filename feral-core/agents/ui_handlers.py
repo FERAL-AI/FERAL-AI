@@ -41,44 +41,79 @@ async def handle_ui_event(
         session_id[:8], event, action_id, value, app_id or "",
     )
 
-    if action_id.startswith("confirm_"):
+    if action_id.startswith(("confirm_", "reject_")):
+        accepted = action_id.startswith("confirm_")
+        confirmation_id = action_id[8:] if accepted else action_id[7:]
         pending_confirmations = getattr(orchestrator, "_pending_confirmations", None)
         if not isinstance(pending_confirmations, dict):
-            pending_confirmations = {}
-            setattr(orchestrator, "_pending_confirmations", pending_confirmations)
-        confirmation_id = action_id[8:]
-        pending = pending_confirmations.pop(confirmation_id, None)
-        if pending:
-            app_action = pending.get("app_action")
-            if app_action:
-                logger.info("User confirmed app action: %s", confirmation_id)
-                await _handle_app_action(
-                    orchestrator,
-                    session_id=session_id,
-                    app_id=app_action["app_id"],
-                    action_id=app_action["action_id"],
-                    event=app_action.get("event", "tap"),
-                    value=app_action.get("value"),
-                    screen_id=app_action.get("screen_id"),
-                    _confirmed=True,
+            return
+        pending = pending_confirmations.get(confirmation_id)
+        if not isinstance(pending, dict) or pending.get("session_id") != session_id:
+            return
+        # No await before consumption: a foreign/replayed response cannot
+        # withdraw the legitimate owner or execute the action twice.
+        pending_confirmations.pop(confirmation_id, None)
+        app_action = pending.get("app_action")
+        if app_action is not None or pending.get("confirmation_version") == 1:
+            async def receipt(status: str) -> None:
+                safe = app_action if isinstance(app_action, dict) else {}
+                await orchestrator.send(session_id, FeralMessage(
+                    session_id=session_id, hop="brain", type="confirmation_decision",
+                    payload={"request_id": confirmation_id, "status": status,
+                             **{key: safe.get(key, "") if isinstance(safe.get(key, ""), str) else ""
+                                for key in ("app_id", "surface_id", "action_id", "screen_id")},
+                             "scope": "app_action", "dispatch_accepted": status == "accepted",
+                             "tool_outcome_verified": False},
+                ))
+            if pending.get("confirmation_version") == 1:
+                now = time.time()
+                created, expiry = pending.get("created_at"), pending.get("expires_at")
+                import math
+                if (not isinstance(created, (int, float)) or not isinstance(expiry, (int, float))
+                        or type(created) not in (int, float) or type(expiry) not in (int, float)):
+                    await receipt("error")
+                    return
+                try:
+                    valid = (math.isfinite(created) and math.isfinite(expiry)
+                             and created <= now and expiry > created and expiry - created <= 300)
+                except OverflowError:
+                    # isfinite converts built-in ints to float; an oversized
+                    # timestamp must refuse consent rather than escape dispatch.
+                    valid = False
+                if not valid:
+                    await receipt("error")
+                    return
+                if expiry <= now:
+                    await receipt("expired")
+                    return
+                if not isinstance(pending.get("action_spec"), dict) or not isinstance(pending.get("manifest_snapshot"), dict):
+                    await receipt("error")
+                    return
+            if not isinstance(app_action, dict) or any(not isinstance(app_action.get(key), str) or not app_action[key]
+                                                       for key in ("app_id", "surface_id", "action_id", "screen_id")):
+                await receipt("error")
+                return
+            if not accepted:
+                await receipt("rejected")
+                await orchestrator._send_text(session_id, "Cancelled. I won't run that action.")
+                return
+            try:
+                dispatched = await _handle_app_action(
+                    orchestrator, session_id=session_id, app_id=app_action["app_id"],
+                    action_id=app_action["action_id"], event=app_action.get("event", "tap"),
+                    value=app_action.get("value"), screen_id=app_action["screen_id"], _confirmed=True,
+                    _confirmed_spec=pending.get("action_spec") if pending.get("confirmation_version") == 1 else None,
+                    _confirmed_manifest=pending.get("manifest_snapshot") if pending.get("confirmation_version") == 1 else None,
                 )
-            else:
-                logger.info("User confirmed action: %s", confirmation_id)
-                await orchestrator._execute_tool_call(
-                    session_id,
-                    pending["tool_call"],
-                    pending.get("skills", []),
-                )
-        return
-    if action_id.startswith("reject_"):
-        pending_confirmations = getattr(orchestrator, "_pending_confirmations", None)
-        if not isinstance(pending_confirmations, dict):
-            pending_confirmations = {}
-            setattr(orchestrator, "_pending_confirmations", pending_confirmations)
-        confirmation_id = action_id[7:]
-        pending = pending_confirmations.pop(confirmation_id, None)
-        if pending:
-            logger.info("User rejected action: %s", confirmation_id)
+            except Exception:
+                logger.exception("Confirmed app dispatch failed")
+                dispatched = False
+            await receipt("accepted" if dispatched is True else "error")
+            return
+        # Generic pre-existing tool confirmations retain their legacy shape.
+        if accepted:
+            await orchestrator._execute_tool_call(session_id, pending["tool_call"], pending.get("skills", []))
+        else:
             await orchestrator._send_text(session_id, "Cancelled. I won't run that action.")
         return
     if action_id.startswith("perm_grant_"):
@@ -121,7 +156,9 @@ async def _handle_app_action(
     value: Any,
     screen_id: Optional[str],
     _confirmed: bool = False,
-) -> None:
+    _confirmed_spec: Optional[dict] = None,
+    _confirmed_manifest: Optional[dict] = None,
+) -> bool:
     """Dispatch a ui_event that belongs to a third-party GenUI app.
 
     Flow:
@@ -148,7 +185,7 @@ async def _handle_app_action(
             session_id,
             "The app registry isn't available right now. Please retry shortly.",
         )
-        return
+        return False
 
     app = registry.get(app_id)
     if app is None:
@@ -156,7 +193,9 @@ async def _handle_app_action(
             session_id,
             f"App '{app_id}' is not installed on this brain.",
         )
-        return
+        return False
+    if _confirmed and _confirmed_manifest is not None and app.manifest.model_dump(mode="json") != _confirmed_manifest:
+        return False
 
     surface_id = None
     if screen_id:
@@ -191,17 +230,24 @@ async def _handle_app_action(
             session_id,
             f"That action isn't in {app_id}'s surface contract.",
         )
-        return
+        return False
 
     handler = action_spec.handler
+    if _confirmed and _confirmed_spec is not None and action_spec.model_dump(mode="json") != _confirmed_spec:
+        return False
 
     if action_spec.requires_confirmation and not _confirmed:
+        canonical_screen = registry.build_screen_id(app_id=app_id, surface_id=surface_id, scope=session_id)
+        if resolved_screen_id != canonical_screen:
+            return False
         pending_confirmations = getattr(orchestrator, "_pending_confirmations", None)
         if not isinstance(pending_confirmations, dict):
             pending_confirmations = {}
             setattr(orchestrator, "_pending_confirmations", pending_confirmations)
-        confirmation_id = str(uuid4())[:8]
-        pending_confirmations[confirmation_id] = {
+        confirmation_id = str(uuid4())
+        created_at = time.time()
+        pending_confirmation = {
+            "session_id": session_id,
             "app_action": {
                 "app_id": app_id,
                 "surface_id": surface_id,
@@ -210,8 +256,13 @@ async def _handle_app_action(
                 "value": value,
                 "screen_id": resolved_screen_id,
             },
-            "created_at": time.time(),
+            "created_at": created_at,
+            "expires_at": created_at + 300,
+            "confirmation_version": 1,
+            "action_spec": action_spec.model_dump(mode="json"),
+            "manifest_snapshot": app.manifest.model_dump(mode="json"),
         }
+        pending_confirmations[confirmation_id] = pending_confirmation
         confirm_root = {
             "type": "VStack",
             "spacing": 12,
@@ -246,26 +297,47 @@ async def _handle_app_action(
                 },
             ],
         }
-        await _send_app_surface_payload(
-            orchestrator,
-            session_id=session_id,
-            app_id=app_id,
-            surface_id=surface_id,
-            screen_id=resolved_screen_id,
-            root=confirm_root,
-            title=f"{app_id} confirmation",
-        )
+        try:
+            delivered = await _send_app_surface_payload(
+                orchestrator,
+                session_id=session_id,
+                app_id=app_id,
+                surface_id=surface_id,
+                screen_id=resolved_screen_id,
+                root=confirm_root,
+                title=f"{app_id} confirmation",
+                confirmation={"contract_version": 1, "request_id": confirmation_id, "session_id": session_id,
+                              "app_id": app_id, "surface_id": surface_id, "action_id": action_id,
+                              "screen_id": resolved_screen_id, "created_at": created_at, "expires_at": created_at + 300,
+                              "scope": "app_action", "handler": action_spec.handler, "target": action_spec.target or "",
+                              "event": event, "value": value, "requires_confirmation": True},
+            )
+        except Exception:
+            delivered = False
+        if delivered is not True:
+            # A fast client may have answered, or another entry may have
+            # replaced this ID, while delivery awaited. Withdraw only ours.
+            if pending_confirmations.get(confirmation_id) is pending_confirmation:
+                pending_confirmations.pop(confirmation_id, None)
+            try:
+                await orchestrator._send_text(
+                    session_id,
+                    "App confirmation delivery was not confirmed. Reconnect and request a fresh action review before retrying.",
+                )
+            except Exception:
+                logger.debug("Undelivered app confirmation notice failed")
+            return False
         await orchestrator._send_text(
             session_id,
             "Please confirm that app action before I execute it.",
         )
-        return
+        return False
 
     if handler == "navigate":
         target = action_spec.target or ""
         if not target:
             await orchestrator._send_text(session_id, "App navigation had no target surface.")
-            return
+            return False
         result = await registry.open_surface(
             app_id=app_id,
             surface_id=target,
@@ -281,11 +353,11 @@ async def _handle_app_action(
             root=result["root"],
             title=f"{app_id} · {target}",
         )
-        return
+        return True
 
     if handler == "close":
         await orchestrator._send_text(session_id, f"Closed {app_id}/{surface_id}.")
-        return
+        return True
 
     if handler == "skill_call":
         if not action_spec.target:
@@ -293,14 +365,15 @@ async def _handle_app_action(
                 session_id,
                 f"App {app_id} declared a skill_call but no target endpoint.",
             )
-            return
+            return False
         tool_call = {"name": action_spec.target, "args": value if isinstance(value, dict) else {}}
         try:
             await orchestrator._execute_tool_call(session_id, tool_call, [])
         except Exception as exc:
             logger.warning("App skill_call failed: %s", exc)
-            await orchestrator._send_text(session_id, f"The app's tool call failed: {exc}")
-        return
+            await orchestrator._send_text(session_id, "The app's tool call failed. Private details are withheld.")
+            return False
+        return True
 
     if handler == "patch":
         patches = None
@@ -313,7 +386,7 @@ async def _handle_app_action(
                 session_id,
                 "Patch action ignored because no patches payload was provided.",
             )
-            return
+            return False
         await orchestrator.send(
             session_id,
             FeralMessage(
@@ -326,7 +399,7 @@ async def _handle_app_action(
                 ).model_dump(),
             ),
         )
-        return
+        return True
 
     # Default handler: "app_event" — the brain forwards the tuple to
     # the orchestrator as an LLM-visible event so the agent can decide
@@ -340,6 +413,7 @@ async def _handle_app_action(
             f"(event: {event}, value: {value}). What should happen next?"
         ),
     )
+    return True
 
 
 async def _send_app_surface_payload(
@@ -351,8 +425,14 @@ async def _send_app_surface_payload(
     screen_id: str,
     root: dict,
     title: str,
-) -> None:
-    await orchestrator.send(
+    confirmation: Optional[dict] = None,
+) -> bool:
+    """Return an explicit delivery receipt, preserving best-effort node relay.
+
+    Legacy node senders return None even when the node is missing. Such a
+    return cannot authorize keeping an executable confirmation pending.
+    """
+    delivered = await orchestrator.send(
         session_id,
         FeralMessage(
             session_id=session_id,
@@ -361,9 +441,11 @@ async def _send_app_surface_payload(
             payload=SDUIPayload(
                 screen_id=screen_id,
                 root=root,
+                confirmation=confirmation,
             ).model_dump(),
         ),
     )
+    delivered = delivered is True
 
     _state: Optional[BrainState] = None
     try:
@@ -373,7 +455,7 @@ async def _send_app_surface_payload(
     else:
         _state = _brain_state
     if _state is None:
-        return
+        return delivered
     bindings = getattr(_state, "_daemon_session_bindings", {}) or {}
     node_id = None
     for bound_node, sessions in bindings.items():
@@ -381,11 +463,11 @@ async def _send_app_surface_payload(
             node_id = bound_node
             break
     if not node_id:
-        return
+        return delivered
     if not hasattr(_state, "send_to_daemon"):
-        return
+        return delivered
     try:
-        await _state.send_to_daemon(
+        node_delivered = await _state.send_to_daemon(
             node_id,
             FeralMessage(
                 session_id=session_id,
@@ -403,18 +485,22 @@ async def _send_app_surface_payload(
                 },
             ),
         )
+        delivered = delivered or node_delivered is True
     except Exception as exc:
         logger.debug("genui_push relay failed: %s", exc)
+    return delivered
 
 
 async def send_permission_request(orchestrator, session_id: str, path: str, operation: str, reason: str = "") -> None:
     from uuid import uuid4 as _uuid4
 
-    req_id = str(_uuid4())[:8]
+    req_id = str(_uuid4())
+    expires_at = time.time() + 300
     orchestrator._pending_permission_requests[req_id] = {
         "session_id": session_id,
         "path": path,
         "operation": operation,
+        "expires_at": expires_at,
     }
     delivered = await orchestrator.send(
         session_id,
@@ -427,6 +513,8 @@ async def send_permission_request(orchestrator, session_id: str, path: str, oper
                 "path": path,
                 "operation": operation,
                 "reason": reason or f"The agent needs {operation} access to {path}",
+                "expires_at": expires_at,
+                "scope": "persistent_workspace",
             },
         ),
     )
@@ -447,19 +535,50 @@ async def send_permission_request(orchestrator, session_id: str, path: str, oper
 
 async def handle_permission_response(orchestrator, session_id: str, req_id: str, granted: bool, value=None) -> None:
     _ = value
-    pending = orchestrator._pending_permission_requests.pop(req_id, None)
-    if not pending:
+    pending = orchestrator._pending_permission_requests.get(req_id)
+    # Only the session that received the question can consume it. A foreign
+    # response must not withdraw the legitimate owner's pending request.
+    if not isinstance(pending, dict) or pending.get("session_id") != session_id:
+        return
+    orchestrator._pending_permission_requests.pop(req_id, None)
+
+    async def receipt(status: str, **details) -> None:
+        await orchestrator.send(session_id, FeralMessage(
+            session_id=session_id, hop="brain", type="permission_decision",
+            payload={"request_id": req_id, "status": status, **details},
+        ))
+
+    expires_at = pending.get("expires_at")
+    if expires_at is not None and (not isinstance(expires_at, (int, float)) or expires_at <= time.time()):
+        await receipt("expired")
+        await orchestrator._send_text(session_id, "That folder-access request expired. Ask for a new request before granting access.")
         return
     path = pending["path"]
     operation = pending["operation"]
     if granted:
         from security.sandbox_policy import SandboxPolicy
 
-        policy = SandboxPolicy.load_default()
-        mode = "readwrite" if operation == "write" else "read"
-        policy.grant_folder(path, mode=mode)
-        await orchestrator._send_text(session_id, f"Access granted to `{path}` ({mode}). I can now work with files there.")
+        if operation not in {"read", "write", "readwrite"}:
+            await receipt("error")
+            await orchestrator._send_text(session_id, "The requested folder operation is unsupported. No access was granted.")
+            return
+        mode = "readwrite" if operation in {"write", "readwrite"} else "read"
+        try:
+            policy = SandboxPolicy.load_default()
+            result = policy.grant_folder(path, mode=mode)
+        except Exception:
+            logger.exception("Folder grant failed for request %s", req_id)
+            await receipt("error")
+            await orchestrator._send_text(session_id, "The folder grant could not be confirmed. Check workspace grants before retrying.")
+            return
+        if not isinstance(result, dict) or result.get("ok") is not True or result.get("mode") != mode:
+            await receipt("error")
+            await orchestrator._send_text(session_id, "The security policy did not confirm this folder grant. Check workspace grants before retrying.")
+            return
+        await receipt("granted", path=result.get("path", path), mode=mode, scope="persistent_workspace")
+        await orchestrator._send_text(session_id, f"Persistent workspace access granted to `{path}` ({mode}). This applies across this brain's sessions until revoked in Security.")
     else:
+        await receipt("denied")
         await orchestrator._send_text(session_id, f"Access to `{path}` was denied. I won't access that path.")
 
 

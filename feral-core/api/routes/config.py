@@ -1,5 +1,6 @@
 """Setup, configuration, identity, and credential endpoints."""
 
+from copy import deepcopy
 import logging
 import os
 import re
@@ -7,12 +8,22 @@ import re
 from fastapi import APIRouter, HTTPException
 
 from api.state import state
-from config.loader import clear_settings_cache as _clear_settings_cache, feral_home
+from providers.catalog import bind_active_cloud_runtime
+from config.loader import ChatOutputBudgetError, clear_settings_cache as _clear_settings_cache, feral_home, validate_chat_output_settings_patch
 from config.runtime import ollama_base_url
 
 logger = logging.getLogger("feral.api.config")
 
 router = APIRouter()
+
+
+def _require_deferred_credentials_ready():
+    if getattr(state, "_native_vault_deferred", False) is True:
+        from security.vault_coordinator import VaultLockedRefusal
+        try:
+            state.vault_coordinator.require_ready()
+        except VaultLockedRefusal as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)}) from None
 
 
 # ── Setup ──
@@ -43,6 +54,12 @@ async def complete_setup(body: dict):
     settings = body.get("settings", {})
     credentials = body.get("credentials", {})
     identity = body.get("identity", {})
+    try:
+        validate_chat_output_settings_patch(settings)
+    except ChatOutputBudgetError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from None
+    if credentials:
+        _require_deferred_credentials_ready()
 
     if settings:
         state.config.save_user_settings(settings)
@@ -117,7 +134,15 @@ async def update_config(body: dict):
             },
         )
 
-    state.config.update_settings(section, key, value)
+    if section == "llm" and key in ("api_key", "key", "credentials"):
+        _require_deferred_credentials_ready()
+        if getattr(state, "_native_vault_deferred", False) is True:
+            raise HTTPException(status_code=400, detail={"code": "use_credential_endpoint", "message": "Store provider credentials through the encrypted credential endpoint, not generic settings."})
+
+    try:
+        state.config.update_settings(section, key, value)
+    except ChatOutputBudgetError as exc:
+        raise HTTPException(status_code=400, detail={"code": exc.code, "message": str(exc)}) from None
 
     # ``load_settings`` memoises the merged dict so a per-turn caller does
     # not re-parse three files and unlock the keychain every time. The
@@ -165,9 +190,29 @@ async def update_config(body: dict):
         # id leaked into chat completions despite a clean settings
         # write. Await the swap so the in-memory provider always
         # matches what we just persisted.
-        await state.orchestrator.llm.switch_provider(
-            new_provider, model=new_model, base_url=new_base, api_key=new_key,
-        )
+        owner = state
+        orchestrator = owner.orchestrator
+        runtime = orchestrator.llm
+        catalog = getattr(owner, "provider_catalog", None)
+        try:
+            await runtime.switch_provider(new_provider, model=new_model, base_url=new_base, api_key=new_key)
+        except Exception:
+            # Keep this route's established generic HTTP 500 response while
+            # removing private connection details from the exception itself.
+            raise RuntimeError("Runtime activation was not verified; settings may already be saved") from None
+        if catalog is not None:
+            try:
+                bind_active_cloud_runtime(catalog, runtime, owner, orchestrator, state)
+            except (ValueError, RuntimeError):
+                raise HTTPException(status_code=503, detail={
+                    "code": "active_cloud_catalog_binding_unavailable",
+                    "message": "The active catalog connection could not be verified. Settings may already have changed; refresh before probing.",
+                }) from None
+        # The provider swap applies the primary adapter, but route_call and
+        # failover read a separate config snapshot. Refresh that full snapshot
+        # too, so saved call-site tiers/overrides take effect on the next turn.
+        # Detach nested maps from ConfigLoader's mutable merged settings.
+        runtime.set_config(deepcopy(llm_config))
 
     elif section == "features":
         enabled = str(value).lower() in ("true", "1", "yes", "on")
@@ -406,6 +451,7 @@ async def save_credentials(body: dict):
     They are reported back under ``skill_keys_saved`` /
     ``skill_keys_rejected`` rather than ``keys_saved``.
     """
+    _require_deferred_credentials_ready()
     creds: dict = {}
     rejected: list[str] = []
     skill_keys_saved: list[str] = []

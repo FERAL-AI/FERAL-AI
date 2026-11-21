@@ -808,7 +808,9 @@ def _guard_state_mocks(request):
             if not isinstance(candidate, NonCallableMock):
                 _REAL_BRAIN_STATE = candidate
 
-    for name, module in list(sys.modules.items()):
+    # Background imports may mutate sys.modules while Python iterates its
+    # items view. CPython dict.copy takes the snapshot before that iteration.
+    for name, module in sys.modules.copy().items():
         if module is None or type(module) is _StateGuardModule:
             continue
         if name != "api.state" and name != "api.server" and not name.startswith("api.routes."):

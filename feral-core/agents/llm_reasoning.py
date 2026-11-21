@@ -241,8 +241,15 @@ def apply_responses_param_fork(model: str, body: dict) -> dict:
     # — and our caller only hits this fork for responses-class models,
     # which are all reasoning. Drop temperature to avoid the 400.
     temp = body.get("temperature")
-    if temp is not None and temp != 1 and temp != 1.0:
+    # GPT-5.4+ accepts sampling controls only when reasoning is disabled.
+    # Explicit temperature=1 is still an unsupported parameter with medium.
+    reasoning_sampling = bool(re.match(
+        r"^gpt-(5\.(4|5|6)(-|$)|6(\.|-))", model or ""
+    )) and reasoning.get("effort") != "none"
+    if reasoning_sampling or (temp is not None and temp != 1 and temp != 1.0):
         body.pop("temperature", None)
+    if reasoning_sampling:
+        body.pop("top_logprobs", None)
     for key in ("top_p", "presence_penalty", "frequency_penalty"):
         body.pop(key, None)
     return body

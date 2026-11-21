@@ -63,6 +63,9 @@ Extract ALL readable text from this image. Return a JSON object:
 - "primary_content": the most important text visible (e.g. a sign, document title, screen content)
 - "language": detected language of the text
 
+Copy visible text character-for-character, preserving case and punctuation.
+Do not replace hyphens or straight quotes with typographic alternatives.
+Report unclear characters as uncertain instead of guessing.
 Return ONLY valid JSON."""
 
 MULTI_FRAME_PROMPT = """You are analyzing a sequence of {count} camera frames from smart glasses.
@@ -207,6 +210,8 @@ class SceneAnalyzer:
         """Is a VLM wired at all? True whenever a client object exists."""
         if self._vlm_client:
             return True
+        if self._vlm_provider:
+            return callable(getattr(self._llm, "chat_selected_vision", None))
         return self._llm is not None and self._llm.available
 
     @property
@@ -429,6 +434,9 @@ class SceneAnalyzer:
             return (
                 f"You are the vision system of smart glasses. "
                 f"Answer this question about what you see: {query}\n"
+                "When quoting visible text, copy it character-for-character, "
+                "preserving case and punctuation. Do not beautify hyphens or "
+                "quotes. Report unclear characters as uncertain instead of guessing.\n"
                 f"Return a JSON object with: \"answer\" (your response), "
                 f"\"confidence\" (0.0-1.0), \"detected_objects\" (relevant objects)."
             )
@@ -459,6 +467,8 @@ class SceneAnalyzer:
         try:
             if self._vlm_client:
                 text = await self._call_dedicated_vlm(messages)
+            elif self._vlm_provider:
+                text = await self._call_selected_vlm(messages)
             else:
                 text = await self._call_default_llm(messages)
         except Exception as exc:
@@ -469,6 +479,38 @@ class SceneAnalyzer:
         # The call reached the provider. Whatever it answered, the socket
         # worked, so any backoff in progress is over.
         self._note_vlm_reachable()
+        return text
+
+    async def _call_selected_vlm(self, messages: list[dict]) -> Optional[str]:
+        """Respect an explicit cloud selection without changing primary chat.
+
+        Use the shared request/budget adapter, with no provider failover and no
+        constructor or readiness probe. Local/dedicated selections remain local.
+        """
+        from agents.llm_provider import _PROVIDER_REGISTRY, _resolve_api_key
+
+        owner = self._llm
+        call = getattr(owner, "chat_selected_vision", None)
+        if not callable(call):
+            return None
+        provider = self._vlm_provider
+        registered = _PROVIDER_REGISTRY.get(provider)
+        if not registered or provider in {"ollama", "gemini", "local", "hybrid", "codex"}:
+            return None
+        same_provider = provider == getattr(owner, "provider", None)
+        model = self._vlm_model or (getattr(owner, "model", "") if same_provider else "")
+        base_url = self._vlm_base_url or (getattr(owner, "base_url", "") if same_provider else "") or registered[0]
+        key = (self._vlm_api_key or _resolve_api_key(provider)
+               or os.getenv(registered[1], "")
+               or (getattr(owner, "api_key", "") if same_provider else ""))
+        response = await call(messages=messages, provider=provider, model=model,
+                              base_url=base_url, api_key=key, temperature=0.1,
+                              max_tokens=500)
+        if response.get("error"):
+            logger.warning("Selected scene vision failed (%s)",
+                           response.get("error_code", "vision_request_unavailable"))
+            return None
+        text, _ = owner.extract_response(response)
         return text
 
     async def _call_default_llm(self, messages: list[dict]) -> Optional[str]:
@@ -590,6 +632,8 @@ class SceneAnalyzer:
         """Human-readable name of whatever actually served the call."""
         if self._vlm_client:
             return f"{self._vlm_client['type']}/{self._vlm_client.get('model', '?')}"
+        if self._vlm_provider:
+            return f"{self._vlm_provider}/{self._vlm_model or '?'}"
         return "shared LLM provider"
 
     def _salvage_prose(self, text: str, mode: str) -> Optional[dict]:

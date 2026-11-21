@@ -22,6 +22,8 @@ async def runtime():
     await taskflow.start()
     yield taskflow, store
     await taskflow.stop()
+    await store.aclose()
+    taskflow._conn.close()
 
     os.unlink(mem_path)
     os.unlink(flow_path)

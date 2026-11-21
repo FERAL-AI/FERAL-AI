@@ -26,7 +26,7 @@ class TestDeviceManifest:
         m = FERAL_GLASSES_MANIFEST
         assert m.device_id == "feral-glasses"
         assert m.device_type == "glasses"
-        assert len(m.capabilities) == 8
+        assert len(m.capabilities) == 9  # + measure_blood_pressure
         assert "heart_rate" in m.sensors
         assert m.battery_powered is True
 
@@ -87,7 +87,8 @@ class TestDeviceRegistry:
         reg = DeviceRegistry()
         reg.register_device(FERAL_GLASSES_MANIFEST)
         ctx = reg.to_llm_context()
-        assert "FERAL Smart Glasses" in ctx
+        # Product name, not the BLE vendor id or the board part number.
+        assert "Theora Glasses" in ctx
         assert "heart_rate" in ctx.lower() or "Heart Rate" in ctx
 
     def test_stats(self):
@@ -95,8 +96,8 @@ class TestDeviceRegistry:
         reg.register_device(FERAL_GLASSES_MANIFEST)
         s = reg.stats
         assert s["device_count"] == 1
-        assert s["total_capabilities"] == 8
-        assert s["total_sensors"] == 7
+        assert s["total_capabilities"] == 9  # + measure_blood_pressure
+        assert s["total_sensors"] == 8  # + blood_pressure
 
     @pytest.mark.asyncio
     async def test_execute_device_not_found(self):

@@ -100,6 +100,17 @@ def test_surface_deny_overrides_everything():
     assert decision.deny_reason
 
 
+@pytest.mark.parametrize("skill_id", [BUILTIN_SKILL_ID, "external_fixture"])
+def test_manifest_deny_wins_over_approval_and_read_only_hints(skill_id):
+    registry = _FakeRegistry([_make_skill(skill_id, {
+        "safety_tier": "deny",
+        "requires_user_approval": True,
+        "read_only_hint": True,
+    })])
+    decision = _resolve(f"{skill_id}__do_thing", registry=registry)
+    assert decision.level == LEVEL_DENY
+
+
 def test_surface_deny_does_not_fire_on_allowed_surface():
     decision = _resolve("desktop_control__shell_command", surface="websocket")
     # Not surface-denied; danger-map elevates it to CONFIRM.

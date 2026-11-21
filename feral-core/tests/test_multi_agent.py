@@ -335,7 +335,9 @@ async def test_agent_worker_never_surfaces_no_response_generated():
     w = AgentWorker("gen", "G", "SYS", [], llm=llm)
     r = await w.run("s1", "hello")
     assert "No response generated" not in r.text
-    assert r.text  # friendly, non-empty fallback
+    assert not r.text
+    assert r.provider_error
+    assert "did not generate a reply" in r.error
 
 
 @pytest.mark.asyncio

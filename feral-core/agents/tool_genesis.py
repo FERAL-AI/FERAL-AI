@@ -1,6 +1,7 @@
 """Tool Genesis — agents that build their own tools from observed patterns."""
 from __future__ import annotations
 import ast
+import asyncio
 import json
 import hashlib
 import logging
@@ -124,6 +125,9 @@ class ToolGenesisEngine:
         self._generated: dict[str, GeneratedTool] = {}
         self._session_traces: dict[str, list[dict]] = {}  # session -> recent tool calls
         self._db_path = db_path
+        # Fixed-size live creation exclusion, not a cross-process lease.
+        # Serializes draft generation within this engine, including waiters.
+        self._generation_lock = asyncio.Lock()
         if db_path:
             self._init_db()
             self._load_from_db()
@@ -164,6 +168,18 @@ class ToolGenesisEngine:
         return proposals
 
     async def generate_tool(self, sequence_id: str) -> Optional[GeneratedTool]:
+        if not isinstance(sequence_id, str) or sequence_id not in self._sequences or not self._llm:
+            return None
+        async with self._generation_lock:
+            try:
+                if await self._creation_target_exists(sequence_id, f"genesis_{sequence_id}"):
+                    return None
+                return await self._generate_tool_once(sequence_id)
+            except Exception:
+                logger.warning("Tool Genesis creation could not be confirmed for sequence %s", sequence_id)
+                return None
+
+    async def _generate_tool_once(self, sequence_id: str) -> Optional[GeneratedTool]:
         seq = self._sequences.get(sequence_id)
         if not seq or not self._llm:
             return None
@@ -204,8 +220,8 @@ class ToolGenesisEngine:
                 requires_approval=True,
                 approved=False,
             )
-            self._generated[sequence_id] = tool
-            self._persist_generated(sequence_id)
+            if not await self._commit_new_generated(sequence_id, tool):
+                return None
             logger.info("Tool Genesis: created %s from sequence %s (pending approval)", tool_id, seq.tools)
             return tool
         except Exception as e:
@@ -284,8 +300,19 @@ class ToolGenesisEngine:
         when no existing skill fits. Returns the ``tool_id`` of the new
         (pending) proposal, or ``None`` if the generation failed.
         """
-        if not self._llm:
+        if not isinstance(intent_text, str) or not intent_text.strip() or not self._llm:
             return None
+        sig = hashlib.md5(f"intent::{intent_text[:200]}".encode()).hexdigest()[:12]
+        async with self._generation_lock:
+            try:
+                if await self._creation_target_exists(sig, f"genesis_intent_{sig}"):
+                    return None
+                return await self._propose_from_intent_once(intent_text, history)
+            except Exception:
+                logger.warning("Tool Genesis intent draft creation could not be confirmed for %s", sig)
+                return None
+
+    async def _propose_from_intent_once(self, intent_text: str, history: list[dict] | None = None) -> Optional[str]:
         prompt = (
             "You are FERAL's tool-genesis pipeline. The user needs a capability that no existing "
             "skill provides. Draft a tiny async Python function named `main(args)` that performs "
@@ -331,10 +358,63 @@ class ToolGenesisEngine:
             requires_approval=True,
             approved=False,
         )
-        self._generated[sig] = gt
-        self._persist_generated(sig)
+        if not await self._commit_new_generated(sig, gt):
+            return None
         logger.info("Tool Genesis: proposed %s from intent", tool_id)
         return tool_id
+
+    async def _creation_target_exists(self, sig: str, tool_id: str) -> bool:
+        if sig in self._generated or any(gt.tool_id == tool_id for gt in self._generated.values()):
+            return True
+        if not self._db_path:
+            return False
+        return await asyncio.to_thread(self._stored_target_exists, sig, tool_id)
+
+    def _stored_target_exists(self, sig: str, tool_id: str) -> bool:
+        db_path = self._db_path
+        if not db_path:
+            raise RuntimeError("Generated tool storage is not configured")
+        with sqlite3.connect(db_path) as con:
+            return con.execute("SELECT 1 FROM generated_tools WHERE sig = ? OR tool_id = ? LIMIT 1", (sig, tool_id)).fetchone() is not None
+
+    async def _commit_new_generated(self, sig: str, tool: GeneratedTool) -> bool:
+        if sig in self._generated or any(gt.tool_id == tool.tool_id for gt in self._generated.values()):
+            return False
+        # Cancellation cannot stop a running SQLite worker. Its commit may still
+        # land without live publication; callers must reconcile, not assume rollback.
+        if self._db_path and not await asyncio.to_thread(self._insert_new_generated, sig, tool):
+            return False
+        # No await between the final live check and publication. SQLite commit
+        # precedes publication; cancellation/readback loss cannot imply success.
+        if sig in self._generated or any(gt.tool_id == tool.tool_id for gt in self._generated.values()):
+            return False
+        self._generated[sig] = tool
+        return True
+
+    def _insert_new_generated(self, sig: str, tool: GeneratedTool) -> bool:
+        db_path = self._db_path
+        if not db_path:
+            raise RuntimeError("Generated tool storage is not configured")
+        expected = (sig, tool.tool_id, tool.name, tool.description, json.dumps(tool.source_sequence),
+                    tool.python_code, tool.created_at, tool.last_used, tool.use_count, tool.performance_vs_manual)
+        con = sqlite3.connect(db_path)
+        try:
+            con.execute("BEGIN IMMEDIATE")
+            if con.execute("SELECT 1 FROM generated_tools WHERE sig = ? OR tool_id = ? LIMIT 1", (sig, tool.tool_id)).fetchone():
+                con.rollback()
+                return False
+            con.execute(
+                "INSERT INTO generated_tools (sig, tool_id, name, description, source_sequence_json, python_code, created_at, last_used, use_count, performance_vs_manual) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                expected,
+            )
+            con.commit()
+            stored = con.execute("SELECT sig, tool_id, name, description, source_sequence_json, python_code, created_at, last_used, use_count, performance_vs_manual FROM generated_tools WHERE sig = ?", (sig,)).fetchone()
+            return stored == expected
+        except BaseException:
+            con.rollback()
+            raise
+        finally:
+            con.close()
 
     def list_pending_proposals(self) -> list[dict]:
         """Unapproved generated tools — for UI/approval surface."""
@@ -574,4 +654,3 @@ class GeneratedSkill(BaseSkill):
         result.setdefault("error", None)
         return result
 '''
-

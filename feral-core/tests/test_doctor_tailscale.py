@@ -240,6 +240,25 @@ def doctor_home(monkeypatch, tmp_path):
 
     monkeypatch.setattr(_sqlite_vec_mod, "sqlite_vec_available", lambda: True)
 
+    # Tailscale severity must not depend on the test host's GUI permissions.
+    # Denied-permission reporting/deeplinks have their own doctor test; these
+    # are deterministic probe results, not actual OS permission grants.
+    from security import macos_permissions as _macos_permissions
+
+    monkeypatch.setattr(
+        _macos_permissions,
+        "all_gui_permission_statuses",
+        lambda: [
+            _macos_permissions.TCCStatus(
+                permission=name,
+                status="granted",
+                api="unit-test probe",
+                setup_step="unit-test fixture",
+            )
+            for name in ("accessibility", "screen_recording")
+        ],
+    )
+
     (home / "USER.md").write_text("Leroy, testing remote pairing.\n")
     return home
 

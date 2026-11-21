@@ -279,6 +279,22 @@ jobs:
           pip-audit --strict
         continue-on-error: true
 
+      - name: Generic Python SDK HTTP and WebSocket contracts
+        working-directory: .
+        run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      - name: Actual Node plugin execution through the installed brain runtime
+        working-directory: sdk/node
+        run: |
+          npm ci --ignore-scripts
+          FERAL_TEST_PYTHON="$(command -v python)" npm run test:runtime
+
       - name: Run tests with coverage (50% threshold)
         # Raised from 46 → 50 alongside the pyproject.toml change.
         # Addopts there enables --cov by default, but we still pass the
@@ -362,6 +378,22 @@ jobs:
         # base dev dep (feral-core/pyproject.toml), so it no longer
         # needs to be listed on the command line.
         run: pip install --constraint requirements.lock -e ".[all,dev]"
+
+      - name: Generic Python SDK HTTP and WebSocket contracts
+        working-directory: .
+        run: python -m pytest sdk/python/tests -q -p no:randomly --no-cov --timeout=60 --timeout-method=thread
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+
+      - name: Actual Node plugin execution through the installed brain runtime
+        working-directory: sdk/node
+        run: |
+          npm ci --ignore-scripts
+          FERAL_TEST_PYTHON="$(command -v python)" npm run test:runtime
 
       - name: Run tests with coverage (50% threshold)
         # --timeout=60 per-test ceiling: surfaces any single hanging test as a
@@ -541,6 +573,28 @@ jobs:
       - name: Run tests
         run: npm test
 
+  generic-node-sdk:
+    # This application SDK is separate from the device SDK above.
+    name: SDK — generic Node HTTP and WebSocket contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sdk/node
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: sdk/node/package-lock.json
+      - name: Install locked compiler
+        run: npm ci --ignore-scripts
+      - name: Compile and test SDK contracts
+        # Cross-language execution is a required brain-job step above, where
+        # Python and the locked runtime dependencies are actually installed.
+        run: npm run test:unit
+
   webui-v2-coherence:
     name: WebUI v2 — bundled asset coherence
     runs-on: ubuntu-latest
@@ -631,6 +685,10 @@ jobs:
             exit 1
           fi
           find "${FIND_ARGS[@]}" -print0 | xargs -0 python -m py_compile
+
+      - name: Read-only work recovery helper checks
+        working-directory: .
+        run: python -m unittest discover -s scripts/tests -p test_feral_work_status.py -v
 
   boundary-check:
     name: Architecture boundaries

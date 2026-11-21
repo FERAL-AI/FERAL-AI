@@ -5,29 +5,75 @@ Concrete Python backing implementations for JSON skill schemas.
 """
 import json
 import logging
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, Iterable, Optional, Type
+from typing import Any, Callable, Dict, Iterable, Iterator, Optional, TypeVar
 
 from skills.base import BaseSkill
 
 logger = logging.getLogger("feral.skills.impl")
 
 # Registry mapping skill_id -> Python Class implementation
-SKILL_IMPLEMENTATIONS: Dict[str, Type[BaseSkill]] = {}
+SKILL_IMPLEMENTATIONS: dict[str, BaseSkill] = {}
 
-def register_skill(skill_class: Type[BaseSkill]):
+
+@dataclass
+class RegistrationCapture:
+    """Capture helper-mediated writes during one trusted candidate import.
+
+    This is publication staging, not a sandbox for Python import effects.
+    A closed inherited context cannot subsequently publish delayed writes.
+    """
+
+    skill_id: str
+    instances: dict[str, BaseSkill] = field(default_factory=dict)
+    closed: bool = False
+
+
+_REGISTRATION_CAPTURE: ContextVar[RegistrationCapture | None] = ContextVar(
+    "skill_registration_capture", default=None,
+)
+
+
+@contextmanager
+def capture_registrations(skill_id: str) -> Iterator[RegistrationCapture]:
+    capture = RegistrationCapture(skill_id)
+    token = _REGISTRATION_CAPTURE.set(capture)
+    try:
+        yield capture
+    finally:
+        capture.closed = True
+        _REGISTRATION_CAPTURE.reset(token)
+
+SkillFactory = TypeVar("SkillFactory", bound=Callable[[], BaseSkill])
+
+
+def register_skill(skill_class: SkillFactory) -> SkillFactory:
     """Decorator to register a python skill implementation."""
     def wrapper():
         # Instantiate it to get the ID, or read standard class property
         instance = skill_class()
-        SKILL_IMPLEMENTATIONS[instance.skill_id] = instance
+        register_instance(instance.skill_id, instance)
         return skill_class
 
     wrapper()
     return skill_class
 
-def register_instance(skill_id: str, instance):
+def register_instance(skill_id: str, instance: BaseSkill) -> None:
     """Register a pre-built integration instance as a skill implementation."""
+    capture = _REGISTRATION_CAPTURE.get()
+    if capture is not None:
+        if capture.closed or skill_id != capture.skill_id:
+            raise ValueError("Candidate registration is closed or names a different skill")
+        if not isinstance(instance, BaseSkill) or instance.skill_id != skill_id:
+            raise ValueError("Candidate implementation identity does not match")
+        previous = capture.instances.get(skill_id)
+        if previous is not None and previous is not instance:
+            raise ValueError("Candidate registers multiple implementations")
+        capture.instances[skill_id] = instance
+        return
     SKILL_IMPLEMENTATIONS[skill_id] = instance
 
 def get_implementation(skill_id: str) -> BaseSkill | None:
@@ -83,6 +129,7 @@ AUTOLOAD_MODULES: tuple[str, ...] = (
     "feral_reminders",
     "feral_routines",
     "feral_workflows",
+    "background_task",
     "notes_memory",
     "plan",
     # imported for the @register_skill side effect
@@ -93,6 +140,7 @@ AUTOLOAD_MODULES: tuple[str, ...] = (
     # of skills/impl/browser_use.py: the store must be loadable without a
     # browser.
     "browser_memory",
+    "places",
 )
 
 # module name -> reason it is not loaded. Empty on a healthy install.

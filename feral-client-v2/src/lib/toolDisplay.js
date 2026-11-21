@@ -53,6 +53,7 @@ export const DEFAULT_TOOL_FAMILY = 'tool';
 export const SKILL_FAMILY = Object.freeze({
   // categories: search / knowledge
   web_search: 'search',
+  places: 'search',
   // categories: browser / automation / web / commerce
   browser: 'browser',
   browser_memory: 'browser',

@@ -10,9 +10,11 @@ use std::time::Duration;
 use tauri::menu::{Menu, MenuItem, PredefinedMenuItem};
 use tauri::tray::{MouseButton, MouseButtonState, TrayIconBuilder, TrayIconEvent};
 use tauri::{Emitter, Manager, State};
+use tauri_plugin_dialog::DialogExt;
 use tauri_plugin_global_shortcut::{Builder as GsBuilder, ShortcutState};
 
 struct BrainProcess(pub Mutex<Option<Child>>);
+struct BrainIdentity(pub Mutex<Option<String>>);
 
 // ---------------------------------------------------------------------------
 // What the brain actually said
@@ -65,7 +67,9 @@ struct BrainLog(Arc<Mutex<VecDeque<String>>>);
 
 impl BrainLog {
     fn new() -> Self {
-        BrainLog(Arc::new(Mutex::new(VecDeque::with_capacity(BRAIN_LOG_LINES))))
+        BrainLog(Arc::new(Mutex::new(VecDeque::with_capacity(
+            BRAIN_LOG_LINES,
+        ))))
     }
 
     /// Drop everything. Called when a new brain is spawned, so the screen
@@ -423,11 +427,14 @@ fn start_brain(
     app: tauri::AppHandle,
     state: State<'_, BrainProcess>,
     log: State<'_, BrainLog>,
+    identity: State<'_, BrainIdentity>,
 ) -> Result<u32, String> {
     let mut guard = state.0.lock().map_err(|e| format!("lock: {e}"))?;
     if let Some(mut existing) = guard.take() {
-        let _ = existing.kill();
-        let _ = existing.wait();
+        if let Err(error) = terminate_owned_child(&mut existing, Duration::from_secs(5)) {
+            *guard = Some(existing);
+            return Err(format!("could not stop the previous brain: {error}"));
+        }
     }
     let dir = resolve_feral_core_dir(&app)?;
     let python = resolve_python(&app, &dir)?;
@@ -437,6 +444,21 @@ fn start_brain(
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    configure_bundled_runtime(&mut cmd, &python, app.path().resource_dir().ok().as_deref())?;
+    let instance = format!(
+        "{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|e| e.to_string())?
+            .as_nanos()
+    );
+    cmd.env("FERAL_DESKTOP_INSTANCE_ID", &instance);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd.spawn().map_err(|e| {
         format!(
             "failed to spawn {} -m api.server in {}: {e}",
@@ -462,6 +484,7 @@ fn start_brain(
     }
 
     *guard = Some(child);
+    *identity.0.lock().unwrap_or_else(|p| p.into_inner()) = Some(instance);
     Ok(pid)
 }
 
@@ -502,32 +525,135 @@ fn brain_output_tail(log: State<'_, BrainLog>) -> String {
 
 #[tauri::command]
 fn stop_brain(state: State<'_, BrainProcess>, pid: u32) -> Result<(), String> {
-    let mut guard = state.0.lock().map_err(|e| format!("lock: {e}"))?;
-    if let Some(mut child) = guard.take() {
-        if child.id() == pid {
-            let _ = child.kill();
-            let _ = child.wait();
-            return Ok(());
-        }
-        *guard = Some(child);
-    }
-    kill_pid(pid).map_err(|e| e.to_string())
+    stop_owned_brain(state.inner(), pid)
 }
 
-fn kill_pid(pid: u32) -> std::io::Result<()> {
+fn stop_owned_brain(state: &BrainProcess, pid: u32) -> Result<(), String> {
+    let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
+    if guard.as_ref().map(|child| child.id()) != Some(pid) {
+        return Err("the requested process is not owned by this app".into());
+    }
+    let mut child = guard.take().expect("ownership checked above");
+    if let Err(error) = terminate_owned_child(&mut child, Duration::from_secs(5)) {
+        *guard = Some(child);
+        return Err(error.to_string());
+    }
+    Ok(())
+}
+
+fn executable_file(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
     #[cfg(unix)]
     {
-        std::process::Command::new("kill")
-            .args(["-TERM", &pid.to_string()])
-            .status()?;
+        use std::os::unix::fs::PermissionsExt;
+        return path
+            .metadata()
+            .map(|m| m.permissions().mode() & 0o111 != 0)
+            .unwrap_or(false);
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+fn configure_bundled_runtime(
+    cmd: &mut Command,
+    python: &Path,
+    resources: Option<&Path>,
+) -> Result<(), String> {
+    let mut paths = vec![python
+        .parent()
+        .ok_or("interpreter has no directory")?
+        .to_path_buf()];
+    if let Some(root) = resources {
+        let opencode = root.join("opencode/bin/opencode");
+        if executable_file(&opencode) {
+            if std::env::var_os("FERAL_OPENCODE_BIN").is_none() {
+                cmd.env("FERAL_OPENCODE_BIN", &opencode);
+            }
+            paths.push(root.join("opencode/bin"));
+        }
+    }
+    if let Some(inherited) = std::env::var_os("PATH") {
+        paths.extend(std::env::split_paths(&inherited));
+    }
+    cmd.env(
+        "PATH",
+        std::env::join_paths(paths).map_err(|e| format!("invalid runtime PATH: {e}"))?,
+    );
+    Ok(())
+}
+
+#[cfg(unix)]
+fn signal_owned_group(pid: u32, signal: i32) -> std::io::Result<bool> {
+    extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    // The group is created for the Child we own, never a caller-supplied PID.
+    let result = unsafe { kill(-(pid as i32), signal) };
+    if result == 0 {
+        return Ok(true);
+    }
+    let error = std::io::Error::last_os_error();
+    if error.raw_os_error() == Some(3) {
+        return Ok(false);
+    } // ESRCH on macOS/Linux
+    Err(error)
+}
+
+fn terminate_owned_child(child: &mut Child, grace: Duration) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        signal_owned_group(child.id(), 15)?;
+        let deadline = std::time::Instant::now() + grace;
+        loop {
+            let exited = child.try_wait()?.is_some();
+            let group_exists = signal_owned_group(child.id(), 0)?;
+            if exited && !group_exists {
+                return Ok(());
+            }
+            if std::time::Instant::now() >= deadline {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(20));
+        }
+        signal_owned_group(child.id(), 9)?;
     }
     #[cfg(windows)]
     {
-        std::process::Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/F"])
+        let status = Command::new("taskkill")
+            .args(["/PID", &child.id().to_string(), "/T", "/F"])
             .status()?;
+        if !status.success() && child.try_wait()?.is_none() {
+            child.kill()?;
+        }
     }
+    if child.try_wait()?.is_none() {
+        child.kill()?;
+    }
+    child.wait()?;
     Ok(())
+}
+
+#[tauri::command]
+async fn pick_working_directory(app: tauri::AppHandle) -> Result<Option<String>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        app.dialog()
+            .file()
+            .blocking_pick_folder()
+            .map(|selection| {
+                selection
+                    .into_path()
+                    .map(|path| path.to_string_lossy().into_owned())
+                    .map_err(|e| e.to_string())
+            })
+            .transpose()
+    })
+    .await
+    .map_err(|e| format!("directory picker failed: {e}"))?
 }
 
 // ---------------------------------------------------------------------------
@@ -559,7 +685,12 @@ const HEALTH_TOTAL_TIMEOUT: Duration = Duration::from_secs(2);
 ///
 /// Split from `brain_health_probe` so it can be tested against a real
 /// socket without touching process-wide environment variables.
+#[cfg(test)]
 fn probe_health_at(base_url: &str) -> (bool, String) {
+    probe_instance_health_at(base_url, None)
+}
+
+fn probe_instance_health_at(base_url: &str, expected: Option<&str>) -> (bool, String) {
     let url = format!("{}/health", base_url.trim_end_matches('/'));
     let client = match reqwest::blocking::Client::builder()
         .connect_timeout(HEALTH_CONNECT_TIMEOUT)
@@ -573,6 +704,19 @@ fn probe_health_at(base_url: &str) -> (bool, String) {
     };
     match client.get(url).send() {
         Ok(resp) => {
+            if let Some(expected) = expected {
+                if resp
+                    .headers()
+                    .get("X-Feral-Desktop-Instance")
+                    .and_then(|h| h.to_str().ok())
+                    != Some(expected)
+                {
+                    return (
+                        false,
+                        "unowned server at brain address; instance identity mismatch".into(),
+                    );
+                }
+            }
             let code = resp.status().as_u16();
             let ok = resp.status().is_success();
             (ok, format!("HTTP {code}"))
@@ -589,13 +733,37 @@ fn probe_health_at(base_url: &str) -> (bool, String) {
     }
 }
 
-fn brain_health_probe() -> (bool, String) {
-    probe_health_at(&brain_base_url())
+fn owned_child_is_running(state: &BrainProcess) -> bool {
+    let mut guard = state.0.lock().unwrap_or_else(|p| p.into_inner());
+    guard
+        .as_mut()
+        .is_some_and(|child| matches!(child.try_wait(), Ok(None)))
+}
+
+fn brain_health_probe(state: &BrainProcess, identity: &BrainIdentity) -> (bool, String) {
+    if !owned_child_is_running(state) {
+        return (false, "owned brain process is not running".into());
+    }
+    let expected = identity.0.lock().unwrap_or_else(|p| p.into_inner()).clone();
+    let Some(expected) = expected else {
+        return (false, "owned brain identity is unavailable".into());
+    };
+    let result = probe_instance_health_at(&brain_base_url(), Some(&expected));
+    if !owned_child_is_running(state) {
+        return (
+            false,
+            "owned brain process exited during health probe".into(),
+        );
+    }
+    result
 }
 
 #[tauri::command]
-fn check_brain_health() -> Result<String, String> {
-    let (_ok, status) = brain_health_probe();
+fn check_brain_health(
+    state: State<'_, BrainProcess>,
+    identity: State<'_, BrainIdentity>,
+) -> Result<String, String> {
+    let (_ok, status) = brain_health_probe(state.inner(), identity.inner());
     Ok(status)
 }
 
@@ -624,8 +792,9 @@ fn shutdown_brain(state: &BrainProcess) {
         Err(poisoned) => poisoned.into_inner(),
     };
     if let Some(mut child) = guard.take() {
-        let _ = child.kill();
-        let _ = child.wait();
+        if let Err(error) = terminate_owned_child(&mut child, Duration::from_secs(5)) {
+            eprintln!("[FERAL] brain shutdown failed: {error}");
+        }
     }
 }
 
@@ -643,6 +812,10 @@ fn toggle_floating_window(app: &tauri::AppHandle) {
             let _ = w.set_focus();
         }
     }
+}
+
+fn window_owns_brain_lifecycle(label: &str) -> bool {
+    label == "main"
 }
 
 fn main() {
@@ -680,12 +853,14 @@ fn main() {
         .build();
 
     tauri::Builder::default()
+        .plugin(tauri_plugin_dialog::init())
         .plugin(global_shortcut)
         .plugin(tauri_plugin_autostart::init(
             tauri_plugin_autostart::MacosLauncher::LaunchAgent,
             Some(vec!["--minimized"]),
         ))
         .manage(BrainProcess(Mutex::new(None)))
+        .manage(BrainIdentity(Mutex::new(None)))
         .manage(BrainLog::new())
         .invoke_handler(tauri::generate_handler![
             start_brain,
@@ -694,16 +869,14 @@ fn main() {
             get_brain_url,
             brain_runtime_info,
             brain_output_tail,
+            pick_working_directory,
         ])
         .setup(|app| {
+            #[cfg(target_os = "macos")]
+            app.set_menu(Menu::default(app.handle())?)?;
             // ---- System tray menu ----------------------------------------
-            let show_hide = MenuItem::with_id(
-                app,
-                "show_hide",
-                "Show / Hide FERAL",
-                true,
-                None::<&str>,
-            )?;
+            let show_hide =
+                MenuItem::with_id(app, "show_hide", "Show / Hide FERAL", true, None::<&str>)?;
             let spotlight = MenuItem::with_id(
                 app,
                 "spotlight",
@@ -711,15 +884,9 @@ fn main() {
                 true,
                 None::<&str>,
             )?;
-            let quick_chat = MenuItem::with_id(
-                app,
-                "quick_chat",
-                "Quick Chat",
-                true,
-                None::<&str>,
-            )?;
-            let quit =
-                MenuItem::with_id(app, "quit", "Quit FERAL", true, None::<&str>)?;
+            let quick_chat =
+                MenuItem::with_id(app, "quick_chat", "Quick Chat", true, None::<&str>)?;
+            let quit = MenuItem::with_id(app, "quit", "Quit FERAL", true, None::<&str>)?;
 
             let menu = Menu::with_items(
                 app,
@@ -785,8 +952,12 @@ fn main() {
 
             // ---- Background health tooltip loop --------------------------
             let tray_bg = tray.clone();
+            let health_app = app.handle().clone();
             std::thread::spawn(move || loop {
-                let (ok, detail) = brain_health_probe();
+                let (ok, detail) = brain_health_probe(
+                    health_app.state::<BrainProcess>().inner(),
+                    health_app.state::<BrainIdentity>().inner(),
+                );
                 let dot = if ok { "🟢" } else { "🔴" };
                 let tip = format!("FERAL — {dot} {detail}");
                 let _ = tray_bg.set_tooltip(Some(tip.as_str()));
@@ -796,14 +967,23 @@ fn main() {
             Ok(())
         })
         .on_window_event(|window, event| {
-            if let tauri::WindowEvent::Destroyed = event {
+            if matches!(event, tauri::WindowEvent::Destroyed)
+                && window_owns_brain_lifecycle(window.label())
+            {
                 if let Some(bp) = window.app_handle().try_state::<BrainProcess>() {
                     shutdown_brain(bp.inner());
                 }
             }
         })
-        .run(tauri::generate_context!())
-        .expect("error while running FERAL Desktop");
+        .build(tauri::generate_context!())
+        .expect("error while building FERAL Desktop")
+        .run(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(bp) = app.try_state::<BrainProcess>() {
+                    shutdown_brain(bp.inner());
+                }
+            }
+        });
 }
 
 // ---------------------------------------------------------------------------
@@ -821,6 +1001,13 @@ fn main() {
 mod tests {
     use super::*;
     use std::fs;
+
+    #[test]
+    fn auxiliary_windows_do_not_own_the_brain_lifetime() {
+        assert!(window_owns_brain_lifecycle("main"));
+        assert!(!window_owns_brain_lifecycle("floating"));
+        assert!(!window_owns_brain_lifecycle("settings"));
+    }
 
     /// Build a fake repo: <root>/feral-core/api/server.py
     fn make_core(root: &Path) -> PathBuf {
@@ -981,7 +1168,10 @@ mod tests {
         // Oldest dropped, newest kept: a traceback printed just before the
         // process died must be the part that survives.
         assert!(!tail.contains("line 0\n"));
-        assert!(lines.last().unwrap().contains(&format!("line {}", BRAIN_LOG_LINES * 3 - 1)));
+        assert!(lines
+            .last()
+            .unwrap()
+            .contains(&format!("line {}", BRAIN_LOG_LINES * 3 - 1)));
     }
 
     #[test]
@@ -1016,8 +1206,13 @@ mod tests {
         // The whole point of the piped stdio: what the process wrote is
         // readable afterwards. A Cursor stands in for the child's pipe.
         let log = BrainLog::new();
-        let payload = b"Traceback (most recent call last):\nsqlite3.OperationalError: no such module: fts5\n";
-        drain_stream(std::io::Cursor::new(payload.to_vec()), "stderr", log.clone());
+        let payload =
+            b"Traceback (most recent call last):\nsqlite3.OperationalError: no such module: fts5\n";
+        drain_stream(
+            std::io::Cursor::new(payload.to_vec()),
+            "stderr",
+            log.clone(),
+        );
 
         // The drain runs on its own thread; poll rather than sleep a fixed
         // amount, so this is not a timing bet.
@@ -1078,10 +1273,56 @@ mod tests {
         let mut cmd = Command::new("sh");
         cmd.args(["-c", "echo 'no such module: fts5' >&2; exit 1"]);
 
-        let (status, stderr) =
-            output_with_timeout(&mut cmd, Duration::from_secs(30)).unwrap();
+        let (status, stderr) = output_with_timeout(&mut cmd, Duration::from_secs(30)).unwrap();
         assert!(!status.success());
         assert!(stderr.contains("fts5"), "{stderr}");
+    }
+
+    #[test]
+    fn health_requires_the_spawned_instance_marker() {
+        use std::io::{Read, Write};
+        for marker in [None, Some("foreign-instance"), Some("our-instance")] {
+            let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+            let address = listener.local_addr().unwrap();
+            let server = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                let mut request = [0; 2048];
+                stream.read(&mut request).unwrap();
+                let header = marker
+                    .map(|value| format!("X-Feral-Desktop-Instance: {value}\r\n"))
+                    .unwrap_or_default();
+                write!(
+                    stream,
+                    "HTTP/1.1 200 OK\r\n{header}Content-Length: 2\r\nConnection: close\r\n\r\n{{}}"
+                )
+                .unwrap();
+            });
+            let (healthy, detail) =
+                probe_instance_health_at(&format!("http://{address}"), Some("our-instance"));
+            server.join().unwrap();
+            assert_eq!(healthy, marker == Some("our-instance"));
+            if !healthy {
+                assert!(
+                    !detail.starts_with("HTTP 2"),
+                    "foreign server must not look healthy to shell: {detail}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn exited_owned_child_is_never_a_healthy_brain() {
+        let mut child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .spawn()
+            .unwrap();
+        child.wait().unwrap();
+        let state = BrainProcess(Mutex::new(Some(child)));
+        let identity = BrainIdentity(Mutex::new(Some("our-instance".into())));
+        let (healthy, detail) = brain_health_probe(&state, &identity);
+        assert!(!healthy);
+        assert!(detail.contains("not running"));
     }
 
     #[test]
@@ -1093,8 +1334,8 @@ mod tests {
         //
         // The listener accepts the connection and holds it. No response
         // is ever written.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0")
-            .expect("bind a loopback listener");
+        let listener =
+            std::net::TcpListener::bind("127.0.0.1:0").expect("bind a loopback listener");
         let addr = listener.local_addr().unwrap();
         let accepted = std::thread::spawn(move || {
             // Hold the accepted socket open, and the listener with it, so
@@ -1141,12 +1382,145 @@ mod tests {
     }
 
     #[test]
+    #[cfg(unix)]
+    fn stop_rejects_unowned_pid_and_keeps_the_owned_brain() {
+        use std::os::unix::process::CommandExt;
+        let mut unrelated_cmd = Command::new("/bin/sh");
+        unrelated_cmd.args(["-c", "sleep 30"]).process_group(0);
+        let mut unrelated = unrelated_cmd.spawn().unwrap();
+        let mut owned_cmd = Command::new("/bin/sh");
+        owned_cmd.args(["-c", "sleep 30"]).process_group(0);
+        let owned = owned_cmd.spawn().unwrap();
+        let owned_pid = owned.id();
+        let state = BrainProcess(Mutex::new(Some(owned)));
+        assert!(stop_owned_brain(&state, unrelated.id()).is_err());
+        assert_eq!(state.0.lock().unwrap().as_ref().unwrap().id(), owned_pid);
+        assert!(unrelated.try_wait().unwrap().is_none());
+        stop_owned_brain(&state, owned_pid).unwrap();
+        terminate_owned_child(&mut unrelated, Duration::from_millis(100)).unwrap();
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn graceful_shutdown_runs_the_childs_term_handler() {
+        use std::os::unix::process::CommandExt;
+        let root = tempdir("graceful-stop");
+        let marker = root.join("term-handled");
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "trap 'echo stopped > \"$1\"; exit 0' TERM; echo ready; while :; do sleep 1; done",
+                "smoke",
+            ])
+            .arg(&marker)
+            .stdout(Stdio::piped())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let mut ready = String::new();
+        BufReader::new(child.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        terminate_owned_child(&mut child, Duration::from_secs(2)).unwrap();
+        assert!(
+            marker.is_file(),
+            "SIGKILL bypassed the graceful TERM handler"
+        );
+        assert!(child.try_wait().unwrap().is_some());
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn shutdown_kills_term_resistant_descendants_with_a_deadline() {
+        use std::os::unix::process::CommandExt;
+        let mut command = Command::new("/bin/sh");
+        command
+            .args(["-c", "trap '' TERM; sleep 30 & echo $!; wait"])
+            .stdout(Stdio::piped())
+            .process_group(0);
+        let mut child = command.spawn().unwrap();
+        let mut line = String::new();
+        let mut output = BufReader::new(child.stdout.take().unwrap());
+        output.read_line(&mut line).unwrap();
+        let descendant = line.trim().to_owned();
+        let started = std::time::Instant::now();
+        terminate_owned_child(&mut child, Duration::from_millis(100)).unwrap();
+        assert!(started.elapsed() < Duration::from_secs(2));
+        assert!(child.try_wait().unwrap().is_some());
+        // EOF proves that the descendant no longer holds the inherited pipe.
+        let mut remainder = String::new();
+        output.read_to_string(&mut remainder).unwrap();
+        let status = Command::new("/bin/ps")
+            .args(["-o", "stat=", "-p", &descendant])
+            .output()
+            .unwrap();
+        let state = String::from_utf8_lossy(&status.stdout);
+        assert!(
+            state.trim().is_empty() || state.trim().starts_with('Z'),
+            "descendant is still running: {state}"
+        );
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn runtime_path_precedes_external_tools_and_ignores_nonexecutable_opencode() {
+        let root = tempdir("bundled-path");
+        let python = root.join("python/bin/python3");
+        fs::create_dir_all(python.parent().unwrap()).unwrap();
+        let mut command = Command::new(&python);
+        configure_bundled_runtime(&mut command, &python, Some(&root)).unwrap();
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(
+            std::env::split_paths(path).next().unwrap(),
+            python.parent().unwrap()
+        );
+        assert!(!command
+            .get_envs()
+            .any(|(key, _)| key == "FERAL_OPENCODE_BIN"));
+        let binary = root.join("opencode/bin/opencode");
+        fs::create_dir_all(binary.parent().unwrap()).unwrap();
+        fs::write(&binary, "not executable").unwrap();
+        assert!(!executable_file(&binary));
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&binary, fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = Command::new(&python);
+        configure_bundled_runtime(&mut command, &python, Some(&root)).unwrap();
+        let path = command
+            .get_envs()
+            .find(|(key, _)| *key == "PATH")
+            .unwrap()
+            .1
+            .unwrap();
+        assert_eq!(
+            std::env::split_paths(path).nth(1).unwrap(),
+            binary.parent().unwrap()
+        );
+        if std::env::var_os("FERAL_OPENCODE_BIN").is_none() {
+            assert!(command.get_envs().any(
+                |(key, value)| key == "FERAL_OPENCODE_BIN" && value == Some(binary.as_os_str())
+            ));
+        }
+    }
+
+    #[test]
     fn shutdown_takes_the_child_even_when_the_lock_is_poisoned() {
         // Declining to act on a poisoned lock is what leaves an orphaned
         // python on port 9090 after the app quits. The observable
         // property is that the slot is emptied.
         let state = BrainProcess(Mutex::new(None));
-        let child = Command::new("sh")
+        let mut command = Command::new("sh");
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            command.process_group(0);
+        }
+        let child = command
             .args(["-c", "sleep 30"])
             .stdin(Stdio::null())
             .stdout(Stdio::null())

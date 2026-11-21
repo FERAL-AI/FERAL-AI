@@ -2,10 +2,29 @@
 
 export interface FeralMessage {
   type: string;
+  msg_id?: string;
   session_id?: string;
   hop?: string;
   payload?: Record<string, unknown>;
   timestamp?: number;
+  timestamp_ms?: number;
+}
+
+export type TurnProcessingOutcome = 'completed' | 'awaiting_approval' | 'failed' | 'cancelled'
+  | 'outcome_unknown' | 'unavailable' | 'refused' | 'budget_exceeded';
+
+/** Correlated processing receipt. action_outcome never certifies external effects. */
+export interface ChatTurnReceipt {
+  request_id: string;
+  turn_id: string;
+  session_id: string;
+  processing_outcome: TurnProcessingOutcome;
+  final_text: string;
+  action_outcome: 'not_asserted' | 'unknown';
+  approval_request_ids: string[];
+  replayed: boolean;
+  durable: true;
+  contract_version: 1;
 }
 
 export interface TextCommand {

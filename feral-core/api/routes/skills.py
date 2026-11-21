@@ -1,10 +1,12 @@
 """Skill generation, approval, listing, and API-key endpoints."""
 
 import logging
+import asyncio
 
 from fastapi import APIRouter, Response
 
 from api.state import state
+from skills.registry import SkillRegistry
 
 logger = logging.getLogger("feral.api.skills")
 
@@ -324,11 +326,18 @@ async def reload_skill(skill_id: str, response: Response):
         return {"ok": False, "skill_id": skill_id, "error": "skill registry not initialized"}
 
     try:
-        ok, code, reason = _reload(registry, skill_id)
+        if isinstance(registry, SkillRegistry):
+            ok, code, reason = await registry.reload_skill_detail_async(
+                skill_id, publish_guard=lambda: getattr(state, "skill_registry", None) is registry,
+            )
+        else:
+            # Compatibility for legacy bundled registries/test doubles.
+            ok, code, reason = await asyncio.to_thread(_reload, registry, skill_id)
     except Exception as exc:
-        logger.warning("reload_skill(%s) raised: %s", skill_id, exc)
+        logger.warning("Skill reload failed (%s)", type(exc).__name__)
         response.status_code = _BRAIN_FAILED
-        return {"ok": False, "skill_id": skill_id, "error": str(exc)}
+        return {"ok": False, "skill_id": skill_id, "code": "reload_raised",
+                "error": "Skill reload failed; inspect the redacted runtime diagnostics"}
 
     if not ok:
         response.status_code = _STATE_CONFLICT
@@ -338,7 +347,10 @@ async def reload_skill(skill_id: str, response: Response):
             "code": code,
             "error": reason or f"reload of '{skill_id}' did not happen",
         }
-    return {"ok": True, "skill_id": skill_id}
+    result = {"ok": True, "skill_id": skill_id}
+    if isinstance(registry, SkillRegistry):
+        result.update(registry._reload_metadata.get(skill_id, {}))
+    return result
 
 
 def _reload(registry, skill_id: str) -> tuple[bool, str, str]:

@@ -55,7 +55,9 @@ def _router_with_spies():
 
     router = VoiceRouter(audio_pipeline=MagicMock(), orchestrator=MagicMock())
     chained = MagicMock()
-    chained.open_session = AsyncMock(return_value=MagicMock())
+    opened = MagicMock()
+    chained.open_session = AsyncMock(return_value=opened)
+    chained.get_session.return_value = opened
     router.set_chained_pipeline(chained)
     return router, captured, _spy_stt, _spy_tts
 

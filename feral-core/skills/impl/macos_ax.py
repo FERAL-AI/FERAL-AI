@@ -84,14 +84,21 @@ the model reads.
 from __future__ import annotations
 
 import logging
+import json
+import math
 import re
 import time
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from decimal import Decimal, InvalidOperation
 from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 from skills.base import BaseSkill
 from skills.impl import register_skill
+from security.desktop_input import (
+    DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked,
+    check_input, cleanup_failed, input_failure, physical_input_scope, run_worker,
+)
 
 logger = logging.getLogger("feral.skill.macos_ax")
 
@@ -184,6 +191,7 @@ HARD_MAX_DEPTH = 60
 DEFAULT_TIMEOUT_S = 8.0
 MAX_TIMEOUT_S = 30.0
 DEFAULT_FIND_LIMIT = 20
+MAX_AX_TEXT_CHARS = 2048
 
 # Hard ceiling on elements touched in one walk, independent of the clock.
 # A malformed tree that answers instantly could otherwise produce an
@@ -339,6 +347,44 @@ def _is_secure(role: str, subrole: str) -> bool:
     return role in SECURE_ROLES or subrole in SECURE_SUBROLES
 
 
+def _content_attributes(element, role: str, subrole: str) -> dict:
+    """Bounded display data, separate from the label; never read secure fields.
+
+    AXURL may be a toll-free bridged NSURL. Unsupported objects must not
+    be stringified: their description is neither a URL nor a field value.
+    """
+    if _is_secure(role, subrole):
+        return {}
+    out: dict[str, Any] = {}
+    for attribute, key in (("AXValue", "value"), ("AXURL", "url")):
+        err, value = _attr(element, attribute)
+        if err != 0 or value is None:
+            continue
+        text = None
+        if isinstance(value, str):
+            text = value
+        elif attribute == "AXValue" and isinstance(value, (int, float)):
+            if isinstance(value, float) and not math.isfinite(value):
+                continue
+            try:
+                text = str(value)
+            except ValueError:
+                continue
+        elif attribute == "AXURL":
+            try:
+                from Foundation import NSURL
+                if isinstance(value, NSURL):
+                    text = value.absoluteString()
+            except (ImportError, AttributeError, TypeError, ValueError):
+                continue
+        if not isinstance(text, str) or not text:
+            continue
+        out[key] = text[:MAX_AX_TEXT_CHARS]
+        if len(text) > MAX_AX_TEXT_CHARS:
+            out[key + "_truncated"] = True
+    return out
+
+
 def _label(element, role: str, subrole: str) -> Tuple[str, str]:
     """``(label, which_attribute_supplied_it)``.
 
@@ -466,6 +512,10 @@ class AXNode:
     secure: bool = False
     window_index: Optional[int] = None
     window_title: str = ""
+    value: str = ""
+    url: str = ""
+    value_truncated: bool = False
+    url_truncated: bool = False
 
     def is_interactive(self) -> bool:
         if self.role in INTERACTIVE_ROLES:
@@ -491,6 +541,13 @@ class AXNode:
             out["secure"] = True
         if self.window_index is not None:
             out["window_index"] = self.window_index
+        if not (self.secure or _is_secure(self.role, self.subrole)):
+            for key in ("value", "url"):
+                text = getattr(self, key)
+                if text:
+                    out[key] = text[:MAX_AX_TEXT_CHARS]
+                    if getattr(self, key + "_truncated") or len(text) > MAX_AX_TEXT_CHARS:
+                        out[key + "_truncated"] = True
         return out
 
     def to_line(self) -> str:
@@ -503,6 +560,14 @@ class AXNode:
         elif self.label:
             shown = self.label if len(self.label) <= 120 else self.label[:117] + "..."
             parts.append(f'"{shown}"')
+        if not (self.secure or _is_secure(self.role, self.subrole)):
+            for key in ("value", "url"):
+                text = getattr(self, key)
+                if text:
+                    shown = text[:240]
+                    if len(text) > 240 or getattr(self, key + "_truncated"):
+                        shown += "..."
+                    parts.append(f"{key}=" + json.dumps(shown, ensure_ascii=False))
         if self.bounds:
             b = self.bounds
             parts.append(
@@ -607,15 +672,45 @@ def _running_apps() -> List[_App]:
     return apps
 
 
-def _frontmost_app() -> Optional[_App]:
-    running = _workspace().frontmostApplication()
-    if running is None:
+def _focused_application_pid() -> Optional[int]:
+    """Observe the current AX focused application without prompting or activating."""
+    try:
+        ax = _ax()
+        if not ax.AXIsProcessTrusted():
+            return None
+        system = ax.AXUIElementCreateSystemWide()
+        err, focused = ax.AXUIElementCopyAttributeValue(
+            system, "AXFocusedApplication", None,
+        )
+        if int(err) != 0 or focused is None:
+            return None
+        err, pid = ax.AXUIElementGetPid(focused, None)
+        if int(err) != 0 or not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+            return None
+        return pid
+    except Exception:  # noqa: BLE001
         return None
-    return _App(
-        name=str(running.localizedName() or ""),
-        pid=int(running.processIdentifier()),
-        bundle_id=str(running.bundleIdentifier() or ""),
-    )
+
+
+def _app_for_pid(pid: int) -> Optional[_App]:
+    """Resolve an observed PID; NSWorkspace frontmost state is not evidence here."""
+    try:
+        from AppKit import NSRunningApplication
+        running = NSRunningApplication.runningApplicationWithProcessIdentifier_(pid)
+        if running is None or int(running.processIdentifier()) != pid:
+            return None
+        return _App(
+            name=str(running.localizedName() or ""),
+            pid=pid,
+            bundle_id=str(running.bundleIdentifier() or ""),
+        )
+    except Exception:  # noqa: BLE001
+        return None
+
+
+def _frontmost_app() -> Optional[_App]:
+    pid = _focused_application_pid()
+    return _app_for_pid(pid) if pid is not None else None
 
 
 def _resolve_app(name: Optional[str]) -> Tuple[Optional[_App], str]:
@@ -767,6 +862,7 @@ def _describe_node(element, depth: int) -> AXNode:
         bounds=None,
         enabled=_enabled(element),
         secure=secure,
+        **_content_attributes(element, role, subrole),
     )
     if (
         role in GENERIC_LABEL_ROLES
@@ -980,6 +1076,8 @@ class MacOSAccessibilitySkill(BaseSkill):
                 if gate is not None:
                     return gate
             return await self._run(handler, call_args)
+        except (DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked) as exc:
+            return input_failure(exc)
         except _Unsupported as exc:
             return _fail(str(exc), status=501)
         except Exception as exc:  # noqa: BLE001 - never crash the orchestrator
@@ -995,9 +1093,7 @@ class MacOSAccessibilitySkill(BaseSkill):
         loop thread stalls every other orchestrator task for the duration
         (0.25s for Finder, worse for a busy app).
         """
-        import asyncio
-
-        return await asyncio.to_thread(handler, call_args)
+        return await run_worker(handler, call_args)
 
     @staticmethod
     def _require_accessibility() -> Optional[dict]:
@@ -1182,12 +1278,14 @@ class MacOSAccessibilitySkill(BaseSkill):
         for node, element in zip(collected.nodes, collected.elements):
             if filter_mode == "interactive" and not node.is_interactive():
                 continue
-            haystack = node.label.lower()
-            if haystack == needle:
+            texts = [node.label.lower()]
+            if not (node.secure or _is_secure(node.role, node.subrole)):
+                texts.extend((node.value.lower(), node.url.lower()))
+            if needle in texts:
                 rank = 0
-            elif haystack.startswith(needle):
+            elif any(text.startswith(needle) for text in texts):
                 rank = 1
-            elif needle in haystack:
+            elif any(needle in text for text in texts):
                 rank = 2
             elif needle in node.role.lower():
                 rank = 3
@@ -1337,6 +1435,7 @@ class MacOSAccessibilitySkill(BaseSkill):
             "value_settable": self._value_settable(element),
             "attributes": [str(n) for n in (names or [])] if err_names == 0 else [],
             "children": len(_children(element)),
+            **_content_attributes(element, role, subrole),
         })
 
     def _check_permission(self, args: dict) -> dict:
@@ -1350,10 +1449,14 @@ class MacOSAccessibilitySkill(BaseSkill):
                 "or act until the grant is given."
             )
         apps = _running_apps()
+        frontmost = _frontmost_app()
         return _ok({
             "accessibility_trusted": True,
             "running_apps": sorted(a.name for a in apps),
-            "frontmost_app": (_frontmost_app() or _App("", 0, "")).name,
+            "frontmost_app": frontmost.name if frontmost else "",
+            "frontmost_pid": frontmost.pid if frontmost else None,
+            "frontmost_observed": frontmost is not None,
+            "frontmost_source": "AXFocusedApplication" if frontmost else "unavailable",
             "text": (
                 "Accessibility is granted. macos_ax can read and act on "
                 f"{len(apps)} running app(s)."
@@ -1609,16 +1712,31 @@ class MacOSAccessibilitySkill(BaseSkill):
                 status=501,
             )
         try:
-            point = (x, y)
-            for event_type in (
-                Quartz.kCGEventMouseMoved,
-                Quartz.kCGEventLeftMouseDown,
-                Quartz.kCGEventLeftMouseUp,
-            ):
-                event = Quartz.CGEventCreateMouseEvent(
-                    None, event_type, point, Quartz.kCGMouseButtonLeft,
-                )
-                Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+            with physical_input_scope():
+                point = (x, y)
+                down_attempted = False
+                try:
+                    for event_type in (Quartz.kCGEventMouseMoved, Quartz.kCGEventLeftMouseDown):
+                        check_input()
+                        event = Quartz.CGEventCreateMouseEvent(
+                            None, event_type, point, Quartz.kCGMouseButtonLeft,
+                        )
+                        check_input()
+                        if event_type == Quartz.kCGEventLeftMouseDown:
+                            down_attempted = True
+                        Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+                        check_input()
+                finally:
+                    if down_attempted:
+                        try:
+                            event = Quartz.CGEventCreateMouseEvent(
+                                None, Quartz.kCGEventLeftMouseUp, point, Quartz.kCGMouseButtonLeft,
+                            )
+                            Quartz.CGEventPost(Quartz.kCGHIDEventTap, event)
+                        except Exception:
+                            cleanup_failed()
+        except (DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked):
+            raise
         except Exception as exc:  # noqa: BLE001
             return _fail(
                 f"Coordinate click at ({int(x)},{int(y)}) failed: {exc}",
@@ -1679,8 +1797,35 @@ class MacOSAccessibilitySkill(BaseSkill):
                 status=422,
                 data={"ref": ref, "role": entry.role},
             )
+        native_value: Any = value
+        numeric = False
+        # Native segmented date fields expose NSNumber values. Use that type
+        # only when this exact live incrementor actually exposes it; do not
+        # guess a date format or coerce text-valued controls.
+        if entry.role == "AXIncrementor":
+            observed_error, observed = _attr(element, "AXValue")
+            if observed_error == 0 and type(observed) in (int, float):
+                numeric = True
+                try:
+                    parsed = Decimal(value)
+                    if not parsed.is_finite():
+                        raise ValueError("Non-finite numeric value")
+                    if type(observed) is int:
+                        if parsed != parsed.to_integral_value() or not -(2**63) <= parsed < 2**63:
+                            raise ValueError("Expected a signed 64-bit integer")
+                        native_value = int(parsed)
+                    else:
+                        native_value = float(parsed)
+                        if not math.isfinite(observed) or not math.isfinite(native_value):
+                            raise ValueError("Expected a finite number")
+                except (InvalidOperation, ValueError, OverflowError):
+                    return _fail(
+                        "This incrementor exposes a numeric AXValue. Pass a finite "
+                        "number of the observed type; nothing was changed.",
+                        status=422, data={"ref": ref, "role": entry.role},
+                    )
         try:
-            err = int(_ax().AXUIElementSetAttributeValue(element, "AXValue", value))
+            err = int(_ax().AXUIElementSetAttributeValue(element, "AXValue", native_value))
         except Exception as exc:  # noqa: BLE001
             return _fail(
                 f"Setting AXValue on {ref} raised: {exc}", status=502,
@@ -1694,7 +1839,11 @@ class MacOSAccessibilitySkill(BaseSkill):
                 f"error {err}; the field was not changed.",
                 status=502, data={"ref": ref, "ax_error": err},
             )
-        readback = self._verified_readback(element, value)
+        if numeric:
+            readback, verified = self._verified_numeric_readback(element, native_value)
+        else:
+            readback = self._verified_readback(element, value)
+            verified = readback == value
         return _ok({
             "ref": ref,
             "role": entry.role,
@@ -1702,14 +1851,30 @@ class MacOSAccessibilitySkill(BaseSkill):
             "app": entry.app_name,
             "value": value,
             "readback": readback,
-            "verified": readback == value,
+            "verified": verified,
             "text": (
                 f"Set {entry.role} \"{entry.label}\" to {value!r}"
-                + ("." if readback == value else
+                + ("." if verified else
                    f", but it now reads {readback!r}. The app rewrote or "
                    f"rejected the value.")
             ),
         })
+
+    @staticmethod
+    def _verified_numeric_readback(element, expected: Any) -> Tuple[str, bool]:
+        """Verify native numeric equality; a formatted string is not numeric proof."""
+        readback = ""
+        for attempt in range(3):
+            err, observed = _attr(element, "AXValue")
+            if err == 0 and type(observed) in (int, float) and math.isfinite(observed):
+                readback = str(observed)
+                if observed == expected:
+                    return readback, True
+            else:
+                readback = observed if err == 0 and isinstance(observed, str) else ""
+            if attempt < 2:
+                time.sleep(0.12)
+        return readback, False
 
     @staticmethod
     def _verified_readback(element, expected: str) -> str:

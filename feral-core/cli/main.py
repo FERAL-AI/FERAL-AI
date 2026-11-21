@@ -751,6 +751,8 @@ def _spawn_brain_server(
     ssl_kwargs: dict,
 ) -> tuple[threading.Thread, threading.Event, dict]:
     """Start uvicorn in a non-daemon thread (shared by ``serve`` + ``start``)."""
+    from security.profile_writer import acquire_runtime_profile
+    acquire_runtime_profile()  # Registry retains the process-owned descriptor.
     server_ready = threading.Event()
     server_holder: dict = {"server": None, "exc": None}
 
@@ -969,6 +971,8 @@ def cmd_serve(host: str | None = None, port: int | None = None, tls: bool = Fals
     host = host or brain_bind_host()
     port = int(port or brain_port())
 
+    from security.profile_writer import acquire_runtime_profile
+    acquire_runtime_profile()  # Before TLS certificate/profile writes.
     ssl_kwargs = _brain_ssl_kwargs(tls=tls)
     if (tls or brain_tls_enabled()) and not ssl_kwargs:
         return
@@ -1197,20 +1201,10 @@ def cmd_start(
 
     port = int(port or brain_port())
 
-    ssl_kwargs = _brain_ssl_kwargs(tls=tls)
-    if (tls or brain_tls_enabled()) and not ssl_kwargs:
-        return
-
-    # First run detection — auto-launch setup
-    if _is_first_run():
-        from cli.ui_kit import banner_line as _firstrun_banner
-        _firstrun_banner("First time running FERAL? Let's set you up.")
-        cmd_setup()
-
     # Check if already running. In this branch there is no local server
     # for us to manage, so a clean REPL exit is enough.
     try:
-        scheme = "https" if ssl_kwargs else "http"
+        scheme = "https" if tls or brain_tls_enabled() else "http"
         health_url = os.getenv("FERAL_HEALTH_URL", f"{scheme}://127.0.0.1:{port}/health")
         if httpx:
             r = httpx.get(health_url, timeout=2, verify=False)
@@ -1226,6 +1220,19 @@ def cmd_start(
                 return
     except Exception:
         pass
+
+    from security.profile_writer import acquire_runtime_profile
+    acquire_runtime_profile()  # Before first-run setup or TLS writes.
+
+    ssl_kwargs = _brain_ssl_kwargs(tls=tls)
+    if (tls or brain_tls_enabled()) and not ssl_kwargs:
+        return
+
+    # First run detection — auto-launch setup
+    if _is_first_run():
+        from cli.ui_kit import banner_line as _firstrun_banner
+        _firstrun_banner("First time running FERAL? Let's set you up.")
+        cmd_setup()
 
     from cli.ui_kit import (
         get_console as _get_console,

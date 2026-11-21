@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import os
+import math
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 import aiosqlite
 
@@ -37,6 +39,10 @@ class BudgetExceeded(Exception):
             f"${current_dollars:.6f} / ${cap_dollars:.6f} "
             f"({window}, resets at {reset_at:.0f})"
         )
+
+
+class PricingUnavailable(RuntimeError):
+    """A bounded call has no usable published pricing basis."""
 
 DEFAULT_COST_SETTINGS: dict[str, Any] = {
     "cost": {
@@ -214,6 +220,8 @@ class CostBudget:
         self._conn: aiosqlite.Connection | None = None
         self._ready = False
         self._spend: dict[tuple[str, str], float] = {}
+        self._spend_windows: dict[str, float] = {}
+        self._settlement_uncertain = False
         self._override_caps: dict[tuple[str, str], float] = {}
 
     async def ensure_ready(self) -> None:
@@ -224,7 +232,15 @@ class CostBudget:
                 return
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
             self._conn = await aiosqlite.connect(self.db_path)
-            await self._conn.execute("PRAGMA journal_mode=WAL")
+            for attempt in range(4):
+                try:
+                    cursor = await self._conn.execute("PRAGMA journal_mode=WAL")
+                    await cursor.close()
+                    break
+                except aiosqlite.OperationalError as exc:
+                    if "locked" not in str(exc).lower() or attempt == 3:
+                        raise
+                    await asyncio.sleep(0.02 * (attempt + 1))
             await self._conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS cost_rollup (
@@ -250,8 +266,27 @@ class CostBudget:
                 )
                 """
             )
+            await self._conn.execute("""
+                CREATE TABLE IF NOT EXISTS cost_reservations (
+                    reservation_id TEXT PRIMARY KEY,
+                    call_site TEXT NOT NULL, model TEXT NOT NULL,
+                    created_at REAL NOT NULL, updated_at REAL NOT NULL,
+                    estimated_dollars REAL NOT NULL,
+                    prompt_tokens INTEGER NOT NULL, output_tokens INTEGER NOT NULL,
+                    pricing_basis TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK(status IN
+                        ('held', 'dispatched', 'outcome_unknown', 'settled', 'released')),
+                    actual_dollars REAL,
+                    event_id INTEGER UNIQUE
+                )
+            """)
+            await self._conn.execute(
+                "CREATE INDEX IF NOT EXISTS idx_cost_reservations_open "
+                "ON cost_reservations(status, call_site)"
+            )
             await self._conn.commit()
             await self._load_rollups()
+            self._settlement_uncertain = False
             self._ready = True
 
     async def close(self) -> None:
@@ -264,15 +299,19 @@ class CostBudget:
     async def _load_rollups(self) -> None:
         assert self._conn is not None
         now = time.time()
-        self._spend.clear()
+        loaded: dict[tuple[str, str], float] = {}
+        loaded_windows: dict[str, float] = {}
         for window in ("hour", "day", "month"):
             start = window_start(window, now)
+            loaded_windows[window] = start
             async with self._conn.execute(
                 "SELECT call_site, dollars FROM cost_rollup WHERE window = ? AND window_start = ?",
                 (window, start),
             ) as cursor:
                 async for call_site, dollars in cursor:
-                    self._spend[(call_site, window)] = float(dollars)
+                    loaded[(call_site, window)] = float(dollars)
+        self._spend = loaded
+        self._spend_windows = loaded_windows
 
     def set_cap(self, call_site: str, window: str, cap_dollars: float) -> None:
         if window not in _VALID_WINDOWS:
@@ -367,6 +406,8 @@ class CostBudget:
         return caps
 
     def _get_spend(self, call_site: str, window: str) -> float:
+        if self._spend_windows.get(window) != window_start(window):
+            return 0.0
         return float(self._spend.get((call_site, window), 0.0))
 
     def current_spend(
@@ -394,8 +435,15 @@ class CostBudget:
         model: str,
         estimated_max_tokens: int,
     ) -> bool:
+        """Legacy advisory preflight only; async reserve owns durable admission.
+
+        Kept for synchronous loop consumers. This does not issue a reservation
+        receipt and must not be used as concurrent dispatch authorization.
+        """
         if not self.enabled:
             return True
+        if self._settlement_uncertain and self._active_caps(call_site):
+            raise RuntimeError("Cost settlement requires ledger reconciliation")
         est = self._estimate_cost(model, estimated_max_tokens)
         for site, window, cap in self._active_caps(call_site):
             projected = self._get_spend(site, window) + est
@@ -403,6 +451,119 @@ class CostBudget:
                 cost_telemetry.record_cap_hit(call_site, window)
                 return False
         return True
+
+    async def reserve(self, call_site: str, model: str, prompt_tokens: int,
+                      output_tokens: int, *, reservation_id: str | None = None,
+                      local_free: bool = False, unpriceable_input: bool = False) -> str | None:
+        """Atomically admit one estimated text attempt against spend plus holds.
+
+        Unknown attempts remain charged against every current cap across window
+        resets. No lease expiry can assert that a dispatched call was free.
+        """
+        if not self.enabled:
+            return None
+        await self.ensure_ready()
+        bounded = bool(self._active_caps(call_site))
+        rates = {"input": 0.0, "output": 0.0} if local_free else self.pricing.lookup_known(model)
+        known = local_free or (rates is not None and not unpriceable_input)
+        if not known and bounded:
+            raise PricingUnavailable("Pricing is unavailable for this bounded model/input; no request was dispatched")
+        if rates is None:
+            rates = self.pricing.lookup(model)
+        if any(not math.isfinite(float(value)) or float(value) < 0
+               for value in rates.values()):
+            raise PricingUnavailable("Invalid pricing basis; no request was dispatched")
+        prompt, output = max(0, int(prompt_tokens)), max(0, int(output_tokens))
+        # A new prompt may incur a cache-write surcharge. Never reserve only
+        # discounted cache reads before the provider establishes that outcome.
+        estimate = prompt / 1000 * max(rates["input"], rates.get("cache_write", 0)) + output / 1000 * rates["output"]
+        identity = reservation_id or str(uuid4())
+        basis = "local_compute_only" if local_free else "catalog_estimate" if known else "fallback_estimate_unverified"
+        async with self._lock:
+            assert self._conn is not None
+            conn = self._conn
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                now = time.time()
+                for site, window, cap in self._active_caps(call_site):
+                    async with conn.execute(
+                        "SELECT COALESCE(SUM(dollars), 0) FROM cost_rollup "
+                        "WHERE call_site = ? AND window = ? AND window_start = ?",
+                        (site, window, window_start(window, now)),
+                    ) as cursor:
+                        spent_row = await cursor.fetchone()
+                        if spent_row is None:
+                            raise RuntimeError("Cost rollup aggregate is unavailable")
+                        spent = float(spent_row[0])
+                    async with conn.execute(
+                        "SELECT COALESCE(SUM(MAX(estimated_dollars - COALESCE(actual_dollars,0),0)), 0) FROM cost_reservations "
+                        "WHERE status IN ('held','dispatched','outcome_unknown') "
+                        "AND (? = ? OR call_site = ?)", (site, _GLOBAL_SITE, site),
+                    ) as cursor:
+                        held_row = await cursor.fetchone()
+                        if held_row is None:
+                            raise RuntimeError("Cost reservation aggregate is unavailable")
+                        held = float(held_row[0])
+                    if spent + held + estimate > cap + 1e-12:
+                        self._raise_budget_exceeded(call_site, window, cap, spent + held)
+                await conn.execute(
+                    "INSERT INTO cost_reservations "
+                    "(reservation_id,call_site,model,created_at,updated_at,estimated_dollars,"
+                    "prompt_tokens,output_tokens,pricing_basis,status) VALUES (?,?,?,?,?,?,?,?,?,'held')",
+                    (identity, call_site, model, now, now, estimate, prompt, output, basis),
+                )
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+        return identity
+
+    async def _reservation_transition(self, reservation_id: str, target: str) -> None:
+        await self.ensure_ready()
+        allowed = {"dispatched": ("held",), "released": ("held",),
+                   "outcome_unknown": ("dispatched",)}
+        if target not in allowed:
+            raise ValueError("Invalid reservation transition")
+        async with self._lock:
+            assert self._conn is not None
+            conn = self._conn
+            try:
+                await conn.execute("BEGIN IMMEDIATE")
+                async with conn.execute("SELECT status FROM cost_reservations WHERE reservation_id = ?",
+                                        (reservation_id,)) as cursor:
+                    row = await cursor.fetchone()
+                if row is None:
+                    raise ValueError("Unknown reservation identity")
+                if row[0] == target or (target == "outcome_unknown" and row[0] in {"settled", "released"}):
+                    await conn.rollback()
+                    return
+                if row[0] not in allowed[target]:
+                    raise ValueError("Reservation outcome requires reconciliation")
+                await conn.execute("UPDATE cost_reservations SET status = ?, updated_at = ? WHERE reservation_id = ?",
+                                   (target, time.time(), reservation_id))
+                await conn.commit()
+            except BaseException:
+                await conn.rollback()
+                raise
+
+    async def mark_dispatched(self, reservation_id: str) -> None:
+        await self._reservation_transition(reservation_id, "dispatched")
+
+    async def release(self, reservation_id: str) -> None:
+        """Release only a durably undispatched attempt, never a lost response."""
+        await self._reservation_transition(reservation_id, "released")
+
+    async def mark_unknown(self, reservation_id: str) -> None:
+        await self._reservation_transition(reservation_id, "outcome_unknown")
+
+    async def get_reservations(self, limit: int = 100) -> list[dict]:
+        await self.ensure_ready()
+        async with self._lock:
+            assert self._conn is not None
+            async with self._conn.execute("SELECT * FROM cost_reservations ORDER BY created_at DESC LIMIT ?",
+                                          (max(1, min(int(limit), 1000)),)) as cursor:
+                columns = [column[0] for column in cursor.description]
+                return [dict(zip(columns, row)) for row in await cursor.fetchall()]
 
     def _raise_budget_exceeded(
         self,
@@ -427,9 +588,11 @@ class CostBudget:
         prompt_tokens: int,
         completion_tokens: int,
         reasoning_tokens: int = 0,
+        *, reservation_id: str | None = None,
+        usage_complete: bool = True,
     ) -> float:
         await self.ensure_ready()
-        if not self.enabled:
+        if not self.enabled and reservation_id is None:
             return 0.0
 
         dollars, rates = compute_token_cost(
@@ -445,49 +608,109 @@ class CostBudget:
         input_dollars = (prompt / 1000.0) * rates["input"]
         output_dollars = ((completion + reasoning) / 1000.0) * rates["output"]
 
+        exceeded: tuple[str, str, float, float] | None = None
+        count_call = True
+        receipt_total = dollars
         async with self._lock:
-            for site, window, cap in self._active_caps(call_site):
-                projected = self._get_spend(site, window) + dollars
-                if projected > cap + 1e-12:
-                    self._raise_budget_exceeded(site, window, cap, projected)
-
-            for window in ("hour", "day", "month"):
-                for site in (call_site, _GLOBAL_SITE):
-                    key = (site, window)
-                    self._spend[key] = self._get_spend(site, window) + dollars
-
             assert self._conn is not None
             ts = time.time()
-            await self._conn.execute(
-                """
-                INSERT INTO cost_events
-                    (ts, call_site, model, prompt_tokens, completion_tokens, reasoning_tokens, dollars)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                """,
-                (ts, call_site, model, prompt, completion, reasoning, dollars),
-            )
-            for window in ("hour", "day", "month"):
-                start = window_start(window, ts)
-                for site in (call_site, _GLOBAL_SITE):
+            # Usage is an already-incurred charge, not an admission request.
+            # Persist it even when it crosses a cap. The SQLite writer lock
+            # also serializes distinct CostBudget instances using this ledger.
+            try:
+                await self._conn.execute("BEGIN IMMEDIATE")
+                if reservation_id is not None:
+                    async with self._conn.execute(
+                        "SELECT call_site, model, status, actual_dollars, pricing_basis FROM cost_reservations WHERE reservation_id = ?",
+                        (reservation_id,),
+                    ) as cursor:
+                        reservation = await cursor.fetchone()
+                    if reservation is None or reservation[0] != call_site or reservation[1] != model:
+                        raise ValueError("Usage does not match reservation scope")
+                    if reservation[2] == "settled":
+                        await self._conn.rollback()
+                        return float(reservation[3])
+                    if reservation[2] not in {"dispatched", "outcome_unknown"}:
+                        raise ValueError("Usage requires dispatched reservation identity")
+                    if reservation[4] == "local_compute_only":
+                        dollars = input_dollars = output_dollars = 0.0
+                    receipt_total = dollars
+                    previously_recorded = float(reservation[3] or 0.0)
+                    if dollars + 1e-12 < previously_recorded:
+                        raise ValueError("Usage regressed below persisted cumulative receipt")
+                    count_call = reservation[3] is None
+                    dollars = max(0.0, dollars - previously_recorded)
+                    ratio = dollars / receipt_total if receipt_total else 0.0
+                    input_dollars *= ratio
+                    output_dollars *= ratio
+                event = await self._conn.execute(
+                    """
+                    INSERT INTO cost_events
+                        (ts, call_site, model, prompt_tokens, completion_tokens, reasoning_tokens, dollars)
+                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (ts, call_site, model, prompt, completion, reasoning, dollars),
+                )
+                if reservation_id is not None:
                     await self._conn.execute(
-                        """
-                        INSERT INTO cost_rollup (call_site, window, window_start, dollars)
-                        VALUES (?, ?, ?, ?)
-                        ON CONFLICT(call_site, window, window_start) DO UPDATE SET
-                            dollars = cost_rollup.dollars + excluded.dollars
-                        """,
-                        (site, window, start, dollars),
+                        "UPDATE cost_reservations SET status = ?, actual_dollars = ?, "
+                        "event_id = ?, updated_at = ? WHERE reservation_id = ?",
+                        ("settled" if usage_complete else "outcome_unknown", receipt_total,
+                         event.lastrowid, ts, reservation_id),
                     )
-            await self._conn.commit()
+                for window in ("hour", "day", "month"):
+                    start = window_start(window, ts)
+                    for site in dict.fromkeys((call_site, _GLOBAL_SITE)):
+                        await self._conn.execute(
+                            """
+                            INSERT INTO cost_rollup (call_site, window, window_start, dollars)
+                            VALUES (?, ?, ?, ?)
+                            ON CONFLICT(call_site, window, window_start) DO UPDATE SET
+                                dollars = cost_rollup.dollars + excluded.dollars
+                            """,
+                            (site, window, start, dollars),
+                        )
+                settled_spend: dict[tuple[str, str], float] = {}
+                for window in ("hour", "day", "month"):
+                    async with self._conn.execute(
+                        "SELECT call_site, dollars FROM cost_rollup "
+                        "WHERE window = ? AND window_start = ?",
+                        (window, window_start(window, ts)),
+                    ) as cursor:
+                        async for site, spent in cursor:
+                            settled_spend[(site, window)] = float(spent)
+                await self._conn.commit()
+            except BaseException:
+                self._settlement_uncertain = True
+                await self._conn.rollback()
+                # Cancellation can arrive after SQLite commits but before the
+                # await returns. Reload truth instead of assuming no charge.
+                await self._load_rollups()
+                self._settlement_uncertain = False
+                raise
+            # Publish the cache only after the entire settlement commits.
+            self._spend = settled_spend
+            self._spend_windows = {
+                window: window_start(window, ts) for window in ("hour", "day", "month")
+            }
+            self._settlement_uncertain = False
+            for site, window, cap in self._active_caps(call_site):
+                current = settled_spend.get((site, window), 0.0)
+                if current > cap + 1e-12:
+                    exceeded = (site, window, cap, current)
+                    break
 
-        cost_telemetry.record_call(call_site, model)
+        if count_call:
+            cost_telemetry.record_call(call_site, model)
         cost_telemetry.record_dollars(
             call_site,
             model,
             input_dollars=input_dollars,
             output_dollars=output_dollars,
         )
-        return dollars
+        if exceeded is not None:
+            self._raise_budget_exceeded(*exceeded)
+        return receipt_total if reservation_id is not None else dollars
 
     async def reset(self, call_site: str | None = None) -> None:
         await self.ensure_ready()
@@ -510,3 +733,4 @@ class CostBudget:
                     self._spend.pop((call_site, window), None)
             await self._conn.commit()
             await self._load_rollups()
+            self._settlement_uncertain = False

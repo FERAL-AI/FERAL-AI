@@ -40,11 +40,13 @@ class SessionHandoffManager:
         sessions: dict | None = None,
         daemons: dict | None = None,
         memory=None,
+        orchestrator=None,
         send_to_session: Callable[[str, Any], Awaitable[None]] | None = None,
     ):
         self._sessions = sessions or {}
         self._daemons = daemons or {}
         self._memory = memory
+        self._orchestrator = orchestrator
         self._send_to_session = send_to_session
 
         self._device_registry: dict[str, ConnectedDevice] = {}
@@ -106,6 +108,16 @@ class SessionHandoffManager:
         history_depth: int,
     ) -> dict:
         """Copy working memory and notify both ends."""
+        from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
+        try:
+            async with legacy_context_mutation(self._orchestrator, self._memory,
+                                               (from_session_id, to_session_id), "handoff"):
+                return await self._apply_transfer_legacy(from_session_id, to_session_id, to_node_type, history_depth)
+        except RuntimeContextError as exc:
+            return {"success": False, "pending": False, "error": "Managed thread handoff is unavailable", "code": exc.code}
+
+    async def _apply_transfer_legacy(self, from_session_id: str, to_session_id: str,
+                                     to_node_type: str, history_depth: int) -> dict:
         if to_session_id == from_session_id:
             return {"success": False, "error": "Source and target are the same device"}
 
@@ -174,6 +186,12 @@ class SessionHandoffManager:
         ``messages_transferred``.
         """
         want = self._normalize_node_type(to_node_type)
+        from agents.runtime_context_checkpoint import RuntimeContextError, legacy_context_mutation
+        try:
+            async with legacy_context_mutation(self._orchestrator, self._memory, (from_session_id,), "handoff"):
+                pass
+        except RuntimeContextError as exc:
+            return {"success": False, "pending": False, "error": "Managed thread handoff is unavailable", "code": exc.code}
         to_session_id = self._find_session_for_node_type(want)
         if not to_session_id:
             self._pending[want] = (from_session_id, history_depth)

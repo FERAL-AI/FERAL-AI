@@ -1,8 +1,9 @@
 """Routine (cron job) CRUD endpoints."""
 
+import asyncio
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, HTTPException
 from starlette.responses import JSONResponse
 
 from agents.scheduler import UnparseableCronExpression
@@ -103,11 +104,17 @@ async def list_routines(session_id: str = ""):
 async def get_routine(routine_id: int):
     if not state.scheduler:
         return {"error": "Scheduler not initialized"}
-    job = state.scheduler.get_job(routine_id)
+    scheduler = state.scheduler
+    job = await asyncio.to_thread(scheduler.get_job, routine_id)
     if not job:
         return {"error": "Routine not found"}
-    runs = state.scheduler.get_runs(routine_id, limit=20)
-    return {"routine": _job_to_dict(job), "runs": runs}
+    runs = await asyncio.to_thread(scheduler.get_runs, routine_id, limit=20)
+    inspect = getattr(scheduler, "get_dispatch_state", None)
+    dispatch = await asyncio.to_thread(inspect, routine_id) if callable(inspect) else {
+        "tracking_available": False, "dispatch_state": "unavailable",
+        "reconciliation_required": None, "occurrence": None,
+    }
+    return {"routine": _job_to_dict(job), "runs": runs, "dispatch": dispatch}
 
 
 @router.post("/api/routines/{routine_id}/pause")
@@ -130,7 +137,13 @@ async def resume_routine(routine_id: int):
 async def delete_routine(routine_id: int):
     if not state.scheduler:
         return {"error": "Scheduler not initialized"}
-    ok = state.scheduler.delete_job(routine_id)
+    scheduler = state.scheduler
+    ok = await asyncio.to_thread(scheduler.delete_job, routine_id)
+    if not ok and await asyncio.to_thread(scheduler.get_job, routine_id):
+        raise HTTPException(status_code=409, detail={
+            "error_code": "routine_action_pending",
+            "error": "Routine has an unfinished action record. Pause future scheduling and reconcile before deletion.",
+        })
     return {"ok": ok}
 
 

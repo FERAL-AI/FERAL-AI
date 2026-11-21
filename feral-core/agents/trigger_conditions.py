@@ -671,12 +671,12 @@ def _attach_hr_baseline(
     operator report 2026-06-07 wearing a new hat.
 
     Metric id preference mirrors the proactive engine's Fix #5: the
-    per-source baseline (``hr_resting:jw_health_glasses``) before the
-    legacy bare ``hr_resting``, so two wearables keep separate means.
+    per-source baseline (``hr:jw_health_glasses``) before the
+    legacy bare ``hr``, so two wearables keep separate means.
     """
     if baseline_engine is None:
         return
-    candidates = ([f"hr_resting:{source}"] if source else []) + ["hr_resting"]
+    candidates = ([f"hr:{source}"] if source else []) + ["hr"]
     for metric_id in candidates:
         try:
             metric = baseline_engine.get_baseline(metric_id)

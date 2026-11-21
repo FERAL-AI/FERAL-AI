@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import re
+import uuid
 
 from models.protocol import FeralMessage, SDUIPayload
+from security.safety_resolver import is_read_only
 
 GREETINGS = {
     "hello", "hey", "hi", "sup", "yo", "howdy", "good morning", "good evening",
@@ -13,12 +15,11 @@ GREETINGS = {
 
 async def direct_execute(orchestrator, session_id: str, text: str, skills):
     cleaned = text.strip().lower().rstrip("!.,?")
-    if cleaned in GREETINGS or any(cleaned.startswith(g + " ") for g in GREETINGS) or any(cleaned.startswith(g) for g in ("hi ", "hey ", "hello ")):
+    if cleaned in GREETINGS:
         await orchestrator._send_text(
             session_id,
             "Hey! I'm running in direct mode right now (no LLM connected). "
-            "I can still help with specific tasks \u2014 try 'search [topic]', 'what's the weather', "
-            "'read my notes', or check Settings to add an API key or start Ollama."
+            "Connect a model in AI Providers for task reasoning. Some explicitly matched read-only skills can still run."
         )
         return
 
@@ -74,31 +75,72 @@ async def direct_execute(orchestrator, session_id: str, text: str, skills):
         )
         return
 
-    skill = skills[0]
-    endpoint = skill.endpoints[0] if skill.endpoints else None
-    if not endpoint:
-        await orchestrator._send_text(session_id, f"Skill '{skill.brand.name}' has no endpoints.")
+    # A semantic/tool bag is not an instruction. After an LLM failure it can
+    # contain core tools unrelated to the requested task; never execute its
+    # first entry or guess between endpoints.
+    candidates = {}
+    command = re.sub(r"^please\s+", "", text.strip(), flags=re.IGNORECASE)
+    for candidate in skills:
+        matches = [
+            phrase.strip()
+            for phrase in candidate.trigger_phrases
+            if phrase.strip()
+            and re.match(re.escape(phrase.strip()) + r"(?:\b|$)", command, re.IGNORECASE)
+        ]
+        if matches:
+            candidates[candidate.skill_id] = (max(map(len, matches)), candidate)
+    longest = max((score for score, _ in candidates.values()), default=0)
+    matched = [candidate for score, candidate in candidates.values() if score == longest]
+    if len(matched) != 1:
+        await orchestrator._send_text(
+            session_id,
+            "I couldn't safely identify that action without a working model. "
+            "No fallback action has run. Connect a model in AI Providers and try again.",
+        )
         return
-
-    if skill.skill_id == "notes_memory":
-        await handle_memory_direct(orchestrator, session_id, text, skill)
-        return
+    skill = matched[0]
 
     if skill.requires_daemon:
-        await handle_daemon_direct(orchestrator, session_id, text, skill)
+        await orchestrator._send_text(
+            session_id, "Computer actions need a working model and an exact device review. No fallback action has run."
+        )
         return
 
-    await orchestrator._send_text(session_id, f"Direct mode: calling {skill.brand.name}...")
+    if len(skill.endpoints) != 1:
+        await orchestrator._send_text(
+            session_id, "That action needs a working model to select its operation. No fallback action has run."
+        )
+        return
+    endpoint = skill.endpoints[0]
+    tool_name = f"{skill.skill_id}__{endpoint.id}"
+    if not is_read_only(tool_name, registry=orchestrator.skills, strict=True):
+        await orchestrator._send_text(
+            session_id, "That action needs a working model and its normal review. No fallback action has run."
+        )
+        return
     args = extract_args_from_text(text, endpoint)
-
-    result = await orchestrator.executor.execute(
-        tool_name=f"{skill.skill_id}__{endpoint.id}",
-        args=args,
-        skill=skill,
-        endpoint=endpoint,
+    if any(param.required and param.name not in args for param in endpoint.params):
+        await orchestrator._send_text(session_id, "I need more details for that action. No fallback action has run.")
+        return
+    runner = getattr(orchestrator, "tool_runner", None)
+    if runner is None:
+        await orchestrator._send_text(session_id, "The action dispatcher is unavailable. No fallback action has run.")
+        return
+    result = await runner.execute_tool_call_for_llm(
+        session_id,
+        {"id": f"direct-{uuid.uuid4().hex}", "name": tool_name, "args": args},
+        [skill],
     )
 
-    if result["success"] and result["data"]:
+    if not isinstance(result, dict):
+        await orchestrator._send_text(session_id, "The action returned an invalid response; completion is unconfirmed.")
+        return
+    if result.get("status") == "pending_approval":
+        await orchestrator._send_text(
+            session_id, "That action was sent for your approval. Review its approval card for the current status."
+        )
+        return
+    if result.get("success") is True and result.get("data") is not None:
         sdui = orchestrator.genui.generate(
             data=result["data"],
             skill_brand=skill.brand.model_dump(),
@@ -115,58 +157,9 @@ async def direct_execute(orchestrator, session_id: str, text: str, skills):
             ),
         )
     else:
-        sdui = {
-            "type": "VStack",
-            "spacing": 16,
-            "padding": 20,
-            "children": [
-                {
-                    "type": "HStack",
-                    "spacing": 10,
-                    "children": [
-                        {"type": "Icon", "name": "sparkles", "size": 22, "color": skill.brand.primary_color},
-                        {
-                            "type": "Text",
-                            "value": skill.brand.name,
-                            "style": "headline",
-                            "color": skill.brand.primary_color,
-                        },
-                    ],
-                },
-                {"type": "Divider"},
-                {"type": "Text", "value": f"Endpoint: {endpoint.method} {endpoint.url}", "style": "caption"},
-                {"type": "Text", "value": endpoint.description, "style": "body"},
-                {"type": "Divider"},
-                {
-                    "type": "Text",
-                    "value": f"Error: {result.get('error', 'Unknown')}",
-                    "style": "body",
-                    "color": "#e17055",
-                },
-                {
-                    "type": "Text",
-                    "value": f"Set FERAL_KEY_{skill.skill_id} env var to provide the API key",
-                    "style": "caption",
-                },
-                *[
-                    {
-                        "type": "Button",
-                        "action_id": f"call_{skill.skill_id}__{ep.id}",
-                        "label": ep.id.replace("_", " ").title(),
-                        "style": "secondary",
-                    }
-                    for ep in skill.endpoints
-                ],
-            ],
-        }
-        await orchestrator.send(
+        await orchestrator._send_text(
             session_id,
-            FeralMessage(
-                session_id=session_id,
-                hop="brain",
-                type="sdui",
-                payload=SDUIPayload(root=sdui).model_dump(),
-            ),
+            f"That action did not report completion: {str(result.get('error') or result.get('status') or 'unknown result')[:500]}",
         )
 
 
@@ -526,7 +519,7 @@ def extract_args_from_text(text: str, endpoint) -> dict:
     subject = " ".join(content_words) if content_words else text
 
     for param in endpoint.params:
-        if param.default:
+        if param.default is not None:
             args[param.name] = param.default
         if param.name in ("q", "query", "text", "search", "message"):
             args[param.name] = text

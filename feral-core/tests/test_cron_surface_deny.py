@@ -238,9 +238,8 @@ class TestAutoConfirmCannotOverrideASurfaceDeny:
     But auto_confirm lives in the same payload that names the tool, so a
     routine could hand itself the override, and the new cron deny list would
     have been decorative. Surface deny now joins physical-safety deny as
-    non-overridable. Manifest-tier DENY stays overridable, which is what the
-    operator's pre-authorised device routines rely on (see
-    tests/test_automation_time_context.py).
+    non-overridable. All DENY decisions now remain final, and CONFIRM needs
+    an exact durable routine grant rather than a payload boolean.
     """
 
     def _run_routine(self, monkeypatch, payload, tmp_path):
@@ -308,10 +307,10 @@ class TestAutoConfirmCannotOverrideASurfaceDeny:
         assert calls == [], "a shell routine executed on the cron surface"
         assert run["status"] == "skipped"
 
-    def test_cutebot_routine_with_auto_confirm_still_runs(
+    def test_cutebot_auto_confirm_does_not_supply_exact_routine_grant(
         self, monkeypatch, tmp_path,
     ):
-        """The control: the carve-out did not become a blanket block."""
+        """A payload flag cannot authorize an unattended device action."""
         calls, run = self._run_routine(
             monkeypatch,
             {
@@ -322,5 +321,6 @@ class TestAutoConfirmCannotOverrideASurfaceDeny:
             },
             tmp_path,
         )
-        assert calls == [("follow_line", {})]
-        assert run["status"] == "success"
+        assert calls == []
+        assert run["status"] == "skipped"
+        assert run["result"]["reason"] == "routine_exact_approval_unavailable"

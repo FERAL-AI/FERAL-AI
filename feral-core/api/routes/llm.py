@@ -14,10 +14,41 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel, Field
 
 from api.state import state
+from providers.catalog import bind_active_cloud_runtime
 
 logger = logging.getLogger("feral.api.llm")
 
 router = APIRouter()
+
+
+def _bind_runtime_catalog(catalog, runtime, owner, orchestrator):
+    try:
+        bind_active_cloud_runtime(catalog, runtime, owner, orchestrator, state)
+    except (ValueError, RuntimeError):
+        raise HTTPException(status_code=503, detail={
+            "code": "active_cloud_catalog_binding_unavailable",
+            "message": "The active catalog connection could not be verified. Settings or credentials may already have changed; refresh before probing.",
+        }) from None
+
+
+def _configure_catalog_key(catalog, provider_id, secret):
+    # Rotating a credential must preserve this provider's existing connection,
+    # including inactive scoped overrides; a missing URL would select defaults.
+    current = catalog.get_adapter(provider_id)
+    catalog.configure(provider_id, api_key=secret,
+                      base_url=getattr(current, "_base_url", None), _redact_errors=True)
+
+
+def _runtime_uses_catalog_provider(catalog, runtime, provider_id):
+    return (runtime is not None and isinstance(runtime.provider, str)
+            and (catalog.resolve_alias(runtime.provider) or runtime.provider) == provider_id)
+
+
+def _saved_activation_failure():
+    # A runtime may itself catch construction failures. Its raw reason can
+    # contain a connection URL or credential, so never forward that text.
+    return {"ok": False, "reason": "runtime_reconfiguration_unavailable",
+            "message": "Settings or credentials may already be saved, but runtime activation was not verified. Refresh before probing."}
 
 
 def _require_catalog():
@@ -101,10 +132,9 @@ async def llm_switch(body: dict):
                 detail=f"unknown provider {provider!r}; resolve via /api/llm/providers",
             )
 
-    from agents.llm_provider import is_supported_runtime_provider
+    from agents.llm_provider import is_supported_runtime_provider, is_supported_catalog_provider
     if (
-        not is_supported_runtime_provider(resolved)
-        and resolved not in ("local", "hybrid")
+        not is_supported_catalog_provider(resolved)
         and not base_url
     ):
         raise HTTPException(
@@ -116,10 +146,18 @@ async def llm_switch(body: dict):
             ),
         )
 
-    await state.orchestrator.llm.switch_provider(
-        resolved, model=model, api_key=api_key, base_url=base_url,
-    )
-    llm = state.orchestrator.llm
+    owner = state
+    orchestrator = owner.orchestrator
+    llm = orchestrator.llm
+    try:
+        await llm.switch_provider(resolved, model=model, api_key=api_key, base_url=base_url)
+    except Exception:
+        raise HTTPException(status_code=503, detail={
+            "code": "runtime_reconfiguration_unavailable",
+            "message": "The provider change could not be verified. Refresh before continuing.",
+        }) from None
+    if catalog is not None:
+        _bind_runtime_catalog(catalog, llm, owner, orchestrator)
     return {
         "success": True,
         "provider": llm.provider,
@@ -186,11 +224,15 @@ async def list_llm_providers():
     """
     catalog = _require_catalog()
     descriptors = catalog.list_providers()
+    from agents.llm_provider import is_supported_catalog_provider
     payload = []
     for desc in descriptors:
         status = catalog.status_for(desc.provider_id)
+        runtime_supported = is_supported_catalog_provider(desc.provider_id)
         payload.append({
             **status.to_dict(),
+            "runtime_supported": runtime_supported,
+            "setup_selectable": runtime_supported,
             "credential_env_var": desc.credential_env_var,
             "aliases": list(desc.aliases),
             "notes": desc.notes,
@@ -263,7 +305,14 @@ async def probe_llm_provider(provider_id: str):
     catalog = _require_catalog()
     if catalog.get_descriptor(provider_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
-    status = await catalog.probe(provider_id)
+    from providers.catalog import ProviderProbeConfigurationChanged
+    try:
+        status = await catalog.probe(provider_id)
+    except ProviderProbeConfigurationChanged:
+        raise HTTPException(status_code=409, detail={
+            "code": "provider_configuration_changed",
+            "message": "Provider configuration changed; review it before probing again.",
+        }) from None
     return status.to_dict()
 
 
@@ -273,6 +322,15 @@ class ConfigureRequest(BaseModel):
     extra: dict[str, Any] = Field(default_factory=dict)
 
 
+def _require_deferred_key_write_ready():
+    if getattr(state, "_native_vault_deferred", False) is True:
+        from security.vault_coordinator import VaultLockedRefusal
+        try:
+            state.vault_coordinator.require_ready()
+        except VaultLockedRefusal as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)}) from None
+
+
 def _persist_key(env_var: str, api_key: str) -> dict:
     """Write *api_key* through every persistence layer we have.
 
@@ -280,6 +338,7 @@ def _persist_key(env_var: str, api_key: str) -> dict:
     caller (REST endpoint) can surface honest success/failure state
     to the UI instead of silently swallowing errors.
     """
+    _require_deferred_key_write_ready()
     warnings: list[str] = []
     vault_ok = False
     creds_ok = False
@@ -329,6 +388,8 @@ async def configure_llm_provider(provider_id: str, req: ConfigureRequest):
     ``settings.json`` itself never stores the plaintext key — only the
     currently-selected provider + model + base_url.
     """
+    if req.api_key:
+        _require_deferred_key_write_ready()
     catalog = _require_catalog()
     if catalog.get_descriptor(provider_id) is None:
         raise HTTPException(status_code=404, detail=f"unknown provider_id {provider_id!r}")
@@ -401,6 +462,7 @@ async def get_llm_config():
     """
     if state.config is None:
         raise HTTPException(status_code=503, detail="ConfigLoader not initialised")
+
     provider = state.config.get("llm", "provider", "") or ""
     model = state.config.get("llm", "model", "") or ""
     base_url = state.config.get("llm", "base_url", "") or ""
@@ -517,6 +579,7 @@ class ProviderKeyRequest(BaseModel):
 
 
 def _require_vault():
+    _require_deferred_key_write_ready()
     if state.vault is None:
         raise HTTPException(status_code=503, detail="vault not initialised")
     return state.vault
@@ -560,34 +623,37 @@ async def add_provider_key(provider_id: str, req: ProviderKeyRequest):
         if env_var:
             _persist_key(env_var, req.api_key)
             try:
-                catalog.configure(provider_id, api_key=req.api_key)
-            except Exception as exc:
+                if not _runtime_uses_catalog_provider(catalog, getattr(state.orchestrator, "llm", None), provider_id):
+                    _configure_catalog_key(catalog, provider_id, req.api_key)
+            except Exception:
                 logger.warning(
-                    "catalog.configure(%s) after add_provider_key failed: %s",
-                    provider_id, exc,
+                    "catalog key configuration for %s failed; details withheld",
+                    provider_id,
                 )
         # Cross-cut #1 (v2026.5.42): push the newly-active labeled key
         # into the running LLMProvider so the next chat turn uses it
         # without a brain restart. Pre-fix the vault was updated but
         # ``self.api_key`` / the httpx client stayed stale until the
         # operator hit Settings → Save & switch.
-        if state.orchestrator and getattr(state.orchestrator, "llm", None) is not None:
+        owner = state
+        orchestrator = owner.orchestrator
+        runtime = getattr(orchestrator, "llm", None)
+        if runtime is not None and _runtime_uses_catalog_provider(catalog, runtime, provider_id):
             try:
                 from security.vault_keys import get_active_key
                 secret = get_active_key(provider_id)
-                if secret and provider_id == state.orchestrator.llm.provider:
-                    reconfigure_result = await state.orchestrator.llm.reconfigure(
-                        provider=provider_id,
-                        model=state.orchestrator.llm.model or "",
-                        api_key=secret,
-                        base_url=state.orchestrator.llm.base_url or "",
+                if secret:
+                    reconfigure_result = await runtime.reconfigure(
+                        provider=provider_id, model=runtime.model or "",
+                        api_key=secret, base_url=runtime.base_url or "",
                     )
-            except Exception as exc:
-                logger.warning(
-                    "reconfigure after add_provider_key(%s) failed: %s",
-                    provider_id, exc,
-                )
-                reconfigure_result = {"ok": False, "reason": str(exc)}
+            except Exception:
+                logger.warning("runtime reconfiguration after labeled credential change failed; details withheld")
+                reconfigure_result = {"ok": False, "reason": "runtime_reconfiguration_unavailable"}
+            if isinstance(reconfigure_result, dict) and reconfigure_result.get("ok") is True:
+                _bind_runtime_catalog(catalog, runtime, owner, orchestrator)
+            elif reconfigure_result is not None:
+                reconfigure_result = _saved_activation_failure()
     payload: dict = {"success": True, "key": entry.to_dict()}
     if reconfigure_result is not None:
         payload["reconfigured"] = reconfigure_result
@@ -665,11 +731,12 @@ async def set_provider_active_key(provider_id: str, req: ProviderActiveRequest):
     if secret and env_var:
         _persist_key(env_var, secret)
         try:
-            catalog.configure(provider_id, api_key=secret)
-        except Exception as exc:
+            if not _runtime_uses_catalog_provider(catalog, getattr(state.orchestrator, "llm", None), provider_id):
+                _configure_catalog_key(catalog, provider_id, secret)
+        except Exception:
             logger.warning(
-                "catalog.configure(%s) after set_active_label failed: %s",
-                provider_id, exc,
+                "catalog key configuration for %s failed; details withheld",
+                provider_id,
             )
     # Cross-cut #1 (v2026.5.42): propagate the active-label swap into
     # the running LLMProvider so the next chat turn uses the new key
@@ -677,25 +744,22 @@ async def set_provider_active_key(provider_id: str, req: ProviderActiveRequest):
     # ``self.api_key`` / the httpx client stayed pinned to the
     # previously-active secret until full Save & switch.
     reconfigure_result: dict | None = None
-    if (
-        secret
-        and state.orchestrator
-        and getattr(state.orchestrator, "llm", None) is not None
-        and provider_id == state.orchestrator.llm.provider
-    ):
+    owner = state
+    orchestrator = owner.orchestrator
+    runtime = getattr(orchestrator, "llm", None)
+    if secret and runtime is not None and _runtime_uses_catalog_provider(catalog, runtime, provider_id):
         try:
-            reconfigure_result = await state.orchestrator.llm.reconfigure(
-                provider=provider_id,
-                model=state.orchestrator.llm.model or "",
-                api_key=secret,
-                base_url=state.orchestrator.llm.base_url or "",
+            reconfigure_result = await runtime.reconfigure(
+                provider=provider_id, model=runtime.model or "",
+                api_key=secret, base_url=runtime.base_url or "",
             )
-        except Exception as exc:
-            logger.warning(
-                "reconfigure after set_active_label(%s -> %s) failed: %s",
-                provider_id, active, exc,
-            )
-            reconfigure_result = {"ok": False, "reason": str(exc)}
+        except Exception:
+            logger.warning("runtime reconfiguration after labeled credential change failed; details withheld")
+            reconfigure_result = {"ok": False, "reason": "runtime_reconfiguration_unavailable"}
+        if isinstance(reconfigure_result, dict) and reconfigure_result.get("ok") is True:
+            _bind_runtime_catalog(catalog, runtime, owner, orchestrator)
+        elif reconfigure_result is not None:
+            reconfigure_result = _saved_activation_failure()
     payload: dict = {
         "success": True, "provider_id": provider_id, "active_label": active,
     }
@@ -787,6 +851,8 @@ async def set_llm_config(req: LLMConfigRequest):
     switch" button hits. After this call completes successfully the
     next chat turn uses the new provider — no reboot needed.
     """
+    if req.api_key:
+        _require_deferred_key_write_ready()
     catalog = _require_catalog()
     resolved = catalog.resolve_alias(req.provider) or req.provider
     if catalog.get_descriptor(resolved) is None:
@@ -797,17 +863,27 @@ async def set_llm_config(req: LLMConfigRequest):
     if state.config is None:
         raise HTTPException(status_code=503, detail="ConfigLoader not initialised")
 
+    previous_provider = state.config.get("llm", "provider", "") or ""
+    previous_resolved = catalog.resolve_alias(previous_provider) or previous_provider
+    # A model-only save on the current provider must keep its custom
+    # endpoint in both persisted and live state. When changing providers,
+    # an omitted URL selects that provider's default, not the old endpoint.
+    effective_base_url = (
+        (state.config.get("llm", "base_url", "") or "")
+        if req.base_url is None and previous_resolved == resolved
+        else (req.base_url or "")
+    )
+
     # Gate catalog-only descriptors (e.g. ``bedrock``, ``together``,
     # ``fireworks``) that ship without a runtime adapter in this build.
     # We allow the save to proceed only when the caller supplies an
     # explicit ``base_url`` override — that's the escape hatch for
     # custom OpenAI-compatible gateways. Otherwise we 400 so the UI
     # never lands on a provider the runtime can't actually call.
-    from agents.llm_provider import is_supported_runtime_provider
+    from agents.llm_provider import is_supported_catalog_provider
     if (
-        not is_supported_runtime_provider(resolved)
-        and resolved not in ("local", "hybrid")
-        and not req.base_url
+        not is_supported_catalog_provider(resolved)
+        and not effective_base_url
     ):
         raise HTTPException(
             status_code=400,
@@ -821,11 +897,9 @@ async def set_llm_config(req: LLMConfigRequest):
     # Auto-prepend the previous primary as a fallback so failover works
     # by default. User can still explicitly pass `fallback_providers`
     # (including []) to override this.
-    previous_provider = state.config.get("llm", "provider", "") or ""
     state.config.update_settings("llm", "provider", resolved)
     state.config.update_settings("llm", "model", req.model)
-    if req.base_url is not None:
-        state.config.update_settings("llm", "base_url", req.base_url)
+    state.config.update_settings("llm", "base_url", effective_base_url)
     if req.fallback_providers is not None:
         fallbacks = list(req.fallback_providers)
     else:
@@ -840,7 +914,22 @@ async def set_llm_config(req: LLMConfigRequest):
     persisted: dict = {"ok": True, "warnings": []}
     if req.api_key:
         persisted = _persist_key(env_var, req.api_key)
-        catalog.configure(resolved, api_key=req.api_key, base_url=req.base_url)
+        # Supported active adapters publish only the resolved runtime after
+        # activation. Manual gateway/no-runtime setup retains its legacy path.
+        if not (is_supported_catalog_provider(resolved) and state.orchestrator
+                and getattr(state.orchestrator, "llm", None) is not None):
+            catalog.configure(resolved, api_key=req.api_key, base_url=effective_base_url or None, _redact_errors=True)
+
+    # Local activation does not require a credential. Keep its catalogue probe
+    # bound to this exact saved endpoint rather than an unrelated default port.
+    if resolved in ("ollama", "lmstudio"):
+        try:
+            catalog.bind_active_local(resolved, effective_base_url)
+        except (ValueError, RuntimeError):
+            raise HTTPException(status_code=503, detail={
+                "code": "local_provider_binding_unavailable",
+                "message": "Local provider settings were saved but its adapter could not be bound. Refresh before continuing.",
+            }) from None
 
     state.config.update_settings("meta", "setup_complete", True)
 
@@ -850,20 +939,27 @@ async def set_llm_config(req: LLMConfigRequest):
     # configured providers).
     reconfigure_result: dict = {"ok": False, "reason": "orchestrator_missing"}
     if state.orchestrator and state.orchestrator.llm:
+        owner = state
+        orchestrator = owner.orchestrator
+        runtime = orchestrator.llm
         try:
-            reconfigure_result = await state.orchestrator.llm.reconfigure(
+            reconfigure_result = await runtime.reconfigure(
                 provider=resolved,
                 model=req.model,
                 api_key=req.api_key or "",
-                base_url=req.base_url or "",
+                base_url=effective_base_url,
             )
             # Push the new fallback list into the running LLM so
             # chat_with_failover picks it up on the very next turn.
-            cur = state.orchestrator.llm._config if isinstance(state.orchestrator.llm._config, dict) else {}
-            state.orchestrator.llm.set_config({**cur, "fallback_providers": fallbacks})
-        except Exception as exc:
-            logger.warning("reconfigure after set_llm_config failed: %s", exc)
-            reconfigure_result = {"ok": False, "reason": str(exc)}
+            cur = runtime._config if isinstance(runtime._config, dict) else {}
+            runtime.set_config({**cur, "fallback_providers": fallbacks})
+        except Exception:
+            logger.warning("runtime reconfiguration after settings change failed; details withheld")
+            reconfigure_result = {"ok": False, "reason": "runtime_reconfiguration_unavailable"}
+        if isinstance(reconfigure_result, dict) and reconfigure_result.get("ok") is True:
+            _bind_runtime_catalog(catalog, runtime, owner, orchestrator)
+        elif reconfigure_result is not None:
+            reconfigure_result = _saved_activation_failure()
 
     return {
         "success": True,

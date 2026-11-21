@@ -55,7 +55,7 @@ describe('Setup (new v2 wizard)', () => {
     });
     // Navigate to the LLM step
     const tabButtons = document.querySelectorAll('[role="tab"]');
-    // Second tab is "LLM provider"
+    // Second tab is "AI provider"
     tabButtons[1]?.click();
     expect(await findByTestId('v2-setup-pick-openai')).toBeInTheDocument();
     expect(await findByTestId('v2-setup-pick-ollama')).toBeInTheDocument();
@@ -93,7 +93,7 @@ describe('Setup (new v2 wizard)', () => {
       },
     });
 
-    getByRole('tab', { name: /pair your phone/i }).click();
+    getByRole('tab', { name: /connect devices/i }).click();
     const remoteBtn = await findByTestId('v2-setup-pair-remote');
     remoteBtn.click();
 

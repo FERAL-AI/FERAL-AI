@@ -231,7 +231,7 @@ async def test_a_throwing_vad_degrades_to_the_timer_instead_of_killing_the_sessi
 
 
 @pytest.mark.asyncio
-async def test_speech_during_playback_cancels_the_turn():
+async def test_speech_during_playback_interrupts_output():
     """Barge-in. The chained path had no cancel path at all."""
     frames: list[dict] = []
 
@@ -296,7 +296,7 @@ async def test_barge_in_can_be_disabled():
 
 
 @pytest.mark.asyncio
-async def test_router_cancel_chained_response_cuts_the_turn():
+async def test_router_cancel_chained_response_cuts_speech():
     """``api/server.py:2587`` cancels realtime and Gemini sessions only.
 
     This is the chained equivalent it needs to call. It is deliberately

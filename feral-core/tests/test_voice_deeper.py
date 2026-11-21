@@ -416,7 +416,8 @@ async def test_handle_event_audio_delta_invokes_callback():
 
 
 @pytest.mark.asyncio
-async def test_handle_event_tool_call_executes_and_sends_result(monkeypatch):
+@pytest.mark.parametrize("invalidate_after_result", [False, True])
+async def test_handle_event_tool_call_executes_and_sends_result(monkeypatch, invalidate_after_result):
     monkeypatch.setenv("OPENAI_API_KEY", "sk")
 
     ep = MagicMock(id="bash")
@@ -430,15 +431,19 @@ async def test_handle_event_tool_call_executes_and_sends_result(monkeypatch):
 
     sent: list[dict] = []
 
-    async def capture_send(event: dict):
+    async def capture_send(payload: str):
+        event = json.loads(payload)
         sent.append(event)
+        if invalidate_after_result and event.get("type") == "conversation.item.create":
+            rs._response_epoch += 1
 
     p = RealtimeProxy(skill_registry=reg, skill_executor=skill_exec)
 
     async def fake_connect(self):
         self._connected = True
         self._ws = MagicMock()
-        self._send = capture_send
+        # Capture the wire while retaining the real guarded-send boundary.
+        self._ws.send = AsyncMock(side_effect=capture_send)
 
     with patch.object(RealtimeSession, "connect", fake_connect):
         rs = await p.start_session("sess-t", "node-t")
@@ -450,11 +455,14 @@ async def test_handle_event_tool_call_executes_and_sends_result(monkeypatch):
         "arguments": "{}",
     })
 
-    skill_exec.execute.assert_awaited()
-    assert any(
-        x.get("type") == "conversation.item.create"
-        and x.get("item", {}).get("call_id") == "call-1"
-        for x in sent
+    skill_exec.execute.assert_awaited_once()
+    assert sent[0]["type"] == "conversation.item.create"
+    assert sent[0]["item"]["type"] == "function_call_output"
+    assert sent[0]["item"]["call_id"] == "call-1"
+    assert json.loads(sent[0]["item"]["output"])["data"] == {"ok": True}
+    assert [event["type"] for event in sent] == (
+        ["conversation.item.create"] if invalidate_after_result
+        else ["conversation.item.create", "response.create"]
     )
     await rs.disconnect()
 

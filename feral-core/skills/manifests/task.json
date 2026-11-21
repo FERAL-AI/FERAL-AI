@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Run long-horizon work autonomously in the background. Use this when the user asks you to 'go work on', 'spend some time', 'keep working until', or otherwise take on a multi-step job that won't finish in a single reply. The task survives the user navigating away AND a brain restart, and each step runs with a generous tool budget. Then check progress with status/list. These endpoints reach the brain's own HTTP surface on http://localhost:9090, which is the default port and is not re-derived from configuration: on a brain started on a different port (FERAL_PORT / network.port) every call here fails with a connection error, and the fix is the operator's port setting, not a retry.",
+    "description": "Create and inspect persistent background work using the in-process TaskFlow adapter. A durable accepted handoff means the job was stored, not that its actions were approved or completed. Each step retains the existing execution bounds and policy gates; uncertain effects require reconciliation.",
     "trigger_phrases": [
         "go work on",
         "work on this for a while",
@@ -36,7 +36,7 @@
             "id": "start",
             "method": "POST",
             "url": "http://localhost:9090/internal/task/start",
-            "description": "Start a persistent background task. Use `goal` for a single autonomous job, or `subtasks` (an ordered list) to break a larger goal into steps that run sequentially in the background. Each step is an autonomous agent turn with the full tool budget (up to ~15 minutes of work). Returns a flow_id you can use with `status`. Tell the user the task started and that you'll keep working; do NOT claim it's finished.",
+            "description": "Create a persistent background goal or ordered subtasks. Returns a flow_id and creation handoff receipt. Say the task was accepted only when handoff.accepted is true. Do not claim completion, inherited action permission, an attached notification subscription, or unlimited work.",
             "params": [
                 {
                     "name": "goal",
@@ -60,7 +60,7 @@
                     "description": "Short human-readable title for the task list UI."
                 }
             ],
-            "returns_description": "{ok, flow_id, steps, status, title}",
+            "returns_description": "{ok, flow_id, steps, status, title, handoff: {accepted, durable, replayed, origin, replay_protected, action_outcome, result_subscription}}",
             "ui_hint": "detail_card"
         },
         {

@@ -577,6 +577,58 @@ def test_an_expired_clock_stops_the_walk(monkeypatch):
     assert budget.hit_timeout is True
 
 
+def test_snapshot_reports_depth_without_confusing_a_shorter_clock_budget(monkeypatch):
+    """Exercise collect/snapshot/header with deterministic slow AX reads.
+
+    A baseline can finish inside 30 seconds while a second 8-second walk
+    times out before reaching the intended depth. Neither outcome is a
+    product bug; snapshot must report the actual limiting condition.
+    """
+    from types import SimpleNamespace
+
+    _patch_children(monkeypatch)
+    root = node = _FakeElement("0")
+    for index in range(1, 15):
+        child = _FakeElement(str(index))
+        node.children = [child]
+        node = child
+    clock = [0.0]
+
+    def describe(element, depth):
+        clock[0] += 1.0  # One simulated second per AX description, no sleep.
+        return _node(ref="", label=element.name, depth=depth)
+
+    app = macos_ax._App("Synthetic", 1, "test.synthetic")
+    monkeypatch.setattr(macos_ax, "time", SimpleNamespace(
+        monotonic=lambda: clock[0], time=lambda: clock[0]))
+    monkeypatch.setattr(macos_ax, "_resolve_app", lambda name: (app, ""))
+    monkeypatch.setattr(macos_ax, "_app_element", lambda app: root)
+    monkeypatch.setattr(macos_ax, "_windows", lambda element: (0, [root]))
+    monkeypatch.setattr(macos_ax, "_describe_node", describe)
+    monkeypatch.setattr(macos_ax, "_fill_bounds", lambda node, element: node)
+    monkeypatch.setattr(macos_ax, "_REFS", macos_ax._RefStore())
+
+    full = run("snapshot", app="Synthetic", filter="all", timeout_s=MAX_TIMEOUT_S)
+    assert full["success"] is True
+    assert full["data"]["limits_hit"] == []
+    assert full["data"]["elements_visited"] == 15
+    depth = max(node["depth"] for node in full["data"]["nodes"])
+    assert depth == 14
+
+    shorter = run("snapshot", app="Synthetic", filter="all", max_depth=depth - 1)
+    assert shorter["success"] is True
+    assert shorter["data"]["limits_hit"] == ["timeout"]
+    assert shorter["data"]["elements_visited"] == 8
+    assert "WALK STOPPED EARLY (timeout)" in shorter["data"]["tree"]
+
+    bounded = run("snapshot", app="Synthetic", filter="all", max_depth=depth - 1,
+                  timeout_s=MAX_TIMEOUT_S)
+    assert bounded["success"] is True
+    assert bounded["data"]["limits_hit"] == ["max_depth"]
+    assert bounded["data"]["elements_visited"] == 14
+    assert "WALK STOPPED EARLY (max_depth)" in bounded["data"]["tree"]
+
+
 # ── 7. the real Mac ───────────────────────────────────────────────
 
 live_macos = pytest.mark.skipif(
@@ -704,8 +756,11 @@ def test_a_depth_limit_is_reported_not_hidden():
     So the baseline asks for the maximum the tool allows, and a timeout
     that survives that is a SKIP rather than a failure: a baseline that
     could not complete cannot establish the tree depth this test needs,
-    which is the same shape as the two skips already here. Only
-    `max_depth` appearing in a bounded walk is the property under test.
+    which is the same shape as the two skips already here. The second
+    walk uses the same clock budget: the default 8-second budget can
+    expire before the depth bound on a tree that took longer to read
+    during the 30-second baseline. The deterministic snapshot test above
+    covers both limiting conditions without a live clock.
     """
     full = run("snapshot", app="Finder", filter="all", timeout_s=MAX_TIMEOUT_S)
     if not full["success"]:
@@ -724,7 +779,8 @@ def test_a_depth_limit_is_reported_not_hidden():
     if depth < 2:
         pytest.skip(f"Finder's tree is only {depth} level(s) deep; nothing to truncate")
 
-    result = run("snapshot", app="Finder", filter="all", max_depth=depth - 1)
+    result = run("snapshot", app="Finder", filter="all", max_depth=depth - 1,
+                 timeout_s=MAX_TIMEOUT_S)
     assert result["success"] is True
     assert "max_depth" in result["data"]["limits_hit"], (
         f"walk was cut at depth {depth - 1} of {depth} and did not report it"

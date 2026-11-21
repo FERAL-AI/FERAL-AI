@@ -30,6 +30,7 @@ Design notes:
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from typing import Any, Optional
@@ -97,21 +98,36 @@ def _routine_jobs() -> list[dict]:
         window = now + 3600  # next hour
         out: list[dict] = []
         for job in jobs:
+            inspect = getattr(svc, "get_dispatch_state", None)
+            dispatch = inspect(job.id) if callable(inspect) else None
+            if dispatch is not None and not isinstance(dispatch, dict):
+                raise ValueError("Routine dispatch state is unreadable")
+            status = dispatch.get("dispatch_state") if dispatch else "scheduled"
+            if status not in {"scheduled", "in_progress", "reconciliation_required", "bookkeeping_pending"}:
+                raise ValueError("Routine dispatch state is unrecognized")
+            needs_attention = status != "scheduled"
             if not getattr(job, "enabled", True):
-                continue
+                if not needs_attention:
+                    continue
             next_run = getattr(job, "next_run", 0.0) or 0.0
-            if next_run <= 0 or next_run > window:
+            if not needs_attention and (next_run <= 0 or next_run > window):
                 continue
             out.append({
                 "id": f"routine-{job.id}",
                 "kind": "routine",
                 "name": job.description or f"Routine {job.id}",
-                "status": "scheduled",
+                "status": status,
                 "started_at": job.created_at,
                 "progress": None,
                 "context_session_id": job.session_id or None,
-                "cancellable_via": f"DELETE /api/routines/{job.id}",
-                "detail": {"cron": job.cron_expr, "next_run": next_run},
+                "cancellable_via": None if needs_attention else f"DELETE /api/routines/{job.id}",
+                "detail": {
+                    "cron": job.cron_expr, "next_run": next_run,
+                    "enabled": bool(job.enabled),
+                    "occurrence_tracking_available": bool(dispatch and dispatch.get("tracking_available")),
+                    "reconciliation_required": dispatch.get("reconciliation_required") if dispatch else None,
+                    "occurrence": dispatch.get("occurrence") if dispatch else None,
+                },
             })
         return out
     except Exception as exc:
@@ -327,7 +343,7 @@ async def list_jobs(
         if kind and kind != k:
             continue
         try:
-            rows = fn()
+            rows = await asyncio.to_thread(fn) if k == "routine" else fn()
         except Exception as exc:
             # Isolation is still the contract, it just is not silent now.
             degraded[k] = f"{type(exc).__name__}: {exc}"

@@ -556,11 +556,15 @@ class WebSocketDeviceAdapter(DeviceAdapter):
 FERAL_GLASSES_MANIFEST = DeviceManifest(
     device_id="feral-glasses",
     device_type="glasses",
-    name="FERAL Smart Glasses",
-    manufacturer="FERAL",
-    model="W300",
+    name="Theora Glasses",
+    manufacturer="Theora",
+    # The product name, not the part number of the board inside it.
+    model="Theora Glasses",
     connection_type="ble",
-    sensors=["heart_rate", "spo2", "temperature", "uv", "accelerometer", "gyroscope", "ambient_light"],
+    sensors=[
+        "heart_rate", "spo2", "blood_pressure", "temperature", "uv",
+        "accelerometer", "gyroscope", "ambient_light",
+    ],
     actuators=["display", "speaker", "haptic"],
     battery_powered=True,
     location="head",
@@ -589,6 +593,32 @@ FERAL_GLASSES_MANIFEST = DeviceManifest(
             description="Get UV exposure level (0-15)",
             category="sensor", permission_tier="passive",
             returns={"level": "int"},
+        ),
+        DeviceCapability(
+            id="measure_blood_pressure", name="Measure Blood Pressure",
+            description=(
+                "Start an on-demand blood-pressure measurement and return "
+                "the result. Takes roughly 30-45 seconds, during which the "
+                "wearer should stay still. Unlike the other vitals this is "
+                "not a read of something already streaming: nothing exists "
+                "until the measurement runs. Returns an optical estimate, "
+                "not a cuff reading."
+            ),
+            # "active", not "passive": this runs the sensor and asks
+            # something of the wearer for half a minute. The other reads
+            # sample what is already there.
+            category="sensor", permission_tier="active",
+            rate_limit_per_minute=2,
+            returns={
+                "systolic": "int",
+                "diastolic": "int",
+                "unit": "str",
+                "ts": "float",
+            },
+            safety_notes=(
+                "Optical estimate. Not a diagnostic device; a reading that "
+                "would change a health decision needs a validated cuff."
+            ),
         ),
         DeviceCapability(
             id="read_steps", name="Read Steps",

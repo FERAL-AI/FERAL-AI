@@ -505,16 +505,20 @@ class CodexAppServerClient:
 
     @staticmethod
     def _normalize_usage(raw: dict[str, Any]) -> dict[str, int]:
-        input_tokens = int(raw.get("inputTokens") or 0)
-        output_tokens = int(raw.get("outputTokens") or 0)
-        reasoning_tokens = int(raw.get("reasoningOutputTokens") or 0)
-        total_tokens = int(raw.get("totalTokens") or input_tokens + output_tokens)
-        return {
-            "input_tokens": input_tokens,
-            "output_tokens": output_tokens,
-            "reasoning_tokens": reasoning_tokens,
-            "total_tokens": total_tokens,
-        }
+        # Preserve absence: a completed turn with only one observed counter
+        # cannot settle a complete billing receipt as if the other were zero.
+        usage: dict[str, int] = {}
+        for source, target in (("inputTokens", "input_tokens"),
+                               ("outputTokens", "output_tokens"),
+                               ("reasoningOutputTokens", "reasoning_tokens"),
+                               ("totalTokens", "total_tokens")):
+            value = raw.get(source)
+            if ((type(value) is int and value >= 0)
+                    or (isinstance(value, str) and value.isdecimal())):
+                usage[target] = int(value)
+        if "total_tokens" not in usage and "input_tokens" in usage and "output_tokens" in usage:
+            usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+        return usage
 
 
 class CodexProvider(BaseProvider):

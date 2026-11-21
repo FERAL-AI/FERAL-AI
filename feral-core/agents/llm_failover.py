@@ -266,6 +266,18 @@ def _describe_http_status_error(error: httpx.HTTPStatusError) -> str:
 
 
 def _describe_error(error: Exception) -> str:
+    if isinstance(error, httpx.TimeoutException):
+        # Timeout strings can be empty, or contain request URLs/secrets.
+        # A stable description explains the failure without echoing input.
+        if isinstance(error, httpx.ReadTimeout):
+            return "Timed out waiting for the model to reply. Try again or choose a faster model."
+        if isinstance(error, httpx.ConnectTimeout):
+            return "Timed out connecting to the model server. Check that it is running and reachable."
+        if isinstance(error, httpx.WriteTimeout):
+            return "Timed out sending the request to the model server. Please try again."
+        if isinstance(error, httpx.PoolTimeout):
+            return "Timed out waiting for an available model connection. Please try again."
+        return "The model request timed out. Please try again."
     if isinstance(error, httpx.HTTPStatusError):
         return _describe_http_status_error(error)
     return str(error)

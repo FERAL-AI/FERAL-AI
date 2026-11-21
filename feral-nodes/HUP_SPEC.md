@@ -1142,6 +1142,64 @@ never existed.
 }
 ```
 
+#### Durable task delivery (additive contract v1)
+
+The brain advertises `node_ack.task_result_contract` only when its live durable
+task receipt reader is available. The exact v1 marker carries integer
+`contract_version: 1` and literal-true `durable_receipts`,
+`reconnect_reconciliation`, `readonly_status`, `admission_discovery`. Clients
+enable recovery/discovery only with that complete marker. Missing or malformed
+capabilities preserve compatibility with older brains without speculative probes.
+
+`task_accepted` acknowledges a committed background task independently of the
+current speech response. Its strict payload carries `contract_version: 1`,
+canonical UUID `request_id`, originating `session_id`, bounded `task_id`,
+`durable: true`, Boolean `replayed`, and `action_outcome: "not_asserted"`.
+Pending approval is not accepted work; admission does not establish execution.
+
+`task_result` carries the same identity plus canonical UUID `delivery_id`,
+`processing_outcome` (`completed`, `failed`, `cancelled`, `outcome_unknown`),
+`action_outcome` (`not_asserted`, `unknown`), `report` (at most 8192 characters),
+and Boolean `report_truncated`. Unknown processing requires unknown action
+outcome. A terminal model report does not establish an external action outcome.
+Clients deduplicate the stable delivery ID and match the originating task,
+request and conversation before display. Speech interruption is distinct from
+explicit task cancellation.
+
+`task_result_get` requests read-only recovery with `contract_version: 1`,
+`session_id`, `task_id` and `request_id`. The brain verifies the authenticated
+paired device against the persisted origin. Successful recovery adds
+`recovery_request_id`, the exact lookup envelope ID, and sets `replayed: true`.
+Unavailable/nonterminal identities return an error. Recovery never resends the
+goal, resumes execution, grants permission or repeats an external effect.
+Delivery is bound to the authenticated peer, not broadcast by conversation ID.
+
+If the connection disappeared before admission identities arrived, the client
+uses `task_receipts_get` with strict v1 `session_id`, integer `limit` (1 through
+16, default 16), and optional `older_than_task_id`. Its `task_receipts` response
+contains the same originating session, canonical lookup `recovery_request_id`,
+at most 16 `task_accepted` identities with `replayed: true`, and optional
+`next_cursor` equal to the last returned task ID. Results are newest first;
+the cursor must belong to that same authenticated paired device and session.
+No goal, task contents, permissions or private device identity are returned.
+Discovery only supplies identifiers for `task_result_get`; it never restarts
+work or repeats a start request.
+
+`audio_response` may include bounded, nonempty `stream_id` and `response_id`
+when the actual producer knows them. Legacy frames omit unavailable identities.
+Clients must not infer a provider response identity from a current UI turn;
+identified frames must match the active stream and response before playback.
+When actual provider response identity is available, `voice_response` precedes
+the first audio frame. Its strict v1 payload carries `contract_version: 1`,
+nonempty `stream_id`, `response_id`, and `state` (`created`, `completed`,
+`cancelled`, `failed`, `incomplete`), with existing negotiated voice-attempt
+metadata. Clients match the current stream/attempt, activate only an observed
+`created` identity, and retire only the matching terminal response. No response
+identity is invented for providers that do not expose one; those retain the
+legacy compatibility boundary. Health `voice_status` is separate from this
+response lifecycle.
+The canonical payload validators are in `feral-core/models/protocol.py`.
+
 `genui_push`:
 
 ```json

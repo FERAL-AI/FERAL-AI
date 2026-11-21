@@ -35,6 +35,9 @@ pytestmark = pytest.mark.no_auto_feral_home
 
 def _voice_router_mock() -> MagicMock:
     vr = MagicMock()
+    # Model the actual router's empty node binding map, rather than a
+    # truthy undeclared MagicMock result that cannot establish ownership.
+    vr.nodes_bound_to_session = MagicMock(return_value=[])
     vr.stop_session_voice = AsyncMock()
     vr.stop_node_voice = AsyncMock()
     return vr
@@ -52,6 +55,40 @@ def test_web_disconnect_stops_voice(ws_mock_state, ws_client):  # noqa: F811
         session_id = next(iter(ws_mock_state.sessions.keys()))
 
     ws_mock_state.voice_router.stop_session_voice.assert_awaited_once_with(session_id)
+
+
+def test_web_disconnect_preserves_voice_bound_to_a_phone(
+    ws_mock_state, ws_client, monkeypatch,  # noqa: F811
+):
+    """Closing an owning web socket cannot terminate a shared phone call."""
+    router = VoiceRouter(audio_pipeline=MagicMock())
+    stop_voice = AsyncMock()
+    monkeypatch.setattr(router, "stop_session_voice", stop_voice)
+    ws_mock_state.voice_router = router
+
+    with ws_client.websocket_connect("/v1/session") as ws:
+        ws.receive_json()
+        session_id = next(iter(ws_mock_state.sessions.keys()))
+        router.bind_node_to_session("phone-sharing", session_id)
+
+    assert router.nodes_bound_to_session(session_id) == ["phone-sharing"]
+    stop_voice.assert_not_awaited()
+
+
+def test_web_disconnect_preserves_voice_when_node_ownership_is_unknown(
+    ws_mock_state, ws_client,  # noqa: F811
+):
+    """A failed binding lookup does not authorize stopping another surface."""
+    router = _voice_router_mock()
+    router.nodes_bound_to_session.side_effect = RuntimeError("lookup unavailable")
+    ws_mock_state.voice_router = router
+
+    with ws_client.websocket_connect("/v1/session") as ws:
+        ws.receive_json()
+        session_id = next(iter(ws_mock_state.sessions.keys()))
+
+    router.nodes_bound_to_session.assert_called_once_with(session_id)
+    router.stop_session_voice.assert_not_awaited()
 
 
 def test_web_disconnect_of_a_superseded_socket_does_not_stop_voice(

@@ -48,12 +48,70 @@ PINNED_OPENAI_TOOL_NAMES: tuple[str, ...] = (
     "desktop_control__shell_command",
     "desktop_control__open_app",
     "desktop_control__screenshot",
+    # Durable work must remain available while the foreground voice turn ends.
+    # Exposure preserves the same central task admission and approval policy.
+    "background_task__start",
+    # Regular Mac apps remain operable when Chrome CDP is unavailable.
+    # Keep observation, reference-based input and visual fallback together.
+    "macos_ax__check_permission",
+    "macos_ax__snapshot",
+    "macos_ax__find",
+    "macos_ax__list_windows",
+    "macos_ax__click",
+    "macos_ax__activate",
+    "macos_ax__set_value",
+    "macos_ax__perform_action",
+    "screen_capture__capture",
+    "gui_computer_use__mouse_click",
+    "gui_computer_use__type_text",
+    "gui_computer_use__key_press",
+    "gui_computer_use__scroll",
+    "gui_computer_use__window_focus",
+    # Keep a complete text-based web workflow, not just navigation. A
+    # late-registered browser otherwise gets only its first endpoint from
+    # the coverage pass, leaving voice unable to inspect or fill a page.
+    # These are existing central-policy tools for the selected CDP browser;
+    # catalogue visibility does not grant access to another Chrome profile.
+    "browser__navigate",
+    "browser__get_page_info",
+    "browser__get_page_text",
+    "browser__snapshot",
+    "browser__find",
+    "browser__click",
+    "browser__type_text",
+    "browser__fill_form",
+    "browser__press_key",
     # Reading and writing their files.
     "coding_tools__read_file",
     "coding_tools__edit_file",
     "coding_tools__write_file",
     "coding_tools__grep_search",
     "coding_tools__bash",
+    # Memory. The two verbs this product exists for.
+    #
+    # These were NOT pinned, and the three recall tools below were, so
+    # the coverage pass saw notes_memory represented and cut the rest.
+    # The agent could read memory and could not write it.
+    #
+    # Measured on a live brain on 2026-09-07. Asked to "remember this
+    # and share it with my work scope", the agent called
+    # list_capabilities, then describe_skill(notes_memory), then
+    # describe_skill(notion), never called save_note because it was not
+    # in the 128 it had been given, and answered "Done, I saved that and
+    # shared it to your work scope." Nothing was written. Zero notes,
+    # and the sync WAL unchanged.
+    #
+    # That is the worst failure this product can have. A memory system
+    # that cannot record, on a turn that reports success, teaches the
+    # operator to trust something that is not happening. The fabricated
+    # answer is a model behaviour and is not fixed here; being unable to
+    # reach the tool is ours, and it is what set it up.
+    #
+    # `search_notes` is pinned with `save_note` deliberately. Writing
+    # what can never be read back is not memory, and "what do you know
+    # about X" is the other half of the same feature.
+    "notes_memory__save_note",
+    "notes_memory__search_notes",
     # Recall. `list_conversations` answers "did you hear that", which
     # the agent used to answer wrongly from its self-model.
     "notes_memory__fused_timeline",

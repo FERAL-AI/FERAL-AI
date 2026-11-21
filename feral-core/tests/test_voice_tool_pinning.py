@@ -83,6 +83,16 @@ def test_pinned_order_respects_priority_tuple():
     assert pinned_present == list(PINNED_OPENAI_TOOL_NAMES)
 
 
+def test_durable_handoff_survives_more_than_128_distinct_skills():
+    raw = [_tool(f"distinct_{i}__start") for i in range(180)]
+    handoff = _tool("background_task__start")
+    raw.append(handoff)
+    capped = cap_tools_with_pins(raw, max_tools=OPENAI_TOOL_HARD_LIMIT)
+    assert len(capped) == OPENAI_TOOL_HARD_LIMIT
+    assert any(tool is handoff for tool in capped)
+    assert sum(tool_name_from_def(tool) == "background_task__start" for tool in capped) == 1
+
+
 @pytest.mark.asyncio
 async def test_realtime_configure_pins_routines_before_truncation():
     """session.update must expose feral_routines even with 200+ raw tools."""

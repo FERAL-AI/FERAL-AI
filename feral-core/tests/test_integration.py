@@ -19,11 +19,16 @@ pytestmark = pytest.mark.no_auto_feral_home
 
 
 @pytest.fixture(autouse=True)
-def _clean_feral_env_integration(monkeypatch):
+def _clean_feral_env_integration(monkeypatch, tmp_path):
     """Remove FERAL_* env vars leaked by earlier test modules."""
     for key in list(os.environ):
         if key.startswith("FERAL_"):
             monkeypatch.delenv(key, raising=False)
+    # The config fixture below uses this exact profile. Vault/audit operations
+    # must stay there after resetting ambient settings, including on macOS.
+    user_home = tmp_path / ".feral"
+    monkeypatch.setenv("FERAL_HOME", str(user_home))
+    monkeypatch.setenv("FERAL_AUDIT_LOG_PATH", str(user_home / "audit.log"))
 
 import pytest
 

@@ -20,6 +20,20 @@ from providers.codex_provider import (
 )
 
 
+@pytest.mark.parametrize("raw,expected", [
+    ({}, {}),
+    ({"inputTokens": 10}, {"input_tokens": 10}),
+    ({"outputTokens": 0}, {"output_tokens": 0}),
+    ({"inputTokens": 0, "outputTokens": 0}, {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0}),
+    ({"inputTokens": 10, "outputTokens": None}, {"input_tokens": 10}),
+    ({"inputTokens": 10, "outputTokens": False}, {"input_tokens": 10}),
+    ({"inputTokens": 10, "outputTokens": 1.5}, {"input_tokens": 10}),
+    ({"inputTokens": "10", "outputTokens": "2"}, {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}),
+])
+def test_codex_usage_preserves_observed_counter_presence(raw, expected):
+    assert CodexAppServerClient._normalize_usage(raw) == expected
+
+
 class _QueueReader:
     def __init__(self) -> None:
         self.queue: asyncio.Queue[bytes] = asyncio.Queue()

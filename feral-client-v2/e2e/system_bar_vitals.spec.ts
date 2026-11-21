@@ -54,6 +54,7 @@ async function stub(page) {
 test('every vital the brain can answer is on the bar', async ({ page }) => {
   await stub(page);
   await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
   await expect(page.locator('.v2-sysbar')).toBeVisible();
   await expect(page.locator('.v2-ext').first()).toBeVisible();
 
@@ -76,6 +77,7 @@ for (const width of [1512, 1024, 768]) {
     await stub(page);
     await page.setViewportSize({ width, height: 860 });
     await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
     await page.locator('.v2-ext[aria-label*="waiting on you"]').click();
 
     const pop = page.locator('.v2-pop');
@@ -108,6 +110,7 @@ for (const width of [1512, 1024, 768]) {
 test('a job popover offers kill only when the brain names a route', async ({ page }) => {
   await stub(page);
   await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
   await page.locator('.v2-ext[aria-label*="running"]').click();
   const pop = page.locator('.v2-pop');
   await expect(pop).toBeVisible();
@@ -118,6 +121,7 @@ test('a job popover offers kill only when the brain names a route', async ({ pag
 test('the autonomy popover marks the current tier and offers the others', async ({ page }) => {
   await stub(page);
   await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
   await page.locator('.v2-ext[aria-label*="Autonomy"]').click();
   const pop = page.locator('.v2-pop');
   await expect(pop).toBeVisible();
@@ -130,6 +134,9 @@ test('the autonomy popover marks the current tier and offers the others', async 
 test('the rail collapses with B and with its own control', async ({ page }) => {
   await stub(page);
   await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
+  await expect(page.locator('.v2-rail')).toHaveCount(0);
+  await page.getByRole('button', { name: 'Show activity sidebar' }).click();
   await expect(page.locator('.v2-rail')).toBeVisible();
 
   // The design documents the shortcut: "Press B to collapse the rail."
@@ -138,7 +145,7 @@ test('the rail collapses with B and with its own control', async ({ page }) => {
   await page.keyboard.press('b');
   await expect(page.locator('.v2-rail')).toBeVisible();
 
-  await page.locator('.v2-sysbar-icon[aria-label*="Collapse the rail"]').click();
+  await page.locator('.v2-sysbar-icon[aria-label*="Hide activity sidebar"]').click();
   await expect(page.locator('.v2-rail')).toHaveCount(0);
 });
 
@@ -149,6 +156,8 @@ test('B does not collapse the rail while you are typing', async ({ page }) => {
   // cannot demonstrate anything about typing.
   await stub(page);
   await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
+  await page.getByRole('button', { name: 'Show activity sidebar' }).click();
   await expect(page.locator('.v2-rail')).toBeVisible();
 
   await page.keyboard.press('ControlOrMeta+k');
@@ -170,6 +179,7 @@ test('the brand light is green when the brain answers and red when it does not',
   // was up or gone.
   await stub(page);
   await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
   const mark = page.locator('.v2-sysbar-mark');
   await expect(mark).toHaveAttribute('data-up', 'yes');
 
@@ -202,6 +212,7 @@ test('the Brain popover leads with uptime and names the model', async ({ page })
     body: JSON.stringify({ available: true, provider: 'openai', model: 'gpt-5.6-sol' }),
   }));
   await page.goto('/console');
+  await page.locator('.v2-status-details > summary').click();
   await page.locator('.v2-ext[aria-label*="Brain"]').click();
 
   const pop = page.locator('.v2-pop');

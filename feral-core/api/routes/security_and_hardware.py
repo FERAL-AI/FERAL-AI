@@ -14,6 +14,82 @@ from security.vault import PermissionTier
 router = APIRouter()
 
 
+def _coordinator():
+    coordinator = getattr(state, "vault_coordinator", None)
+    if coordinator is None:
+        raise HTTPException(status_code=409, detail={"code": "deferred_vault_unavailable", "message": "Explicit deferred vault control is not enabled for this agent."})
+    return coordinator
+
+
+def _passive_vault_status():
+    coordinator = getattr(state, "vault_coordinator", None)
+    if coordinator is None:
+        # Legacy readiness is reported without querying OS status.
+        return {"state": "ready" if state.vault is not None else "unavailable", "code": "legacy_mode",
+                "message": "Deferred vault control is not enabled for this agent.", "in_flight": False,
+                "credentials_available": state.vault is not None, "unlock_supported": False,
+                "initialization_supported": False, "memory_available": getattr(state, "memory", None) is not None,
+                "bootstrap_required": False, "sync_dormant": False}
+    return {**coordinator.status(), "unlock_supported": True, "initialization_supported": False,
+            "memory_available": getattr(state, "memory", None) is not None,
+            "bootstrap_required": getattr(state, "_native_bootstrap_required", False) is True,
+            "sync_dormant": getattr(state, "_native_vault_deferred", False) is True}
+
+
+def _ready_vault():
+    if getattr(state, "_native_vault_deferred", False) is True:
+        from security.vault_coordinator import VaultLockedRefusal
+        try:
+            return _coordinator().require_ready()
+        except VaultLockedRefusal as exc:
+            raise HTTPException(status_code=503, detail={"code": exc.code, "message": str(exc)}) from None
+    if state.vault is None:
+        raise HTTPException(status_code=503, detail={"code": "vault_unavailable", "message": "Credential storage is unavailable."})
+    return state.vault
+
+
+@router.get("/api/security/vault/status")
+async def vault_status():
+    return _passive_vault_status()
+
+
+@router.post("/api/security/vault/unlock/review")
+async def vault_unlock_review(body: dict):
+    if body:
+        raise HTTPException(status_code=400, detail={"code": "invalid_review", "message": "Unlock review accepts an empty object only."})
+    from security.vault_coordinator import VaultInitializationRefusal
+    try:
+        review = _coordinator().review_unlock()
+    except VaultInitializationRefusal as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from None
+    return {**review, "status": _passive_vault_status()}
+
+
+def _unlock_token(body):
+    token = body.get("review_token")
+    if set(body) != {"review_token"} or not isinstance(token, str) or len(token) != 36:
+        raise HTTPException(status_code=400, detail={"code": "invalid_review", "message": "A server-issued unlock review token is required."})
+    return token
+
+
+@router.post("/api/security/vault/unlock")
+async def vault_unlock(body: dict):
+    token = _unlock_token(body)
+    from security.vault_coordinator import VaultInitializationRefusal
+    try:
+        await _coordinator().confirm_unlock(token, timeout=5)
+    except VaultInitializationRefusal as exc:
+        raise HTTPException(status_code=409, detail={"code": exc.code, "message": str(exc)}) from None
+    status = _passive_vault_status()
+    return {"ok": status["credentials_available"], "operation": "unlock", "review_token": token, "status": status}
+
+
+@router.post("/api/security/vault/unlock/cancel")
+async def vault_unlock_cancel(body: dict):
+    _coordinator().cancel_unlock_review(_unlock_token(body))
+    return {"ok": True}
+
+
 # ─────────────────────────────────────────────
 # Security API
 # ─────────────────────────────────────────────
@@ -34,13 +110,14 @@ async def vault_store(body: dict):
     value = body.get("value", "")
     if not name or not value:
         return {"error": "key_name and value are required"}
-    state.vault.store(name, value, stored_by="api")
-    return {"ok": True, "key_name": name, "fingerprint": state.vault.fingerprint(name)}
+    vault = _ready_vault()
+    vault.store(name, value, stored_by="api")
+    return {"ok": True, "key_name": name, "fingerprint": vault.fingerprint(name)}
 
 
 @router.delete("/api/security/vault/{key_name}")
 async def vault_remove(key_name: str):
-    removed = state.vault.remove(key_name, removed_by="api")
+    removed = _ready_vault().remove(key_name, removed_by="api")
     return {"ok": removed}
 
 

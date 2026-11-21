@@ -102,9 +102,9 @@ export default function SystemBar({ onOpenPalette, railOpen, onToggleRail }) {
         type="button"
         className="v2-sysbar-icon"
         onClick={onToggleRail}
-        aria-pressed={!railOpen}
-        title={railOpen ? 'Collapse the rail (B)' : 'Show the rail (B)'}
-        aria-label={railOpen ? 'Collapse the rail' : 'Show the rail'}
+        aria-expanded={railOpen}
+        title={railOpen ? 'Hide activity sidebar (B)' : 'Show activity sidebar (B)'}
+        aria-label={railOpen ? 'Hide activity sidebar' : 'Show activity sidebar'}
       >
         <PanelLeft size={13} aria-hidden="true" />
       </button>
@@ -112,8 +112,8 @@ export default function SystemBar({ onOpenPalette, railOpen, onToggleRail }) {
       <button
         type="button"
         className="v2-sysbar-brand"
-        onClick={() => navigate('/console')}
-        title={v.reachable ? 'Brain is online. Open the console.' : 'Brain is not responding'}
+        onClick={() => navigate('/chat')}
+        title={v.reachable ? 'Open chat. Brain is online.' : 'Open chat. Brain is not responding.'}
       >
         {/* Green when the brain is answering, red when it is not.
             This was a conic gradient ring, which is the design's mark
@@ -134,7 +134,16 @@ export default function SystemBar({ onOpenPalette, railOpen, onToggleRail }) {
 
       <div className="v2-sysbar-space" />
 
-      <div className="v2-sysbar-vitals">
+      <details className="v2-status-details" onKeyDown={(event) => {
+        if (event.key === 'Escape') {
+          event.currentTarget.open = false;
+          event.currentTarget.querySelector('summary')?.focus();
+        }
+      }}>
+        <summary aria-label="Activity and usage">
+          <span className="v2-status-label">{v.needs > 0 ? `${v.needs} needs you` : v.running > 0 ? `${v.running} running` : 'Activity'}</span>
+        </summary>
+      <div className="v2-sysbar-vitals" aria-label="Activity and usage details">
         {vitals.map(({ k, title, Icon, label, count, dot, spark, live, word, aria }) => (
           <button
             key={k}
@@ -153,12 +162,14 @@ export default function SystemBar({ onOpenPalette, railOpen, onToggleRail }) {
             )}
             {dot && <span className={`v2-ext-dot v2-ext-dot--${dot}`} aria-hidden="true" />}
             {Icon && <Icon size={13} aria-hidden="true" />}
+            <span className="v2-ext-title">{title}</span>
             {word && <span className="v2-ext-word">{word}</span>}
             {label && <span className="v2-ext-label">{label}</span>}
             {count && <span className="v2-ext-count">{count}</span>}
           </button>
         ))}
       </div>
+      </details>
 
       <button
         type="button"
@@ -168,7 +179,8 @@ export default function SystemBar({ onOpenPalette, railOpen, onToggleRail }) {
         title="Search, run a command, or ask (⌘K)"
         aria-label="Open the command palette"
       >
-        <span aria-hidden="true">⌘K</span>
+        <span className="v2-sysbar-search-label">Search</span>
+        <span className="v2-sysbar-search-key" aria-hidden="true">⌘K</span>
       </button>
 
       {/* Theme and voice used to live in a second bar at the same

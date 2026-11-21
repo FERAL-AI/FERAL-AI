@@ -9,14 +9,15 @@ One focused test per user-reported problem:
       one-shot reminder); the poll loop tightens near a due job.
   P3  feral_routines / feral_reminders create verify-after-write and
       only report success when the item is actually in the list.
-  P4  A one-shot routine with auto_confirm dispatches the device action
-      directly even when the cron safety pre-flight would DENY it.
+  P4  One-shot schedules retain time semantics while auto_confirm cannot
+      override DENY or substitute for an exact durable device grant.
   P5  A short ambiguous follow-up ("check now") is routed using the
       last-referenced subject from the session's recent turns.
 """
 from __future__ import annotations
 
 import os
+import asyncio
 import tempfile
 from unittest.mock import AsyncMock, MagicMock
 from zoneinfo import ZoneInfo
@@ -26,7 +27,7 @@ import pytest
 from agents.orchestrator import Orchestrator
 from agents.scheduler import CronService, JobType
 from config.loader import local_timezone_name
-from models.skill_manifest import BrandProfile, SkillEndpoint, SkillManifest
+from models.skill_manifest import BrandProfile, EndpointParam, SkillEndpoint, SkillManifest
 
 
 # ── shared skill catalog for routing tests ─────────────────────────
@@ -301,10 +302,10 @@ async def test_reminders_create_reports_failure_when_not_persisted(monkeypatch):
     assert res["reason"] == "verify_after_write_failed"
 
 
-# ── P4: one-shot auto-confirm routine drives the device ────────────
+# ── P4: one-shot device routines preserve actual authorization ─────
 
 
-def test_oneshot_autoconfirm_routine_dispatches_follow_line(monkeypatch):
+def test_oneshot_autoconfirm_routine_cannot_override_follow_line_deny(monkeypatch):
     import api.server as server
     from skills.base import BaseSkill
     from skills.impl import SKILL_IMPLEMENTATIONS
@@ -324,8 +325,8 @@ def test_oneshot_autoconfirm_routine_dispatches_follow_line(monkeypatch):
     cron = CronService(db_path=cron_path)
     reg = SkillRegistry()
     cutebot = _RecordingSkill("cutebot")
-    # follow_line declared DENY to prove auto_confirm bypasses the cron
-    # pre-flight for an explicitly user-scheduled device action.
+    # follow_line declared DENY to prove a payload flag cannot bypass
+    # the cron policy for a one-shot device action.
     reg.register(
         SkillManifest(
             skill_id="cutebot",
@@ -359,10 +360,9 @@ def test_oneshot_autoconfirm_routine_dispatches_follow_line(monkeypatch):
         payload = {"skill": "cutebot", "endpoint": "follow_line", "auto_confirm": True}
         job = cron.create_job(JobType.SCHEDULED, "daily 15:01", "cutebot", payload, "", recurring=False)
         server.execute_routine_job(job)
-        # auto_confirm → the device action fired despite the DENY tier.
-        assert cutebot.calls == [("follow_line", {})]
+        assert cutebot.calls == []
         run = cron.get_runs(job.id, limit=1)[0]
-        assert run["status"] == "success"
+        assert run["status"] == "skipped"
 
         # Control: same DENY endpoint WITHOUT auto_confirm is skipped.
         cutebot.calls.clear()
@@ -378,8 +378,8 @@ def test_oneshot_autoconfirm_routine_dispatches_follow_line(monkeypatch):
         os.unlink(cron_path)
 
 
-def test_oneshot_autoconfirm_routine_logs_device_episode(monkeypatch):
-    """Cron-fired device skills must write device_action episodes."""
+def test_unapproved_routine_does_not_log_action_but_verified_device_result_does(monkeypatch):
+    """Rejected actions do not become episodes; verified results retain recall."""
     import api.server as server
     from agents.orchestrator import Orchestrator
     from skills.base import BaseSkill
@@ -416,7 +416,9 @@ def test_oneshot_autoconfirm_routine_logs_device_episode(monkeypatch):
                     method="PYTHON",
                     url="python://cutebot/drive",
                     description="drive",
-                    safety_tier="safe",
+                    safety_tier="confirm",
+                    params=[EndpointParam(name="left", type="integer", required=True),
+                            EndpointParam(name="right", type="integer", required=True)],
                 )
             ],
         )
@@ -450,7 +452,16 @@ def test_oneshot_autoconfirm_routine_logs_device_episode(monkeypatch):
         }
         job = cron.create_job(JobType.SCHEDULED, "daily 15:01", "cutebot", payload, "sess-cron", recurring=False)
         server.execute_routine_job(job)
-        assert cutebot.calls == [("drive", {"left": 60, "right": -60})]
+        assert cutebot.calls == []
+        run = cron.get_runs(job.id, limit=1)[0]
+        assert run["status"] == "skipped"
+        memory.episode_save.assert_not_awaited()
+        # Exercise the existing episode projection with an inert verified
+        # receipt independently; this is not a dispatched device action.
+        asyncio.run(server._log_routine_device_action(
+            "sess-cron", "cutebot", "drive", {"left": 60, "right": -60},
+            {"success": True, "data": {"verified": True, "mode": "drive"}}, run["id"],
+        ))
         memory.episode_save.assert_awaited()
         kwargs = memory.episode_save.await_args.kwargs
         assert kwargs["event_type"] == "device_action"

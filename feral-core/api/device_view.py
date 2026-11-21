@@ -42,6 +42,8 @@ import time
 from collections import defaultdict
 from typing import Iterable, Optional
 
+from integrations.health_canonical import source_display_name
+
 # ─────────────────────────────────────────────────────────────
 # The heartbeat window. ONE number, derived, not invented.
 # ─────────────────────────────────────────────────────────────
@@ -139,6 +141,24 @@ def _peripheral_name(row: dict) -> str:
     return str(attrs.get("device_name") or "").strip()
 
 
+def peripheral_display_name(capability: str, reported: str) -> str:
+    """What a person should hear this peripheral called.
+
+    Both inputs are internal strings that leak outward. ``capability``
+    is the BLE vendor's SDK id and ``reported`` is whatever the board
+    announces over the air, which on this install is the part number
+    "W300". A model handed either one renders it by title-casing, so
+    the identifiers stay for matching and this is what gets said.
+    """
+    reported = (reported or "").strip()
+    if reported:
+        mapped = source_display_name(reported)
+        if mapped != reported:
+            return mapped
+        return reported
+    return source_display_name(str(capability or "").strip())
+
+
 def group_subdevice_rows(rows: Iterable[dict], *, now: Optional[float] = None) -> list[dict]:
     """Collapse repeated observations of ONE peripheral into one record.
 
@@ -197,10 +217,15 @@ def _merge_peripheral(capability: str, group: list[dict], *, now: float) -> dict
     # one that omitted `device_name` (feral-iphone-79447a4cd1ed reported
     # a battery level and an empty name), and dropping the label there
     # would make a known device render as a bare capability id.
-    name = next((_peripheral_name(r) for r in ordered if _peripheral_name(r)), "")
+    reported = next((_peripheral_name(r) for r in ordered if _peripheral_name(r)), "")
+    name = peripheral_display_name(capability, reported)
     return {
         "capability": capability,
         "name": name,
+        # The literal string the board announced, kept because it is
+        # what grouping split on and what BLE matching needs. `name` is
+        # the display form and the two differ on purpose.
+        "reported_name": reported,
         "status": newest.get("status"),
         "live": bool(newest.get("live")),
         "provenance": newest.get("provenance"),

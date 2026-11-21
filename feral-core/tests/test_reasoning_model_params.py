@@ -114,11 +114,8 @@ class TestOpenAIReasoningFork:
             max_tokens=128,
             temperature=0.7,
         )
-        assert "max_completion_tokens" in body, (
-            f"{model}: reasoning models require max_completion_tokens — "
-            "sending max_tokens is the 400 from the shipped log"
-        )
-        assert body["max_completion_tokens"] == 128
+        key = "max_output_tokens" if model in {"gpt-5.5", "gpt-5.4-mini"} else "max_completion_tokens"
+        assert body[key] == 128
         assert "max_tokens" not in body
 
     @pytest.mark.parametrize("model", ["gpt-5.5", "o3"])
@@ -147,7 +144,7 @@ class TestOpenAIReasoningFork:
             model="gpt-5.5",
             max_tokens=32,
         )
-        assert body.get("reasoning_effort") == "medium"
+        assert body.get("reasoning", {}).get("effort") == "medium"
 
     async def test_reasoning_effort_override_respected(self) -> None:
         body = await _capture_openai_body(
@@ -156,7 +153,7 @@ class TestOpenAIReasoningFork:
             max_tokens=32,
             reasoning_effort="high",
         )
-        assert body.get("reasoning_effort") == "high"
+        assert body.get("reasoning", {}).get("effort") == "high"
 
     @pytest.mark.parametrize("model", ["gpt-4o", "gpt-4o-mini", "gpt-4.1", "gpt-3.5-turbo"])
     async def test_non_reasoning_model_keeps_legacy_shape(self, model: str) -> None:

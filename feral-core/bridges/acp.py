@@ -69,7 +69,7 @@ from bridges.permissions import (
     PermissionDecision,
     parse_permission_request,
 )
-from security.env_jail import EnvJail, build_coding_agent_env
+from security.env_jail import EnvJail, build_coding_agent_env, build_child_env, PASSTHROUGH
 
 logger = logging.getLogger("feral.bridges.acp")
 
@@ -151,6 +151,7 @@ class AcpEvent:
             "text": self.text,
             "tool_call_id": self.tool_call_id,
             "tool_name": self.tool_name,
+            "action_kind": str(self.raw.get("kind") or ""),
             "title": self.title,
             "status": self.status,
             "at": self.at,
@@ -364,6 +365,7 @@ class AcpAgentProcess:
         *,
         cwd: Optional[str] = None,
         env: Optional[dict[str, str]] = None,
+        env_extra: Optional[dict[str, str]] = None,
         broker: Optional[PermissionBroker] = None,
         stream_limit: int = DEFAULT_STREAM_LIMIT,
     ) -> "AcpAgentProcess":
@@ -397,7 +399,11 @@ class AcpAgentProcess:
 
         jail = None
         if env is None:
-            jail = build_coding_agent_env()
+            # Consumer local-provider setup must not inherit even operator-
+            # allowlisted cloud credentials or subscription state.
+            local_source = {key: value for key, value in os.environ.items() if key in PASSTHROUGH}
+            jail = (build_child_env(extra=env_extra, source=local_source) if env_extra is not None
+                    else build_coding_agent_env())
             env = jail.env
             logger.debug(
                 "spawning %s in an env jail (HOME=%s, %d names dropped)",
@@ -566,6 +572,7 @@ class AcpAgentProcess:
         return {}
 
     async def _handle_permission(self, params: dict) -> dict[str, Any]:
+        params = self._permission_context(params)
         request = parse_permission_request(params)
         if not request.options:
             raise JsonRpcError(INVALID_PARAMS, "permission request offered no options")
@@ -589,6 +596,46 @@ class AcpAgentProcess:
             decision.reason or "-",
         )
         return decision.to_outcome()
+
+    def _permission_context(self, params: dict) -> dict:
+        """Fill missing scope only from the same live ACP tool-call event.
+
+        Some engines send permission metadata without the read's path, while
+        their preceding tool_call event includes it. Never infer a target from
+        a title, another call, another session or a completed tool.
+        """
+        call = params.get("toolCall")
+        if not isinstance(call, dict) or call.get("rawInput"):
+            return params
+        session_id = params.get("sessionId")
+        if not isinstance(session_id, str) or not session_id:
+            return params
+        session = self.sessions.get(session_id)
+        call_id, kind = call.get("toolCallId"), call.get("kind")
+        if session is None or not isinstance(call_id, str) or not call_id or not isinstance(kind, str):
+            return params
+        events = [event for event in session.transcript if event.is_tool_call and event.tool_call_id == call_id]
+        if not events or events[-1].status in {"completed", "failed"}:
+            return params
+        snapshot: dict[str, object] = {}
+        for event in events:
+            if event.session_id != session.session_id or event.raw.get("kind", kind) != kind:
+                return params
+            for key in ("rawInput", "locations"):
+                value = event.raw.get(key)
+                if value:
+                    if key in snapshot and snapshot[key] != value:
+                        return params  # Changing scope cannot establish authority.
+                    snapshot[key] = value
+        if not isinstance(snapshot.get("rawInput"), dict) or not snapshot["rawInput"]:
+            return params
+        enriched = dict(call)
+        for key, value in snapshot.items():
+            if call.get(key) and call[key] != value:
+                return params
+            enriched[key] = value
+        enriched["review_scope_source"] = "same_session_live_tool_call"
+        return {**params, "toolCall": enriched}
 
     # ------------------------------------------------------------------
     # Outbound: us driving the agent

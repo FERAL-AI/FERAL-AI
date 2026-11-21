@@ -7,6 +7,7 @@ into a silent hole. Now they must land in every layer.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, AsyncMock
 
 import pytest
@@ -20,6 +21,8 @@ def _make_mock_state(tmp_path, *, with_catalog=True, with_vault=True, with_orch=
     """Build a state mock with the pieces the config + llm routes touch."""
     mock = MagicMock()
     mock.config = MagicMock()
+    settings = {("llm", "provider"): "openai", ("llm", "base_url"): "", ("llm", "fallback_providers"): []}
+    mock.config.get.side_effect = lambda section, key, default=None: settings.get((section, key), default)
     mock.config.save_credentials = MagicMock(return_value=True)
     mock.config.update_settings = MagicMock(return_value=True)
 
@@ -37,13 +40,25 @@ def _make_mock_state(tmp_path, *, with_catalog=True, with_vault=True, with_orch=
 
     if with_orch:
         orch = MagicMock()
-        llm = MagicMock()
-        llm.reconfigure = AsyncMock(return_value={
-            "ok": True, "provider": "openai", "model": "gpt-4o-mini",
-            "available": True, "base_url": "", "reason": "ok",
-        })
+        llm = SimpleNamespace(provider="openai", model="gpt-4o-mini", available=True,
+                              base_url="https://fixture.invalid/openai/v1", api_key="", _config={})
+
+        async def reconfigure(*, provider, model="", api_key="", base_url=""):
+            from agents.llm_provider import _PROVIDER_REGISTRY, runtime_provider_id
+
+            provider = runtime_provider_id(provider)
+            # Successful activation changes the live connection fields consumed
+            # by the real catalog binding; it is not only a success envelope.
+            llm.provider, llm.model, llm.api_key = provider, model, api_key
+            llm.base_url = base_url or _PROVIDER_REGISTRY[provider][0]
+            llm.available = bool(api_key)
+            return {"ok": True, "provider": provider, "model": model,
+                    "available": llm.available, "base_url": llm.base_url,
+                    "reason": "ok" if llm.available else "no_api_key"}
+
+        llm.reconfigure = AsyncMock(side_effect=reconfigure)
         llm.switch_provider = AsyncMock(return_value=None)
-        llm.provider = "openai"
+        llm.set_config = MagicMock(side_effect=lambda config: setattr(llm, "_config", config))
         orch.llm = llm
         mock.orchestrator = orch
     else:
@@ -60,7 +75,7 @@ def client(tmp_path):
          patch("api.routes.config.state", mock), \
          patch("api.routes.llm.state", mock):
         from api.server import app
-        yield TestClient(app, raise_server_exceptions=False), mock, tmp_path
+        yield TestClient(app, raise_server_exceptions=True), mock, tmp_path
 
 
 # ── save_credentials accepts every catalog env var ───────────────
@@ -126,6 +141,11 @@ def test_llm_config_persists_gemini_key_everywhere(client):
     kwargs = mock.orchestrator.llm.reconfigure.await_args.kwargs
     assert kwargs["provider"] == "gemini"
     assert kwargs["api_key"] == "g-test"
+    active = mock.provider_catalog.get_adapter("gemini")
+    assert active._api_key == mock.orchestrator.llm.api_key == "g-test"
+    assert active._base_url == mock.orchestrator.llm.base_url
+    assert body["reconfigured"]["provider"] == "gemini"
+    mock.config.update_settings.assert_any_call("llm", "fallback_providers", ["openai"])
 
 
 def test_llm_config_without_key_still_switches(client):
@@ -134,8 +154,13 @@ def test_llm_config_without_key_still_switches(client):
         "provider": "anthropic",
         "model": "claude-sonnet-4-20250514",
     })
-    assert r.status_code == 200
+    assert r.status_code == 200, r.text
     mock.orchestrator.llm.reconfigure.assert_awaited_once()
+    active = mock.provider_catalog.get_adapter("anthropic")
+    assert active._base_url == mock.orchestrator.llm.base_url
+    assert active._api_key == mock.orchestrator.llm.api_key == ""
+    assert r.json()["reconfigured"]["provider"] == "anthropic"
+    assert r.json()["reconfigured"]["available"] is False
 
 
 # ── /api/llm/providers/{id}/configure persistence ────────────────

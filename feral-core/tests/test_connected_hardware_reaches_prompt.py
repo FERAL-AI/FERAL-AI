@@ -77,7 +77,11 @@ async def test_live_subdevice_named_in_prompt(store):
     prompt = await _build(loader)
 
     assert "jw_health_glasses" in prompt
-    assert "W300" in prompt
+    # The model reads this prompt aloud. "W300" is the part number of the
+    # board and "jw_health_glasses" is the BLE vendor's SDK id; neither is
+    # what the product is called, so the prompt carries the display name.
+    assert "Theora glasses" in prompt
+    assert "W300" not in prompt
 
 
 @pytest.mark.asyncio

@@ -34,6 +34,12 @@ logger = logging.getLogger("feral.perception")
 # so the model never quotes a stale Apple HealthKit value as live.
 _CONTEXT_FRESH_S = 120.0
 
+#: A location fix older than this is reported as stale. Far longer than
+#: _CONTEXT_FRESH_S on purpose: a heart rate from ten minutes ago is not
+#: current, but a location from ten minutes ago usually still is, and the
+#: phone only sends a new fix when the fix actually changes.
+_LOCATION_STALE_S = 1800.0
+
 # Robot telemetry (CuteBot) uses a tighter freshness window than vitals:
 # autonomous mode / sonar readings go stale quickly when the agent is
 # deciding whether to nudge, halt, or ask the user to reposition.
@@ -171,6 +177,14 @@ class PerceptionFrame:
     heart_rate_source: str = ""  # e.g. "apple_healthkit", "theora_w300"
     spo2_sample_ts: float = 0.0
     spo2_source: str = ""
+    # Blood pressure is episodic: the wearer starts a measurement and
+    # one pair of numbers lands ~30 s later. There is no stream to
+    # arbitrate between, so unlike HR/SpO2 above the newest reading
+    # simply wins. Both halves move together or neither does.
+    bp_systolic: int = 0
+    bp_diastolic: int = 0
+    bp_sample_ts: float = 0.0
+    bp_source: str = ""
     head_pose: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     ambient_light_lux: int = 0
     battery_pct: int = 100
@@ -185,7 +199,12 @@ class PerceptionFrame:
     ambient_temperature_c: float = 0.0
     accel_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
     gyro_xyz: list[float] = field(default_factory=lambda: [0.0, 0.0, 0.0])
-    location: Optional[dict] = None  # {"lat": float, "lon": float}
+    # {"lat": float, "lon": float, "accuracy_m"?: float, "ts"?: float}.
+    # Opt-in on the phone and off by default, so None is the normal
+    # resting state and never an error: nothing may treat its absence as
+    # a fault. Held in RAM only; it is never written to an episode, and
+    # it is cleared when the node that reported it disconnects.
+    location: Optional[dict] = None
 
     # Gesture
     gesture: Optional[str] = None  # "tap", "swipe_left", "nod", etc.
@@ -200,6 +219,16 @@ class PerceptionFrame:
     robot_sonar_cm: float = 0.0
     robot_battery: bool = False
     robot_ts: float = 0.0
+
+    @staticmethod
+    def _age_phrase(age_s: float) -> str:
+        if age_s < 90:
+            return f"{int(age_s)}s ago"
+        if age_s < 5400:
+            return f"{int(age_s / 60)} min ago"
+        if age_s < 172800:
+            return f"{int(age_s / 3600)} h ago"
+        return f"{int(age_s / 86400)} days ago"
 
     def to_system_context(self) -> str:
         """
@@ -251,6 +280,25 @@ class PerceptionFrame:
                     sensor_parts.append(
                         f"SpO2={self.spo2_pct}% (stale, {int(spo2_age)}s ago — do NOT report as current)"
                     )
+        if self.bp_systolic and self.bp_diastolic:
+            bp_ts = float(getattr(self, "bp_sample_ts", 0.0) or 0.0)
+            # A blood pressure is a measurement taken at a moment, not a
+            # level that persists. The freshness window that suits a
+            # continuous HR stream would mark a reading from an hour ago
+            # stale and suppress it, which is wrong: an hour-old BP is
+            # still the wearer's most recent BP. Report it with its age
+            # and let the reader judge.
+            if bp_ts > 0:
+                bp_age = now - bp_ts
+                if bp_age <= _CONTEXT_FRESH_S:
+                    sensor_parts.append(
+                        f"BP={self.bp_systolic}/{self.bp_diastolic}mmHg"
+                    )
+                else:
+                    sensor_parts.append(
+                        f"BP={self.bp_systolic}/{self.bp_diastolic}mmHg "
+                        f"(measured {self._age_phrase(bp_age)}, not a current reading)"
+                    )
         if self.skin_temperature_c:
             sensor_parts.append(f"Temp={self.skin_temperature_c}°C")
         if self.activity_state and self.activity_state != "unknown":
@@ -290,7 +338,23 @@ class PerceptionFrame:
 
         # Location
         if self.location:
-            sections.append(f"Location: lat={self.location.get('lat')}, lon={self.location.get('lon')}")
+            # Age and accuracy belong on the line. A coordinate with
+            # neither reads as "here, now" whatever its real provenance,
+            # and this one can be an hour old by design.
+            loc_bits = [
+                f"lat={self.location.get('lat')}",
+                f"lon={self.location.get('lon')}",
+            ]
+            accuracy = self.location.get("accuracy_m")
+            if isinstance(accuracy, (int, float)) and accuracy > 0:
+                loc_bits.append(f"±{int(accuracy)}m")
+            loc_ts = float(self.location.get("ts") or 0.0)
+            if loc_ts > 0:
+                loc_age = now - loc_ts
+                loc_bits.append(f"fixed {self._age_phrase(loc_age)}")
+                if loc_age > _LOCATION_STALE_S:
+                    loc_bits.append("(stale, the wearer may have moved)")
+            sections.append("Location: " + ", ".join(loc_bits))
 
         # Audio context
         if self.audio_ambient and self.audio_ambient != "silence":
@@ -363,6 +427,41 @@ class PerceptionEngine:
         if session_id not in self._frames:
             self._frames[session_id] = PerceptionFrame()
         return self._frames[session_id]
+
+    def last_known_location(self) -> Optional[dict]:
+        """The newest location fix across sessions, or ``None``.
+
+        ``None`` is the normal resting state, not a failure: location is
+        opt-in on the phone and off by default. Callers must report it as
+        "you have not shared your location" rather than as an error.
+        """
+        best: Optional[dict] = None
+        for frame in self._frames.values():
+            loc = frame.location
+            if not isinstance(loc, dict) or loc.get("lat") is None:
+                continue
+            if best is None or float(loc.get("ts") or 0.0) > float(best.get("ts") or 0.0):
+                best = loc
+        return dict(best) if best else None
+
+    def clear_location(self, session_id: str = "") -> int:
+        """Forget the location fix for one session, or for all of them.
+
+        Called when the node that reported it disconnects. A fix is only
+        true while the phone that sent it is attached, and nothing
+        persists it to disk, so dropping it here is the whole of
+        forgetting it.
+        """
+        if session_id:
+            frames = [self._frames[session_id]] if session_id in self._frames else []
+        else:
+            frames = list(self._frames.values())
+        cleared = 0
+        for frame in frames:
+            if frame.location is not None:
+                frame.location = None
+                cleared += 1
+        return cleared
 
     @staticmethod
     def _first_valid(*values):
@@ -513,6 +612,30 @@ class PerceptionEngine:
                 frame.spo2_sample_ts = new_spo2_ts
                 if new_spo2_source:
                     frame.spo2_source = new_spo2_source
+
+        _bp_sys = _fv(vitals.get("bp_systolic"), sensors.get("bp_systolic"))
+        _bp_dia = _fv(vitals.get("bp_diastolic"), sensors.get("bp_diastolic"))
+        if _bp_sys is not None and _bp_dia is not None:
+            _bp_ts_raw = _fv(
+                vitals.get("blood_pressure_sample_ts"),
+                sensors.get("blood_pressure_sample_ts"),
+            )
+            new_bp_ts = float(_bp_ts_raw) if _bp_ts_raw is not None else 0.0
+            _bp_src = _fv(
+                vitals.get("blood_pressure_source"),
+                sensors.get("blood_pressure_source"),
+                sensors.get("source"),
+            )
+            # Keep the older reading only when the incoming one is
+            # genuinely older; an unstamped arrival still replaces a
+            # stamped one, because a measurement the wearer just took is
+            # the point of the feature.
+            if not (frame.bp_sample_ts and new_bp_ts and new_bp_ts < frame.bp_sample_ts):
+                frame.bp_systolic = int(_bp_sys)
+                frame.bp_diastolic = int(_bp_dia)
+                frame.bp_sample_ts = new_bp_ts
+                if _bp_src is not None and str(_bp_src):
+                    frame.bp_source = str(_bp_src)
         # Flat form included: the HUP `skin_temperature` device_event
         # extractor emits `sensors["skin_temperature_c"]` at the top
         # level, and only the nested `vitals.*` form was read here, so

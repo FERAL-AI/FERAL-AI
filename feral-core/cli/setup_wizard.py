@@ -905,7 +905,7 @@ class OnboardWizard:
         wristband = False
         if is_feral:
             health_goals = Prompt.ask("  Health goals or conditions to track", default="")
-            glasses_model = Prompt.ask("  FERAL glasses model (W300/W610/other/none)", default="none")
+            glasses_model = Prompt.ask("  Theora glasses model (g1/g2/other/none)", default="none")
             wristband = Confirm.ask("  FERAL wristband connected?", default=False)
 
         anything_else = Prompt.ask("  Anything else your agent should know", default="")
@@ -1105,7 +1105,7 @@ class OnboardWizard:
 
         register_glasses = Confirm.ask("  Register FERAL glasses?", default=False)
         if register_glasses:
-            model = Prompt.ask("  Glasses model (W300/W610/other)", default="W610")
+            model = Prompt.ask("  Theora glasses model (g1/g2/other)", default="g2")
             self.config["glasses_model"] = model
             self.c.print(f"  [green]Registered: {model}[/]")
 
@@ -1611,7 +1611,7 @@ class OnboardWizardPlain:
         glasses_model = ""
         if feral_member in ("y", "yes"):
             health_goals = input("  Health goals: ").strip()
-            glasses_model = input("  Glasses model (W300/W610/other/none): ").strip()
+            glasses_model = input("  Theora glasses model (g1/g2/other/none): ").strip()
 
         lines = ["# About Me\n"]
         if name:
@@ -1679,7 +1679,7 @@ class OnboardWizardPlain:
             self.config["phone_bridge_url"] = url or "auto"
         glasses = input("  Register FERAL glasses? (y/N): ").strip().lower()
         if glasses in ("y", "yes"):
-            model = input("  Glasses model (W300/W610/other) [W610]: ").strip() or "W610"
+            model = input("  Theora glasses model (g1/g2/other) [g2]: ").strip() or "g2"
             self.config["glasses_model"] = model
         print()
 

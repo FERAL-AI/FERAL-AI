@@ -222,13 +222,24 @@ class SandboxPolicy:
                                 # hardware/mesh.py phone node
                                 "gps_location", "health_sensors",
                                 # hardware/adapters/smart_home.py
-                                "thermostat_read"],
+                                "thermostat_read",
+                                # Theora glasses, on-demand measurement.
+                                # Listed verbatim as well as bare because
+                                # `_sensor_allowed` only strips a `read_`
+                                # prefix, and this capability is a
+                                # `measure_`: it runs the sensor for ~30 s
+                                # rather than sampling a live stream.
+                                "blood_pressure", "measure_blood_pressure"],
                     "blocked": [],
                     "max_read_rate_per_second": {
                         "heart_rate": 1,
                         "spo2": 0.1,
                         "temperature": 0.05,
                         "gps": 0.2,
+                        # One measurement takes 30-45 s and asks the
+                        # wearer to sit still; twice a minute is already
+                        # more than the hardware can deliver.
+                        "measure_blood_pressure": 0.033,
                     },
                 },
                 # Entries are matched against the HUP capability id the

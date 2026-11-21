@@ -215,4 +215,5 @@ def test_route_surfaces_a_registry_that_raises():
         r = c.post("/api/skills/reload", params={"skill_id": "anything"})
     assert r.status_code == 500
     assert r.json()["ok"] is False
-    assert "disk on fire" in r.json()["error"]
+    assert r.json()["code"] == "reload_raised"
+    assert "disk on fire" not in r.json()["error"]

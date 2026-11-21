@@ -3,9 +3,11 @@ FERAL Timeline API — Chronological life view
 """
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
 import time
+import unicodedata
 from fastapi import APIRouter, HTTPException, Query
 
 from api.state import state
@@ -196,13 +198,45 @@ async def list_automations():
 
 @router.post("/api/automations")
 async def create_automation(body: dict):
-    """Create an automation from natural language."""
+    """Create an explicitly scheduled action, or retain legacy natural language.
+
+    Structured callers never run the schedule parser on their action text. Words
+    such as "every email" must not silently replace the reviewed interval.
+    """
+    if "interval_minutes" in body or "action" in body:
+        minutes, action, session_id = body.get("interval_minutes"), body.get("action"), body.get("session_id")
+        if set(body) != {"interval_minutes", "action", "session_id"}:
+            raise HTTPException(422, "Structured scheduling requires only interval_minutes, action and session_id")
+        if type(minutes) is not int or not 1 <= minutes <= 10_080:
+            raise HTTPException(422, "Interval must be an integer from 1 through 10080 minutes")
+        if not isinstance(action, str) or not action.strip() or any(unicodedata.category(char) == "Cc" and char not in "\n\t" for char in action):
+            raise HTTPException(422, "A nonempty action without control characters is required")
+        if not isinstance(session_id, str) or not session_id or session_id != session_id.strip() or len(session_id) > 1024 or any(unicodedata.category(char) == "Cc" for char in session_id):
+            raise HTTPException(422, "An exact nonempty session_id without surrounding whitespace is required")
+        try:
+            if len(action.encode("utf-8")) > 8000:
+                raise HTTPException(422, "Action exceeds the 8000-byte limit")
+            session_id.encode("utf-8")
+        except UnicodeError:
+            raise HTTPException(422, "Action and session_id must be valid UTF-8 text") from None
+        composed = f"every {minutes} minutes, {action}"
+        try:
+            job = await asyncio.to_thread(
+                state.scheduler.create_job, job_type="custom", cron_expr=f"every {minutes}m",
+                description=composed,
+                payload={"action_text": composed, "source": "natural_language", "original_text": composed},
+                session_id=session_id, recurring=True,
+            )
+            return {"success": True, "job_id": job.id, "cron": job.cron_expr, "description": job.description, "creation_mode": "explicit_interval"}
+        except Exception as exc:
+            _push_logger.warning("Structured automation storage failed (%s)", type(exc).__name__)
+            return {"success": False, "error": "The scheduled action could not be saved; inspect stored state before another attempt"}
     text = body.get("text", "")
     session_id = body.get("session_id", "web")
     if not text:
         return {"error": "text is required"}
     try:
-        job = state.scheduler.create_from_natural_language(text, session_id)
+        job = await asyncio.to_thread(state.scheduler.create_from_natural_language, text, session_id)
         return {"success": True, "job_id": job.id, "cron": job.cron_expr, "description": job.description}
     except Exception as e:
         return {"success": False, "error": str(e)}

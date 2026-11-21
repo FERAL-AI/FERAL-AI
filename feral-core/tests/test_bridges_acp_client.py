@@ -126,7 +126,8 @@ def run_turn(rid, params):
           "params": {
               "sessionId": sid,
               "toolCall": {"toolCallId": "tc-1", "title": "Write hello.txt",
-                           "kind": "edit", "toolName": "write"},
+                           "kind": "edit", "toolName": "write",
+                           "rawInput": {"filePath": "hello.txt", "content": "test fixture content"}},
               "options": [
                   {"optionId": "once", "name": "Allow once", "kind": "allow_once"},
                   {"optionId": "always", "name": "Always allow", "kind": "allow_always"},

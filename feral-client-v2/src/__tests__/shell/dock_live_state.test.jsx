@@ -57,12 +57,12 @@ describe('a quiet machine shows a quiet dock', () => {
 });
 
 describe('state appears only on the tile it belongs to', () => {
-  it('Jobs breathes while something runs, and nothing else does', () => {
+  it('background work does not add a telemetry destination to everyday navigation', () => {
     useMachineVitals.mockReturnValue({ running: 3, shells: 1, needs: 0, devices: 0, tokens: 0, cost: 0, autonomy: '', reachable: true });
     const { container } = draw();
     const s = states(container);
-    expect(s.Jobs).toBe('busy');
-    expect(Object.entries(s).filter(([, v]) => v).map(([k]) => k)).toEqual(['Jobs']);
+    expect(s.Jobs).toBeUndefined();
+    expect(Object.values(s).every((state) => state === '')).toBe(true);
   });
 
   it('Needs you fills while a call is blocked, and nothing else does', () => {
@@ -73,11 +73,11 @@ describe('state appears only on the tile it belongs to', () => {
     expect(Object.entries(s).filter(([, v]) => v).map(([k]) => k)).toEqual(['Needs you']);
   });
 
-  it('both can be live at once', () => {
+  it('keeps the approval signal visible while background work runs', () => {
     useMachineVitals.mockReturnValue({ running: 1, shells: 0, needs: 4, devices: 0, tokens: 0, cost: 0, autonomy: '', reachable: true });
     const { container } = draw();
     const s = states(container);
-    expect(s.Jobs).toBe('busy');
+    expect(s.Jobs).toBeUndefined();
     expect(s['Needs you']).toBe('needs');
   });
 

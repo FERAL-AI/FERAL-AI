@@ -22,9 +22,9 @@ beforeEach(() => {
 
 
 describe('Setup.jsx — Pair phone step', () => {
-  it('exposes a "Pair your phone" tab in the wizard step list', async () => {
+  it('exposes a "Connect devices" tab in the wizard step list', async () => {
     const { findByRole } = renderV2(<Setup />, { fetch: () => ({}) });
-    const tab = await findByRole('tab', { name: /pair your phone/i });
+    const tab = await findByRole('tab', { name: /connect devices/i });
     expect(tab).toBeInTheDocument();
   });
 
@@ -32,13 +32,13 @@ describe('Setup.jsx — Pair phone step', () => {
     const { findAllByRole } = renderV2(<Setup />, { fetch: () => ({}) });
     const tabs = await findAllByRole('tab');
     const labels = tabs.map((t) => t.textContent.toLowerCase());
-    // Order matters: Welcome / LLM / Voice / About you / Pair / Ready.
+    // Order matters: Welcome / AI provider / Voice / About you / Connect / Ready.
     const idx = (s) => labels.findIndex((l) => l.includes(s));
-    expect(idx('welcome')).toBeLessThan(idx('llm'));
-    expect(idx('llm')).toBeLessThan(idx('voice'));
+    expect(idx('welcome')).toBeLessThan(idx('ai provider'));
+    expect(idx('ai provider')).toBeLessThan(idx('voice'));
     expect(idx('voice')).toBeLessThan(idx('about'));
-    expect(idx('about')).toBeLessThan(idx('pair'));
-    expect(idx('pair')).toBeLessThan(idx('ready'));
+    expect(idx('about')).toBeLessThan(idx('connect'));
+    expect(idx('connect')).toBeLessThan(idx('ready'));
   });
 
   it('lazy-imports without crashing — DoneStep references finishSetup callback', async () => {

@@ -21,7 +21,6 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import sys
 from pathlib import Path
 from typing import Optional
 
@@ -157,7 +156,6 @@ def cmd_models_list(*, provider: str = "", live: bool = False, run_probe: bool =
 
     try:
         from rich.console import Console
-        from rich.table import Table
         console = Console()
     except ImportError:
         console = None
@@ -347,17 +345,48 @@ def cmd_models_set(*, provider: str, model: str) -> int:
         print("  Both --provider and --model are required.")
         return 2
 
+    from agents.llm_provider import is_supported_catalog_provider
+
+    try:
+        catalog = _build_catalog()
+    except Exception as exc:
+        print(f"  Provider catalog unavailable ({type(exc).__name__}). No settings changed.")
+        return 1
+    resolved = catalog.resolve_alias(provider)
+    descriptor = catalog.get_descriptor(resolved) if resolved else None
+    if descriptor is None or not is_supported_catalog_provider(descriptor.provider_id):
+        print("  Unknown or unsupported chat provider. Use `feral models list` to choose a supported provider. No settings changed.")
+        return 2
+
     settings_path, settings, err = _load_settings()
     if err is not None:
         return err
 
-    settings.setdefault("llm", {})
-    settings["llm"]["provider"] = provider
-    settings["llm"]["model"] = model
+    if not isinstance(settings, dict) or not isinstance(settings.get("llm", {}), dict):
+        print("  Existing provider settings are invalid. No settings changed.")
+        return 1
+    llm = settings.setdefault("llm", {})
+    if not isinstance(llm.get("provider", ""), str):
+        print("  Existing provider settings are invalid. No settings changed.")
+        return 1
+    previous = catalog.resolve_alias(llm.get("provider", ""))
+    changed_provider = previous != descriptor.provider_id
+    llm["provider"] = descriptor.provider_id
+    llm["model"] = model
+    # Provider changes own their endpoint; a same-provider model change keeps
+    # the operator's custom endpoint. Match the setup wizard's default rule.
+    if changed_provider or not llm.get("base_url"):
+        llm["base_url"] = descriptor.default_base_url or ""
+    if changed_provider:
+        # A local selection must not retain an implicit cloud failover route.
+        # Re-enable fallbacks explicitly in provider settings if desired.
+        llm["fallback_providers"] = []
     _dedup_append_model(settings, model)
     settings_path.write_text(json.dumps(settings, indent=2, sort_keys=True))
 
-    print(f"  Set llm.provider={provider}, llm.model={model} in {settings_path}.")
+    print(f"  Set llm.provider={descriptor.provider_id}, llm.model={model} in {settings_path}.")
+    if changed_provider:
+        print("  Provider changed: endpoint reset to its default and fallbacks cleared. Configure any fallback explicitly.")
     print("  Restart the brain (`feral restart`) for the change to take effect.")
     return 0
 

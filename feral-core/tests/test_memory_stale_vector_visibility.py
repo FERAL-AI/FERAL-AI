@@ -259,12 +259,18 @@ async def test_taskflow_memory_search_step_still_completes(store, tmp_path):
 
     runtime = TaskFlowRuntime(db_path=str(tmp_path / "flows.db"), memory_store=store)
     try:
-        outcome = await runtime._execute_step(
-            {"context": {}},
-            {"step_type": "memory.search", "payload": {"query": "sailing", "limit": 5}},
+        flow = runtime.create_flow(
+            session_id="memory-search-fixture",
+            title="Search stale vector memory",
+            steps=[{"type": "memory.search", "query": "sailing", "limit": 5}],
         )
+        await runtime._run_flow(flow["id"])
+        completed = runtime.get_flow(flow["id"])
+        assert completed["status"] == "completed"
+        outcome = completed["steps"][0]["result"]
     finally:
         await runtime._http.aclose()
+        runtime._conn.close()
     assert outcome["status"] == "completed"
     assert outcome["results"]
 

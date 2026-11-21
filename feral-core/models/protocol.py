@@ -7,12 +7,20 @@ This is the single source of truth for all message types.
 """
 
 from __future__ import annotations
-from pydantic import AliasChoices, BaseModel, Field, field_validator
-from typing import Optional, Literal, Any
-from uuid import uuid4
+from pydantic import AliasChoices, BaseModel, ConfigDict, Field, StrictBool, StrictInt, StrictStr, field_validator, model_validator, model_serializer, ValidationInfo
+from typing import Optional, Literal, Any, Self, Callable
+from uuid import UUID, uuid4
 from time import time
+import unicodedata
 
 HUP_VERSION = "1.4.0"
+TASK_RESULT_CONTRACT = {
+    "contract_version": 1,
+    "durable_receipts": True,
+    "reconnect_reconciliation": True,
+    "readonly_status": True,
+    "admission_discovery": True,
+}
 
 
 # ─────────────────────────────────────────────
@@ -207,7 +215,84 @@ class FeralMessage(BaseModel):
 # Payload Models — Client → Brain
 # ─────────────────────────────────────────────
 
-class AudioChunkPayload(BaseModel):
+class VoiceAttemptPayload(BaseModel):
+    """Optional negotiated client voice identity. Legacy frames omit both."""
+    voice_attempt_version: Literal[1] | None = None
+    voice_attempt_id: str | None = Field(default=None, max_length=36)
+    managed_chained_voice_version: Literal[1] | None = None
+    request_id: str | None = Field(default=None, max_length=36)
+    turn_id: str | None = Field(default=None, max_length=36)
+    context_generation: str | None = Field(default=None, max_length=36)
+    context_revision: int | None = Field(default=None, strict=True, ge=1, lt=2**63 - 1)
+    context_checkpoint: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def negotiated_managed_fields(cls, value: Any) -> Any:
+        if not isinstance(value, dict):
+            return value
+        # Previously unknown fields must remain ignored on legacy frames. Only
+        # the explicit negotiated version opts a frame into these new contracts.
+        if "managed_chained_voice_version" not in value:
+            value = dict(value)
+            for name in ("request_id", "turn_id", "context_generation",
+                         "context_revision", "context_checkpoint"):
+                value.pop(name, None)
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_absent_voice_identity(self, handler: Callable[[object], dict]) -> dict:
+        serialized = handler(self)
+        for name in ("voice_attempt_version", "voice_attempt_id", "voice_request_id",
+                     "managed_chained_voice_version", "request_id", "turn_id",
+                     "context_generation", "context_revision", "context_checkpoint"):
+            if serialized.get(name) is None:
+                serialized.pop(name, None)
+        return serialized
+
+    @field_validator("voice_attempt_version", "managed_chained_voice_version", mode="before")
+    @classmethod
+    def strict_voice_attempt_version(cls, value: object) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported voice attempt version")
+        return value
+
+    @field_validator("voice_attempt_id", "request_id", "turn_id", "context_generation", mode="before")
+    @classmethod
+    def strict_voice_attempt_id(cls, value: object) -> str:
+        if not isinstance(value, str) or len(value) != 36 or str(UUID(value)) != value:
+            raise ValueError("Voice attempt must be a lowercase UUID")
+        return value
+
+    @field_validator("context_checkpoint", mode="before")
+    @classmethod
+    def committed_voice_checkpoint(cls, value: object) -> dict[str, Any]:
+        # The checkpoint class is defined later in this module and resolved
+        # when a frame is parsed, after module initialization has completed.
+        return ChatTurnContextCheckpoint.model_validate(value).model_dump()
+
+    @field_validator("context_revision", mode="before")
+    @classmethod
+    def exact_context_revision(cls, value: object) -> int:
+        if type(value) is not int or not 1 <= value < 2**63 - 1:
+            raise ValueError("Managed voice requires an exact positive revision")
+        return value
+
+    @model_validator(mode="after")
+    def paired_voice_attempt(self) -> Self:
+        if (self.voice_attempt_version is None) != (self.voice_attempt_id is None):
+            raise ValueError("Voice attempt identity requires both fields")
+        if self.managed_chained_voice_version is not None:
+            if self.voice_attempt_id is None:
+                raise ValueError("Managed voice requires a voice attempt")
+            if (self.context_generation is None) != (self.context_revision is None):
+                raise ValueError("Managed voice review requires generation and revision")
+            if self.turn_id is not None and self.request_id is None:
+                raise ValueError("Managed voice turn requires a request")
+        return self
+
+
+class AudioChunkPayload(VoiceAttemptPayload):
     """Streaming audio from client to brain.
 
     ``data_b64`` carries no decoded-size cap on purpose. The only documented
@@ -258,6 +343,14 @@ class TextCommandPayload(BaseModel):
     ceiling here would be a guess that silently truncates real work.
     """
     text: str
+    turn_contract_version: Optional[Literal[1]] = None
+
+    @field_validator("turn_contract_version", mode="before")
+    @classmethod
+    def exact_turn_contract(cls, value):
+        if value is not None and (type(value) is not int or value != 1):
+            raise ValueError("Unsupported tracked turn contract")
+        return value
     context: Optional[dict] = None
     attachments: Optional[list[AttachmentRef]] = Field(
         default=None, max_length=MAX_LIST_ITEMS
@@ -317,6 +410,15 @@ class ChatRequestPayload(BaseModel):
     """
     session_id: str = Field(..., min_length=1, max_length=MAX_SESSION_ID_LEN)
     text: str
+    turn_contract_version: Optional[Literal[1]] = None
+
+    @field_validator("turn_contract_version", mode="before")
+    @classmethod
+    def exact_turn_contract(cls, value):
+        if value is not None and (type(value) is not int or value != 1):
+            raise ValueError("Unsupported tracked turn contract")
+        return value
+
     reply_mode: Literal["stream", "final"] = "final"
     channel: Literal["chat", "vision_ask"] = "chat"
     reply_to: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
@@ -330,6 +432,95 @@ class ChatRequestPayload(BaseModel):
     # preserved until the PromptRefiner (Phase 2) starts populating
     # this field deterministically.
     device_target: Optional[Literal["brain", "phone", "glasses", "auto"]] = None
+
+
+class SourceRef(BaseModel):
+    """One attribution link travelling with a grounded answer.
+
+    ``title`` is passed through exactly as the provider returned it:
+    Google Maps' terms require the source title displayed unaltered, so
+    nothing here may prettify, translate or truncate it.
+    """
+    title: str = Field(..., max_length=MAX_NAME_LEN)
+    url: str = Field(..., max_length=MAX_PATH_LEN)
+
+
+class TaskReviewPayload(BaseModel):
+    """Versioned correlation and exact terms; these public fields grant nothing."""
+    model_config = ConfigDict(extra="forbid")
+    version: Literal[1]
+    request_id: StrictStr = Field(min_length=1, max_length=MAX_ID_LEN)
+    origin_session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    kind: Literal["task_start", "taskflow_action"]
+    terms_digest: StrictStr = Field(pattern=r"^[0-9a-f]{64}$")
+    turn_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+    flow_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+    step_id: StrictInt | None = Field(default=None, gt=0)
+    action_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_NAME_LEN)
+
+    @field_validator("version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported review contract")
+        return value
+
+
+class ApprovalRequestPayload(BaseModel):
+    """Brain to client: something needs a yes or no before it happens.
+
+    Reviews with private device provenance go only to authenticated current
+    connections for the originating device. Legacy session notifications
+    retain their existing audience; session membership grants no approval.
+
+    Typed rather than an ``sdui`` card on purpose: a screenless surface
+    needs a sentence it can speak and a hard yes or no, and inferring one
+    from a layout is how a spoken prompt ends up reading a merchant id
+    aloud. ``speak`` is that sentence.
+
+    ``amount`` is a decimal string, never a float: money that round-trips
+    through binary floating point is money that can be wrong by a cent.
+    It is present only when the amount is already known, which for a
+    scraped purchase it is not at the moment the approval is raised.
+    """
+    request_id: str = Field(..., max_length=MAX_ID_LEN)
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+    tool_name: str = Field(default="", max_length=MAX_NAME_LEN)
+    title: str = Field(default="", max_length=MAX_NAME_LEN)
+    detail: str = Field(default="", max_length=MAX_TOKEN_LEN)
+    speak: str = Field(default="", max_length=MAX_TOKEN_LEN)
+    safety_level: str = Field(default="", max_length=MAX_NAME_LEN)
+    merchant: str = Field(default="", max_length=MAX_NAME_LEN)
+    amount: str = Field(default="", max_length=64)
+    currency: str = Field(default="", max_length=8)
+    created_at: float = 0.0
+    expires_at: float = 0.0
+    task_review: dict | None = None
+
+    @field_validator("task_review")
+    @classmethod
+    def validate_task_review(cls, value):
+        return TaskReviewPayload.model_validate(value).model_dump(exclude_none=True) if value is not None else None
+
+
+class ApprovalResolvedPayload(BaseModel):
+    """Brain to client: this approval is settled, stop asking.
+
+    Device-owned reviews retain their private audience after settlement.
+    Legacy session notifications retain their existing audience.
+    ``outcome`` is ``approved``, ``rejected`` or ``expired``.
+    """
+    request_id: str = Field(..., max_length=MAX_ID_LEN)
+    session_id: str = Field(default="", max_length=MAX_SESSION_ID_LEN)
+    outcome: str = Field(default="", max_length=32)
+    resolved_by: str = Field(default="", max_length=MAX_NAME_LEN)
+    tool_name: str = Field(default="", max_length=MAX_NAME_LEN)
+    task_review: dict | None = None
+
+    @field_validator("task_review")
+    @classmethod
+    def validate_task_review(cls, value):
+        return TaskReviewPayload.model_validate(value).model_dump(exclude_none=True) if value is not None else None
 
 
 class ChatResponsePayload(BaseModel):
@@ -355,6 +546,16 @@ class ChatResponsePayload(BaseModel):
     channel: Literal["chat", "vision_ask"] = "chat"
     reply_to: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     error: Optional[str] = None
+    sources: Optional[list[SourceRef]] = None
+    """Attribution links for an answer grounded in a third-party source.
+
+    Present only when the turn used a grounded tool. Google Maps
+    Grounding Lite permits grounded output to reach an end user only
+    when its source links travel with it and are viewable within the
+    same interaction. These glasses have no screen, so speech alone
+    cannot satisfy that: the phone renders this list while the glasses
+    speak. Optional, so older clients ignore it.
+    """
     somatic: Optional["SomaticStatePayload"] = None
     """The behavioural policy in force for THIS reply, or None.
 
@@ -374,6 +575,10 @@ class ChatResponsePayload(BaseModel):
 class VoiceSessionStartPayload(BaseModel):
     """Phone voice session bootstrap metadata."""
     stream_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    # Which conversation this voice session belongs to. Older phone builds
+    # omit it; the brain then defaults a phone to the primary session so
+    # voice, chat and web share one history and memory.
+    session_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     sample_rate: int = Field(..., ge=1)
     channels: int = Field(..., ge=1)
     language_hint: str = Field(default="en-US", max_length=64)
@@ -382,7 +587,7 @@ class VoiceSessionStartPayload(BaseModel):
     camera_linked: bool = False
 
 
-class VoiceInterruptPayload(BaseModel):
+class VoiceInterruptPayload(VoiceAttemptPayload):
     """Signal from phone to cut in-flight TTS on the active stream.
 
     ``stream_id`` used to be required, but in practice the phone UI
@@ -395,6 +600,18 @@ class VoiceInterruptPayload(BaseModel):
     """
     stream_id: Optional[str] = Field(default=None, max_length=MAX_ID_LEN)
     reason: str = Field(default="user_interrupt", max_length=MAX_NAME_LEN)
+    voice_request_id: str | None = Field(default=None, max_length=36)
+
+    @field_validator("voice_request_id", mode="before")
+    @classmethod
+    def strict_voice_request_id(cls, value: object) -> str:
+        return VoiceAttemptPayload.strict_voice_attempt_id(value)
+
+    @model_validator(mode="after")
+    def v1_interrupt_request(self) -> Self:
+        if self.voice_attempt_id is not None and self.voice_request_id is None:
+            raise ValueError("Voice interruption requires request identity")
+        return self
 
 
 class GenUIPushActionPayload(BaseModel):
@@ -834,7 +1051,7 @@ class SomaticStatePayload(BaseModel):
 ChatResponsePayload.model_rebuild()
 
 
-class TranscriptPayload(BaseModel):
+class TranscriptPayload(VoiceAttemptPayload):
     """Speech-to-text result.
 
     The ``role`` field disambiguates user-spoken text from
@@ -891,11 +1108,31 @@ class TranscriptPayload(BaseModel):
     seq: Optional[int] = Field(default=None, ge=0)
 
 
+class AppActionConfirmationPayload(BaseModel):
+    """Authoritative envelope metadata; never extracted from generated root."""
+    contract_version: Literal[1] = 1
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    session_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    app_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    surface_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    action_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    screen_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    scope: Literal["app_action"] = "app_action"
+    created_at: float
+    expires_at: float
+    handler: str = Field(..., max_length=64)
+    target: str = Field(default="", max_length=MAX_ID_LEN)
+    event: str = Field(default="tap", max_length=64)
+    value: Any = None
+    requires_confirmation: Literal[True] = True
+
+
 class SDUIPayload(BaseModel):
     """Server-Driven UI — the generated interface."""
     screen_id: str = Field(default_factory=lambda: str(uuid4()), max_length=MAX_ID_LEN)
     ttl_seconds: int = Field(default=300, ge=0)
     root: dict  # The SDUI tree (see genui/schema/)
+    confirmation: Optional[AppActionConfirmationPayload] = None
 
 
 class SDUIPatchPayload(BaseModel):
@@ -909,7 +1146,7 @@ class SDUIPatchPayload(BaseModel):
     patches: list[dict]  # [{"path": "children.0.value", "op": "replace", "value": "new text"}]
 
 
-class TTSChunkPayload(BaseModel):
+class TTSChunkPayload(VoiceAttemptPayload):
     """Streaming audio from brain to client (text-to-speech).
 
     ``data_b64`` is brain-generated TTS output with no documented cap, so
@@ -919,6 +1156,86 @@ class TTSChunkPayload(BaseModel):
     encoding: str = Field(default="mp3", max_length=32)
     data_b64: str = ""
     is_final: bool = False
+
+
+class ChatTurnAcceptedPayload(BaseModel):
+    contract_version: Literal[1] = 1
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    turn_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    session_id: str = Field(..., min_length=1, max_length=MAX_SESSION_ID_LEN)
+    status: Literal["accepted"] = "accepted"
+    durable: Literal[True] = True
+    replayed: bool = False
+
+
+class ChatTurnContextCheckpoint(BaseModel):
+    """Historical exact committed context; never current playback authority."""
+    model_config = {"extra": "forbid"}
+    contract_version: Literal[1]
+    session_id: str = Field(..., min_length=1, max_length=1024)
+    generation: str = Field(..., min_length=36, max_length=36)
+    revision: int = Field(..., strict=True, ge=1, lt=2**63 - 1)
+    attempt_id: str = Field(..., min_length=36, max_length=36)
+    durable: Literal[True]
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_contract(cls, value: object) -> int:
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported committed context contract")
+        return value
+
+    @field_validator("durable", mode="before")
+    @classmethod
+    def exact_durability(cls, value: object) -> bool:
+        if value is not True:
+            raise ValueError("Committed context must be durable")
+        return True
+
+    @field_validator("generation", "attempt_id", mode="before")
+    @classmethod
+    def canonical_uuid(cls, value: object) -> str:
+        if not isinstance(value, str) or len(value) != 36 or str(UUID(value)) != value:
+            raise ValueError("Committed context identity must be a lowercase UUID")
+        return value
+
+    @field_validator("session_id", mode="before")
+    @classmethod
+    def canonical_session(cls, value: object) -> str:
+        if (not isinstance(value, str) or not value or len(value) > 1024
+                or value.strip() != value
+                or any(unicodedata.category(char) == "Cc" for char in value)):
+            raise ValueError("Invalid committed context session")
+        return value
+
+
+class ChatTurnTerminalPayload(BaseModel):
+    contract_version: Literal[1] = 1
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    turn_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    session_id: str = Field(..., min_length=1, max_length=MAX_SESSION_ID_LEN)
+    processing_outcome: Literal["completed", "awaiting_approval", "failed", "cancelled", "outcome_unknown", "unavailable", "refused", "budget_exceeded"]
+    final_text: str = ""
+    action_outcome: Literal["not_asserted", "unknown"] = "not_asserted"
+    approval_request_ids: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    durable: Literal[True] = True
+    replayed: bool = False
+    context_checkpoint: ChatTurnContextCheckpoint | None = None
+
+    @model_validator(mode="after")
+    def committed_context_matches_terminal(self) -> Self:
+        if self.context_checkpoint is not None:
+            if (self.context_checkpoint.session_id != self.session_id
+                    or self.processing_outcome not in {"completed", "awaiting_approval", "refused"}):
+                raise ValueError("Committed context does not match this terminal")
+        return self
+
+    @model_serializer(mode="wrap")
+    def omit_absent_context(self, handler: Callable[[object], dict]) -> dict:
+        serialized = handler(self)
+        if serialized.get("context_checkpoint") is None:
+            serialized.pop("context_checkpoint", None)
+        return serialized
 
 
 class TextResponsePayload(BaseModel):
@@ -1149,6 +1466,50 @@ class NodeRegisterPayload(BaseModel):
     # brain is a passive consumer that re-emits whatever the node
     # published. Validation lives in the registry, not here.
     skills: list[dict] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
+    # Optional full registered-device schema, bounded and owner-checked before
+    # it reaches Mesh. Legacy flat-capability registrations remain unchanged.
+    device_manifest: Optional[dict] = None
+
+    @field_validator("device_manifest", mode="before")
+    @classmethod
+    def validate_device_manifest(cls, value, info: ValidationInfo):
+        if value is None:
+            return None
+        import json
+        from hardware.protocol import DeviceManifest, DeviceCapability
+        if type(value) is not dict:
+            raise ValueError("device_manifest must be a full object")
+        try:
+            wire = json.dumps(value, allow_nan=False, separators=(",", ":"))
+        except (TypeError, ValueError, RecursionError):
+            raise ValueError("device_manifest must be finite JSON") from None
+        if len(wire.encode("utf-8")) > 65536:
+            raise ValueError("device_manifest exceeds 64 KiB")
+        if set(value) - set(DeviceManifest.model_fields):
+            raise ValueError("unsupported device_manifest fields")
+        caps = value.get("capabilities", [])
+        if type(caps) is not list or len(caps) > 128:
+            raise ValueError("device_manifest capabilities exceed bounds")
+        seen = set()
+        for cap in caps:
+            if type(cap) is not dict or set(cap) - set(DeviceCapability.model_fields):
+                raise ValueError("unsupported capability object")
+            ident = cap.get("id")
+            if type(ident) is not str or not 1 <= len(ident) <= MAX_ID_LEN or ident in seen:
+                raise ValueError("invalid or duplicate capability identity")
+            seen.add(ident)
+            parameters = cap.get("parameters", [])
+            if type(parameters) is not list or len(parameters) > 64:
+                raise ValueError("capability parameter declarations exceed bounds")
+        manifest = DeviceManifest.model_validate(value, strict=True)
+        if manifest.device_id != info.data.get("node_id"):
+            raise ValueError("device_manifest owner must match node_id")
+        if manifest.connection_type != "websocket":
+            raise ValueError("node device_manifest must declare websocket transport")
+        normalized = manifest.model_dump()
+        if len(json.dumps(normalized, allow_nan=False, separators=(",", ":")).encode("utf-8")) > 65536:
+            raise ValueError("normalized device_manifest exceeds 64 KiB")
+        return normalized
 
 
 class ExecuteCommandPayload(BaseModel):
@@ -1312,6 +1673,8 @@ class PermissionRequestPayload(BaseModel):
     path: str = Field(..., min_length=1, max_length=MAX_PATH_LEN)
     operation: Literal["read", "write", "readwrite"] = "read"
     reason: str = ""
+    expires_at: float | None = Field(default=None, ge=0)
+    scope: Literal["persistent_workspace"] = "persistent_workspace"
 
 
 class PermissionResponsePayload(BaseModel):
@@ -1321,20 +1684,168 @@ class PermissionResponsePayload(BaseModel):
     mode: str = Field(default="read", max_length=32)
 
 
+class PermissionDecisionPayload(BaseModel):
+    """Authoritative result for a session-owned folder permission request."""
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    status: Literal["granted", "denied", "expired", "error"]
+    path: str = Field(default="", max_length=MAX_PATH_LEN)
+    mode: str = Field(default="", max_length=32)
+    scope: str = Field(default="", max_length=64)
+
+
+class ConfirmationDecisionPayload(BaseModel):
+    """Session-owned app dispatch decision; never proof of tool completion."""
+    request_id: str = Field(..., min_length=1, max_length=MAX_ID_LEN)
+    status: Literal["accepted", "rejected", "expired", "error"]
+    app_id: str = Field(default="", max_length=MAX_ID_LEN)
+    surface_id: str = Field(default="", max_length=MAX_ID_LEN)
+    action_id: str = Field(default="", max_length=MAX_ID_LEN)
+    screen_id: str = Field(default="", max_length=MAX_ID_LEN)
+    scope: Literal["app_action"] = "app_action"
+    dispatch_accepted: bool = False
+    tool_outcome_verified: Literal[False] = False
+
+
 # ─────────────────────────────────────────────
 # Payload Models — Voice Pipeline
 # ─────────────────────────────────────────────
 
-class VoiceConfigPayload(BaseModel):
+class VoiceConfigPayload(VoiceAttemptPayload):
     """Client/node declares voice capabilities and selected mode."""
     node_id: str = Field(default="", max_length=MAX_ID_LEN)
     supports_realtime: bool = False
-    mode: Literal["realtime", "whisper", "auto", "disabled"] = "auto"
+    mode: Literal["realtime", "chained", "whisper", "auto", "disabled"] = "auto"
+    provider: str = Field(default="openai", max_length=MAX_NAME_LEN)
     preferred_model: str = Field(default="", max_length=MAX_NAME_LEN)
     sample_rate: int = Field(default=24000, ge=1)
     encoding: str = Field(default="pcm16", max_length=32)
 
-class AudioResponsePayload(BaseModel):
+    @model_validator(mode="after")
+    def managed_configuration(self) -> Self:
+        if self.managed_chained_voice_version is not None and self.mode != "disabled":
+            if (self.mode != "chained" or self.provider != "configured"
+                    or self.context_generation is None):
+                raise ValueError("Managed voice requires reviewed chained configuration")
+        return self
+
+
+class VoiceConfigAckPayload(VoiceAttemptPayload):
+    mode: str = Field(default="", max_length=MAX_NAME_LEN)
+    provider: str = Field(default="", max_length=MAX_NAME_LEN)
+    status: Literal["ok", "error", "configured"]
+    code: str = Field(default="", max_length=MAX_NAME_LEN)
+    message: str = ""
+    task_cancellation: dict[str, Any] | None = None
+
+    @model_serializer(mode="wrap")
+    def omit_absent_cancellation(self, handler: Callable[[object], dict]) -> dict:
+        serialized = super().omit_absent_voice_identity(handler)
+        if serialized.get("task_cancellation") is None:
+            serialized.pop("task_cancellation", None)
+        return serialized
+
+    @model_validator(mode="after")
+    def configured_is_not_admission(self) -> Self:
+        if self.status == "configured" and (
+            self.managed_chained_voice_version is None or self.mode != "chained"
+            or self.context_checkpoint is None
+        ):
+            raise ValueError("Configured voice requires its exact managed checkpoint")
+        return self
+
+
+class VoiceUtterancePayload(VoiceAttemptPayload):
+    """Client begin/finish request; carries review identity, not task authority."""
+
+    @model_validator(mode="after")
+    def exact_utterance_review(self) -> Self:
+        if (self.managed_chained_voice_version is None or self.request_id is None
+                or self.context_generation is None or self.turn_id is not None
+                or self.context_checkpoint is not None):
+            raise ValueError("Utterance requires a managed request and reviewed fence")
+        return self
+
+
+class VoiceUtteranceAckPayload(VoiceAttemptPayload):
+    code: str = Field(default="", max_length=MAX_NAME_LEN)
+    retry_safe: Literal[False] | None = None
+
+    @field_validator("retry_safe", mode="before")
+    @classmethod
+    def refusal_never_grants_replay(cls, value: object) -> bool:
+        if value is not False:
+            raise ValueError("Utterance refusal does not grant automatic retry")
+        return False
+
+    @model_serializer(mode="wrap")
+    def omit_absent_refusal(self, handler: Callable[[object], dict]) -> dict:
+        serialized = super().omit_absent_voice_identity(handler)
+        if serialized.get("retry_safe") is None:
+            serialized.pop("retry_safe", None)
+        if not serialized.get("code"):
+            serialized.pop("code", None)
+        if serialized.get("task_accepted") is None:
+            serialized.pop("task_accepted", None)
+        return serialized
+
+    def validate_refusal(self) -> None:
+        if not self.code or self.retry_safe is not False or self.context_checkpoint is not None or self.turn_id is not None:
+            raise ValueError("Utterance refusal requires a code and no task authority")
+
+
+class VoiceUtteranceBeginAckPayload(VoiceUtteranceAckPayload):
+    status: Literal["collecting", "error"]
+
+    @model_validator(mode="after")
+    def exact_collecting_receipt(self) -> Self:
+        if self.status == "error":
+            self.validate_refusal()
+            return self
+        if (self.managed_chained_voice_version is None or self.request_id is None
+                or self.context_checkpoint is None or self.turn_id is not None):
+            raise ValueError("Collecting requires a managed request checkpoint")
+        return self
+
+
+class VoiceUtteranceFinishAckPayload(VoiceUtteranceAckPayload):
+    status: Literal["submitted_processing", "error"]
+    task_accepted: Literal[False] | None = None
+
+    @field_validator("task_accepted", mode="before")
+    @classmethod
+    def not_task_acceptance(cls, value: object) -> bool:
+        if value is not False:
+            raise ValueError("Finish ACK is not task acceptance")
+        return False
+
+    @model_validator(mode="after")
+    def exact_processing_receipt(self) -> Self:
+        if self.status == "error":
+            self.validate_refusal()
+            return self
+        if (self.managed_chained_voice_version is None or self.request_id is None
+                or self.task_accepted is not False
+                or self.turn_id is not None or self.context_checkpoint is not None):
+            raise ValueError("Processing ACK requires a managed request only")
+        return self
+
+
+class VoiceStatePayload(VoiceAttemptPayload):
+    state: str = Field(..., min_length=1, max_length=MAX_NAME_LEN)
+    mode: str = Field(default="chained", max_length=MAX_NAME_LEN)
+    error: str = ""
+
+
+class VoiceInterruptAckPayload(VoiceInterruptPayload):
+    status: str = Field(default="", max_length=MAX_NAME_LEN)
+    cancel_requested: bool = False
+    session_preserved: bool = True
+
+
+class VoiceMutePayload(VoiceAttemptPayload):
+    muted: bool = False
+
+class AudioResponsePayload(VoiceAttemptPayload):
     """Brain sends audio back to a node (realtime TTS or Whisper TTS).
 
     ``data_b64`` is brain-generated audio with no documented cap, so none is
@@ -1345,7 +1856,48 @@ class AudioResponsePayload(BaseModel):
     sample_rate: int = Field(default=24000, ge=1)
     is_final: bool = False
 
-class VoiceStatusPayload(BaseModel):
+    stream_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_SESSION_ID_LEN)
+    response_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("stream_id", "response_id")
+    @classmethod
+    def exact_audio_identity(cls, value):
+        if value is not None and (value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("Invalid audio producer identity")
+        return value
+
+    @model_serializer(mode="wrap")
+    def omit_absent_audio_identity(self, handler: Callable[[object], dict]) -> dict:
+        serialized = super().omit_absent_voice_identity(handler)
+        for name in ("stream_id", "response_id"):
+            if serialized.get(name) is None:
+                serialized.pop(name, None)
+        return serialized
+
+class VoiceResponsePayload(VoiceAttemptPayload):
+    """Actual provider response lifecycle, before identified audio delivery."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    stream_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    response_id: StrictStr = Field(min_length=1, max_length=MAX_ID_LEN)
+    state: Literal["created", "completed", "cancelled", "failed", "incomplete"]
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported voice response contract")
+        return value
+
+    @field_validator("stream_id", "response_id")
+    @classmethod
+    def exact_identity(cls, value):
+        if value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("Invalid voice response identity")
+        return value
+
+
+class VoiceStatusPayload(VoiceAttemptPayload):
     """Brain -> client voice subsystem health update.
 
     Emitted by the voice router when a realtime provider fails (e.g.
@@ -1399,8 +1951,214 @@ class HandoffRequestPayload(BaseModel):
 # Message Type Registry — Maps type strings to payload models
 # ─────────────────────────────────────────────
 
+class PhoneTurnContractPayload(BaseModel):
+    """Paired phone server capability; every field is required and exact."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    durable_receipts: Literal[True]
+    reconnect_reconciliation: Literal[True]
+    readonly_status: Literal[True]
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported phone turn contract")
+        return value
+
+    @field_validator("durable_receipts", "reconnect_reconciliation", "readonly_status", mode="before")
+    @classmethod
+    def exact_capability(cls, value):
+        if value is not True:
+            raise ValueError("Unsupported phone turn capability")
+        return value
+
+
+class TaskResultContractPayload(PhoneTurnContractPayload):
+    """Negotiated durable task recovery, including lost-notice discovery."""
+    admission_discovery: Literal[True]
+
+    @field_validator("admission_discovery", mode="before")
+    @classmethod
+    def exact_discovery(cls, value):
+        if value is not True:
+            raise ValueError("Unsupported task discovery capability")
+        return value
+
+
+class PhoneTurnStatusRequestPayload(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    contract_version: Literal[1]
+    request_id: StrictStr = Field(min_length=36, max_length=36)
+    session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        if type(value) is not int or value != 1:
+            raise ValueError("Unsupported phone turn contract")
+        return value
+
+    @field_validator("request_id")
+    @classmethod
+    def exact_request(cls, value):
+        if str(UUID(value)) != value:
+            raise ValueError("A canonical request UUID is required")
+        return value
+
+    @field_validator("session_id")
+    @classmethod
+    def exact_session(cls, value):
+        if (value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("Invalid phone origin session")
+        return value
+
+
+class PhoneTurnStatusPayload(PhoneTurnStatusRequestPayload):
+    status: Literal["found", "not_found", "unavailable"]
+    receipt: dict | None = None
+
+    @model_validator(mode="after")
+    def receipt_identity(self):
+        if self.status == "found":
+            if (not isinstance(self.receipt, dict) or self.receipt.get("request_id") != self.request_id
+                    or self.receipt.get("session_id") != self.session_id):
+                raise ValueError("Receipt identity was not confirmed")
+        elif self.receipt is not None:
+            raise ValueError("Unavailable receipt must not be disclosed")
+        return self
+
+
+class TaskResultGetPayload(PhoneTurnStatusRequestPayload):
+    """Read-only recovery of an already admitted exact-origin task."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    task_id: StrictStr = Field(min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("task_id")
+    @classmethod
+    def exact_task(cls, value):
+        if value.strip() != value or any(ord(c) < 32 or ord(c) == 127 for c in value):
+            raise ValueError("Invalid task identity")
+        return value
+
+
+class TaskAcceptedPayload(TaskResultGetPayload):
+    """Committed durable admission; never proof of an external action."""
+    durable: Literal[True]
+    replayed: StrictBool
+    action_outcome: Literal["not_asserted"]
+
+    @field_validator("durable", mode="before")
+    @classmethod
+    def exact_durable(cls, value):
+        if value is not True:
+            raise ValueError("A task receipt requires durable admission")
+        return value
+
+
+class TaskReceiptsGetPayload(BaseModel):
+    """Bounded discovery after a committed admission notice was lost."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    limit: StrictInt = Field(default=16, ge=1, le=16)
+    older_than_task_id: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_version(value)
+
+    @field_validator("session_id")
+    @classmethod
+    def exact_session(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_session(value)
+
+    @field_validator("older_than_task_id")
+    @classmethod
+    def exact_cursor(cls, value):
+        return TaskResultGetPayload.exact_task(value) if value is not None else None
+
+
+class TaskReceiptsPayload(BaseModel):
+    """Identity-only discovery; it cannot resume or authorize work."""
+    model_config = ConfigDict(extra="forbid", strict=True)
+    contract_version: Literal[1]
+    session_id: StrictStr = Field(min_length=1, max_length=MAX_SESSION_ID_LEN)
+    recovery_request_id: StrictStr = Field(min_length=36, max_length=36)
+    receipts: list[TaskAcceptedPayload] = Field(max_length=16)
+    next_cursor: StrictStr | None = Field(default=None, min_length=1, max_length=MAX_ID_LEN)
+
+    @field_validator("contract_version", mode="before")
+    @classmethod
+    def exact_version(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_version(value)
+
+    @field_validator("session_id")
+    @classmethod
+    def exact_session(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_session(value)
+
+    @field_validator("recovery_request_id")
+    @classmethod
+    def exact_recovery(cls, value):
+        return PhoneTurnStatusRequestPayload.exact_request(value)
+
+    @field_validator("next_cursor")
+    @classmethod
+    def exact_cursor(cls, value):
+        return TaskResultGetPayload.exact_task(value) if value is not None else None
+
+    @model_validator(mode="after")
+    def exact_origins(self):
+        tasks, requests = set(), set()
+        for receipt in self.receipts:
+            if (receipt.session_id != self.session_id or receipt.replayed is not True
+                    or receipt.task_id in tasks or receipt.request_id in requests):
+                raise ValueError("Task discovery identities must be exact and unique")
+            tasks.add(receipt.task_id)
+            requests.add(receipt.request_id)
+        if self.next_cursor is not None and (not self.receipts or self.next_cursor != self.receipts[-1].task_id):
+            raise ValueError("Task discovery cursor must match the last returned receipt")
+        return self
+
+
+class TaskResultPayload(TaskResultGetPayload):
+    """Exact task terminal report, separate from the current speech response."""
+    delivery_id: StrictStr = Field(min_length=36, max_length=36)
+    processing_outcome: Literal["completed", "failed", "cancelled", "outcome_unknown"]
+    action_outcome: Literal["not_asserted", "unknown"]
+    report: StrictStr = Field(max_length=8192)
+    report_truncated: StrictBool
+    durable: Literal[True]
+    replayed: StrictBool
+    recovery_request_id: StrictStr | None = Field(default=None, min_length=36, max_length=36)
+
+    @field_validator("durable", mode="before")
+    @classmethod
+    def exact_durable(cls, value):
+        if value is not True:
+            raise ValueError("A task receipt requires durable admission")
+        return value
+
+    @field_validator("delivery_id", "recovery_request_id")
+    @classmethod
+    def exact_delivery(cls, value):
+        if value is not None and str(UUID(value)) != value:
+            raise ValueError("A canonical delivery UUID is required")
+        return value
+
+    @model_validator(mode="after")
+    def unknown_action(self):
+        if self.processing_outcome == "outcome_unknown" and self.action_outcome != "unknown":
+            raise ValueError("Unknown processing cannot assert a known action outcome")
+        return self
+
+
 class NodeAckPayload(BaseModel):
     """Brain acknowledges a node_register (HUP_SPEC §5.2)."""
+    phone_turn_contract: PhoneTurnContractPayload | None = None
+    task_result_contract: TaskResultContractPayload | None = None
     node_id: str = Field(default="", max_length=MAX_ID_LEN)
     session_token: str = Field(default="", max_length=MAX_TOKEN_LEN)
     hup_version: str = Field(default=HUP_VERSION, max_length=32)
@@ -1585,6 +2343,7 @@ class HealthSeriesModel(BaseModel):
     precision: int = Field(default=0, ge=0, le=10)
     category: str = Field(default="vitals", max_length=64)
     source: str = Field(default="", max_length=64)
+    source_name: str = Field(default="", max_length=MAX_NAME_LEN)
     points: list[dict] = Field(default_factory=list)
 
 
@@ -1596,6 +2355,7 @@ class HealthUpdateDataModel(BaseModel):
     """
     sources: list[str] = Field(default_factory=list, max_length=MAX_LIST_ITEMS)
     window_days: int = Field(default=0, ge=0)
+    source_grouping: Optional[Literal["metric_source_unit"]] = None
     note: str = ""
     readings: list[HealthReadingModel] = Field(default_factory=list)
     series: list[HealthSeriesModel] = Field(default_factory=list)
@@ -1628,6 +2388,8 @@ MESSAGE_TYPES = {
     # Client → Brain
     "audio_chunk": AudioChunkPayload,
     "text_command": TextCommandPayload,
+    "task_result_get": TaskResultGetPayload,
+    "task_receipts_get": TaskReceiptsGetPayload,
     "biometric": BiometricPayload,
     "ui_event": UIEventPayload,
     "device_register": DeviceRegisterPayload,
@@ -1649,6 +2411,10 @@ MESSAGE_TYPES = {
     "ambient_digest_request": AmbientDigestRequestPayload,
 
     # Brain → Client
+    "task_accepted": TaskAcceptedPayload,
+    "task_result": TaskResultPayload,
+    "task_receipts": TaskReceiptsPayload,
+    "voice_response": VoiceResponsePayload,
     "transcript": TranscriptPayload,
     # The behavioural policy the agent is currently applying, plus the
     # body state it derived from. Unsolicited: pushed when biometrics
@@ -1662,10 +2428,17 @@ MESSAGE_TYPES = {
     # inbound handler. First frame pair in this feature where one goes
     # each way; HUP_SPEC 5.9 notes the direction of each.
     "ambient_digest": AmbientDigestPayload,
+    # Brain → Client. Pushed when a tool needs a yes or no, and again
+    # when it is settled, so a prompt answered on the phone stops being
+    # asked by the glasses.
+    "approval_request": ApprovalRequestPayload,
+    "approval_resolved": ApprovalResolvedPayload,
     "sdui": SDUIPayload,
     "sdui_patch": SDUIPatchPayload,
     "tts_chunk": TTSChunkPayload,
     "text_response": TextResponsePayload,
+    "chat_turn_accepted": ChatTurnAcceptedPayload,
+    "chat_turn_terminal": ChatTurnTerminalPayload,
     "stream_delta": StreamDeltaPayload,
     "tool_start": ToolStartPayload,
     "tool_result": ToolResultPayload,
@@ -1681,6 +2454,8 @@ MESSAGE_TYPES = {
     "register": NodeRegisterPayload,
     "node_register": NodeRegisterPayload,
     "node_ack": NodeAckPayload,
+    "phone_turn_status_request": PhoneTurnStatusRequestPayload,
+    "phone_turn_status": PhoneTurnStatusPayload,
     "node_heartbeat": NodeHeartbeatPayload,
     "hup_action_request": HUPActionRequestPayload,
     "hup_action_response": HUPActionResponsePayload,
@@ -1707,9 +2482,19 @@ MESSAGE_TYPES = {
     "confirmation_response": ConfirmationResponsePayload,
     "permission_request": PermissionRequestPayload,
     "permission_response": PermissionResponsePayload,
+    "permission_decision": PermissionDecisionPayload,
+    "confirmation_decision": ConfirmationDecisionPayload,
 
     # Voice Pipeline
     "voice_config": VoiceConfigPayload,
+    "voice_config_ack": VoiceConfigAckPayload,
+    "voice_utterance_begin": VoiceUtterancePayload,
+    "voice_utterance_finish": VoiceUtterancePayload,
+    "voice_utterance_begin_ack": VoiceUtteranceBeginAckPayload,
+    "voice_utterance_finish_ack": VoiceUtteranceFinishAckPayload,
+    "voice_state": VoiceStatePayload,
+    "voice_interrupt_ack": VoiceInterruptAckPayload,
+    "voice_mute": VoiceMutePayload,
     "audio_response": AudioResponsePayload,
     "voice_status": VoiceStatusPayload,
     "vision_query": VisionQueryPayload,
@@ -1729,5 +2514,11 @@ def parse_message(raw: dict) -> tuple[FeralMessage, BaseModel | None]:
     msg = FeralMessage(**raw)
     payload_cls = MESSAGE_TYPES.get(msg.type)
     if payload_cls:
-        return msg, payload_cls(**msg.payload)
+        payload = payload_cls(**msg.payload)
+        if (isinstance(payload, VoiceAttemptPayload)
+                and payload.managed_chained_voice_version is not None
+                and payload.context_checkpoint is not None
+                and payload.context_checkpoint["session_id"] != msg.session_id):
+            raise ValueError("Managed voice checkpoint belongs to another session")
+        return msg, payload
     return msg, None

@@ -19,6 +19,7 @@ import asyncio
 import base64
 import io
 import logging
+import math
 import os
 import platform
 import shutil
@@ -30,6 +31,11 @@ from typing import Any, Dict, List, Optional, Tuple
 
 from skills.base import BaseSkill
 from skills.impl import register_skill
+from security.desktop_input import (
+    DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked,
+    check_input, cleanup_failed, input_failure, input_pause,
+    physical_input_scope, run_worker,
+)
 
 logger = logging.getLogger("feral.skill.gui")
 
@@ -351,7 +357,8 @@ tell application "System Events"
 					set sz to size of w
 					set out to out & pname & tab & wname & tab & ¬
 						((item 1 of pos) as text) & tab & ((item 2 of pos) as text) & tab & ¬
-						((item 1 of sz) as text) & tab & ((item 2 of sz) as text) & linefeed
+						((item 1 of sz) as text) & tab & ((item 2 of sz) as text) & tab & ¬
+					((unix id of p) as text) & linefeed
 				end try
 			end repeat
 		end try
@@ -377,13 +384,84 @@ class WindowListing:
         self.attempts: List[dict] = []
 
 
-def _frontmost_pid() -> Optional[int]:
+def _focus_message_timeout(ax, element) -> bool:
     try:
-        from AppKit import NSWorkspace  # type: ignore[import-not-found]
-        app = NSWorkspace.sharedWorkspace().frontmostApplication()
-        return int(app.processIdentifier()) if app is not None else None
+        return ax.AXUIElementSetMessagingTimeout(element, 0.25) == 0
     except Exception:
-        return None
+        return False
+
+
+def _foreground_state() -> dict:
+    """Fresh system-wide AX observation; unavailable is never a cached guess."""
+    state: dict[str, Any] = {"pid": None, "window": None, "title": None, "bounds": None}
+    try:
+        from skills.impl.macos_ax import _ax, _attr, _bounds
+        ax = _ax()
+        if not ax.AXIsProcessTrusted():
+            return state
+        system = ax.AXUIElementCreateSystemWide()
+        error, app = _attr(system, "AXFocusedApplication")
+        if error or app is None:
+            return state
+        error, pid = ax.AXUIElementGetPid(app, None)
+        if error or type(pid) is not int or pid <= 0:
+            return state
+        state["pid"] = pid
+        if not _focus_message_timeout(ax, app):
+            return state
+        error, window = _attr(app, "AXFocusedWindow")
+        if error or window is None:
+            return state
+        if not _focus_message_timeout(ax, window):
+            return state
+        state["window"], state["bounds"] = window, _bounds(window)
+        error, title = _attr(window, "AXTitle")
+        if not error and isinstance(title, str):
+            state["title"] = title
+        return state
+    except Exception:
+        return state
+
+
+def _frontmost_pid() -> Optional[int]:
+    return _foreground_state()["pid"]
+
+
+def _same_bounds(left: dict | None, right: dict | None) -> bool:
+    """Compare the same integer point precision returned by window_list."""
+    if left is None or right is None:
+        return False
+    keys = ("x", "y", "width", "height")
+    try:
+        for bounds in (left, right):
+            if any(type(bounds.get(key)) not in (int, float)
+                   or not math.isfinite(bounds[key]) for key in keys):
+                return False
+            if bounds["width"] <= 0 or bounds["height"] <= 0:
+                return False
+        return all(int(left[key]) == int(right[key]) for key in keys)
+    except (TypeError, ValueError, OverflowError):
+        return False
+
+
+def _row_for_ax_window(state: dict, windows: list[dict]) -> dict | None:
+    candidates = [w for w in windows if w.get("pid") == state.get("pid") and state.get("pid")]
+    titled = [w for w in candidates if state.get("title") is not None and w.get("title") == state["title"]]
+    if len(titled) == 1:
+        return titled[0]
+    bounded = [w for w in candidates if _same_bounds(w, state.get("bounds"))]
+    return bounded[0] if len(bounded) == 1 else None
+
+
+def _annotate_window_focus(windows: list[dict]) -> None:
+    state = _foreground_state()
+    focused = _row_for_ax_window(state, windows) if state["window"] is not None else None
+    for row in windows:
+        known = type(row.get("pid")) is int and state["pid"] is not None
+        row["app_frontmost_known"] = known
+        row["app_frontmost"] = bool(known and row["pid"] == state["pid"])
+        row["focused_known"] = bool(known and (not row["app_frontmost"] or focused is not None))
+        row["focused"] = row is focused
 
 
 def _windows_via_quartz() -> Tuple[Optional[List[dict]], Optional[str]]:
@@ -409,7 +487,6 @@ def _windows_via_quartz() -> Tuple[Optional[List[dict]], Optional[str]]:
     if raw is None:
         return None, "CGWindowListCopyWindowInfo returned NULL"
 
-    front_pid = _frontmost_pid()
     out: List[dict] = []
     for entry in raw:
         # Layer 0 is the normal application-window layer. Higher layers
@@ -429,9 +506,9 @@ def _windows_via_quartz() -> Tuple[Optional[List[dict]], Optional[str]]:
             "height": int(bounds.get("Height", 0)),
             "pid": int(pid) if pid is not None else None,
             "window_id": int(entry.get("kCGWindowNumber") or 0) or None,
-            "focused": bool(front_pid is not None and pid is not None
-                            and int(pid) == front_pid),
+            "focused": False,
         })
+    _annotate_window_focus(out)
     return out, None
 
 
@@ -444,27 +521,18 @@ def _windows_via_applescript() -> Tuple[Optional[List[dict]], Optional[str], Opt
     if not res.ok:
         return None, (res.stderr.strip() or f"osascript exit {res.returncode}"), res.tcc_permission
 
-    front_pid = _frontmost_pid()
-    front_app = ""
-    if front_pid is not None:
-        try:
-            from AppKit import NSWorkspace  # type: ignore[import-not-found]
-            app = NSWorkspace.sharedWorkspace().frontmostApplication()
-            front_app = str(app.localizedName() or "") if app is not None else ""
-        except Exception:
-            front_app = ""
-
     windows: List[dict] = []
     for line in res.stdout.splitlines():
         if not line.strip():
             continue
         parts = line.split("\t")
-        if len(parts) != 6:
+        if len(parts) not in (6, 7):
             logger.debug("window_list: unparseable AppleScript row: %r", line)
             continue
-        app, title, x, y, w, h = parts
+        app, title, x, y, w, h = parts[:6]
         try:
             rect = (int(x), int(y), int(w), int(h))
+            pid = int(parts[6]) if len(parts) == 7 else None
         except ValueError:
             logger.debug("window_list: non-numeric bounds in row: %r", line)
             continue
@@ -472,10 +540,11 @@ def _windows_via_applescript() -> Tuple[Optional[List[dict]], Optional[str], Opt
             "app": app,
             "title": title,
             "x": rect[0], "y": rect[1], "width": rect[2], "height": rect[3],
-            "pid": None,
+            "pid": pid if pid is not None and pid > 0 else None,
             "window_id": None,
-            "focused": bool(front_app and app == front_app),
+            "focused": False,
         })
+    _annotate_window_focus(windows)
     return windows, None, None
 
 
@@ -642,7 +711,13 @@ class GUIComputerUseSkill(BaseSkill):
             }
         try:
             return await handler(args)
+        except (DesktopInputBusy, DesktopInputCleanupFailed, DesktopInputRevoked) as exc:
+            return input_failure(exc)
         except Exception as exc:
+            if endpoint_id in {"mouse_click", "mouse_double_click", "mouse_right_click", "mouse_move",
+                               "type_text", "key_press", "scroll", "window_focus"}:
+                logger.error("gui_computer_use.%s failed (%s)", endpoint_id, type(exc).__name__)
+                return self._err(500, "Desktop input failed; earlier effects may need checking")
             logger.exception("gui_computer_use.%s failed", endpoint_id)
             return {
                 "success": False, "status_code": 500,
@@ -683,24 +758,24 @@ class GUIComputerUseSkill(BaseSkill):
 
     async def _mouse_click(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_click, x, y, 1, "left")
+        await run_worker(self._pyautogui_click, x, y, 1, "left", physical=True)
         return self._ok(f"Clicked ({x}, {y})")
 
     async def _mouse_double_click(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_click, x, y, 2, "left")
+        await run_worker(self._pyautogui_click, x, y, 2, "left", physical=True)
         return self._ok(f"Double-clicked ({x}, {y})")
 
     async def _mouse_right_click(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_click, x, y, 1, "right")
+        await run_worker(self._pyautogui_click, x, y, 1, "right", physical=True)
         return self._ok(f"Right-clicked ({x}, {y})")
 
     # ── mouse_move ────────────────────────────────────────────────
 
     async def _mouse_move(self, args: dict) -> dict:
         x, y = self._scaled_xy(args)
-        await asyncio.to_thread(self._pyautogui_move, x, y)
+        await run_worker(self._pyautogui_move, x, y, physical=True)
         return self._ok(f"Moved to ({x}, {y})")
 
     # ── type_text ─────────────────────────────────────────────────
@@ -709,7 +784,7 @@ class GUIComputerUseSkill(BaseSkill):
         text = args.get("text", "")
         if not text:
             return self._err(400, "text is required")
-        await asyncio.to_thread(self._do_type, text)
+        await run_worker(self._do_type, text, physical=True)
         preview = text[:80] + ("..." if len(text) > 80 else "")
         return self._ok(f"Typed: {preview}")
 
@@ -719,7 +794,7 @@ class GUIComputerUseSkill(BaseSkill):
         combo = args.get("keys", "") or args.get("key", "")
         if not combo:
             return self._err(400, "keys is required (e.g. 'cmd+c')")
-        await asyncio.to_thread(self._do_hotkey, combo)
+        await run_worker(self._do_hotkey, combo, physical=True)
         return self._ok(f"Key combo: {combo}")
 
     # ── scroll ────────────────────────────────────────────────────
@@ -730,7 +805,7 @@ class GUIComputerUseSkill(BaseSkill):
         direction = args.get("direction", "down")
         amount = int(args.get("amount", 3))
         sx, sy = scale_coordinates(x, y, self.scale) if (x or y) else (None, None)
-        await asyncio.to_thread(self._do_scroll, sx, sy, direction, amount)
+        await run_worker(self._do_scroll, sx, sy, direction, amount, physical=True)
         return self._ok(f"Scrolled {direction} by {amount}")
 
     # ── cursor_position ───────────────────────────────────────────
@@ -783,9 +858,17 @@ class GUIComputerUseSkill(BaseSkill):
 
     async def _window_focus(self, args: dict) -> dict:
         title = args.get("title", "")
-        if not title:
+        if not isinstance(title, str) or not title or len(title) > 2048:
             return self._err(400, "title is required")
-        outcome = await asyncio.to_thread(self._focus_window, title)
+        ax_title = args.get("window_ax_title")
+        if "window_ax_title" in args and (not isinstance(ax_title, str) or not ax_title or len(ax_title) > 2048):
+            return self._err(400, "window_ax_title must be an exact nonempty observed AX title")
+        if ax_title is not None and platform.system() != "Darwin":
+            return self._err(400, "window_ax_title is supported on macOS only")
+        if ax_title is None:
+            outcome = await run_worker(self._focus_window, title, physical=True)
+        else:
+            outcome = await run_worker(self._focus_window, title, ax_title, physical=True)
         if outcome.get("ok"):
             return {
                 "success": True, "status_code": 200,
@@ -794,9 +877,19 @@ class GUIComputerUseSkill(BaseSkill):
                     "app": outcome.get("app"),
                     "matched": outcome.get("matched"),
                     "strategy": outcome.get("strategy"),
+                    "pid": outcome.get("pid"),
+                    "window_id": outcome.get("window_id"),
+                    "ax_title": outcome.get("ax_title"),
+                    "identity_match": outcome.get("identity_match"),
+                    "foreground_verified": outcome.get("foreground_verified", False),
+                    "window_focus_verified": outcome.get("window_focus_verified", False),
                 },
                 "error": None,
             }
+        if outcome.get("error_code"):
+            return {"success": False, "status_code": outcome.get("status_code", 409),
+                "data": {"foreground_verified": False, "window_focus_verified": False},
+                "error": outcome["error"], "error_code": outcome["error_code"]}
         if outcome.get("tcc_permission"):
             return {
                 "success": False, "status_code": 403,
@@ -834,27 +927,58 @@ class GUIComputerUseSkill(BaseSkill):
     @staticmethod
     def _pyautogui_click(x: int, y: int, clicks: int, button: str) -> None:
         import pyautogui
-        pyautogui.click(x, y, clicks=clicks, button=button)
+        with physical_input_scope():
+            for _ in range(clicks):
+                check_input()
+                # Mark attempted before the OS call: a failing call may have
+                # posted the down event before raising.
+                try:
+                    pyautogui.mouseDown(x, y, button=button)
+                    check_input()
+                finally:
+                    try:
+                        pyautogui.mouseUp(button=button)
+                    except Exception:
+                        cleanup_failed()
 
     @staticmethod
     def _pyautogui_move(x: int, y: int) -> None:
         import pyautogui
-        pyautogui.moveTo(x, y)
+        with physical_input_scope():
+            check_input()
+            pyautogui.moveTo(x, y)
 
     @staticmethod
     def _do_type(text: str) -> None:
         """Type text. Uses pyperclip + Cmd/Ctrl+V for non-ASCII."""
         import pyautogui
-        if text.isascii():
-            pyautogui.write(text, interval=0.02)
-        else:
-            try:
-                import pyperclip
-                pyperclip.copy(text)
-                modifier = "command" if platform.system() == "Darwin" else "ctrl"
-                pyautogui.hotkey(modifier, "v")
-            except ImportError:
-                pyautogui.write(text, interval=0.02)
+        with physical_input_scope():
+            check_input()
+            if not text.isascii():
+                try:
+                    import pyperclip
+                except ImportError:
+                    pass
+                else:
+                    check_input()
+                    pyperclip.copy(text)
+                    check_input()
+                    modifier = "command" if platform.system() == "Darwin" else "ctrl"
+                    GUIComputerUseSkill._do_hotkey(modifier + "+v")
+                    return
+            # One character per bounded call. Revocation never retries the
+            # remaining text, and cleanup releases only our attempted key.
+            for character in text:
+                check_input()
+                try:
+                    pyautogui.keyDown(character)
+                    check_input()
+                finally:
+                    try:
+                        pyautogui.keyUp(character)
+                    except Exception:
+                        cleanup_failed()
+                input_pause(0.02)
 
     @staticmethod
     def _do_hotkey(combo: str) -> None:
@@ -873,18 +997,36 @@ class GUIComputerUseSkill(BaseSkill):
                 mapped.append("shift")
             else:
                 mapped.append(low)
-        pyautogui.hotkey(*mapped)
+        with physical_input_scope():
+            held = []
+            try:
+                for key in mapped:
+                    check_input()
+                    held.append(key)
+                    pyautogui.keyDown(key)
+                    check_input()
+            finally:
+                failed = False
+                for key in reversed(held):
+                    try:
+                        pyautogui.keyUp(key)
+                    except Exception:
+                        failed = True
+                if failed:
+                    cleanup_failed()
 
     @staticmethod
     def _do_scroll(
         x: Optional[int], y: Optional[int], direction: str, amount: int,
     ) -> None:
         import pyautogui
-        clicks = amount if direction == "up" else -amount
-        if x is not None and y is not None:
-            pyautogui.scroll(clicks, x=x, y=y)
-        else:
-            pyautogui.scroll(clicks)
+        with physical_input_scope():
+            check_input()
+            clicks = amount if direction == "up" else -amount
+            if x is not None and y is not None:
+                pyautogui.scroll(clicks, x=x, y=y)
+            else:
+                pyautogui.scroll(clicks)
 
     @staticmethod
     def _get_cursor_pos() -> Tuple[int, int]:
@@ -904,7 +1046,7 @@ class GUIComputerUseSkill(BaseSkill):
         return collect_windows().windows
 
     @staticmethod
-    def _focus_window(title: str) -> dict:
+    def _focus_window(title: str, window_ax_title: str | None = None) -> dict:
         """Bring a window (or its owning app) to the front.
 
         Returns a dict rather than a bare bool so the caller can tell
@@ -919,7 +1061,7 @@ class GUIComputerUseSkill(BaseSkill):
         """
         system = platform.system()
         if system == "Darwin":
-            return _focus_window_macos(title)
+            return _focus_window_macos(title, window_ax_title)
         if system == "Linux":
             for tool, argv in (
                 ("wmctrl", ["wmctrl", "-a", title]),
@@ -948,49 +1090,157 @@ class GUIComputerUseSkill(BaseSkill):
         }
 
 
-def _focus_window_macos(title: str) -> dict:
-    """macOS focus: match a window title first, fall back to app name."""
+def _focus_failure(code: str, message: str, status: int = 409) -> dict:
+    return {"ok": False, "status_code": status, "error_code": code, "error": message}
+
+
+def _selected_ax_window(target: dict, rows: list[dict], app,
+                        window_ax_title: str | None = None) -> tuple[Any, str | None, str] | None:
+    """Bind one CG row to an actual AX handle; never infer a title suffix."""
+    from skills.impl.macos_ax import _ax, _attr, _bounds
+    error, windows = _attr(app, "AXWindows")
+    if error or windows is None:
+        return None
+    try:
+        if len(windows) > 64:
+            return None
+    except TypeError:
+        return None
+    deadline = time.monotonic() + 2
+    observed = []
+    for window in windows:
+        check_input()
+        if time.monotonic() > deadline:
+            return None
+        if not _focus_message_timeout(_ax(), window):
+            return None
+        error, pid = _ax().AXUIElementGetPid(window, None)
+        if error or type(pid) is not int or pid != target["pid"]:
+            return None
+        error, title = _attr(window, "AXTitle")
+        title = title if not error and isinstance(title, str) else None
+        observed.append((window, title, _bounds(window)))
+    if time.monotonic() > deadline:
+        return None
+    exact = [item for item in observed if item[1] is not None and item[1] == target.get("title")]
+    siblings = [row for row in rows if row.get("pid") == target["pid"]]
+    if window_ax_title is not None:
+        explicit = [item for item in observed if item[1] == window_ax_title]
+        cg_title = target.get("title")
+        if not isinstance(cg_title, str) or not cg_title or len(explicit) != 1:
+            return None
+        # Both titles are observed strings, never a constructed app/profile
+        # suffix. Require a one-to-one prefix relationship on BOTH inventories
+        # as well as geometry, so hidden/similarly named windows cannot win.
+        ax_prefixes = [item for item in observed if isinstance(item[1], str) and item[1].startswith(cg_title)]
+        cg_prefixes = [row for row in siblings if isinstance(row.get("title"), str) and row["title"]
+                       and window_ax_title.startswith(row["title"])]
+        if (len(ax_prefixes) == len(cg_prefixes) == 1 and ax_prefixes[0] is explicit[0]
+                and cg_prefixes[0] is target and _same_bounds(explicit[0][2], target)):
+            return explicit[0][0], explicit[0][1], "explicit_observed_titles_and_bounds"
+        return None
+    if len(exact) == 1 and sum(row.get("title") == target.get("title") for row in siblings) == 1:
+        return exact[0][0], exact[0][1], "observed_title"
+    bounded = [item for item in observed if _same_bounds(item[2], target)]
+    if len(bounded) == 1 and sum(_same_bounds(row, target) for row in siblings) == 1:
+        return bounded[0][0], bounded[0][1], "bounds"
+    return None
+
+
+def _focus_window_macos(title: str, window_ax_title: str | None = None) -> dict:
+    """Request exact app/window focus and independently verify its outcome."""
+    from skills.impl.macos_ax import _ax, _running_apps
+    from CoreFoundation import CFEqual
     listing = collect_windows()
+    rows = listing.windows if listing.ok else []
     needle = title.casefold()
-
-    exact = [w for w in listing.windows if (w.get("title") or "").casefold() == needle]
-    partial = [w for w in listing.windows if needle in (w.get("title") or "").casefold()]
-    by_app = [w for w in listing.windows if needle in (w.get("app") or "").casefold()]
-    target = (exact or partial or by_app or [None])[0]
-
-    app_name = (target or {}).get("app") or title
-    res = run_osascript(f'tell application {_as_str(app_name)} to activate', timeout_s=8)
-    if res.ok:
-        # Raising a specific window inside the app needs Accessibility.
-        # Best effort: never let its failure turn a successful activate
-        # into a reported failure.
-        if target and target.get("title"):
-            run_osascript(
-                'tell application "System Events" to tell process '
-                f'{_as_str(app_name)} to perform action "AXRaise" of '
-                f'(first window whose name is {_as_str(target["title"])})',
-                timeout_s=8,
-            )
-        return {
-            "ok": True,
-            "app": app_name,
-            "matched": (target or {}).get("title") or app_name,
-            "strategy": "window_match" if target else "app_name",
-        }
-    if res.tcc_permission:
-        return {
-            "ok": False, "status_code": 403,
-            "tcc_permission": res.tcc_permission, "error": res.stderr.strip(),
-        }
-    if target is None:
-        return {
-            "ok": False, "status_code": 404,
-            "error": (
-                f"No open window or running app matched {title!r}; "
-                f"activate failed: {res.stderr.strip()}"
-            ),
-            "candidates": sorted(
-                {w.get("app", "") for w in listing.windows if w.get("app")}
-            ),
-        }
-    return {"ok": False, "status_code": 500, "error": res.stderr.strip()}
+    exact = [w for w in rows if (w.get("title") or "").casefold() == needle]
+    partial = [w for w in rows if needle in (w.get("title") or "").casefold()]
+    by_app = [w for w in rows if needle in (w.get("app") or "").casefold()]
+    matches = exact or partial or by_app
+    if len(matches) > 1:
+        return _focus_failure("window_focus_ambiguous", "Multiple windows matched; select an exact unique window title from window_list.")
+    target = matches[0] if matches else None
+    if target is not None:
+        pid, app_name = target.get("pid"), target.get("app")
+        if type(pid) is not int or pid <= 0 or not isinstance(app_name, str) or not app_name:
+            return _focus_failure("window_focus_unverified", "Selected window has no exact process identity; refresh window_list.")
+    else:
+        if window_ax_title is not None:
+            return _focus_failure("window_focus_unverified", "An explicit AX title requires a unique selected window_list row.")
+        # App-only focus is allowed for a uniquely observed running app, but
+        # never launches an unknown app or claims a specific window outcome.
+        apps = _running_apps()
+        exact_apps = [a for a in apps if a.name.casefold() == needle or a.bundle_id.casefold() == needle]
+        apps = exact_apps or [a for a in apps if needle in a.name.casefold()]
+        if len(apps) > 1:
+            return _focus_failure("window_focus_ambiguous", "Multiple running applications matched; use an exact unique app name.")
+        if not apps:
+            return {"ok": False, "status_code": 404,
+                "error": "No open window or running app matched the requested title.",
+                "candidates": sorted({w.get("app", "") for w in rows if w.get("app")})}
+        pid, app_name = apps[0].pid, apps[0].name
+    if type(pid) is not int or pid <= 0:
+        return _focus_failure("window_focus_unverified", "Selected application has no usable process identity.")
+    ax = _ax()
+    if not ax.AXIsProcessTrusted():
+        return {"ok": False, "status_code": 403, "tcc_permission": "accessibility",
+                "error": "Accessibility is required to verify and focus the selected app/window."}
+    app = ax.AXUIElementCreateApplication(pid)
+    if not _focus_message_timeout(ax, app):
+        return _focus_failure("window_focus_unverified", "Selected application could not establish a bounded focus read.")
+    error, app_pid = ax.AXUIElementGetPid(app, None)
+    if error or type(app_pid) is not int or app_pid != pid:
+        return _focus_failure("window_focus_unverified", "Selected application identity could not be read.")
+    selected = _selected_ax_window(target, rows, app, window_ax_title) if target is not None else None
+    if target is not None and selected is None:
+        return _focus_failure("window_focus_unverified", "Selected CG window cannot be uniquely bound to an observed AX window; no focus was requested. For differing titles/overlapping windows, copy exact window_ax_title from macos_ax__list_windows.")
+    check_input()
+    activation = ax.AXUIElementSetAttributeValue(app, "AXFrontmost", True)
+    if activation != 0:
+        if activation == -25211:
+            return {"ok": False, "status_code": 403, "tcc_permission": "accessibility", "error": "Accessibility refused selected-app activation."}
+        return _focus_failure("window_focus_refused", "Selected-app activation was refused; foreground focus was not verified.", 502)
+    if selected is not None:
+        check_input()
+        raised = ax.AXUIElementPerformAction(selected[0], "AXRaise")
+        if raised != 0:
+            if raised == -25211:
+                return {"ok": False, "status_code": 403, "tcc_permission": "accessibility", "error": "Accessibility refused selected-window raising; app activation may already have occurred."}
+            return _focus_failure("window_focus_refused", "Selected-window raising was refused; app activation may already have occurred.", 502)
+    for attempt in range(6):
+        check_input()
+        current = collect_windows() if target is not None else None
+        state = _foreground_state()
+        verified = state["pid"] == pid
+        if selected is not None:
+            assert target is not None
+            try:
+                same_handle = bool(state["window"] is not None and CFEqual(state["window"], selected[0]))
+            except Exception:
+                same_handle = False
+            verified = verified and same_handle
+            if current is None or not current.ok:
+                verified = False
+            else:
+                live = [row for row in current.windows if all(row.get(key) == target.get(key)
+                        for key in ("pid", "app", "title", "window_id"))]
+                if verified and len(live) == 1 and window_ax_title is not None:
+                    rebound = _selected_ax_window(live[0], current.windows, app, window_ax_title)
+                    try:
+                        verified = bool(rebound is not None and CFEqual(rebound[0], selected[0]))
+                    except Exception:
+                        verified = False
+                else:
+                    verified = bool(verified and len(live) == 1 and _row_for_ax_window(state, current.windows) is live[0])
+        if verified:
+            return {"ok": True, "app": app_name, "pid": pid,
+                "matched": target.get("title") or app_name if target is not None else app_name,
+                "strategy": "window_match" if target is not None else "app_name",
+                "window_id": target.get("window_id") if target is not None else None,
+                "ax_title": selected[1] if selected is not None else None,
+                "identity_match": selected[2] if selected is not None else "running_app_pid",
+                "foreground_verified": True, "window_focus_verified": selected is not None}
+        if attempt < 5:
+            input_pause(0.05)
+    return _focus_failure("window_focus_unverified", "Focus was requested but the selected app/window did not become verifiably foreground; do not send global keys or text.")

@@ -228,6 +228,11 @@ class DevicePairingStore:
         with self._lock:
             conn = self._conn()
             try:
+                # Instances/processes share the database, not self._lock.
+                # Hold SQLite's writer lock across schema inspection and
+                # legacy-token migration so another startup cannot add or
+                # drop a column between this connection's checks.
+                conn.execute("BEGIN IMMEDIATE")
                 # Base table — fresh installs land here directly.
                 conn.execute("""
                     CREATE TABLE IF NOT EXISTS paired_devices (
@@ -355,8 +360,6 @@ class DevicePairingStore:
                     "CREATE INDEX IF NOT EXISTS idx_ppc_expires_at "
                     "ON pending_pair_codes(expires_at)"
                 )
-                conn.commit()
-
                 # Migrate any  rows: copy to needs_rotation_log,
                 # null out the plaintext token, drop the column.
                 self._migrate_legacy_plaintext_rows(conn)
@@ -896,6 +899,37 @@ class DevicePairingStore:
             "bearer_kind": PHONE_BEARER_KIND,
         }
 
+    def admitted_credential_current(self, *, device_id: str, credential: str,
+                                    bearer_kind: str) -> bool:
+        """Read-only revocation fence for an already authenticated connection.
+
+        This is not authentication: the ingress must first verify the secret
+        using verify_device/verify_phone_bearer. Repeated dispatch guards check
+        the exact credential lookup, owner and expiry without rehashing a secret
+        or extending its lifetime. A removed device invalidates retained bearer
+        rows too. No client-supplied device identity is sufficient for admission.
+        """
+        if not device_id or not credential or bearer_kind not in {"pair_token", PHONE_BEARER_KIND}:
+            return False
+        lookup = _token_lookup(credential)
+        conn = self._conn()
+        try:
+            if bearer_kind == "pair_token":
+                row = conn.execute(
+                    "SELECT expires_at FROM paired_devices WHERE device_id = ? AND token_lookup = ?",
+                    (device_id, lookup),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT c.expires_at FROM device_credentials c "
+                    "JOIN paired_devices d ON d.device_id = c.device_id "
+                    "WHERE c.device_id = ? AND c.token_lookup = ? AND c.bearer_kind = ?",
+                    (device_id, lookup, PHONE_BEARER_KIND),
+                ).fetchone()
+            return row is not None and (row["expires_at"] is None or row["expires_at"] > int(time.time()))
+        finally:
+            conn.close()
+
     def verify_phone_bearer(self, bearer: str) -> Optional[str]:
         """Return the ``device_id`` for a runtime phone bearer.
 
@@ -910,9 +944,10 @@ class DevicePairingStore:
         conn = self._conn()
         try:
             row = conn.execute(
-                """SELECT credential_id, device_id, token_hash, expires_at, ttl_seconds
-                   FROM device_credentials
-                   WHERE token_lookup = ? AND bearer_kind = ?""",
+                """SELECT c.credential_id, c.device_id, c.token_hash, c.expires_at, c.ttl_seconds
+                   FROM device_credentials c
+                   JOIN paired_devices d ON d.device_id = c.device_id
+                   WHERE c.token_lookup = ? AND c.bearer_kind = ?""",
                 (lookup, PHONE_BEARER_KIND),
             ).fetchone()
         finally:
@@ -937,6 +972,19 @@ class DevicePairingStore:
         with self._lock:
             conn = self._conn()
             try:
+                # Hash verification runs outside the lock. Revocation/rotation
+                # may win meanwhile; an absent old credential is not authority
+                # to update the device or return a successful authentication.
+                conn.execute("BEGIN IMMEDIATE")
+                current = conn.execute(
+                    "SELECT c.expires_at FROM device_credentials c "
+                    "JOIN paired_devices d ON d.device_id = c.device_id "
+                    "WHERE c.credential_id = ? AND c.device_id = ? AND c.token_lookup = ? "
+                    "AND c.token_hash = ? AND c.bearer_kind = ?",
+                    (row["credential_id"], device_id, lookup, row["token_hash"], PHONE_BEARER_KIND),
+                ).fetchone()
+                if current is None or (current["expires_at"] is not None and current["expires_at"] <= int(time.time())):
+                    return None
                 conn.execute(
                     "UPDATE device_credentials SET expires_at = ?, rotated_at = ? "
                     "WHERE credential_id = ?",
@@ -1093,6 +1141,29 @@ class DevicePairingStore:
                 return True, "verified"
             finally:
                 conn.close()
+
+    def token_claimed(self, token: str) -> bool:
+        """Has a device already claimed this pairing token?
+
+        Read-only, unlike :meth:`verify_device`, which claims an unclaimed
+        token as a side effect. HTTP auth uses this to refuse a pairing
+        code that was issued (and perhaps shown on screen as a QR code)
+        but never attached by the device it was meant for. Does not
+        verify the token hash; callers still need :meth:`verify_device`.
+        """
+        if not token:
+            return False
+        lookup = _token_lookup(token)
+        with self._lock:
+            conn = self._conn()
+            try:
+                row = conn.execute(
+                    "SELECT claimed_at FROM paired_devices WHERE token_lookup = ?",
+                    (lookup,),
+                ).fetchone()
+            finally:
+                conn.close()
+        return row is not None and row["claimed_at"] is not None
 
     def token_pin_verified(self, token: str) -> bool:
         """Has the PIN gate been cleared for this token?
