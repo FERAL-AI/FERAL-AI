@@ -44,9 +44,9 @@ _LEGACY_SIZE_MAP = {"1792x1024": "1536x1024", "1024x1792": "1024x1536"}
 
 # Default model. Read from ``FERAL_IMAGE_MODEL`` so an operator can pin a
 # different one (for example ``gpt-image-2``) without a code change; the
-# default is the mid-tier GPT image model rather than DALL·E 3, whose request
+# default is the detailed GPT image model rather than DALL·E 3, whose request
 # shape OpenAI no longer accepts (see module docstring).
-_DEFAULT_MODEL = "gpt-image-1.5"
+_DEFAULT_MODEL = "gpt-image-2.6-sunburst"
 
 
 def _image_model() -> str:

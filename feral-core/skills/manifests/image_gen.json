@@ -9,7 +9,7 @@
         "logo_url": "",
         "icon_set": "sf_symbols"
     },
-    "description": "Generate an image from a text description with an OpenAI GPT image model (gpt-image-1.5 by default; FERAL_IMAGE_MODEL overrides). Needs an OpenAI key, read from the vault entry for 'image_gen' or from the OPENAI_API_KEY environment variable; with neither present every call fails with 'No image generation providers configured (set OPENAI_API_KEY)' and no image is produced. There is no keyless fallback provider.",
+    "description": "Generate an image from a text description with an OpenAI GPT image model (gpt-image-2.6-sunburst by default; FERAL_IMAGE_MODEL overrides). Needs an OpenAI key, read from the vault entry for 'image_gen' or from the OPENAI_API_KEY environment variable; with neither present every call fails with 'No image generation providers configured (set OPENAI_API_KEY)' and no image is produced. There is no keyless fallback provider.",
     "trigger_phrases": [
         "generate an image",
         "generate image",
