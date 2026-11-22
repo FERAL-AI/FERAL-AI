@@ -433,7 +433,9 @@ jobs:
     # scroll containment, overlap, focus rings, painted colour.
     # ─────────────────────────────────────────────────────────────
     name: Client v2 — playwright e2e
-    runs-on: ubuntu-latest
+    # Playwright 1.59.1's locked browser/dependency bundle supports Ubuntu 24.04.
+    # Pin this with the real-brain workflow instead of following ubuntu-latest.
+    runs-on: ubuntu-24.04
     timeout-minutes: 25
     defaults:
       run:

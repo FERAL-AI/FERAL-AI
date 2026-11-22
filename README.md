@@ -58,7 +58,7 @@ FERAL's is a store, not a note:
 - **Four tiers, one retriever.** Working context, episodes, semantic/graph knowledge, and execution history are queried through a single ranked view that reports which tier each result came from, instead of each caller inventing its own lookup.
 - **Hybrid retrieval.** SQLite FTS5 for lexical recall, 384-dim vector embeddings for meaning, and an entity-linked knowledge graph with confidence, evidence, and multi-hop traversal over a recursive CTE.
 - **It forgets on purpose.** Decay is an Ebbinghaus curve with a SuperMemo SM-2 derivation, so rehearsed facts stay sharp and one-off detail fades. A store that never forgets gets slower and less useful at the same time.
-- **It follows you across your own machines.** CRDT replication over mDNS peer discovery with hybrid logical clocks, no cloud relay, exercised by a nightly chaos suite.
+- **It follows you across your own machines.** CRDT replication over mDNS peer discovery with hybrid logical clocks, no cloud relay, exercised by a weekly chaos suite.
 - **Encryption at rest** is available as an AEAD envelope over `~/.feral/memory.db`, applied while the brain is stopped (the plaintext database is required at runtime).
 
 Full detail in [the memory guide](https://docs.feral.sh/guides/memory).

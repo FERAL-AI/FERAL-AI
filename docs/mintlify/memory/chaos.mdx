@@ -12,7 +12,7 @@ and which are **fatal** (you need a backup restore).
 
 The corresponding tests live at
 `feral-core/tests/test_memory_sync_chaos.py` and
-`feral-core/tests/test_memory_recovery.py`, plus the nightly chaos
+`feral-core/tests/test_memory_recovery.py`, plus the multi-process chaos
 script `scripts/chaos/sync_kill.py`. They run on cron via
 `.github/workflows/sync-chaos-nightly.yml`.
 
@@ -136,7 +136,7 @@ pytest -m chaos -v --no-cov
 python ../scripts/chaos/sync_kill.py --iterations 5 --ops-per-cycle 20
 ```
 
-Nightly CI runs both via the `Sync chaos (nightly)` workflow at
-05:00 UTC. The job is allowed to fail (it does not gate any release)
-but always uploads logs and any leftover `/tmp/feral-chaos-*` run
-directories as artifacts for forensics.
+Weekly CI runs both via the `Sync chaos (weekly)` workflow on Tuesday at
+05:17 UTC; manual dispatch remains available. A failed pytest or kill-loop
+outcome fails the workflow. Logs and leftover `/tmp/feral-chaos-*` run directories
+are uploaded for forensics and retained for seven days.

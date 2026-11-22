@@ -22,7 +22,8 @@ and `feral-core/tests/conftest.py`.
 
 | Trigger                                  | What runs                                  |
 | ---------------------------------------- | ------------------------------------------ |
-| Nightly cron (`.github/workflows/soak-nightly.yml`) | Voice soak (60 min, fake peers) + channel soak (24 h, env-gated) |
+| Weekly cron (`.github/workflows/soak-nightly.yml`), Monday 04:13 UTC | Two voice soaks (60 min each, fake peers) |
+| Manual workflow dispatch | Voice soak (10, 30 or 60 min); optional live-channel soaks (30, 60 or 300 min each) |
 | Before cutting a release that touches `feral-core/voice/**` or `feral-core/channels/**` | `python scripts/soak/voice.py --provider openai --duration-min 60` and `--provider gemini --duration-min 60`  |
 | Investigating a "voice cuts out after N minutes" bug | Run the voice harness with `--reconnect-interval-sec` matching the suspected churn cadence |
 | Investigating "channel posts silently dropped" | Run the channel harness against the affected provider with the staging bot token |
@@ -68,8 +69,8 @@ A clean run prints a single summary line per test (`[VOICE SOAK / openai] PASS: 
 
 Voice soak needs nothing — both peers are in-process fakes.
 
-Channel soak skips cleanly unless its env vars are set. In the nightly
-workflow these come from repo secrets:
+Channel soak requires an explicit manual `run-channels` choice and skips cleanly
+unless its env vars are set. The workflow receives these from repository secrets:
 
 | Channel  | Env vars                                                    |
 | -------- | ----------------------------------------------------------- |
@@ -78,13 +79,13 @@ workflow these come from repo secrets:
 | Discord  | `FERAL_SOAK_DISCORD_WEBHOOK`                                |
 
 Use **personal staging bots** in dedicated channels — never point the
-soak at a production workspace, the 24-hour heartbeat will be very
-visible.
+soak at a production workspace: the repeated heartbeat will be visible.
 
 ## Escalation path
 
-The nightly workflow runs with `continue-on-error: true` so a single
-red soak never blocks the morning's regular CI on `main`. Triage steps:
+The weekly/manual workflow fails when a soak fails. It is separate from the
+required PR checks, and matrix jobs continue so both protocols produce evidence.
+Logs are retained for seven days. Triage steps:
 
 1. Pull the per-job artifact (`voice-soak-logs` or `channels-soak-logs`)
    from the failed run; the log contains the full pytest output and the

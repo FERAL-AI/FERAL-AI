@@ -15,8 +15,7 @@ name: Client v2 real-brain e2e
 # Opt-in, and deliberately NOT part of the required PR gate:
 #   - `workflow_dispatch` to run it by hand on any ref,
 #   - the `real-brain-e2e` label on a PR,
-#   - nightly, so a regression is found within a day rather than
-#     whenever someone next remembers this exists.
+#   - weekly, to retain automatic coverage without a daily full-stack run.
 #
 # It is opt-in because it needs a brain and because the control walk
 # MUTATES the brain it points at (it clicks by blocklist, so anything
@@ -29,8 +28,8 @@ on:
   pull_request:
     types: [labeled, synchronize]
   schedule:
-    # 04:20 UTC daily.
-    - cron: '20 4 * * *'
+    # Wednesday at 04:37 UTC; manual and labelled-PR runs remain available.
+    - cron: '37 4 * * 3'
 
 concurrency:
   group: real-brain-e2e-${{ github.event.pull_request.number || github.ref }}
@@ -42,7 +41,9 @@ jobs:
     if: >-
       github.event_name != 'pull_request'
       || contains(github.event.pull_request.labels.*.name, 'real-brain-e2e')
-    runs-on: ubuntu-latest
+    # package-lock.json pins Playwright 1.59.1, which supports Ubuntu 24.04
+    # but cannot install Chromium dependencies on the current ubuntu-latest (26.04).
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
