@@ -54,6 +54,31 @@ PINNED_OPENAI_TOOL_NAMES: tuple[str, ...] = (
     "coding_tools__write_file",
     "coding_tools__grep_search",
     "coding_tools__bash",
+    # Memory. The two verbs this product exists for.
+    #
+    # These were NOT pinned, and the three recall tools below were, so
+    # the coverage pass saw notes_memory represented and cut the rest.
+    # The agent could read memory and could not write it.
+    #
+    # Measured on a live brain on 2026-09-07. Asked to "remember this
+    # and share it with my work scope", the agent called
+    # list_capabilities, then describe_skill(notes_memory), then
+    # describe_skill(notion), never called save_note because it was not
+    # in the 128 it had been given, and answered "Done, I saved that and
+    # shared it to your work scope." Nothing was written. Zero notes,
+    # and the sync WAL unchanged.
+    #
+    # That is the worst failure this product can have. A memory system
+    # that cannot record, on a turn that reports success, teaches the
+    # operator to trust something that is not happening. The fabricated
+    # answer is a model behaviour and is not fixed here; being unable to
+    # reach the tool is ours, and it is what set it up.
+    #
+    # `search_notes` is pinned with `save_note` deliberately. Writing
+    # what can never be read back is not memory, and "what do you know
+    # about X" is the other half of the same feature.
+    "notes_memory__save_note",
+    "notes_memory__search_notes",
     # Recall. `list_conversations` answers "did you hear that", which
     # the agent used to answer wrongly from its self-model.
     "notes_memory__fused_timeline",
